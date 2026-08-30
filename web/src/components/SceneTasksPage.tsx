@@ -2,7 +2,8 @@
  * 场景联动页——独立「场景联动」Tab 的主视图。
  *
  * 场景联动任务 = 一条 state 规则把「感知命中」直接接到「米家自动化场景」：
- *   - 进入：条件 query 变为满足 → 触发进入场景（如识别到床上有人看书 → 开灯）
+ *   - 进入：条件 query 变为满足并持续 enterDebounceSeconds（进入确认时间）→
+ *     触发进入场景（如识别到床上有人看书 → 开灯）
  *   - 退出：条件不再满足并持续 exitDebounceSeconds → 触发退出场景（如关灯）；
  *     或配置 maxDwellSeconds 后「到期自动退出」（如开灯 1 分钟后自动关灯）
  * 命中 / 抗抖 / 冷却完全复用规则引擎，**不经过 agent**（后端 /api/scene-tasks）。
@@ -123,6 +124,7 @@ interface Draft {
   enterSceneId: string;
   exitSceneId: string;
   cooldownMinutes: string;
+  enterDebounceSeconds: string;
   exitDebounceSeconds: string;
   maxDwellSeconds: string;
   enabled: boolean;
@@ -136,6 +138,7 @@ function draftFromTask(task: SceneTask): Draft {
     enterSceneId: task.enterSceneId ?? "",
     exitSceneId: task.exitSceneId ?? "",
     cooldownMinutes: String(task.cooldownMinutes ?? 5),
+    enterDebounceSeconds: String(task.enterDebounceSeconds ?? 0),
     exitDebounceSeconds: String(task.exitDebounceSeconds),
     maxDwellSeconds: task.maxDwellSeconds ? String(task.maxDwellSeconds) : "",
     enabled: task.enabled,
@@ -150,6 +153,7 @@ function emptyDraft(): Draft {
     enterSceneId: "",
     exitSceneId: "",
     cooldownMinutes: "5",
+    enterDebounceSeconds: "0",
     exitDebounceSeconds: "60",
     maxDwellSeconds: "",
     enabled: true,
@@ -172,6 +176,7 @@ function buildPatch(draft: Draft, task: SceneTask): SceneTaskInput {
   const exitId = draft.exitSceneId || null;
   const maxDwell = num(draft.maxDwellSeconds);
   const cooldown = num(draft.cooldownMinutes);
+  const enterDebounce = num(draft.enterDebounceSeconds);
   const debounce = num(draft.exitDebounceSeconds);
   if (draft.description !== task.description) patch.description = draft.description;
   if (draft.query !== task.query) patch.query = draft.query;
@@ -181,6 +186,9 @@ function buildPatch(draft: Draft, task: SceneTask): SceneTaskInput {
   if ((enterId ?? null) !== (task.enterSceneId ?? null)) patch.enterSceneId = enterId;
   if ((exitId ?? null) !== (task.exitSceneId ?? null)) patch.exitSceneId = exitId;
   if (cooldown !== null && cooldown !== task.cooldownMinutes) patch.cooldownMinutes = cooldown;
+  if (enterDebounce !== null && enterDebounce !== task.enterDebounceSeconds) {
+    patch.enterDebounceSeconds = enterDebounce;
+  }
   if (debounce !== null && debounce !== task.exitDebounceSeconds) {
     patch.exitDebounceSeconds = debounce;
   }
@@ -197,6 +205,7 @@ function buildInput(draft: Draft): SceneTaskInput {
     enterSceneId: draft.enterSceneId || null,
     exitSceneId: draft.exitSceneId || null,
     cooldownMinutes: num(draft.cooldownMinutes) ?? 5,
+    enterDebounceSeconds: num(draft.enterDebounceSeconds) ?? 0,
     exitDebounceSeconds: num(draft.exitDebounceSeconds) ?? 60,
     maxDwellSeconds: num(draft.maxDwellSeconds),
     enabled: draft.enabled,
@@ -415,6 +424,9 @@ function SceneTaskDrawer({
                 noneLabel={t("sceneTasks.noScene")}
                 onChange={(v) => set({ enterSceneId: v })}
               />
+              <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
+                {t("sceneTasks.enterHint")}
+              </p>
             </Section>
 
             <Section title={t("sceneTasks.exitSceneLabel")}>
@@ -433,13 +445,14 @@ function SceneTaskDrawer({
           <div className="grid grid-cols-2 gap-3">
             <label className="block">
               <span className="text-caption text-text-secondary block mb-1.5">
-                {t("sceneTasks.cooldownLabel")}
+                {t("sceneTasks.enterDebounceLabel")}
               </span>
               <input
                 type="number"
-                min={1}
-                value={draft.cooldownMinutes}
-                onChange={(e) => set({ cooldownMinutes: e.target.value })}
+                min={0}
+                value={draft.enterDebounceSeconds}
+                onChange={(e) => set({ enterDebounceSeconds: e.target.value })}
+                placeholder={t("sceneTasks.enterDebouncePlaceholder")}
                 className={inputCls}
               />
             </label>
@@ -457,22 +470,36 @@ function SceneTaskDrawer({
             </label>
           </div>
 
-          <label className="block">
-            <span className="text-caption text-text-secondary block mb-1.5">
-              {t("sceneTasks.dwellLabel")}
-            </span>
-            <input
-              type="number"
-              min={1}
-              value={draft.maxDwellSeconds}
-              onChange={(e) => set({ maxDwellSeconds: e.target.value })}
-              placeholder={t("sceneTasks.dwellPlaceholder")}
-              className={inputCls}
-            />
-            <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
-              {t("sceneTasks.dwellHint")}
-            </p>
-          </label>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block">
+              <span className="text-caption text-text-secondary block mb-1.5">
+                {t("sceneTasks.cooldownLabel")}
+              </span>
+              <input
+                type="number"
+                min={1}
+                value={draft.cooldownMinutes}
+                onChange={(e) => set({ cooldownMinutes: e.target.value })}
+                className={inputCls}
+              />
+            </label>
+            <label className="block">
+              <span className="text-caption text-text-secondary block mb-1.5">
+                {t("sceneTasks.dwellLabel")}
+              </span>
+              <input
+                type="number"
+                min={1}
+                value={draft.maxDwellSeconds}
+                onChange={(e) => set({ maxDwellSeconds: e.target.value })}
+                placeholder={t("sceneTasks.dwellPlaceholder")}
+                className={inputCls}
+              />
+            </label>
+          </div>
+          <p className="text-caption text-text-tertiary leading-relaxed">
+            {t("sceneTasks.dwellHint")}
+          </p>
 
           <div className="flex items-center justify-between">
             <span className="text-body text-text-primary">{t("sceneTasks.enabledLabel")}</span>
@@ -717,6 +744,13 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
                           count: task.perceiveDeviceIds.length,
                         })}
                       </span>
+                      {task.enterDebounceSeconds > 0 && (
+                        <span className="text-caption text-text-tertiary num">
+                          {t("sceneTasks.enterDebounceBadge", {
+                            seconds: task.enterDebounceSeconds,
+                          })}
+                        </span>
+                      )}
                       {task.maxDwellSeconds != null && (
                         <span className="text-caption text-text-tertiary num">
                           {t("sceneTasks.dwellBadge", {

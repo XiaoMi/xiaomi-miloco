@@ -21,8 +21,11 @@
     "exitSceneLabel": "Scene on exit",
     "scenePlaceholder": "Pick a Mi Home automation scene",
     "noScene": "None",
+    "enterHint": "Fires only after the condition stays true for the enter-confirm duration; longer = fewer false enters",
     "exitHint": "Fires after the condition stays false for the exit-confirm duration; longer = fewer false exits",
     "cooldownLabel": "Scene cooldown (min)",
+    "enterDebounceLabel": "Enter confirm (sec)",
+    "enterDebouncePlaceholder": "0 = fire immediately",
     "debounceLabel": "Exit confirm (sec)",
     "dwellLabel": "Auto-exit after (sec)",
     "dwellPlaceholder": "Empty = no auto-exit",
@@ -52,6 +55,7 @@
     "errCamera": "Pick at least one camera",
     "errScene": "Configure at least one of enter / exit scene",
     "cameraCount": "{{count}} cameras",
+    "enterDebounceBadge": "enter after {{seconds}}s confirm",
     "dwellBadge": "auto-exit in {{seconds}}s"
   }
 }

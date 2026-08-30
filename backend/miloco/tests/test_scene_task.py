@@ -5,7 +5,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from miloco.database.kv_repo import ScopeConfigKeys
@@ -43,6 +43,7 @@ def _make_scene_state_rule(
     exit_scene='scene-2',
     max_dwell_seconds=None,
     exit_debounce_seconds=0,
+    duration_seconds=None,
     enabled=True,
 ):
     return Rule(
@@ -59,6 +60,9 @@ def _make_scene_state_rule(
         on_exit_actions=[_scene_action(exit_scene)] if exit_scene else [],
         exit_debounce_seconds=exit_debounce_seconds,
         max_dwell_seconds=max_dwell_seconds,
+        # 进入确认时间：duration_ratio 恒 1.0（严格连续满足才触发进入场景）
+        duration_seconds=duration_seconds,
+        duration_ratio=1.0 if duration_seconds else None,
     )
 
 
@@ -198,6 +202,56 @@ async def test_manual_trigger_schedules_dwell(runner):
     ), '手动触发与真实 ENTERED 同口径：应起到期计时'
 
 
+# ---- 进入确认时间（enter_debounce → rule duration_seconds） ----
+
+
+@pytest.fixture
+def confirm_runner(mock_miot_proxy, mock_log_repo, mock_task_record_service):
+    """sample_interval=3s、duration_seconds=6 → maxlen=2 的进入确认窗口。"""
+    return RuleRunner(
+        rules=[
+            _make_scene_state_rule(
+                rule_id='rule-confirm', duration_seconds=6,
+                exit_debounce_seconds=0,
+            )
+        ],
+        miot_proxy=mock_miot_proxy,
+        rule_log_repo=mock_log_repo,
+        sample_interval_seconds=3.0,
+        task_record_service=mock_task_record_service,
+    )
+
+
+@pytest.mark.asyncio
+async def test_enter_confirm_single_true_does_not_fire(
+    confirm_runner, mock_miot_proxy
+):
+    """单次误识别（一帧 True 后不再满足）→ 不触发进入场景。"""
+    with patch('miloco.rule.runner.time.time') as mt:
+        mt.return_value = 100.0
+        out = await confirm_runner.update_state('rule-confirm', 'cam-001', True)
+    await confirm_runner.drain()
+    assert out is TriggerOutcome.COUNTING
+    assert mock_miot_proxy.execute_miot_scene.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_enter_confirm_continuous_true_fires_after_window(
+    confirm_runner, mock_miot_proxy
+):
+    """条件持续满足 6s（两个采样周期全 True）→ 达标触发进入场景。"""
+    with patch('miloco.rule.runner.time.time') as mt:
+        mt.return_value = 100.0
+        await confirm_runner.update_state('rule-confirm', 'cam-001', True)
+        mt.return_value = 103.0
+        out = await confirm_runner.update_state('rule-confirm', 'cam-001', True)
+    await confirm_runner.drain()
+    assert out is TriggerOutcome.FIRED
+    assert mock_miot_proxy.execute_miot_scene.await_count == 1
+    calls = [c.args[0] for c in mock_miot_proxy.execute_miot_scene.await_args_list]
+    assert calls == ['scene-1']
+
+
 # ---- SceneTaskService ----
 
 
@@ -284,11 +338,37 @@ async def test_create_builds_task_and_state_rule(svc, rule_service_mock, task_se
     assert rule.mode is RuleMode.STATE
     assert rule.max_dwell_seconds == 60
     assert rule.exit_debounce_seconds == 60
+    # 默认进入确认时间 0 = 立即触发 → 不设 duration 滑窗
+    assert rule.duration_seconds is None
     assert [a.did for a in rule.on_enter_actions] == ['scene-1']
     assert [a.did for a in rule.on_exit_actions] == ['scene-2']
     # 返回视图带场景名
     assert view.enter_scene_name == '开灯'
     assert view.exit_scene_name == '关灯'
+    assert view.enter_debounce_seconds == 0
+
+
+@pytest.mark.asyncio
+async def test_create_maps_enter_confirm_to_rule_duration(
+    svc, rule_service_mock
+):
+    """进入确认时间 >0 → rule 走 duration 前置确认门槛（ratio 恒 1.0 严格连续）。"""
+    created: dict = {}
+
+    def _capture(rule):
+        created['rule'] = rule
+        return 'rule-new'
+
+    rule_service_mock.create_rule = AsyncMock(side_effect=_capture)
+    rule_service_mock.get_all_rules = AsyncMock(
+        side_effect=lambda enabled_only=False: [created['rule']]
+        if 'rule' in created else [],
+    )
+    view = await svc.create(_create_req(enter_debounce_seconds=30))
+    rule = created['rule']
+    assert rule.duration_seconds == 30
+    assert rule.duration_ratio == 1.0
+    assert view.enter_debounce_seconds == 30
 
 
 @pytest.mark.asyncio
@@ -318,6 +398,35 @@ async def test_list_resolves_scene_names(svc):
     assert views[0].enter_scene_name == '开灯'
     assert views[0].query == '有人在看书'
     assert views[0].enabled is True
+
+
+@pytest.mark.asyncio
+async def test_view_maps_enter_confirm_from_rule_duration(svc, rule_service_mock):
+    """视图 enter_debounce_seconds 直接来自 rule.duration_seconds（旧规则 → 0）。"""
+    rule_service_mock.get_all_rules = AsyncMock(
+        return_value=[_make_scene_state_rule(duration_seconds=30)]
+    )
+    views = await svc.list()
+    assert views[0].enter_debounce_seconds == 30
+
+
+@pytest.mark.asyncio
+async def test_update_sets_enter_confirm(svc, rule_service_mock):
+    await svc.update(TASK_ID, SceneTaskUpdateRequest(enter_debounce_seconds=30))
+    update = rule_service_mock.patch_rule.await_args.args[1]
+    assert update.duration_seconds == 30
+    assert update.duration_ratio == 1.0
+    # 只动了 duration，其它字段不进 fields_set
+    assert update.model_fields_set == {'duration_seconds', 'duration_ratio'}
+
+
+@pytest.mark.asyncio
+async def test_update_clears_enter_confirm(svc, rule_service_mock):
+    """0 = 立即触发 → 清空 duration 滑窗。"""
+    await svc.update(TASK_ID, SceneTaskUpdateRequest(enter_debounce_seconds=0))
+    update = rule_service_mock.patch_rule.await_args.args[1]
+    assert update.duration_seconds is None
+    assert update.duration_ratio is None
 
 
 @pytest.mark.asyncio

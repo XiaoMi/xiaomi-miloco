@@ -21,8 +21,11 @@
     "exitSceneLabel": "退出时触发的场景",
     "scenePlaceholder": "选择米家自动化场景",
     "noScene": "不触发",
+    "enterHint": "条件持续满足「进入确认时间」后才触发进入场景；确认时间越长越不容易被单次误识别触发",
     "exitHint": "条件不再满足并持续「退出确认时间」后触发；退出确认时间越长越不容易被误触发",
     "cooldownLabel": "场景冷却（分钟）",
+    "enterDebounceLabel": "进入确认时间（秒）",
+    "enterDebouncePlaceholder": "0 = 立即触发",
     "debounceLabel": "退出确认时间（秒）",
     "dwellLabel": "到期自动退出（秒）",
     "dwellPlaceholder": "留空 = 不自动退出",
@@ -52,6 +55,7 @@
     "errCamera": "请至少选择一台感知摄像头",
     "errScene": "进入 / 退出场景至少配置一个",
     "cameraCount": "{{count}} 台摄像头",
+    "enterDebounceBadge": "{{seconds}}s 确认后进入",
     "dwellBadge": "{{seconds}}s 后自动退出"
   }
 }

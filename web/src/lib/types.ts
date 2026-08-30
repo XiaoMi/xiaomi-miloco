@@ -801,8 +801,10 @@ export interface SceneTask {
   enterSceneName?: string | null;
   exitSceneId?: string | null;
   exitSceneName?: string | null;
-  // 场景触发冷却（分钟）；退出确认时间（秒）；最长驻留（秒，到期强制退出）
+  // 场景触发冷却（分钟）；进入确认时间（秒，条件持续满足这么久才触发进入场景，
+  // 0 = 立即触发）；退出确认时间（秒）；最长驻留（秒，到期强制退出）
   cooldownMinutes?: number | null;
+  enterDebounceSeconds: number;
   exitDebounceSeconds: number;
   maxDwellSeconds?: number | null;
 }
@@ -816,6 +818,7 @@ export interface SceneTaskInput {
   enterSceneId?: string | null;
   exitSceneId?: string | null;
   cooldownMinutes?: number;
+  enterDebounceSeconds?: number;
   exitDebounceSeconds?: number;
   maxDwellSeconds?: number | null;
   enabled?: boolean;

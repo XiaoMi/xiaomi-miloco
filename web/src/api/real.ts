@@ -2167,6 +2167,7 @@ interface BackendSceneTask {
   exit_scene_id?: string | null;
   exit_scene_name?: string | null;
   cooldown_minutes?: number | null;
+  enter_debounce_seconds: number;
   exit_debounce_seconds: number;
   max_dwell_seconds?: number | null;
 }
@@ -2185,6 +2186,9 @@ function toSceneTaskPayload(input: SceneTaskInput): Record<string, unknown> {
   if (input.exitSceneId !== undefined) p.exit_scene_id = input.exitSceneId;
   if (input.cooldownMinutes !== undefined) {
     p.cooldown_minutes = input.cooldownMinutes;
+  }
+  if (input.enterDebounceSeconds !== undefined) {
+    p.enter_debounce_seconds = input.enterDebounceSeconds;
   }
   if (input.exitDebounceSeconds !== undefined) {
     p.exit_debounce_seconds = input.exitDebounceSeconds;
@@ -2211,6 +2215,7 @@ function mapSceneTask(t: BackendSceneTask): SceneTask {
     exitSceneId: t.exit_scene_id ?? null,
     exitSceneName: t.exit_scene_name ?? null,
     cooldownMinutes: t.cooldown_minutes ?? null,
+    enterDebounceSeconds: t.enter_debounce_seconds ?? 0,
     exitDebounceSeconds: t.exit_debounce_seconds,
     maxDwellSeconds: t.max_dwell_seconds ?? null,
   };
