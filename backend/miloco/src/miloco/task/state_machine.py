@@ -65,6 +65,7 @@ class TransitionOutcome(str, Enum):
     MILESTONE_FIRED = "milestone_fired"
     ALREADY_IN_STATE = "already_in_state"
     BLOCKED_BY_EXIT_CONDITION = "blocked_by_exit_condition"
+    STILL_HELD = "still_held"
     NOT_IN_SESSION = "not_in_session"
     SIGNAL_DROPPED = "signal_dropped"
     UNKNOWN_RULE = "unknown_rule"
@@ -314,7 +315,7 @@ class TaskStateMachine:
             # 幂等: 多条路径同时进只执行一次边界动作。
             return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
-        if self._exit_condition_already_true(signal, topology):
+        if self._other_exit_side_holds(signal, topology):
             # §5.1: 进入时退出条件已为真 → 拒绝进入。让错误表现从"开了永远不关"
             # 变成"从来不开" —— 后者用户当场能发现。
             return self._done(TransitionOutcome.BLOCKED_BY_EXIT_CONDITION, signal)
@@ -329,6 +330,11 @@ class TaskStateMachine:
         if self.runtime_state(signal.task_id) is not TaskRuntimeState.ON:
             return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
+        if self._other_exit_side_holds(signal, topology):
+            # OR 的退出条件是「全部都不成立」。少了这一步就成了「任一条断开就整个
+            # 退出」, 另一条还撑着也没用 —— 那不是 OR。
+            return self._done(TransitionOutcome.STILL_HELD, signal)
+
         self._states[signal.task_id] = TaskRuntimeState.OFF
         self._maybe_dispatch(signal.task_id, ActionSlot.ON_EXIT, signal.payload)
 
@@ -338,16 +344,20 @@ class TaskStateMachine:
             self._reset_edge_baseline(rule_id)
         return self._done(TransitionOutcome.EXITED, signal)
 
-    def _exit_condition_already_true(
+    def _other_exit_side_holds(
         self, signal: TaskSignal, topology: TaskTopology
     ) -> bool:
-        """对侧 (出方向) 条件此刻是否已经为真。
+        """除信号自己那条以外, 出口侧还有没有条件此刻为真。
+
+        进入和退出用的是同一个查询, 只是结论相反: 进入时"有真"意味着出口已经
+        开着、别进 (§5.1, 让错误从"开了永远不关"变成"从来不开"); 退出时"有真"
+        意味着还有条件撑着、别出。
 
         排除信号自己那条 rule: 对称模式下进出是同一条 session rule, 不排除的话
-        它会拿自己的条件挡住自己, 永远进不去。
+        它会拿自己的条件挡住自己, 永远进不去也出不来。
 
         只有明确为 ``True`` 才拦。``None`` 是未就绪或脉冲型无稳态 —— 拿"不知道"
-        当"成立"会把正常进入全挡掉。
+        当"成立"会把正常的进出全挡掉。
         """
         for rule_id in topology.exit_side_rule_ids - {signal.rule_id}:
             if self._is_condition_satisfied(rule_id) is True:

@@ -26,7 +26,7 @@ _ABNORMAL = frozenset({"signal_dropped", "unknown_rule"})
 
 # 正常但「没触发」的结论 —— 用户问「怎么没反应」时最需要看到的就是这些
 _SUPPRESSED = frozenset(
-    {"already_in_state", "blocked_by_exit_condition", "not_in_session"}
+    {"already_in_state", "blocked_by_exit_condition", "not_in_session", "still_held"}
 )
 
 

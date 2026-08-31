@@ -3389,6 +3389,47 @@ class TestRuleRunnerOnTargetDesc:
         assert RuleEvent.TARGET_FIRED in events
         assert rule.id in r._target_fired
 
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_target_not_refired_by_sibling_rule(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """「本周期已达标」是 task 维度 —— 换一条同 task 的 rule 不该再发一次。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        rule_a = _make_state_rule_with_target(rule_id="rule-tgt-sib-a")
+        rule_b = _make_state_rule_with_target(rule_id="rule-tgt-sib-b")
+        assert rule_a.task_id == rule_b.task_id
+        r.add_rule(rule_a)
+        r.add_rule(rule_b)
+
+        assert r._fire_target_if_reached(rule_a, ["cam-001"], "ctx") is True
+        assert r._fire_target_if_reached(rule_b, ["cam-001"], "ctx") is False
+        await r.drain()
+
+        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
+        assert events.count(RuleEvent.TARGET_FIRED) == 1
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_target_fires_independently_for_different_tasks(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """达标静默只按 task 收口, 不同 task 之间互不影响。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        rule_a = _make_state_rule_with_target(rule_id="rule-tgt-t1", task_id="task-1")
+        rule_b = _make_state_rule_with_target(rule_id="rule-tgt-t2", task_id="task-2")
+        r.add_rule(rule_a)
+        r.add_rule(rule_b)
+
+        assert r._fire_target_if_reached(rule_a, ["cam-001"], "ctx") is True
+        assert r._fire_target_if_reached(rule_b, ["cam-001"], "ctx") is True
+        await r.drain()
+
+        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
+        assert events.count(RuleEvent.TARGET_FIRED) == 2
+
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
     def test_target_gate_rejection_does_not_consume_fired_marker(
         self, mock_send, mock_miot_proxy, mock_log_repo,

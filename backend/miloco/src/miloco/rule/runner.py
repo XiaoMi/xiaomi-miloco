@@ -1175,7 +1175,7 @@ class RuleRunner:
         if not self._has_target_slot(rule):
             return False
         rs = self._ensure_state(rule.id)
-        if rs.target_fired:
+        if self._task_target_fired(rule.task_id):
             return False
         if state is None:
             state = self._task_record_service.read_duration_target_state(
@@ -1221,7 +1221,7 @@ class RuleRunner:
         rs.target_timer = None
         if not self._has_target_slot(rule):
             return
-        if rs.target_fired:
+        if self._task_target_fired(rule.task_id):
             return
         state = self._task_record_service.read_duration_target_state(rule.task_id)
         if state is None:
@@ -1273,8 +1273,8 @@ class RuleRunner:
                 "TARGET_DROPPED: rule=%s state-false-at-fire", rule.id,
             )
             return
-        # 守卫 2：本 session 已 fire 过（理论上不会，防御性）
-        if rs.target_fired:
+        # 守卫 2：本周期已 fire 过（理论上不会，防御性）
+        if self._task_target_fired(rule.task_id):
             return
         rs.target_fired = True
         actual_target_at = ms_to_iso_local(now_ms())
@@ -1570,6 +1570,21 @@ class RuleRunner:
                 return ("dynamic", rule.on_target_desc)
             return None
         return None
+
+    def _task_target_fired(self, task_id: str) -> bool:
+        """本周期该 task 是否已经发过达标。
+
+        标记落在 per-rule 的 state 上, 但「本周期已达标」是 task 维度的语义 ——
+        只看自己那条的话, 多 rule 时换一条 rule 触发就会重复发。跨日 rollover
+        按 task 遍历名下每条 rule 清零, 所以这个聚合视图跟着一起归零。
+        """
+        for rule in self._rules.values():
+            if rule.task_id != task_id:
+                continue
+            state = self._state.get(rule.id)
+            if state is not None and state.target_fired:
+                return True
+        return False
 
     def _has_target_slot(self, rule: Rule) -> bool:
         """这个 task 有没有配达标动作 —— 接管后看 task 列, 未接管回退 rule 列。

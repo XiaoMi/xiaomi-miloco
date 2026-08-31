@@ -162,6 +162,51 @@ def test_entry_blocked_when_exit_condition_already_true():
     assert h.dispatched == []
 
 
+def test_exit_held_when_another_source_still_true():
+    """OR 的退出条件是「全部都不成立」。
+
+    少这一步就成了「任一条断开就整个退出」, 另一条还撑着也没用 —— 那不是 OR。
+    """
+    h = Harness(satisfied={"s1": False, "s2": False})
+    h.sm.register_task("t1", {"s1": RuleDirection.SESSION, "s2": RuleDirection.SESSION})
+    h.sm.handle(_entered(rule_id="s1"))
+    h.satisfied["s2"] = True  # 另一条的条件此刻成立
+    h.dispatched.clear()
+
+    outcome = h.sm.handle(_exited(rule_id="s1"))
+
+    assert outcome is TransitionOutcome.STILL_HELD
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert h.dispatched == []
+
+
+def test_exit_proceeds_when_nothing_else_holds():
+    """出口侧全都不成立 → 照常退出并派发 on_exit。"""
+    h = Harness(satisfied={"s1": False, "s2": False})
+    h.sm.register_task("t1", {"s1": RuleDirection.SESSION, "s2": RuleDirection.SESSION})
+    h.sm.handle(_entered(rule_id="s1"))
+    h.dispatched.clear()
+
+    outcome = h.sm.handle(_exited(rule_id="s1"))
+
+    assert outcome is TransitionOutcome.EXITED
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
+
+
+def test_single_rule_exit_not_blocked_by_its_own_condition():
+    """单 rule: 排除自己后出口侧为空, 行为与加这道检查之前逐字相同。"""
+    h = Harness(satisfied={"s": True})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION})
+    h.sm.handle(_entered(rule_id="s"))
+    h.dispatched.clear()
+
+    outcome = h.sm.handle(_exited(rule_id="s"))
+
+    assert outcome is TransitionOutcome.EXITED
+    assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
+
+
 def test_unknown_steady_state_does_not_block_entry():
     """None = 未就绪 / 脉冲型无稳态。拿"不知道"当"成立"会把正常进入全挡掉。"""
     h = Harness(satisfied={"x": None})
