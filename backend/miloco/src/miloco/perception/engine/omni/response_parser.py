@@ -420,9 +420,13 @@ def _parse_matched_rules(
         if not isinstance(item, dict):
             continue
         # B 结构：hit=false = 模型评估为"未命中"（reason 是否定理由），直接丢弃、不触发下游。
-        # hit 缺省视作命中，兼容旧 prompt 输出（无 hit 字段）。
-        hit = item.get("hit", True)
-        if hit is False or (isinstance(hit, str) and hit.strip().lower() in ("false", "0", "no")):
+        # hit 字段模型**时有时无**（真实数据 ~4% 缺失）：缺失时不能默认触发也不能默认丢弃
+        # ——由 reason 兜底判定（reason 明确否定 → 丢弃；reason 正常 → 保留，兼容漏写 hit
+        # 的合法命中，见 _reason_negates）。
+        hit = item.get("hit")
+        if hit is False or (
+            isinstance(hit, str) and hit.strip().lower() in ("false", "0", "no")
+        ):
             continue
         # rule_name（模型照抄的完整规则名）→ 还原 rule_id（下游稳定键）；rule_name 一并存供展示
         name = str(item.get("rule_name", ""))
@@ -433,14 +437,47 @@ def _parse_matched_rules(
                 name,
             )
             continue
+        reason = str(item.get("reason", ""))
+        if _reason_negates(reason):
+            # reason 与 hit 自相矛盾 / reason 明确否定：模型要么把否定结论写进 reason
+            # 却漏写或误写 hit（如「画面中只有床铺和家具，并没有人在床上读书」），
+            # 要么把 hit=false 直接写进 reason 文本（旧格式残留）。reason 是判断依据的
+            # 一手文本，按它的否定结论丢弃（宁漏勿误），并留痕便于监控。
+            logger.warning(
+                "omni matched_rules reason 明确否定，丢弃不触发 "
+                "(rule_name=%r, hit=%r, reason=%r)",
+                name, hit, reason[:160],
+            )
+            continue
         result.append(
             MatchedRule(
                 rule_id=rid,
                 rule_name=name,
-                reason=str(item.get("reason", "")),
+                reason=reason,
             )
         )
     return result
+
+
+# reason 明确否定的信号（命中即视为「模型在 reason 里写了否定结论」）。
+# 否定词后 15 字内出现规则成立关键词才算命中：覆盖「并没有人在床上读书」/「未见
+# 散落的黑色垃圾」/「不满足规则要素」/「hit=false」等矛盾或旧格式输出；同时不误杀
+# 合法命中——reason 正常（无否定词）的条目原样保留，包括「不属于线缆」这类排除
+# 干扰物的常见表述（「不属于」不在否定词表）。关键词表覆盖动作类与名词类规则主体，
+# 可按需扩充。
+_REASON_NEGATION_RE = re.compile(
+    r"(?:并没有|并未|没有|没在|不在|未在|并非|不是|并不|未见|未发现|未观察到|"
+    r"未看到|未检测到|不满足|不符合|不成立|不匹配|未)[^。；;，,]{0,15}"
+    r"(?:读书|看书|阅读|纸质书|命中|成立|满足|符合|有人在|人在|看到人|发现人|"
+    r"垃圾|杂物|行为|要素)"
+    r"|(?:没有人|没有任何人|并无人在|未见人|没看到人|未发现人|未看到人|"
+    r"未检测到人|无人在|空无一人|hit\s*[:=]\s*false)"
+)
+
+
+def _reason_negates(reason: str) -> bool:
+    """reason 文本是否包含明确的否定结论（hit 缺失/为 true 时用于丢弃）。"""
+    return bool(reason) and _REASON_NEGATION_RE.search(reason) is not None
 
 
 def _parse_speeches(raw: Any) -> list[Speech]:

@@ -76,7 +76,7 @@ perception:
   log_ttl: 30                  # 感知日志保留天数
   tier_u_dump_enable: false    # POST /api/identity/pool/dump 调试端点开关（生产保持 false，本地调试可设 true）
   collect:
-    window_size: 3           # 时间窗口大小（秒）
+    window_size: 5           # 时间窗口大小（秒）
     max_windows: 3           # 最大待处理窗口数
     settle_ms: 500           # 等待慢轨道的宽限期（毫秒）
     full_action: "clear"     # 窗口满载处理策略：drop | clear | keep
@@ -110,6 +110,7 @@ perception:
       - matched_rules：针对“待判断规则”中每个规则是否命中的解释说明
       - rule_name：必须照抄“待判断规则”中的完整名称，严禁自创或修改。
       - reason：用一句话直接描述画面是否命中规则的客观细节（如：“画面中有一人在床上翻阅书籍”）。
+      - hit：是否命中对应的规则场景，true 或者 false
 
       # 场景判定补充细则
 

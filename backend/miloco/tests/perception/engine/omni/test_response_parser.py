@@ -137,17 +137,127 @@ class TestParseOmniResponse:
         assert len(result.matched_rules) == 1
         assert result.matched_rules[0].rule_id == "[posture] 颈椎提醒"
 
-    def test_hit_missing_defaults_to_matched(self):
-        """hit 缺省（旧 prompt 无此字段）视作命中，向后兼容。"""
-        data = {"matched_rules": [{"rule_name": "[read] 阅读", "reason": "正在看书"}]}
+    def test_hit_missing_with_negation_reason_dropped(self):
+        """hit 缺失 + reason 明确否定 → 丢弃（11:51:25 误触发案例的读书条目）。
+
+        回归：模型漏写 hit 字段、把否定结论写进 reason（「画面中只有床铺和家具，
+        并没有人在床上读书」）——旧代码缺省命中导致误触发进入阅读场景。
+        """
+        data = {
+            "matched_rules": [
+                {"rule_name": "[read] 有人读书", "reason": "画面中只有床铺和家具，并没有人在床上读书。"},
+            ],
+        }
         result = parse_omni_response(_wrap(json.dumps(data)))
-        assert len(result.matched_rules) == 1
+        assert result.matched_rules == []
+
+    def test_hit_missing_with_normal_reason_kept(self):
+        """hit 缺失但 reason 正常 → 保留（同窗口的垃圾条目不能误杀）。
+
+        hit 字段模型时有时无（真实数据 ~4% 缺失）；缺失时由 reason 兜底——
+        reason 无否定即视为命中，兼容漏写 hit 的合法触发。
+        """
+        data = {
+            "matched_rules": [
+                {"rule_name": "[vacuum] 白色地面有黑色垃圾", "reason": "画面右下角白色地板上可见数个分散的小黑点垃圾，不属于线缆、鞋影或机器人。"},
+            ],
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)))
+        assert [r.rule_id for r in result.matched_rules] == ["[vacuum] 白色地面有黑色垃圾"]
 
     def test_hit_string_false_dropped(self):
         """模型输出字符串 "false" 也被正确拦截。"""
         data = {"matched_rules": [{"rule_name": "[x] test", "reason": "no", "hit": "false"}]}
         result = parse_omni_response(_wrap(json.dumps(data)))
         assert result.matched_rules == []
+
+    def test_reason_negation_with_hit_true_dropped(self):
+        """hit=true 但 reason 明确否定（自相矛盾）→ 按 reason 丢弃。
+
+        回归 2026-08-31 11:51:27 误触发：同窗口两条命中，reason 原文——
+        「画面中只有床铺和家具，并没有人在床上读书」的读书条目被丢弃，
+        垃圾条目（reason 正常）保留。
+        """
+        data = {
+            "matched_rules": [
+                {
+                    "rule_name": "[read] 有人读书",
+                    "reason": "画面中只有床铺和家具，并没有人在床上读书。",
+                    "hit": True,
+                },
+                {
+                    "rule_name": "[vacuum] 白色地面有黑色垃圾",
+                    "reason": "画面右下角白色地板上可见数个分散的小黑点垃圾，不属于线缆、鞋影或机器人。",
+                    "hit": True,
+                },
+            ],
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)))
+        assert [r.rule_id for r in result.matched_rules] == ["[vacuum] 白色地面有黑色垃圾"]
+
+    def test_reason_negation_laptop_dropped(self):
+        """hit=true 但 reason 写「并非在看纸质书」（用电脑被当读书）→ 丢弃。
+
+        回归 2026-08-29 rule_log：reason「...双手放在键盘区域，视线朝向电脑
+        屏幕，并非在看纸质书」仍触发过 ENTERED。
+        """
+        data = {
+            "matched_rules": [
+                {
+                    "rule_name": "[read] 有人读书",
+                    "reason": "画面中有人躺在床上，面前放置着一台笔记本电脑，双手放在键盘区域，视线朝向电脑屏幕，并非在看纸质书",
+                    "hit": True,
+                },
+            ],
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)))
+        assert result.matched_rules == []
+
+    def test_reason_old_format_hit_false_text_dropped(self):
+        """旧格式残留：把 hit=false 写进 reason 文本（无结构化 hit）→ 丢弃。"""
+        data = {
+            "matched_rules": [
+                {"rule_name": "[vacuum] 白色地面有黑色垃圾", "reason": "画面中白色地面上未见散落的黑色垃圾，地毯外地面干净，hit=false"},
+            ],
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)))
+        assert result.matched_rules == []
+
+    def test_reason_exclusion_phrase_not_misjudged(self):
+        """「不属于线缆/鞋影/机器人」这类排除干扰物的表述不是否定结论，必须保留。"""
+        data = {
+            "matched_rules": [
+                {
+                    "rule_name": "[vacuum] 白色地面有黑色垃圾",
+                    "reason": "画面右下角白色地板上可见数个分散的小黑点垃圾，不属于线缆、鞋影或机器人。",
+                    "hit": True,
+                },
+                {
+                    "rule_name": "[read] 有人读书",
+                    "reason": "画面中有人坐在床沿，双手拿着纸质书低头阅读，连续多帧保持该姿势。",
+                    "hit": True,
+                },
+            ],
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)))
+        assert [r.rule_id for r in result.matched_rules] == [
+            "[vacuum] 白色地面有黑色垃圾",
+            "[read] 有人读书",
+        ]
+
+    def test_reason_negation_x_but_y_not_misjudged(self):
+        """「不是X而是Y」句式不误杀：否定词后紧跟的 X 不在关键词内即放行。"""
+        data = {
+            "matched_rules": [
+                {
+                    "rule_name": "[read] 有人读书",
+                    "reason": "画面中不是空床，而是有人坐在床上拿着纸质书在看。",
+                    "hit": True,
+                },
+            ],
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)))
+        assert [r.rule_id for r in result.matched_rules] == ["[read] 有人读书"]
 
     def test_partial_fields(self):
         data = {"caption": "安静"}

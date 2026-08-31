@@ -586,8 +586,9 @@ MOCK_RULE_RESPONSE = {
                         "caption": [{"area": "客厅", "description": "爸爸站在门口"}],
                         "matched_rules": [
                             {
-                                "rule_id": "rule_dad_home",
+                                "rule_name": "爸爸回家播报",
                                 "reason": "检测到爸爸出现在门口",
+                                "hit": True,
                             },
                         ],
                         "speeches": [],
