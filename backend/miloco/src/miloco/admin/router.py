@@ -62,7 +62,7 @@ async def get_system_status(current_user: str = Depends(verify_token)):
     try:
         rule_service = manager.rule_service
         total_rules = rule_service._repo.count_all()
-        enabled_rules = rule_service._repo.count_enabled()
+        enabled_rules = len(await rule_service.get_effectively_enabled_rules())
         sqlite_ok = True
     except Exception:
         total_rules = 0

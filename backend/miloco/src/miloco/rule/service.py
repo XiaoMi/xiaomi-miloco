@@ -467,6 +467,16 @@ class RuleService:
     async def get_all_rules(self, enabled_only: bool = False) -> list[Rule]:
         return self._repo.get_all(enabled_only)
 
+    async def get_effectively_enabled_rules(self) -> list[Rule]:
+        """「有效启用」的 rule —— 用户意图 AND 所属 task 没被停用 (§19.9)。
+
+        仍从 DB 读 ``enabled``, 与 task 停用会覆写 enabled 的旧行为同源, 只多滤
+        一层 task 停用。感知侧每 cycle 的下发闸和 admin 状态数字都得用这个:
+        只按 ``enabled`` 过滤会让停用的 task 继续下发、继续触发。
+        """
+        rules = self._repo.get_all(enabled_only=True)
+        return [r for r in rules if not self._runner.is_task_paused(r.task_id)]
+
     def notify_record_rollover(
         self,
         task_id: str,

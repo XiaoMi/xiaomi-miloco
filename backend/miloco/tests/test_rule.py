@@ -310,6 +310,23 @@ class TestTriggerOutcome:
         assert out is TriggerOutcome.FIRED
 
     @pytest.mark.asyncio
+    async def test_paused_task_rule_does_not_fire(self, runner):
+        """task 停用 → 规则不再参与判定。
+
+        两条 rule 的 ``enabled`` 都是 True, 只看 ``rule.enabled`` 的话停用那条
+        也会 FIRED —— 停用就成了空操作。
+        """
+        runner.add_rule(_make_static_rule(rule_id="rule-paused", task_id="task-paused"))
+        runner.set_task_paused("task-paused", True)
+
+        paused_out = await runner.update_state("rule-paused", "cam-001", True)
+        active_out = await runner.update_state("rule-1", "cam-001", True)
+        await runner.drain()
+
+        assert paused_out is TriggerOutcome.NOT_FIRED
+        assert active_out is TriggerOutcome.FIRED
+
+    @pytest.mark.asyncio
     async def test_still_in_returns_still_in(self, runner):
         await runner.update_state("rule-1", "cam-001", True)  # ENTER → FIRED
         out = await runner.update_state("rule-1", "cam-001", True)  # 持续
@@ -587,6 +604,15 @@ class TestRuleRunnerTrigger:
         )
         result = await runner.trigger_rule("disabled", TRIGGER_CONTEXT)
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_trigger_rule_of_paused_task(self, runner):
+        """手动触发也要过有效启用闸: rule.enabled 是 True, 但 task 停用。"""
+        runner.add_rule(_make_static_rule(rule_id="rule-paused", task_id="task-paused"))
+        runner.set_task_paused("task-paused", True)
+
+        assert await runner.trigger_rule("rule-paused", TRIGGER_CONTEXT) is None
+        assert await runner.trigger_rule("rule-1", TRIGGER_CONTEXT) is not None
 
     @pytest.mark.asyncio
     async def test_trigger_static_rule_success(

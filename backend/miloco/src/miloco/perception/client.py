@@ -691,7 +691,7 @@ class PerceptionEngineProxy:
 
             from miloco.manager import get_manager
 
-            rules = await get_manager().rule_service.get_all_rules(enabled_only=True)
+            rules = await get_manager().rule_service.get_effectively_enabled_rules()
             rules = [rule.model_dump() for rule in rules]
             rules, skipped_task_ids = _filter_completed_event_rules(rules)
 

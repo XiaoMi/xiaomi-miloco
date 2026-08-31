@@ -483,17 +483,17 @@ class RuleRunner:
     def get_all_rules(self) -> list[Rule]:
         return list(self._rules.values())
 
-    def get_enabled_rules(self) -> list[Rule]:
-        """「有效启用」的 rule —— 用户意图 AND 所属 task 没被停用 (§19.9)。
+    def _is_effectively_enabled(self, rule: Rule) -> bool:
+        """「有效启用」= 用户意图 AND 所属 task 没被停用 (§19.9)。
 
-        ``rule.enabled`` 只表示用户想不想开; task 停用不再覆写它, 所以这里必须
-        两个条件都判, 否则 task 停用后规则会继续参与判定。
+        ``rule.enabled`` 只表示用户想不想开, task 停用不再覆写它。所以凡是判
+        「这条规则此刻要不要参与判定」都得走这里, 只看 enabled 会让停用失效。
         """
-        return [
-            r
-            for r in self._rules.values()
-            if r.enabled and r.task_id not in self._paused_tasks
-        ]
+        return rule.enabled and rule.task_id not in self._paused_tasks
+
+    def get_enabled_rules(self) -> list[Rule]:
+        """「有效启用」的 rule。"""
+        return [r for r in self._rules.values() if self._is_effectively_enabled(r)]
 
     def set_task_paused(self, task_id: str, paused: bool) -> None:
         """刷新派生量。task 启停的唯一入口。"""
@@ -547,7 +547,7 @@ class RuleRunner:
             if rule is None:
                 logger.warning("update_state: rule %s not found", rule_id)
                 return TriggerOutcome.NOT_FIRED
-            if not rule.enabled:
+            if not self._is_effectively_enabled(rule):
                 return TriggerOutcome.NOT_FIRED
 
             src = self._ensure_source(rule_id, source_did)
@@ -697,7 +697,7 @@ class RuleRunner:
         if rule is None:
             logger.warning("trigger_rule: rule %s not found", rule_id)
             return None
-        if not rule.enabled:
+        if not self._is_effectively_enabled(rule):
             logger.info("trigger_rule: rule %s is disabled, skipping", rule_id)
             return None
 

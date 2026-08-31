@@ -183,6 +183,28 @@ def test_disable_task_does_not_overwrite_rule_enabled(real_db):
     assert runner.is_task_paused("t1") is True
 
 
+@pytest.mark.asyncio
+async def test_effectively_enabled_rules_drops_paused_task(real_db):
+    """感知侧每 cycle 下发取的那份, 停用的 task 不该进去。
+
+    DB 里 ``enabled`` 仍是 1, 所以只按 enabled 过滤的旧口径会把它放出去 ——
+    规则继续下发、继续推理、继续触发。
+    """
+    from miloco.task.service import TaskService
+
+    rule_service, runner = _real_rule_service()
+    svc = TaskService(rule_repo=RuleRepo(), rule_service=rule_service)
+    rid = _setup_task_with_rule(svc)
+    runner.add_rule(RuleRepo().get_by_id(rid))
+    assert len(await rule_service.get_effectively_enabled_rules()) == 1
+
+    svc.disable_task("t1")
+
+    assert RuleRepo().get_by_id(rid).enabled is True
+    assert await rule_service.get_effectively_enabled_rules() == []
+    assert len(await rule_service.get_all_rules(enabled_only=True)) == 1
+
+
 def test_enable_task_restores_effective_enabled(real_db):
     from miloco.task.service import TaskService
 
