@@ -171,12 +171,19 @@ $ miloco-cli scope camera mic-on 1154253570
 # 「客厅这台别裁了 / 只看整个画面」——画面**构图**类诉求，逐机位关裁切
 #  注意与下面的「误识」场景分界：认错东西（把 A 当 B）→ 写感知须知；
 #  构图粗细（裁主体 vs 送整幅）→ crop-off/crop-on。别互相套用。
-$ miloco-cli scope camera crop-off 1154253570:ch0    # 精确到某一路
-$ miloco-cli scope camera crop-on  1154253570        # 裸 did = 该台全部通道，开回默认
+$ miloco-cli scope camera crop-off 1154253570:ch0    # 关掉某一路（精确到 :chN）
   → {"code":0,"message":"ok","data":[
        {"did":"1154253570","name":"小米智能摄像机C700","channel":0,"is_online":true,"in_use":true,
         "connected":true,"awake":true,"voice_in_use":false,"crop_in_use":false,"crop_effective":false,
         "perception_prompt":""}]}
+#  关掉后：crop_in_use=false（存储偏好），crop_effective 随之 false
+
+$ miloco-cli scope camera crop-on  1154253570        # 裸 did = 该台全部通道，开回默认
+  → {"code":0,"message":"ok","data":[
+       {"did":"1154253570","name":"小米智能摄像机C700","channel":0,"is_online":true,"in_use":true,
+        "connected":true,"awake":true,"voice_in_use":false,"crop_in_use":true,"crop_effective":true,
+        "perception_prompt":""}]}
+#  开回来后：crop_in_use=true；crop_effective 还要全局双闸也开才会是 true
 
 # 「这台裁切开了、小目标还是看不清」——按 list 的四个字段反查
 $ miloco-cli scope camera list
