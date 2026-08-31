@@ -1,0 +1,396 @@
+# Copyright (C) 2025 Xiaomi Corporation
+# This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
+
+"""task 状态机接进 RuleRunner 的集成测试.
+
+这些用例是唯一走"接管后"那条路的 —— 存量 test_rule.py 的 225 个用例在内存里造
+Rule、不建 task 动作, 全部命中回退分支 (expand-contract 阶段 A 的接管判据)。
+所以接管路径的覆盖只能靠本文件, 少一条就是一条没人跑过的生产代码。
+
+覆盖:
+- 接管判据: 有 task 动作才接管, 没有则逐字走旧路径
+- 动作取数: task 优先; task 接管后某方向留空不回退到 rule
+- 许可闸: 四个 fire 点各自被状态机吞掉时的行为
+- 两个注入点: is_condition_satisfied 的三态、reset_edge_baseline 的语义
+"""
+
+from __future__ import annotations
+
+import pytest
+from miloco.rule.runner import RuleRunner
+from miloco.rule.schema import (
+    Rule,
+    RuleCondition,
+    RuleDirection,
+    RuleEvent,
+    RuleMode,
+)
+from miloco.task.state_machine import (
+    ActionSlot,
+    TaskRuntimeState,
+    TaskStateMachine,
+    derive_directions,
+)
+
+
+def _rule(rule_id="r1", task_id="t1", mode=RuleMode.EVENT, **kw):
+    return Rule(
+        id=rule_id,
+        name=rule_id,
+        task_id=task_id,
+        mode=mode,
+        condition=RuleCondition(perceive_device_ids=["cam1"], query="有人"),
+        **kw,
+    )
+
+
+def _runner(rules, monkeypatch):
+    monkeypatch.setattr(
+        "miloco.task_record.service.TaskRecordService.__init__", lambda self: None
+    )
+    return RuleRunner(
+        rules=rules,
+        miot_proxy=None,
+        rule_log_repo=None,
+        task_record_service=object(),
+    )
+
+
+def _attach(runner, task_id, rules, actions):
+    sm = TaskStateMachine(
+        is_condition_satisfied=runner.is_condition_satisfied,
+        reset_edge_baseline=runner.reset_edge_baseline,
+        dispatch_action=lambda *_a: None,
+    )
+    runner.attach_state_machine(sm)
+    runner.set_task_actions(task_id, actions)
+    if runner.task_owns_actions(task_id):
+        sm.register_task(
+            task_id,
+            derive_directions((r.id, r.resolved_direction.value) for r in rules),
+        )
+    return sm
+
+
+_TASK_DESC = {"on_enter_desc": "task 侧进入播报"}
+
+
+# ── 接管判据 ──────────────────────────────────────────────────────────
+
+
+def test_empty_task_actions_falls_back_to_rule(monkeypatch):
+    """六个槽全空 = 还没迁移 / 没配动作 → 逐字走旧路径。"""
+    r = _rule(action_descriptions=["rule 侧播报"])
+    runner = _runner([r], monkeypatch)
+    sm = _attach(runner, "t1", [r], {"on_enter_actions": [], "on_enter_desc": None})
+
+    assert sm.owns("t1") is False
+    assert runner._select_slot(r, RuleEvent.ENTERED) == ("dynamic", "1. rule 侧播报")
+
+
+def test_task_actions_take_priority_over_rule(monkeypatch):
+    r = _rule(action_descriptions=["rule 侧播报"])
+    runner = _runner([r], monkeypatch)
+    _attach(runner, "t1", [r], _TASK_DESC)
+
+    assert runner._select_slot(r, RuleEvent.ENTERED) == ("dynamic", "task 侧进入播报")
+
+
+def test_owned_task_does_not_fall_back_for_empty_direction(monkeypatch):
+    """task 接管后某方向留空就是留空 —— 回退会把用户故意清掉的动作重新捡起来。"""
+    r = _rule(mode=RuleMode.STATE, on_exit_desc="rule 侧退出播报")
+    runner = _runner([r], monkeypatch)
+    _attach(runner, "t1", [r], _TASK_DESC)
+
+    assert runner._select_slot(r, RuleEvent.EXITED) is None
+
+
+def test_task_static_actions_are_parsed(monkeypatch):
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    _attach(
+        runner,
+        "t1",
+        [r],
+        {"on_enter_actions": [{"did": "d1", "iid": "prop.2.1", "value": True}]},
+    )
+
+    kind, value = runner._select_slot(r, RuleEvent.ENTERED)
+    assert kind == "static"
+    assert value[0].did == "d1"
+
+
+# ── 许可闸 ────────────────────────────────────────────────────────────
+
+
+def test_gate_passes_when_not_owned(monkeypatch):
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    _attach(runner, "t1", [r], None)
+
+    assert runner._state_machine_allows(r, RuleEvent.ENTERED) is True
+
+
+def test_gate_passes_when_no_state_machine(monkeypatch):
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+
+    assert runner._state_machine_allows(r, RuleEvent.ENTERED) is True
+
+
+def test_event_type_gate_always_passes(monkeypatch):
+    """事件型恒 off, 每次进信号都该放行。"""
+    r = _rule(action_descriptions=["x"])
+    runner = _runner([r], monkeypatch)
+    _attach(runner, "t1", [r], _TASK_DESC)
+
+    for _ in range(3):
+        assert runner._state_machine_allows(r, RuleEvent.ENTERED) is True
+
+
+def test_session_second_enter_is_blocked(monkeypatch):
+    """对称模式已在 on, 第二次进信号不该重复 fire。"""
+    r = _rule(mode=RuleMode.STATE, on_enter_desc="x")
+    runner = _runner([r], monkeypatch)
+    sm = _attach(runner, "t1", [r], _TASK_DESC)
+
+    assert runner._state_machine_allows(r, RuleEvent.ENTERED) is True
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert runner._state_machine_allows(r, RuleEvent.ENTERED) is False
+
+
+def test_exit_when_off_is_blocked(monkeypatch):
+    r = _rule(mode=RuleMode.STATE, on_enter_desc="x")
+    runner = _runner([r], monkeypatch)
+    _attach(runner, "t1", [r], _TASK_DESC)
+
+    assert runner._state_machine_allows(r, RuleEvent.EXITED) is False
+
+
+def test_target_fired_requires_session(monkeypatch):
+    """milestone 只在 task 处于 on 时放行 (§5.3)。"""
+    r = _rule(mode=RuleMode.STATE, on_enter_desc="x")
+    runner = _runner([r], monkeypatch)
+    _attach(runner, "t1", [r], _TASK_DESC)
+
+    assert runner._state_machine_allows(r, RuleEvent.TARGET_FIRED) is False
+    runner._state_machine_allows(r, RuleEvent.ENTERED)
+    assert runner._state_machine_allows(r, RuleEvent.TARGET_FIRED) is True
+
+
+def test_target_fired_does_not_change_state(monkeypatch):
+    """从 off 观测: milestone 走普通信号路径会把 task 推进 on, 从 on 观测则看不出。
+
+    这条一开始是从 on 观测的, 删掉 milestone 分支后 TARGET_FIRED 当成 ENTERED
+    走普通路径、命中"已在态内"、状态照旧是 on —— 对错给同样结果。
+    """
+    r = _rule(mode=RuleMode.STATE, on_enter_desc="x")
+    runner = _runner([r], monkeypatch)
+    sm = _attach(runner, "t1", [r], _TASK_DESC)
+
+    runner._state_machine_allows(r, RuleEvent.TARGET_FIRED)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+# ── 注入点: is_condition_satisfied ────────────────────────────────────
+
+
+def test_condition_satisfied_is_none_before_any_observation(monkeypatch):
+    """未观测和"观测到假"必须分开 —— last_rule_state 的初值 False 分不出来。"""
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+
+    assert runner.is_condition_satisfied("r1") is None
+
+
+def test_condition_satisfied_is_none_when_state_exists_but_no_source(monkeypatch):
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    runner._ensure_state("r1")
+
+    assert runner.is_condition_satisfied("r1") is None
+
+
+def test_condition_satisfied_reflects_last_rule_state(monkeypatch):
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    runner._ensure_source("r1", "cam1")
+
+    assert runner.is_condition_satisfied("r1") is False
+    runner._state["r1"].last_rule_state = True
+    assert runner.is_condition_satisfied("r1") is True
+
+
+# ── 注入点: reset_edge_baseline ───────────────────────────────────────
+
+
+def test_reset_edge_baseline_marks_everything_true(monkeypatch):
+    """置为"已满足": 要求条件先变假再变真才算新一次进入 (§5.2)。"""
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    runner._ensure_source("r1", "cam1")
+    runner._ensure_source("r1", "cam2")
+
+    runner.reset_edge_baseline("r1")
+
+    assert runner._state["r1"].last_rule_state is True
+    assert all(s.last_bool for s in runner._state["r1"].sources.values())
+
+
+def test_reset_edge_baseline_keeps_window_and_timer(monkeypatch):
+    """只挪基线 —— 清窗口 / 撤 timer 是 _reset_runtime_state 的事。"""
+    from collections import deque
+
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    st = runner._ensure_state("r1")
+    st.duration_window = deque([1, 1], maxlen=2)
+    st.state_duration_fired = True
+
+    runner.reset_edge_baseline("r1")
+
+    assert st.duration_window is not None
+    assert st.state_duration_fired is True
+
+
+def test_reset_edge_baseline_on_unknown_rule_is_noop(monkeypatch):
+    runner = _runner([], monkeypatch)
+    runner.reset_edge_baseline("nope")
+
+
+# ── 非互反: 退出后基线重置的完整链路 ──────────────────────────────────
+
+
+def test_exit_resets_enter_rule_baseline_end_to_end(monkeypatch):
+    """退出时状态机回调 runner 的 reset_edge_baseline, 进入 rule 的基线被置真。"""
+    enter_rule = _rule("r_enter", mode=RuleMode.EVENT)
+    exit_rule = _rule("r_exit", mode=RuleMode.EVENT)
+    exit_rule.direction = RuleDirection.EXIT
+    runner = _runner([enter_rule, exit_rule], monkeypatch)
+    _attach(runner, "t1", [enter_rule, exit_rule], _TASK_DESC)
+    runner._ensure_source("r_enter", "cam1")
+
+    runner._state_machine_allows(enter_rule, RuleEvent.ENTERED)
+    assert runner._state["r_enter"].last_rule_state is False
+
+    runner._state_machine_allows(exit_rule, RuleEvent.ENTERED)
+
+    assert runner._state["r_enter"].last_rule_state is True
+
+
+def test_entry_blocked_when_exit_condition_true_end_to_end(monkeypatch):
+    """§5.1: 出边条件此刻已为真 → 拒绝进入, 否则开了永远不关。"""
+    enter_rule = _rule("r_enter")
+    exit_rule = _rule("r_exit")
+    exit_rule.direction = RuleDirection.EXIT
+    runner = _runner([enter_rule, exit_rule], monkeypatch)
+    sm = _attach(runner, "t1", [enter_rule, exit_rule], _TASK_DESC)
+    runner._ensure_source("r_exit", "cam1")
+    runner._state["r_exit"].last_rule_state = True
+
+    assert runner._state_machine_allows(enter_rule, RuleEvent.ENTERED) is False
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+def test_unseeded_exit_condition_does_not_block_entry(monkeypatch):
+    """出边 rule 还没被观测过 → None → 不拦。"""
+    enter_rule = _rule("r_enter")
+    exit_rule = _rule("r_exit")
+    exit_rule.direction = RuleDirection.EXIT
+    runner = _runner([enter_rule, exit_rule], monkeypatch)
+    _attach(runner, "t1", [enter_rule, exit_rule], _TASK_DESC)
+
+    assert runner._state_machine_allows(enter_rule, RuleEvent.ENTERED) is True
+
+
+# ── resolved_direction ───────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [(RuleMode.EVENT, RuleDirection.ENTER), (RuleMode.STATE, RuleDirection.SESSION)],
+)
+def test_resolved_direction_falls_back_to_mode(mode, expected):
+    assert _rule(mode=mode).resolved_direction is expected
+
+
+def test_resolved_direction_prefers_explicit_field():
+    r = _rule(mode=RuleMode.EVENT)
+    r.direction = RuleDirection.MILESTONE
+    assert r.resolved_direction is RuleDirection.MILESTONE
+
+
+@pytest.mark.parametrize("slot", list(ActionSlot))
+def test_action_slot_values_are_stable(slot):
+    """槽名进 DB 列名与日志, 改了会静默错位。"""
+    assert slot.value in {"on_enter", "on_exit", "on_target"}
+
+
+# ── attach_task_state_machine: 启动路径 ───────────────────────────────
+
+
+def _seed_db(tmp_path, monkeypatch, task_actions: dict | None):
+    """建一个真库, 塞一个 task + 一条 rule, 可选写 task 边界动作。"""
+    monkeypatch.setenv("MILOCO_DATABASE__PATH", str(tmp_path / "t.db"))
+    from miloco.config import reset_settings
+
+    reset_settings()
+    import miloco.database.connector as connector_module
+
+    monkeypatch.setattr(connector_module, "db_connector", None)
+    connector_module.init_database()
+
+    from miloco.database.rule_repo import RuleRepo
+    from miloco.database.task_repo import TaskRepo
+
+    task_repo = TaskRepo()
+    task_repo.create_task("t1", "desc")
+    rule_repo = RuleRepo()
+    rule_repo.create(_rule(mode=RuleMode.STATE, on_enter_desc="rule 侧"))
+    if task_actions:
+        task_repo.set_boundary_actions("t1", **task_actions)
+    return rule_repo
+
+
+def test_attach_skips_task_without_boundary_actions(tmp_path, monkeypatch):
+    """没配动作的 task 不接管 —— 未迁移的库启动后行为与接管前逐字相同。"""
+    rule_repo = _seed_db(tmp_path, monkeypatch, None)
+    runner = _runner(rule_repo.get_all(), monkeypatch)
+
+    from miloco.rule.service import attach_task_state_machine
+
+    attach_task_state_machine(runner, rule_repo)
+
+    assert runner._state_machine is not None
+    assert runner._state_machine.owns("t1") is False
+    assert runner.task_owns_actions("t1") is False
+
+
+def test_attach_owns_task_with_boundary_actions(tmp_path, monkeypatch):
+    rule_repo = _seed_db(tmp_path, monkeypatch, {"on_enter_desc": "task 侧"})
+    runner = _runner(rule_repo.get_all(), monkeypatch)
+
+    from miloco.rule.service import attach_task_state_machine
+
+    attach_task_state_machine(runner, rule_repo)
+
+    assert runner._state_machine.owns("t1") is True
+    assert runner._state_machine.runtime_state("t1") is TaskRuntimeState.OFF
+    rule = rule_repo.get_all()[0]
+    assert runner._select_slot(rule, RuleEvent.ENTERED) == ("dynamic", "task 侧")
+
+
+def test_attach_registers_direction_from_db(tmp_path, monkeypatch):
+    """rule 经 repo 落库时 direction 已写成 resolved 值, 拓扑应认出 session。"""
+    rule_repo = _seed_db(tmp_path, monkeypatch, {"on_enter_desc": "task 侧"})
+    runner = _runner(rule_repo.get_all(), monkeypatch)
+
+    from miloco.rule.service import attach_task_state_machine
+
+    attach_task_state_machine(runner, rule_repo)
+    rule = rule_repo.get_all()[0]
+
+    assert rule.direction is RuleDirection.SESSION
+    assert runner._state_machine_allows(rule, RuleEvent.ENTERED) is True
+    assert runner._state_machine.runtime_state("t1") is TaskRuntimeState.ON

@@ -58,6 +58,13 @@ from miloco.rule.schema import (
     TriggerOutcome,
     parse_device_iid,
 )
+from miloco.task.state_machine import (
+    SignalKind,
+    TaskRuntimeState,
+    TaskSignal,
+    TaskStateMachine,
+    TransitionOutcome,
+)
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
@@ -161,6 +168,36 @@ _FIRE_PREAMBLE_WITH_RECORD = """**处理流程**：（按时间序 1→2→3 执
 辅助工具：派生量历史 / 跨窗口查询用 compute <task_id> [--window all|day|week|month] [--date YYYY-MM-DD]；所有 CLI 响应自带 derived 字段直接读，禁止心算。"""
 
 
+# _select_task_slot 的第三态: None 已经表示"空槽", 需要另一个值表示"没接管"。
+_NO_TASK_ACTIONS: object = object()
+
+# 状态机判定为"该 fire"的结论。其余 (已在态内 / 被对侧条件拦住 / 不在会话中)
+# 都不 fire。
+_FIRING_OUTCOMES = frozenset(
+    {
+        TransitionOutcome.ENTERED,
+        TransitionOutcome.EXITED,
+        TransitionOutcome.EVENT_FIRED,
+        TransitionOutcome.MILESTONE_FIRED,
+    }
+)
+
+
+def _has_any_action(actions: dict) -> bool:
+    """六个槽里有没有任何一个非空。全空 = 没配动作 / 还没迁移, 该回退到 rule。"""
+    return any(
+        actions.get(k)
+        for k in (
+            "on_enter_actions",
+            "on_enter_desc",
+            "on_exit_actions",
+            "on_exit_desc",
+            "on_target_actions",
+            "on_target_desc",
+        )
+    )
+
+
 @dataclass
 class PerSourceState:
     last_bool: bool = False
@@ -216,7 +253,55 @@ class RuleRunner:
         # `sample_interval` 锁在 init，避免运行中 settings 漂移。
         self._sample_interval = sample_interval_seconds
 
+        # task 状态机。为 None 时全部走旧的「rule 自己 fire」路径 —— expand-contract
+        # 阶段 A 的回退闸, 单测与未迁移的库都走这条。attach_state_machine 接管。
+        self._state_machine: TaskStateMachine | None = None
+        # task 边界动作快照, 由接管方在登记拓扑时喂进来。runner 不查 DB:
+        # _select_slot 在 fire 路径上, 查一次 DB 就把 hot path 拖进 IO。
+        self._task_actions: dict[str, dict] = {}
+
         logger.info("RuleRunner init, rules: %d", len(self._rules))
+
+    # ---- task 状态机接管 (expand-contract 阶段 A) ----
+
+    def attach_state_machine(self, state_machine: TaskStateMachine) -> None:
+        self._state_machine = state_machine
+
+    def set_task_actions(self, task_id: str, actions: dict | None) -> None:
+        """喂一份 task 边界动作快照。``None`` / 空 → 该 task 回退到 rule 上的旧字段。"""
+        if actions and _has_any_action(actions):
+            self._task_actions[task_id] = actions
+        else:
+            self._task_actions.pop(task_id, None)
+
+    def task_owns_actions(self, task_id: str) -> bool:
+        return task_id in self._task_actions
+
+    # ---- 状态机的两个注入点 (§15 / §5.2) ----
+
+    def is_condition_satisfied(self, rule_id: str) -> bool | None:
+        """该 rule 的条件现在是不是真。``None`` = 未就绪。
+
+        判"未就绪"用的是"有没有任何 source 被观测过", 而不是 last_rule_state 的
+        初值 False —— 后者分不出"观测到假"和"还没观测"。
+        """
+        state = self._state.get(rule_id)
+        if state is None or not state.sources:
+            return None
+        return state.last_rule_state
+
+    def reset_edge_baseline(self, rule_id: str) -> None:
+        """把边沿基线置为「已满足」(§5.2)。
+
+        要求条件先变假、再变真才算新一次进入。不清窗口、不动 timer —— 那是
+        ``_reset_runtime_state`` 的事, 这里只挪基线。
+        """
+        state = self._state.get(rule_id)
+        if state is None:
+            return
+        state.last_rule_state = True
+        for src in state.sources.values():
+            src.last_bool = True
 
     # ---- Legacy field views (test / rule_tester compatibility) ----
     #
@@ -698,6 +783,11 @@ class RuleRunner:
                 maxlen,
                 rule.duration_ratio,
             )
+            if not self._state_machine_allows(rule, RuleEvent.ENTERED):
+                # 在清窗口 / 标记 fired 之前问闸：被吞掉时这两样都不该动，否则
+                # 白丢一次累积。
+                return TriggerOutcome.STILL_IN
+
             if rule.mode == RuleMode.EVENT:
                 # EVENT：清窗口 → 下次 update_state 重新累积（by-design 周期 fire）
                 state.duration_window = None
@@ -787,6 +877,11 @@ class RuleRunner:
             # 用滑窗里第一帧 true 的对齐时间，本路径取的 wall-clock 不用）。
             if rule.duration_seconds:
                 return TriggerOutcome.NOT_FIRED
+
+            if not self._state_machine_allows(rule, RuleEvent.ENTERED):
+                # 状态机吞掉了这次边沿（已在态内 / 被对侧条件拦住）。按 STILL_IN
+                # 上报——与帧级抖动吸收同语义：规则确实在态，只是没有新一次进入。
+                return TriggerOutcome.STILL_IN
 
             sources = self._sources_currently_true(rule.id) or [source_did]
             # Fire-and-forget: dynamic callback retry is up to 1+2+4=7s of sleep,
@@ -896,6 +991,9 @@ class RuleRunner:
                     "target_minutes": state[0],
                 }
 
+        if not self._state_machine_allows(rule, RuleEvent.EXITED):
+            return
+
         # Background-task path: swallow exceptions so they don't surface as
         # "Task exception was never retrieved" warnings.
         try:
@@ -910,6 +1008,41 @@ class RuleRunner:
             )
 
     # ---- Fire-and-forget plumbing ----
+
+    def _state_machine_allows(self, rule: Rule, event: RuleEvent) -> bool:
+        """问 task 状态机: 这次已确认的边沿该不该 fire。
+
+        未接管该 task → 恒 True, 完全是旧行为 (expand-contract 阶段 A 的回退闸)。
+
+        接管后状态机同时维护 ``runtime_state``, 所以这个调用有副作用, 每次边沿
+        只能调一次。
+
+        **为什么是"许可闸"而不是"状态机代为派发"**: 四个 fire 点各自带着不同的
+        metadata (actual_started_at / exit_metadata / target_minutes ...)、不同的
+        日志与冷却上下文。把它们穿过状态机再派回来, 等于把整套执行上下文搬一遍,
+        而阶段 A 的目标是行为等价。状态机自己发起动作的两条路 (重配置时强制
+        on_exit、手动注入) 走 ``dispatch_action``, 那里本来就没有上游边沿。
+        """
+        sm = self._state_machine
+        if sm is None or not sm.owns(rule.task_id):
+            return True
+
+        if event == RuleEvent.TARGET_FIRED:
+            # milestone 语义 (§5.3): 只确认 task 在 on, 不改状态、不重置基线。
+            # 阶段 A 的达标信号还挂在 session rule 上 (而不是独立的 milestone
+            # rule), 走普通信号会被当成进/出边沿, 所以这里单独判。
+            in_session = sm.runtime_state(rule.task_id) is TaskRuntimeState.ON
+            if not in_session:
+                logger.info(
+                    "TARGET dropped: task=%s not in session (rule=%s)",
+                    rule.task_id,
+                    rule.id,
+                )
+            return in_session
+
+        kind = SignalKind.EXITED if event == RuleEvent.EXITED else SignalKind.ENTERED
+        outcome = sm.handle(TaskSignal(rule.task_id, rule.id, kind))
+        return outcome in _FIRING_OUTCOMES
 
     def _spawn_fire(
         self,
@@ -993,6 +1126,9 @@ class RuleRunner:
         )
         rs.target_fired = True
         actual_target_at = ms_to_iso_local(now_ms())
+        if not self._state_machine_allows(rule, RuleEvent.TARGET_FIRED):
+            return False
+
         self._spawn_fire(
             rule, RuleEvent.TARGET_FIRED, list(sources), context,
             extra_metadata={
@@ -1330,6 +1466,10 @@ class RuleRunner:
         ``on_*_actions`` vs ``on_*_desc`` per direction. Validation enforces
         these as mutually exclusive.
         """
+        task_slot = self._select_task_slot(rule, event)
+        if task_slot is not _NO_TASK_ACTIONS:
+            return task_slot
+
         if rule.mode == RuleMode.EVENT:
             if event != RuleEvent.ENTERED:
                 return None
@@ -1362,6 +1502,34 @@ class RuleRunner:
         return None
 
     # ---- 设备直控路径（V1 direct dispatch） ----
+
+    def _select_task_slot(self, rule: Rule, event: RuleEvent) -> Slot:
+        """从 task 的边界动作里选槽 (expand-contract 阶段 A: 读 task 优先)。
+
+        返回 ``_NO_TASK_ACTIONS`` 表示该 task 没有动作快照 —— 调用方回退到 rule
+        上的旧字段。返回 ``None`` 表示 task 接管了但这个方向是空槽, 不再回退:
+        回退会让"用户故意留空的方向"重新捡起 rule 上的存量动作。
+        """
+        actions = self._task_actions.get(rule.task_id)
+        if actions is None:
+            return _NO_TASK_ACTIONS
+
+        if event == RuleEvent.ENTERED:
+            static_key, desc_key = "on_enter_actions", "on_enter_desc"
+        elif event == RuleEvent.EXITED:
+            static_key, desc_key = "on_exit_actions", "on_exit_desc"
+        elif event == RuleEvent.TARGET_FIRED:
+            static_key, desc_key = "on_target_actions", "on_target_desc"
+        else:
+            return None
+
+        raw_actions = actions.get(static_key) or []
+        if raw_actions:
+            return ("static", [RuleAction(**a) for a in raw_actions])
+        desc = actions.get(desc_key)
+        if desc:
+            return ("dynamic", desc)
+        return None
 
     def _in_cooldown(self, rule_id: str, action: RuleAction) -> bool:
         """非幂等 action 是否还在冷却窗内。幂等 action 恒 False（走读现值比对）。"""

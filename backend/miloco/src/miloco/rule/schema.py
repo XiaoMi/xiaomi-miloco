@@ -37,6 +37,25 @@ class RuleMode(str, Enum):
     STATE = "state"
 
 
+class RuleDirection(str, Enum):
+    """rule 的边沿如何映射成 task 的进/出 —— 取代 ``mode``。
+
+    expand-contract 阶段 A 期间两者并存: 本字段为空时按 ``mode`` 推导
+    (``_MODE_TO_DIRECTION``), 读侧一律走 ``Rule.resolved_direction``。
+    """
+
+    ENTER = "enter"
+    EXIT = "exit"
+    SESSION = "session"
+    MILESTONE = "milestone"
+
+
+_MODE_TO_DIRECTION: dict[str, RuleDirection] = {
+    RuleMode.EVENT.value: RuleDirection.ENTER,
+    RuleMode.STATE.value: RuleDirection.SESSION,
+}
+
+
 class RuleLifecycle(str, Enum):
     """permanent: until user deletes.
     temporary: agent evaluates terminate_when and self-deletes."""
@@ -194,6 +213,26 @@ class RuleCondition(BaseModel):
     query: str = Field(..., description="Natural language condition description")
 
 
+class ConditionItem(BaseModel):
+    """一个触发源上的一个条件。
+
+    ``source_type`` 不叫 ``source``: CLI 现有 ``--source <DID>`` 指感知摄像头,
+    这个字段指触发源类型, 撞名会让 agent 把摄像头 did 写成类型串且不报错。
+
+    ``spec`` 按源多态, 本次不上多态模型 —— 求值未落地, 存进来只需原样round-trip。
+    """
+
+    source_type: str = Field("omni", description="omni / record / iot / presence")
+    spec: dict[str, Any] = Field(default_factory=dict)
+    negate: bool = Field(False, description="本次校验强制 false")
+
+
+class RuleConditionDNF(BaseModel):
+    """外层 OR、内层 AND。本次校验强制 1×1, 与旧 ``RuleCondition`` 完全等价。"""
+
+    any_of: list[list[ConditionItem]] = Field(default_factory=list)
+
+
 class Rule(BaseModel):
     """Rule data model (V3)."""
 
@@ -206,6 +245,11 @@ class Rule(BaseModel):
     )
     enabled: bool = Field(True, description="Whether the rule is enabled")
     condition: RuleCondition = Field(..., description="Trigger condition")
+
+    # expand-contract 阶段 A 新增, 与 mode / condition 并存。为空 = 该 rule 还没
+    # 迁移过 (存量库跑迁移前, 或内存里直接构造的), 读侧回退到旧字段。
+    direction: RuleDirection | None = Field(None, description="取代 mode, 见 §4.1")
+    condition_dnf: RuleConditionDNF | None = Field(None, description="DNF 结构")
 
     # event mode fields (mutually exclusive; one of the two must be non-empty)
     actions: list[RuleAction] = Field(
@@ -276,6 +320,17 @@ class Rule(BaseModel):
 
     created_at: str | None = Field(None, description="Creation time (ISO 8601)")
     updated_at: str | None = Field(None, description="Last update time (ISO 8601)")
+
+    @property
+    def resolved_direction(self) -> RuleDirection:
+        """读侧唯一入口: 有 direction 用它, 没有按 mode 推。
+
+        阶段 A 期间两个字段并存, 直接读 ``direction`` 会在存量数据和内存构造的
+        Rule 上拿到 None; 直接读 ``mode`` 则表达不了 exit / milestone。
+        """
+        if self.direction is not None:
+            return self.direction
+        return _MODE_TO_DIRECTION.get(self.mode.value, RuleDirection.ENTER)
 
 
 class RuleConditionUpdate(BaseModel):

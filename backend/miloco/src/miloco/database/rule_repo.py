@@ -17,6 +17,8 @@ from miloco.rule.schema import (
     Rule,
     RuleAction,
     RuleCondition,
+    RuleConditionDNF,
+    RuleDirection,
     RuleExecuteResult,
     RuleLifecycle,
     RuleLog,
@@ -70,6 +72,14 @@ class RuleRepo:
             ),
             enabled=bool(data["enabled"]),
             condition=condition,
+            direction=(
+                RuleDirection(data["direction"]) if data.get("direction") else None
+            ),
+            condition_dnf=(
+                RuleConditionDNF(**json.loads(data["condition_dnf"]))
+                if data.get("condition_dnf")
+                else None
+            ),
             actions=_load_actions("actions"),
             action_descriptions=action_descriptions,
             on_enter_actions=_load_actions("on_enter_actions"),
@@ -107,8 +117,8 @@ class RuleRepo:
             condition_json = rule.condition.model_dump(mode="json")
             sql = """
                 INSERT INTO rule (
-                    id, name, task_id, mode, lifecycle, enabled,
-                    condition, actions, action_descriptions,
+                    id, name, task_id, mode, direction, lifecycle, enabled,
+                    condition, condition_dnf, actions, action_descriptions,
                     on_enter_actions, on_enter_desc,
                     on_exit_actions, on_exit_desc,
                     on_target_desc,
@@ -116,16 +126,22 @@ class RuleRepo:
                     duration_seconds, duration_ratio,
                     created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             params = (
                 rule_id,
                 rule.name,
                 rule.task_id,
                 rule.mode.value,
+                rule.resolved_direction.value,
                 rule.lifecycle.value,
                 rule.enabled,
                 json.dumps(condition_json),
+                (
+                    json.dumps(rule.condition_dnf.model_dump(mode="json"))
+                    if rule.condition_dnf is not None
+                    else None
+                ),
                 json.dumps([a.model_dump(mode="json") for a in rule.actions]),
                 json.dumps(rule.action_descriptions),
                 json.dumps(
@@ -234,8 +250,9 @@ class RuleRepo:
             condition_json = rule.condition.model_dump(mode="json")
             sql = """
                 UPDATE rule
-                SET name = ?, task_id = ?, mode = ?, lifecycle = ?,
-                    enabled = ?, condition = ?, actions = ?, action_descriptions = ?,
+                SET name = ?, task_id = ?, mode = ?, direction = ?, lifecycle = ?,
+                    enabled = ?, condition = ?, condition_dnf = ?,
+                    actions = ?, action_descriptions = ?,
                     on_enter_actions = ?, on_enter_desc = ?,
                     on_exit_actions = ?, on_exit_desc = ?,
                     on_target_desc = ?,
@@ -248,9 +265,15 @@ class RuleRepo:
                 rule.name,
                 rule.task_id,
                 rule.mode.value,
+                rule.resolved_direction.value,
                 rule.lifecycle.value,
                 rule.enabled,
                 json.dumps(condition_json),
+                (
+                    json.dumps(rule.condition_dnf.model_dump(mode="json"))
+                    if rule.condition_dnf is not None
+                    else None
+                ),
                 json.dumps([a.model_dump(mode="json") for a in rule.actions]),
                 json.dumps(rule.action_descriptions),
                 json.dumps(

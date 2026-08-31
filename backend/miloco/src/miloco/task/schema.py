@@ -71,6 +71,9 @@ class TaskFullView(BaseModel):
     status: Literal["active", "paused"]
     paused_at: str | None = None
     created_at: str
+    # 只读: 模式此刻开着还是关着。内存派生, 不落库 —— 重启一律从 off 起 (§4.2)
+    runtime_state: Literal["off", "on"] = "off"
+    lifecycle: Literal["permanent", "temporary"] = "permanent"
     rule_briefs: list[RuleBrief] = Field(default_factory=list)
     cron_refs: list[CronRef] = Field(default_factory=list)
 

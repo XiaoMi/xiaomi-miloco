@@ -12,6 +12,7 @@ cron 归属由 cron.task_id FK CASCADE 表达。task 视图数据源改成 rule 
 ``conn.commit()`` 才能让多条 INSERT 构成原子事务。
 """
 
+import json
 import logging
 import sqlite3
 from typing import Any
@@ -28,6 +29,17 @@ class TaskConflict(Exception):
 
 class TaskNotFound(Exception):
     """404: task 不存在 (toggle / update / delete 时读到 not_found)。"""
+
+
+def _load_actions(raw: str | None) -> list[dict[str, Any]]:
+    """动作列存的是 JSON 数组。解析失败按空处理 —— 存量脏数据不该让读 task 报错。"""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
 
 
 class TaskRepo:
@@ -74,7 +86,7 @@ class TaskRepo:
         """单 task 视图: task 元信息 + cron_refs (rule_briefs 由 service 层拼装)."""
         with self.db.get_connection() as conn:
             task_row = conn.execute(
-                "SELECT task_id, description, status, paused_at, created_at "
+                "SELECT task_id, description, status, paused_at, created_at, lifecycle "
                 "FROM task WHERE task_id=?",
                 (task_id,),
             ).fetchone()
@@ -90,6 +102,7 @@ class TaskRepo:
                 "status": task_row["status"],
                 "paused_at": ms_to_iso_local(task_row["paused_at"]),
                 "created_at": ms_to_iso_local(task_row["created_at"]),
+                "lifecycle": task_row["lifecycle"],
                 "cron_refs": [
                     {
                         "ref": c["cron_id"],
@@ -103,7 +116,7 @@ class TaskRepo:
         """所有 task 的聚合视图 (service 层接管 rule_briefs JOIN)."""
         with self.db.get_connection() as conn:
             tasks = conn.execute(
-                "SELECT task_id, description, status, paused_at, created_at "
+                "SELECT task_id, description, status, paused_at, created_at, lifecycle "
                 "FROM task ORDER BY created_at DESC"
             ).fetchall()
             all_crons = conn.execute(
@@ -122,10 +135,73 @@ class TaskRepo:
                     "status": t["status"],
                     "paused_at": ms_to_iso_local(t["paused_at"]),
                     "created_at": ms_to_iso_local(t["created_at"]),
+                    "lifecycle": t["lifecycle"],
                     "cron_refs": crons_by_task.get(t["task_id"], []),
                 }
                 for t in tasks
             ]
+
+    # ── 边界动作 (expand-contract 阶段 A 新增列) ──────────────────
+
+    def get_boundary_actions(self, task_id: str) -> dict[str, Any] | None:
+        """读 task 的三个动作槽 + lifecycle。task 不存在返回 None。
+
+        六个动作列全空 = 该 task 还没迁移过 (或就是没配动作), 调用方按
+        ``has_any_action`` 判断要不要回退到 rule 上的旧字段。
+        """
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT lifecycle, on_enter_actions, on_enter_desc, "
+                "on_exit_actions, on_exit_desc, on_target_actions, on_target_desc "
+                "FROM task WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "lifecycle": row["lifecycle"],
+            "on_enter_actions": _load_actions(row["on_enter_actions"]),
+            "on_enter_desc": row["on_enter_desc"],
+            "on_exit_actions": _load_actions(row["on_exit_actions"]),
+            "on_exit_desc": row["on_exit_desc"],
+            "on_target_actions": _load_actions(row["on_target_actions"]),
+            "on_target_desc": row["on_target_desc"],
+        }
+
+    def set_boundary_actions(self, task_id: str, **slots: Any) -> bool:
+        """写动作槽。只更新传进来的键, 未传的不动。
+
+        值为 ``None`` 表示清空该槽 —— 与 ``rule update --clear`` 的语义一致,
+        传空串只会存空串。
+        """
+        allowed = {
+            "on_enter_actions",
+            "on_enter_desc",
+            "on_exit_actions",
+            "on_exit_desc",
+            "on_target_actions",
+            "on_target_desc",
+            "lifecycle",
+        }
+        unknown = set(slots) - allowed
+        if unknown:
+            raise ValueError(f"unknown task action slot(s): {sorted(unknown)}")
+        if not slots:
+            return False
+        assignments = ", ".join(f"{k}=?" for k in slots)
+        params = [
+            json.dumps([a for a in v])
+            if k.endswith("_actions") and v is not None
+            else v
+            for k, v in slots.items()
+        ]
+        with self.db.get_connection() as conn:
+            cur = conn.execute(
+                f"UPDATE task SET {assignments} WHERE task_id=?",
+                (*params, task_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     def set_status(self, task_id: str, status: str) -> str:
         """改 task.status。返回 'ok' | 'noop' | 'not_found'。"""

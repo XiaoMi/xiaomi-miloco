@@ -199,12 +199,58 @@ async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
         sample_interval_seconds=sample_interval,
         task_record_service=task_record_service,
     )
+    attach_task_state_machine(rule_runner, rule_repo)
+
     return RuleService(
         rule_repo,
         rule_log_repo,
         rule_runner,
         miot_proxy,
         task_record_service=task_record_service,
+    )
+
+
+def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> None:
+    """建 task 状态机并把每个 task 的拓扑与边界动作登记进去。
+
+    只登记**有边界动作**的 task —— 那是 expand-contract 阶段 A 的接管判据
+    (§10.3「读 task 优先、缺失回退 rule」)。没动作的 task 走旧路径, 行为与接管前
+    逐字相同, 所以这一步对未迁移的库、以及内存里直接构造 rule 的场景是无操作。
+
+    重启一律从 ``off`` 起 (§7): 拓扑登记不恢复任何运行态。
+    """
+    from miloco.database.task_repo import TaskRepo
+    from miloco.task.state_machine import TaskStateMachine, derive_directions
+
+    task_repo = TaskRepo()
+    state_machine = TaskStateMachine(
+        is_condition_satisfied=rule_runner.is_condition_satisfied,
+        reset_edge_baseline=rule_runner.reset_edge_baseline,
+        dispatch_action=lambda task_id, slot, payload: logger.info(
+            "task %s state machine requested %s (no upstream edge)", task_id, slot.value
+        ),
+    )
+    rule_runner.attach_state_machine(state_machine)
+
+    rules_by_task: dict[str, list] = {}
+    for rule in rule_runner.get_all_rules():
+        rules_by_task.setdefault(rule.task_id, []).append(rule)
+
+    owned = 0
+    for task_id, rules in rules_by_task.items():
+        actions = task_repo.get_boundary_actions(task_id)
+        rule_runner.set_task_actions(task_id, actions)
+        if not rule_runner.task_owns_actions(task_id):
+            continue
+        state_machine.register_task(
+            task_id,
+            derive_directions((r.id, r.resolved_direction.value) for r in rules),
+        )
+        owned += 1
+    logger.info(
+        "task state machine attached: %d/%d task(s) owned",
+        owned,
+        len(rules_by_task),
     )
 
 
