@@ -47,12 +47,14 @@ class Harness:
         return [o for o, _ in self.tracked]
 
 
-def _entered(task_id="t1", rule_id="r_enter"):
-    return TaskSignal(task_id, rule_id, SignalKind.ENTERED)
+def _entered(task_id="t1", rule_id="r_enter", slot=ActionSlot.ON_ENTER):
+    """slot 由确认层算好传进来, 这里显式写期望值 —— 复用 ``slot_for_edge`` 会让
+    映射错了测试照样绿。"""
+    return TaskSignal(task_id, rule_id, SignalKind.ENTERED, slot)
 
 
-def _exited(task_id="t1", rule_id="r_enter"):
-    return TaskSignal(task_id, rule_id, SignalKind.EXITED)
+def _exited(task_id="t1", rule_id="r_enter", slot=ActionSlot.ON_EXIT):
+    return TaskSignal(task_id, rule_id, SignalKind.EXITED, slot)
 
 
 # ── 形态推导 (§4.3) ───────────────────────────────────────────────────
@@ -145,7 +147,10 @@ def test_exit_rule_entered_edge_is_an_exit_signal():
     h.sm.register_task("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
     h.sm.handle(_entered(rule_id="a"))
 
-    assert h.sm.handle(_entered(rule_id="x")) is TransitionOutcome.EXITED
+    assert (
+        h.sm.handle(_entered(rule_id="x", slot=ActionSlot.ON_EXIT))
+        is TransitionOutcome.EXITED
+    )
     assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
 
 
@@ -232,7 +237,7 @@ def test_exit_resets_enter_side_baselines():
         {"a": RuleDirection.ENTER, "b": RuleDirection.ENTER, "x": RuleDirection.EXIT},
     )
     h.sm.handle(_entered(rule_id="a"))
-    h.sm.handle(_entered(rule_id="x"))
+    h.sm.handle(_entered(rule_id="x", slot=ActionSlot.ON_EXIT))
 
     # 相等而非包含: 出边 x 不能在里面 —— 重置出边会让下一次退出被吞掉
     assert sorted(h.baseline_resets) == ["a", "b"]
@@ -255,7 +260,10 @@ def test_milestone_fires_only_in_session():
     h.sm.register_task("t1", {"s": RuleDirection.SESSION, "m": RuleDirection.MILESTONE})
     h.sm.handle(_entered(rule_id="s"))
 
-    assert h.sm.handle(_entered(rule_id="m")) is TransitionOutcome.MILESTONE_FIRED
+    assert (
+        h.sm.handle(_entered(rule_id="m", slot=ActionSlot.ON_TARGET))
+        is TransitionOutcome.MILESTONE_FIRED
+    )
     assert ("t1", ActionSlot.ON_TARGET) in h.dispatched
 
 
@@ -263,7 +271,10 @@ def test_milestone_dropped_when_off():
     h = Harness()
     h.sm.register_task("t1", {"s": RuleDirection.SESSION, "m": RuleDirection.MILESTONE})
 
-    assert h.sm.handle(_entered(rule_id="m")) is TransitionOutcome.NOT_IN_SESSION
+    assert (
+        h.sm.handle(_entered(rule_id="m", slot=ActionSlot.ON_TARGET))
+        is TransitionOutcome.NOT_IN_SESSION
+    )
     assert h.dispatched == []
 
 
@@ -271,7 +282,7 @@ def test_milestone_does_not_change_state_or_reset_baseline():
     h = Harness()
     h.sm.register_task("t1", {"s": RuleDirection.SESSION, "m": RuleDirection.MILESTONE})
     h.sm.handle(_entered(rule_id="s"))
-    h.sm.handle(_entered(rule_id="m"))
+    h.sm.handle(_entered(rule_id="m", slot=ActionSlot.ON_TARGET))
 
     assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
     assert h.baseline_resets == []
@@ -285,7 +296,7 @@ def test_queue_overflow_drops_oldest_and_tracks():
     h.sm.register_task("t1", {"s": RuleDirection.SESSION})
 
     for i in range(SIGNAL_QUEUE_DEPTH + 2):
-        h.sm.submit(TaskSignal("t1", f"s{i}", SignalKind.ENTERED))
+        h.sm.submit(TaskSignal("t1", f"s{i}", SignalKind.ENTERED, ActionSlot.ON_ENTER))
 
     assert h.outcomes().count(TransitionOutcome.SIGNAL_DROPPED) == 2
 
@@ -473,3 +484,45 @@ def test_unregister_clears_everything():
     assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
     h.sm.submit(_entered(rule_id="s"))
     assert h.outcomes()[-1] is TransitionOutcome.UNKNOWN_RULE
+
+
+# ── 方向映射：确认层的最后一步 (§2.1 ③层) ──────────────────────────────
+
+
+def test_slot_for_edge_full_table():
+    """四个方向 × 两种边沿的全表。这是 ③→④ 的唯一契约, 写死不靠推导。"""
+    from miloco.task.state_machine import slot_for_edge
+
+    table = {
+        (d, k.value): slot_for_edge(d, k)
+        for d in ("enter", "exit", "session", "milestone")
+        for k in (SignalKind.ENTERED, SignalKind.EXITED)
+    }
+    assert table == {
+        ("enter", "entered"): ActionSlot.ON_ENTER,
+        ("enter", "exited"): None,
+        ("exit", "entered"): ActionSlot.ON_EXIT,
+        ("exit", "exited"): None,
+        ("session", "entered"): ActionSlot.ON_ENTER,
+        ("session", "exited"): ActionSlot.ON_EXIT,
+        ("milestone", "entered"): ActionSlot.ON_TARGET,
+        ("milestone", "exited"): None,
+    }
+
+
+def test_task_layer_dispatches_by_signal_slot_not_by_direction():
+    """task 层按 ``signal.slot`` 分派, 不再自己查方向。
+
+    喂一个「登记为 enter 型、但 slot 说这是出信号」的信号: 若本层还在查方向,
+    它会走进入分支 (already_in_state); 按 slot 走才会真的退出。
+    """
+    h = Harness()
+    # 要有出路径才谈得上「模式开着」—— 纯 enter 型 task 是事件型, 恒 off (§4.3)
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
+    h.sm.handle(_entered(rule_id="a"))
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+
+    outcome = h.sm.handle(_entered(rule_id="a", slot=ActionSlot.ON_EXIT))
+
+    assert outcome is TransitionOutcome.EXITED
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF

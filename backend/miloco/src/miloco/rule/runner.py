@@ -49,7 +49,6 @@ from miloco.rule.schema import (
     Rule,
     RuleAction,
     RuleActionExecuteResult,
-    RuleDirection,
     RuleEvent,
     RuleExecuteResult,
     RuleLog,
@@ -60,11 +59,13 @@ from miloco.rule.schema import (
     parse_device_iid,
 )
 from miloco.task.state_machine import (
+    ActionSlot,
     SignalKind,
     TaskRuntimeState,
     TaskSignal,
     TaskStateMachine,
     TransitionOutcome,
+    slot_for_edge,
 )
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
@@ -184,25 +185,24 @@ _FIRING_OUTCOMES = frozenset(
 )
 
 
-def _slot_prefix(direction: RuleDirection, event: RuleEvent) -> str | None:
-    """rule 边沿 → task 动作槽。达标与方向无关, 其余由方向决定。
+_EVENT_TO_SIGNAL_KIND = {
+    RuleEvent.ENTERED: SignalKind.ENTERED,
+    RuleEvent.EXITED: SignalKind.EXITED,
+}
 
-    exit 型 rule 的"条件成立"就是 task 该退出了, 所以它的 ENTERED 边沿取的是
-    on_exit 槽 —— 按边沿名直接映射会取错那一格。
+
+def _slot_for(rule: Rule, event: RuleEvent) -> ActionSlot | None:
+    """本层唯一的方向映射入口 —— 既定信号的意图, 也定动作取哪个槽。
+
+    两者必须同源: 分成两处算就会在方向改动后短暂分叉 (状态机按旧方向判状态、
+    动作按新方向取槽)。达标不是进出边沿, 直接对应达标槽。
     """
     if event is RuleEvent.TARGET_FIRED:
-        return "on_target"
-    if direction is RuleDirection.SESSION:
-        if event is RuleEvent.ENTERED:
-            return "on_enter"
-        return "on_exit" if event is RuleEvent.EXITED else None
-    if event is not RuleEvent.ENTERED:
+        return ActionSlot.ON_TARGET
+    kind = _EVENT_TO_SIGNAL_KIND.get(event)
+    if kind is None:
         return None
-    if direction is RuleDirection.EXIT:
-        return "on_exit"
-    if direction is RuleDirection.MILESTONE:
-        return "on_target"
-    return "on_enter"
+    return slot_for_edge(rule.resolved_direction.value, kind)
 
 
 def _has_any_action(actions: dict) -> bool:
@@ -1130,10 +1130,17 @@ class RuleRunner:
                 )
             return in_session
 
-        kind = SignalKind.EXITED if event == RuleEvent.EXITED else SignalKind.ENTERED
+        kind = _EVENT_TO_SIGNAL_KIND[event]
+        slot = slot_for_edge(rule.resolved_direction.value, kind)
+        if slot is None:
+            # 这个边沿对该方向没有意义 (单方向的 rule 只有一个边沿) —— 不发信号,
+            # 也就没有动作。发出去只能让 task 层再判一次同样的事。
+            return False
         # dispatch=False: 本调用只要结论。动作由下面的 _spawn_fire / _fire 走
         # 原路径执行, 让状态机再派一次会重复触发。
-        outcome = sm.handle(TaskSignal(rule.task_id, rule.id, kind), dispatch=False)
+        outcome = sm.handle(
+            TaskSignal(rule.task_id, rule.id, kind, slot), dispatch=False
+        )
         return outcome in _FIRING_OUTCOMES
 
     def _spawn_fire(
@@ -1651,10 +1658,10 @@ class RuleRunner:
         if actions is None:
             return _NO_TASK_ACTIONS
 
-        prefix = _slot_prefix(rule.resolved_direction, event)
-        if prefix is None:
+        slot = _slot_for(rule, event)
+        if slot is None:
             return None
-        static_key, desc_key = f"{prefix}_actions", f"{prefix}_desc"
+        static_key, desc_key = f"{slot.value}_actions", f"{slot.value}_desc"
 
         raw_actions = actions.get(static_key) or []
         if raw_actions:

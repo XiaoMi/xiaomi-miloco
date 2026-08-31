@@ -27,7 +27,11 @@ from miloco.rule.schema import (
     RuleMode,
 )
 from miloco.rule.service import RuleService, attach_task_state_machine
-from miloco.task.state_machine import ActionSlot, TaskRuntimeState
+from miloco.task.state_machine import (
+    ActionSlot,
+    TaskRuntimeState,
+    TransitionOutcome,
+)
 
 
 @pytest.fixture
@@ -540,3 +544,39 @@ def test_direction_flip_resets_runtime_state(env):
     runner.add_rule(flipped)
 
     assert runner._ensure_state(r.id).last_rule_state is False
+
+
+def test_meaningless_edge_produces_no_signal(env, monkeypatch):
+    """单方向的 rule 只有一个边沿, 另一个边沿不该发信号给 task 层。
+
+    发出去只是让 task 层再判一次同样的事, 而且那次判定会进判定记账, 看起来像
+    真的发生过一次转换。
+    """
+    _service, runner, _ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    submitted: list = []
+    monkeypatch.setattr(
+        type(runner.state_machine),
+        "handle",
+        lambda self, signal, **kw: submitted.append(signal),
+    )
+    r = _single_edge_rule(RuleDirection.ENTER)
+
+    assert runner._state_machine_allows(r, RuleEvent.EXITED) is False
+    assert submitted == []
+
+
+def test_signal_carries_the_slot_computed_by_confirmation_layer(env, monkeypatch):
+    """确认层算好 slot 填进信号 —— task 层拿到的是意图, 不是「自己去查方向」。"""
+    _service, runner, _ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    seen: list = []
+    monkeypatch.setattr(
+        type(runner.state_machine),
+        "handle",
+        lambda self, signal, **kw: (seen.append(signal), TransitionOutcome.EXITED)[1],
+    )
+    r = _single_edge_rule(RuleDirection.EXIT)
+    runner.state_machine.register_task(r.task_id, {r.id: "exit"})
+
+    runner._state_machine_allows(r, RuleEvent.ENTERED)
+
+    assert [s.slot for s in seen] == [ActionSlot.ON_EXIT]

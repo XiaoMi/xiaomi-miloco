@@ -76,6 +76,10 @@ class TaskSignal:
     task_id: str
     rule_id: str
     kind: SignalKind
+    # 这条边沿对 task 的意图, 由确认层用 ``slot_for_edge`` 算好填进来 (§2.1)。
+    # 状态机不再自己查方向 —— 方向是 rule 的属性, 让本层持副本就得靠重新配置
+    # 同步, 那是一类静默分叉的来源。
+    slot: ActionSlot = ActionSlot.ON_ENTER
     # 派发时原样交回动作层的上下文。状态机不解释它。
     # compare=False: payload 常是 dict / 模型对象, 带进 __hash__ 会炸。
     payload: object | None = field(default=None, compare=False)
@@ -118,31 +122,32 @@ class TaskTopology:
         )
 
 
-def aggregate_to_transition(
-    signal: TaskSignal, topology: TaskTopology
-) -> ActionSlot | None:
-    """聚合点: rule 边沿 → task 进/出意图。本次是 OR 直通 (§15)。
+def slot_for_edge(direction: str, kind: SignalKind) -> ActionSlot | None:
+    """确认层的最后一步: rule 边沿 → 对 task 的意图 (§2.1 ③层)。
 
-    OR 不是一条聚合逻辑, 是透明层的默认行为 —— 单 rule 恒等映射, 多 rule 因状态机
-    幂等消费自然坍缩成 OR。future 换 AND / guard 只动这一个函数。
+    这是全系统唯一的方向映射点。放在本模块是因为 ``ActionSlot`` 在这里定义, 但
+    调用方只有确认层 —— task 层读 ``signal.slot``, 不再自己算。
 
-    milestone 不进聚合 (§5.3), 由调用方在此之前分流。
+    ``direction`` 收字符串而不是枚举: 本层有自己一份 ``RuleDirection``, 与 rule
+    模块那份同名不同类 (为了 task 层不依赖 rule 模块)。跨界传枚举时 ``is`` 比较
+    恒假、会静默落进兜底分支, 传值不会。
+
+    返回 ``None`` = 这个边沿对该方向没有意义 (单方向的 rule 只有一个边沿), 确认层
+    据此不产生信号。
+
+    OR 聚合不在这里: 它不是一条映射逻辑, 是 task 层幂等消费的自然结果 —— 单 rule
+    恒等映射, 多 rule 坍缩成 OR。future 换 AND / guard 动 task 层, 不动本函数。
     """
-    direction = topology.directions.get(signal.rule_id)
-    if direction is None:
+    if direction == RuleDirection.SESSION:
+        return ActionSlot.ON_ENTER if kind is SignalKind.ENTERED else ActionSlot.ON_EXIT
+    if kind is not SignalKind.ENTERED:
         return None
-    if direction is RuleDirection.ENTER and signal.kind is SignalKind.ENTERED:
-        return ActionSlot.ON_ENTER
-    if direction is RuleDirection.EXIT and signal.kind is SignalKind.ENTERED:
+    if direction == RuleDirection.EXIT:
         # exit 型 rule 的"条件成立"就是"该退出了" —— 它自己的 entered 边沿是出信号
         return ActionSlot.ON_EXIT
-    if direction is RuleDirection.SESSION:
-        return (
-            ActionSlot.ON_ENTER
-            if signal.kind is SignalKind.ENTERED
-            else ActionSlot.ON_EXIT
-        )
-    return None
+    if direction == RuleDirection.MILESTONE:
+        return ActionSlot.ON_TARGET
+    return ActionSlot.ON_ENTER
 
 
 class TaskStateMachine:
@@ -280,19 +285,14 @@ class TaskStateMachine:
         if topology is None:
             return self._done(TransitionOutcome.UNKNOWN_RULE, signal)
 
-        direction = topology.directions.get(signal.rule_id)
-        if direction is None:
+        if signal.rule_id not in topology.directions:
             return self._done(TransitionOutcome.UNKNOWN_RULE, signal)
 
-        if direction is RuleDirection.MILESTONE:
+        if signal.slot is ActionSlot.ON_TARGET:
             return self._handle_milestone(signal)
-
-        slot = aggregate_to_transition(signal, topology)
-        if slot is ActionSlot.ON_ENTER:
+        if signal.slot is ActionSlot.ON_ENTER:
             return self._handle_enter(signal, topology)
-        if slot is ActionSlot.ON_EXIT:
-            return self._handle_exit(signal, topology)
-        return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
+        return self._handle_exit(signal, topology)
 
     def _handle_milestone(self, signal: TaskSignal) -> TransitionOutcome:
         """不改状态、不查稳态、不重置基线 —— 只确认 task 在 ``on`` 然后派动作 (§5.3)。"""
