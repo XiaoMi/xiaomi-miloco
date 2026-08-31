@@ -294,15 +294,73 @@ def test_reconfigure_while_off_does_not_run_on_exit():
     assert h.dispatched == []
 
 
-def test_reconfigure_keeps_state_off_even_when_still_session_type():
-    """按 §7 重建: 一律从 off 起, 下一个判定周期照常 diff。"""
-    h = Harness()
+def test_reconfigure_keeps_on_when_exit_side_still_holds():
+    """配置变了而现实没变 —— 改个防抖参数不该把 on 打成 off。
+
+    清运行态会同时丢两样: 那次退出的 on_exit, 以及与 runner 边沿的一致性 ——
+    runner 仍认为在态内、不会再发 enter 信号, 两边就此分叉且不会自愈。
+    """
+    h = Harness(satisfied={"s": True})
     h.sm.register_task("t1", {"s": RuleDirection.SESSION})
     h.sm.handle(_entered(rule_id="s"))
+    h.dispatched.clear()
 
     h.sm.reconfigure("t1", {"s": RuleDirection.SESSION})
 
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert h.dispatched == []
+
+
+def test_reconfigure_exits_when_exit_side_no_longer_holds():
+    """撑着 on 的那条 rule 被删了 → 该退出, 且退出动作不能漏。"""
+    h = Harness(satisfied={"s": True, "s2": False})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION, "s2": RuleDirection.SESSION})
+    h.sm.handle(_entered(rule_id="s"))
+    h.dispatched.clear()
+
+    h.sm.reconfigure("t1", {"s2": RuleDirection.SESSION})
+
     assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
+
+
+def test_reconfigure_ignores_unseeded_rule_when_deciding():
+    """新加进来的 rule 还没喂过数据, 不能拿它否掉老 rule 撑着的 on。"""
+    h = Harness(satisfied={"s": True, "new": None})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION})
+    h.sm.handle(_entered(rule_id="s"))
+    h.dispatched.clear()
+
+    h.sm.reconfigure("t1", {"s": RuleDirection.SESSION, "new": RuleDirection.SESSION})
+
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert h.dispatched == []
+
+
+def test_reconfigure_exits_when_whole_exit_side_unseeded():
+    """整套 rule 被换掉 → 无从确认还撑着, 保守退出而不是静默卡在 on。"""
+    h = Harness(satisfied={"s": True, "new": None})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION})
+    h.sm.handle(_entered(rule_id="s"))
+    h.dispatched.clear()
+
+    h.sm.reconfigure("t1", {"new": RuleDirection.SESSION})
+
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
+
+
+def test_suspend_clears_state_without_running_on_exit():
+    """停用是「停止观察」: 清运行态让 enable 后重建, 但不当作观察到退出。"""
+    h = Harness(satisfied={"s": True})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION})
+    h.sm.handle(_entered(rule_id="s"))
+    h.dispatched.clear()
+
+    h.sm.suspend("t1")
+
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.dispatched == []
 
 
 def test_reconfigure_drops_queued_signals():

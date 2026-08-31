@@ -371,8 +371,10 @@ class TaskStateMachine:
     def reconfigure(self, task_id: str, directions: dict[str, RuleDirection]) -> None:
         """rule 增删改 / 单独启停 / task 重新 enable 统一走这条。
 
-        失去全部出路径且当前为 ``on`` → 先跑 on_exit 退回 ``off``, 否则永远退不出。
-        之后清运行态、从 ``off`` 起, 下一个判定周期照常 diff。
+        运行态反映感知到的现实, 而配置变化不改变现实 —— 只在出口侧再没有条件
+        撑着时才退回 ``off``, 否则原样保留。无条件清 ``off`` 会同时造成两个后果:
+        那次退出的 on_exit 漏发, 且 runner 侧的边沿仍认为在态内、不会再发 enter
+        信号, 两边就此分叉且不会自愈。
         """
         self._reconfiguring.add(task_id)
         try:
@@ -383,17 +385,46 @@ class TaskStateMachine:
                     self._track(TransitionOutcome.SIGNAL_DROPPED, stale)
                 queue.clear()
 
-            new_topology = TaskTopology(task_id, dict(directions))
             was_on = self.runtime_state(task_id) is TaskRuntimeState.ON
-            if was_on and not new_topology.is_session_type:
-                self._dispatch_action(task_id, ActionSlot.ON_EXIT, None)
-
+            new_topology = TaskTopology(task_id, dict(directions))
             self._topologies[task_id] = new_topology
-            self._states[task_id] = TaskRuntimeState.OFF
             self._queues.setdefault(task_id, deque(maxlen=SIGNAL_QUEUE_DEPTH))
             self._wakeups.setdefault(task_id, asyncio.Event())
+
+            if was_on and not self._exit_side_still_holds(new_topology):
+                self._dispatch_action(task_id, ActionSlot.ON_EXIT, None)
+                self._states[task_id] = TaskRuntimeState.OFF
         finally:
             self._reconfiguring.discard(task_id)
+
+    def suspend(self, task_id: str) -> None:
+        """task 停用 —— 停止观察, 不是观察到退出。
+
+        清运行态让 enable 回来时从 ``off`` 重建 (§7), 但**不派发 on_exit**: 现实里
+        条件可能还成立, 停用只是我们不再看了。这与 ``reconfigure`` 是两种语义, 不能
+        共用 —— 后者面对的是配置变了而现实没变。
+        """
+        if task_id not in self._topologies:
+            return
+        self._states[task_id] = TaskRuntimeState.OFF
+        queue = self._queues.get(task_id)
+        if queue:
+            for stale in queue:
+                self._track(TransitionOutcome.SIGNAL_DROPPED, stale)
+            queue.clear()
+
+    def _exit_side_still_holds(self, topology: TaskTopology) -> bool:
+        """出口侧还有条件成立 → 该保持 ``on``。
+
+        ``_is_condition_satisfied`` 是三值: ``True`` 成立, ``False`` 观测到不
+        成立, ``None`` 还没喂过数据(新加进来的 rule 就是这种)。只认 ``True``:
+        全是 ``None`` 时无从确认还撑着, 宁可多发一次退出动作也不要静默卡在 on;
+        事件型的出口侧集合为空, 同样落到退出, 与改动前一致。
+        """
+        return any(
+            self._is_condition_satisfied(rule_id) is True
+            for rule_id in topology.exit_side_rule_ids
+        )
 
     # ── 手动触发 (debug, §5) ──────────────────────────────────────
 

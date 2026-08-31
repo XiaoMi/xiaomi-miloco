@@ -771,7 +771,13 @@ class RuleService:
         的那条 rule 在 task 重新 enable 时错误地打开 (§19.9)。
         """
         self._runner.set_task_paused(task_id, not active)
-        self.reconfigure_task(task_id)
+        if active:
+            # enable: 停用期间 rule 可能被改过, 要重新登记拓扑
+            self.reconfigure_task(task_id)
+            return
+        sm = self._runner.state_machine
+        if sm is not None and sm.owns(task_id):
+            sm.suspend(task_id)
 
     # ---- Trigger ----
 
