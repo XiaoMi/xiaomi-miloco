@@ -48,11 +48,40 @@ class TaskUpdateRequest(BaseModel):
     description: str = Field(..., max_length=200)
 
 
+class TaskBoundaryActions(BaseModel):
+    """task 的边界动作槽。``*_actions`` 走设备直控, ``*_desc`` 走 Agent。"""
+
+    on_enter_actions: list[dict[str, Any]] = Field(default_factory=list)
+    on_enter_desc: str | None = None
+    on_exit_actions: list[dict[str, Any]] = Field(default_factory=list)
+    on_exit_desc: str | None = None
+    on_target_actions: list[dict[str, Any]] = Field(default_factory=list)
+    on_target_desc: str | None = None
+
+
+class TaskActionsUpdateRequest(BaseModel):
+    """``PATCH /tasks/{task_id}/actions`` 入参。
+
+    partial 语义: 只有出现在请求体里的槽才会被改, 显式传 ``null`` 表示清空该槽。
+    "没传"和"传了 null"靠 ``model_fields_set`` 区分, 不能用默认值判断。
+    """
+
+    on_enter_actions: list[dict[str, Any]] | None = None
+    on_enter_desc: str | None = None
+    on_exit_actions: list[dict[str, Any]] | None = None
+    on_exit_desc: str | None = None
+    on_target_actions: list[dict[str, Any]] | None = None
+    on_target_desc: str | None = None
+
+
 class RuleBrief(BaseModel):
     """`task get` / `task list` 中的实时 rule 摘要。"""
 
     rule_id: str
     query: str
+    # enter / exit / session / milestone。enter 与 exit 的 mode 都是 event, 不带
+    # 这个字段就分不出一条 rule 是把 task 推进去还是推出来。
+    direction: str = "enter"
     actions_desc: list[str] = Field(default_factory=list)
 
 
@@ -79,6 +108,8 @@ class TaskFullView(BaseModel):
     last_decision: dict | None = None
     rule_briefs: list[RuleBrief] = Field(default_factory=list)
     cron_refs: list[CronRef] = Field(default_factory=list)
+    # 只在单 task 视图里填 —— 列表路径不查这六列, 避免每行一次额外查询。
+    actions: TaskBoundaryActions | None = None
 
 
 class PendingOp(BaseModel):

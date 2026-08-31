@@ -546,3 +546,109 @@ def test_state_action_desc_keeps_payload_out():
     assert _action_desc_short(tts) == "action.7.3"
     assert "；" not in _action_desc_short(tts)
     assert _action_desc_short(scene) == "scene:scene-A"
+
+
+# ── task 侧动作入口 ────────────────────────────────────────────────────
+
+
+def _mk_task(service, task_id="t1"):
+    service.create_task(TaskCreateRequest(task_id=task_id, description="d"))
+
+
+def test_set_actions_only_touches_the_slots_that_were_sent(service):
+    """partial 语义: 没传的槽保持原样。
+
+    多 rule 的 task 只能从这里改动作, 一次改进入动作就把退出动作冲掉的话,
+    这个入口本身就不可用。
+    """
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    _mk_task(service)
+    service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_desc="进", on_exit_desc="出")
+    )
+    service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc="新进"))
+
+    view = service.get_full_view("t1")
+    assert view.actions.on_enter_desc == "新进"
+    assert view.actions.on_exit_desc == "出"
+
+
+def test_set_actions_clears_a_slot_when_explicitly_null(service):
+    """传 null 才清空 —— 与"没传"必须能分开。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    _mk_task(service)
+    service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_desc="进", on_exit_desc="出")
+    )
+    service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_exit_desc=None))
+
+    view = service.get_full_view("t1")
+    assert view.actions.on_enter_desc == "进"
+    assert view.actions.on_exit_desc is None
+
+
+def test_set_actions_reports_missing_task(service):
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    assert (
+        service.set_boundary_actions(
+            "nope", TaskActionsUpdateRequest(on_enter_desc="进")
+        )
+        is False
+    )
+
+
+def test_set_actions_refreshes_the_state_machine_snapshot(service, monkeypatch):
+    """runner 手里的动作是内存副本, 不刷新就是改了不生效而 CLI 报成功。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    _mk_task(service)
+    reconfigured: list[str] = []
+
+    class _Stub:
+        def reconfigure_task(self, task_id):
+            reconfigured.append(task_id)
+
+    service._rule_service = _Stub()
+    service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc="进"))
+
+    assert reconfigured == ["t1"]
+
+
+def test_full_view_exposes_rule_direction(service):
+    """enter 与 exit 的 mode 都是 event, 不带 direction 就分不出一条 rule 的方向。"""
+    from miloco.rule.schema import RuleDirection
+
+    _mk_task(service)
+    rule = Rule(
+        name="[t1] 出",
+        task_id="t1",
+        mode=RuleMode.EVENT,
+        condition=RuleCondition(perceive_device_ids=["cam1"], query="走了"),
+        action_descriptions=["该退了"],
+    )
+    rule.direction = RuleDirection.EXIT
+    RuleRepo().create(rule)
+
+    view = service.get_full_view("t1")
+    assert [b.direction for b in view.rule_briefs] == ["exit"]
+
+
+def test_set_actions_clearing_a_static_slot_writes_empty_list(service):
+    """``*_actions`` 三列是 NOT NULL —— 清空它们只能写空列表, 写 null 会直接崩。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    _mk_task(service)
+    service.set_boundary_actions(
+        "t1",
+        TaskActionsUpdateRequest(
+            on_enter_actions=[
+                {"did": "1", "iid": "prop.2.1", "value": 1, "idempotent": True}
+            ]
+        ),
+    )
+    service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_actions=None))
+
+    assert service.get_full_view("t1").actions.on_enter_actions == []

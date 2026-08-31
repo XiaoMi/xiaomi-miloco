@@ -55,7 +55,6 @@ _MODE_TO_DIRECTION: dict[str, RuleDirection] = {
     RuleMode.STATE.value: RuleDirection.SESSION,
 }
 
-
 class RuleLifecycle(str, Enum):
     """permanent: until user deletes.
     temporary: agent evaluates terminate_when and self-deletes."""
@@ -355,6 +354,7 @@ class RuleUpdate(BaseModel):
     name: str | None = Field(None)
     task_id: str | None = Field(None)
     mode: RuleMode | None = Field(None)
+    direction: RuleDirection | None = Field(None)
     lifecycle: RuleLifecycle | None = Field(None)
     enabled: bool | None = Field(None)
     condition: RuleConditionUpdate | None = Field(None)

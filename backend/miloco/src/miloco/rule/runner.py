@@ -49,6 +49,7 @@ from miloco.rule.schema import (
     Rule,
     RuleAction,
     RuleActionExecuteResult,
+    RuleDirection,
     RuleEvent,
     RuleExecuteResult,
     RuleLog,
@@ -181,6 +182,27 @@ _FIRING_OUTCOMES = frozenset(
         TransitionOutcome.MILESTONE_FIRED,
     }
 )
+
+
+def _slot_prefix(direction: RuleDirection, event: RuleEvent) -> str | None:
+    """rule 边沿 → task 动作槽。达标与方向无关, 其余由方向决定。
+
+    exit 型 rule 的"条件成立"就是 task 该退出了, 所以它的 ENTERED 边沿取的是
+    on_exit 槽 —— 按边沿名直接映射会取错那一格。
+    """
+    if event is RuleEvent.TARGET_FIRED:
+        return "on_target"
+    if direction is RuleDirection.SESSION:
+        if event is RuleEvent.ENTERED:
+            return "on_enter"
+        return "on_exit" if event is RuleEvent.EXITED else None
+    if event is not RuleEvent.ENTERED:
+        return None
+    if direction is RuleDirection.EXIT:
+        return "on_exit"
+    if direction is RuleDirection.MILESTONE:
+        return "on_target"
+    return "on_enter"
 
 
 def _has_any_action(actions: dict) -> bool:
@@ -406,7 +428,7 @@ class RuleRunner:
     def add_rule(self, rule: Rule) -> None:
         """Insert or replace a rule.
 
-        When replacing an existing rule whose ``mode`` or
+        When replacing an existing rule whose ``direction`` or
         ``condition.perceive_device_ids`` changed, drop the per-rule runtime
         state (last_source/rule_state, pending_exit, action_cooldown). Keeping
         stale state across a shape change can resurrect old EXIT debounces
@@ -414,7 +436,9 @@ class RuleRunner:
         """
         existing = self._rules.get(rule.id)
         if existing is not None:
-            mode_changed = existing.mode != rule.mode
+            # 判 direction 而不是 mode: enter 与 exit 的 mode 都是 event, 只看
+            # mode 的话这两者互换时状态不会清, 旧的防抖和聚合结果会留下来。
+            direction_changed = existing.resolved_direction != rule.resolved_direction
             sources_changed = set(existing.condition.perceive_device_ids) != set(
                 rule.condition.perceive_device_ids
             )
@@ -428,7 +452,7 @@ class RuleRunner:
             # 错误拦截（fired 残留 → 永远不再 fire）。
             enabled_changed = existing.enabled != rule.enabled
             if (
-                mode_changed
+                direction_changed
                 or sources_changed
                 or duration_config_changed
                 or enabled_changed
@@ -811,7 +835,7 @@ class RuleRunner:
                 "(sum=%d/maxlen=%d, ratio>=%.2f)",
                 rule.id,
                 rule.task_id,
-                rule.mode.value,
+                rule.resolved_direction.value,
                 actual_started_at,
                 sum(win),
                 maxlen,
@@ -1484,15 +1508,17 @@ class RuleRunner:
         start_time = int(time.time() * 1000)
         kind, value = slot
 
+        direction = rule.resolved_direction.value
         logger.info(
-            "FIRE: rule=%s name=%s event=%s mode=%s slot=%s sources=%s execute_id=%s",
-            rule.id, rule.name, event.value, rule.mode.value, kind, sources, execute_id,
+            "FIRE: rule=%s name=%s event=%s direction=%s slot=%s sources=%s "
+            "execute_id=%s",
+            rule.id, rule.name, event.value, direction, kind, sources, execute_id,
         )
         self._publish_rule_event(
             "rule_fire", rule.id,
             {
                 "event": event.value,
-                "mode": rule.mode.value,
+                "direction": direction,
                 "slot": kind,
                 "sources": sources,
                 "execute_id": execute_id,
@@ -1625,14 +1651,10 @@ class RuleRunner:
         if actions is None:
             return _NO_TASK_ACTIONS
 
-        if event == RuleEvent.ENTERED:
-            static_key, desc_key = "on_enter_actions", "on_enter_desc"
-        elif event == RuleEvent.EXITED:
-            static_key, desc_key = "on_exit_actions", "on_exit_desc"
-        elif event == RuleEvent.TARGET_FIRED:
-            static_key, desc_key = "on_target_actions", "on_target_desc"
-        else:
+        prefix = _slot_prefix(rule.resolved_direction, event)
+        if prefix is None:
             return None
+        static_key, desc_key = f"{prefix}_actions", f"{prefix}_desc"
 
         raw_actions = actions.get(static_key) or []
         if raw_actions:

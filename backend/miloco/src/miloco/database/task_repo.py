@@ -86,7 +86,9 @@ class TaskRepo:
         """单 task 视图: task 元信息 + cron_refs (rule_briefs 由 service 层拼装)."""
         with self.db.get_connection() as conn:
             task_row = conn.execute(
-                "SELECT task_id, description, status, paused_at, created_at, lifecycle "
+                "SELECT task_id, description, status, paused_at, created_at, lifecycle, "
+                "on_enter_actions, on_enter_desc, on_exit_actions, on_exit_desc, "
+                "on_target_actions, on_target_desc "
                 "FROM task WHERE task_id=?",
                 (task_id,),
             ).fetchone()
@@ -103,6 +105,14 @@ class TaskRepo:
                 "paused_at": ms_to_iso_local(task_row["paused_at"]),
                 "created_at": ms_to_iso_local(task_row["created_at"]),
                 "lifecycle": task_row["lifecycle"],
+                "actions": {
+                    "on_enter_actions": _load_actions(task_row["on_enter_actions"]),
+                    "on_enter_desc": task_row["on_enter_desc"],
+                    "on_exit_actions": _load_actions(task_row["on_exit_actions"]),
+                    "on_exit_desc": task_row["on_exit_desc"],
+                    "on_target_actions": _load_actions(task_row["on_target_actions"]),
+                    "on_target_desc": task_row["on_target_desc"],
+                },
                 "cron_refs": [
                     {
                         "ref": c["cron_id"],
@@ -172,7 +182,7 @@ class TaskRepo:
         """写动作槽。只更新传进来的键, 未传的不动。
 
         值为 ``None`` 表示清空该槽 —— 与 ``rule update --clear`` 的语义一致,
-        传空串只会存空串。
+        传空串只会存空串。``*_actions`` 三列是 NOT NULL, 清空它们就是写空列表。
         """
         allowed = {
             "on_enter_actions",
@@ -190,9 +200,7 @@ class TaskRepo:
             return False
         assignments = ", ".join(f"{k}=?" for k in slots)
         params = [
-            json.dumps([a for a in v])
-            if k.endswith("_actions") and v is not None
-            else v
+            json.dumps(v or []) if k.endswith("_actions") else v
             for k, v in slots.items()
         ]
         with self.db.get_connection() as conn:

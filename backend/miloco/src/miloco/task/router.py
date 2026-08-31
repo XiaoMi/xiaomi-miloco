@@ -17,6 +17,7 @@ from miloco.middleware.exceptions import (
 )
 from miloco.schema.common_schema import NormalResponse
 from miloco.task.schema import (
+    TaskActionsUpdateRequest,
     TaskCreateRequest,
     TaskUpdateRequest,
 )
@@ -83,6 +84,24 @@ async def update_task(
     if not ok:
         raise ResourceNotFoundException(f"task_not_found: {task_id}")
     return NormalResponse(code=0, message="Task updated", data=None)
+
+
+@router.patch(
+    "/{task_id}/actions",
+    summary="Update Task Boundary Actions",
+    response_model=NormalResponse,
+)
+async def update_task_actions(
+    task_id: str,
+    req: TaskActionsUpdateRequest,
+    current_user: str = Depends(verify_token),
+):
+    """写 task 的边界动作槽。只有请求体里出现的槽会被改, 传 null 清空该槽。"""
+    logger.info("Update task actions - User: %s, task_id: %s", current_user, task_id)
+    ok = get_manager().task_service.set_boundary_actions(task_id, req)
+    if not ok:
+        raise ResourceNotFoundException(f"task_not_found: {task_id}")
+    return NormalResponse(code=0, message="Task actions updated", data=None)
 
 
 @router.post(

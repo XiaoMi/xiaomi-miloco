@@ -16,7 +16,7 @@ Reference: rule-design.md §6.1
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from miloco.database.rule_repo import RuleLogRepo, RuleRepo
 from miloco.database.task_repo import TaskRepo
@@ -211,29 +211,42 @@ async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
     )
 
 
-def _rule_action_slots(rule: Rule) -> tuple[list, str | None, list, str | None]:
-    """rule 的动作字段 → task 的四个槽。与 v2→v3 迁移里那份映射同一套口径。
+def _rule_action_slots(rule: Rule) -> dict[str, Any]:
+    """rule 的动作字段 → 它**管辖**的那些 task 槽。与 v2→v3 迁移同一套口径。
 
-    event rule 的动作全部归进方向 —— event 语义就是"发生了就做", 对应 on_enter。
+    只返回管辖的槽。不管辖的不出现在返回里, 调用方才不会把 ``task set-actions``
+    写进去的槽覆盖成空 —— 一条 enter 型 rule 没有理由清掉 task 的达标动作。
+
+    单方向的 rule (enter / exit) 只有一个边沿, 动作就填在 ``actions`` /
+    ``action_descriptions`` 上, 不区分进出; 方向决定它落 on_enter 还是 on_exit。
     多条 agent 回调描述合成一条时的编号规则必须与 runner 的选槽逻辑逐字一致。
     """
-    if rule.resolved_direction is RuleDirection.SESSION:
-        return (
-            [a.model_dump(mode="json") for a in rule.on_enter_actions],
-            rule.on_enter_desc,
-            [a.model_dump(mode="json") for a in rule.on_exit_actions],
-            rule.on_exit_desc,
-        )
+    direction = rule.resolved_direction
+    if direction is RuleDirection.SESSION:
+        return {
+            "on_enter_actions": [
+                a.model_dump(mode="json") for a in rule.on_enter_actions
+            ],
+            "on_enter_desc": rule.on_enter_desc,
+            "on_exit_actions": [
+                a.model_dump(mode="json") for a in rule.on_exit_actions
+            ],
+            "on_exit_desc": rule.on_exit_desc,
+            "on_target_desc": rule.on_target_desc,
+        }
+    if direction is RuleDirection.MILESTONE:
+        # 达标动作在 task 列上, milestone rule 自己的动作字段恒空 —— 透传只会把
+        # task 上那份清掉。
+        return {}
+    prefix = "on_exit" if direction is RuleDirection.EXIT else "on_enter"
     joined = (
         "\n".join(f"{i + 1}. {d}" for i, d in enumerate(rule.action_descriptions))
         or None
     )
-    return (
-        [a.model_dump(mode="json") for a in rule.actions],
-        joined,
-        [],
-        None,
-    )
+    return {
+        f"{prefix}_actions": [a.model_dump(mode="json") for a in rule.actions],
+        f"{prefix}_desc": joined,
+    }
 
 
 def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> None:
@@ -553,6 +566,9 @@ class RuleService:
         if "mode" in fields and update.mode is not None:
             existing.mode = update.mode
 
+        if "direction" in fields and update.direction is not None:
+            existing.direction = update.direction
+
         if "lifecycle" in fields and update.lifecycle is not None:
             existing.lifecycle = update.lifecycle
 
@@ -704,18 +720,13 @@ class RuleService:
             )
             return
 
-        enter_actions, enter_desc, exit_actions, exit_desc = _rule_action_slots(rule)
+        slots = _rule_action_slots(rule)
+        if not slots:
+            return
         # rule 写入已经成功并且是主要效果, 不能被 task 侧同步的失败带崩。但也不能
         # 静默 —— 同步没成功就意味着"动作只读"那个坑还在, 必须留下明显的线索。
         try:
-            written = TaskRepo().set_boundary_actions(
-                rule.task_id,
-                on_enter_actions=enter_actions,
-                on_enter_desc=enter_desc,
-                on_exit_actions=exit_actions,
-                on_exit_desc=exit_desc,
-                on_target_desc=rule.on_target_desc,
-            )
+            written = TaskRepo().set_boundary_actions(rule.task_id, **slots)
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "把 rule %s 的动作同步到 task %s 失败: %s; "

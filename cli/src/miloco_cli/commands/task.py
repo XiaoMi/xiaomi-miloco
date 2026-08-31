@@ -45,6 +45,11 @@ def _parse_json(value: str, label: str) -> Any:
         sys.exit(1)
 
 
+def _exit_error(msg: str):
+    print(json.dumps({"error": msg}, ensure_ascii=False), file=sys.stderr)
+    sys.exit(1)
+
+
 @click.group("task")
 def task_group():
     """任务操作:创建 / 关联 / 更新 / 列表 / 详情 / 启停 / 删除。"""
@@ -120,6 +125,116 @@ def task_get(task_id, pretty):
     from miloco_cli.client import api_get
 
     data = api_get(f"{API_PREFIX}/{task_id}")
+    print_result(data, pretty)
+
+
+_ACTION_SLOTS = (
+    "on_enter_actions",
+    "on_enter_desc",
+    "on_exit_actions",
+    "on_exit_desc",
+    "on_target_actions",
+    "on_target_desc",
+)
+
+
+@task_group.command("set-actions")
+@click.argument("task_id")
+@click.option(
+    "--on-enter-action",
+    "on_enter_actions_raw",
+    multiple=True,
+    help="进入时的设备直控动作 JSON（可重复），格式同 rule create --action",
+)
+@click.option(
+    "--on-enter-desc", "on_enter_desc", default=None, help="进入时交给 Agent 的指令"
+)
+@click.option(
+    "--on-exit-action",
+    "on_exit_actions_raw",
+    multiple=True,
+    help="退出时的设备直控动作 JSON（可重复）",
+)
+@click.option(
+    "--on-exit-desc", "on_exit_desc", default=None, help="退出时交给 Agent 的指令"
+)
+@click.option(
+    "--on-target-action",
+    "on_target_actions_raw",
+    multiple=True,
+    help="达标时的设备直控动作 JSON（可重复）",
+)
+@click.option(
+    "--on-target-desc", "on_target_desc", default=None, help="达标时交给 Agent 的指令"
+)
+@click.option(
+    "--clear",
+    "clear_slots",
+    multiple=True,
+    type=click.Choice(_ACTION_SLOTS),
+    help="清空指定槽（可重复）。与同名赋值 flag 互斥",
+)
+@click.option("--pretty", is_flag=True)
+def task_set_actions(
+    task_id,
+    on_enter_actions_raw,
+    on_enter_desc,
+    on_exit_actions_raw,
+    on_exit_desc,
+    on_target_actions_raw,
+    on_target_desc,
+    clear_slots,
+    pretty,
+):
+    """改 task 的边界动作（进入 / 退出 / 达标）。
+
+    只有传了的槽会被改，其余保持原样；清空某个槽用 --clear。
+    一个 task 下有多条 rule 时，rule 侧的动作 flag 不会透传到 task
+    （从一条 rule 单向覆盖会冲掉另一条的动作），只能从这里改。
+    """
+    from miloco_cli.client import api_patch
+    from miloco_cli.commands.rule import _parse_actions
+
+    given = {
+        "on_enter_actions": list(on_enter_actions_raw) or None,
+        "on_enter_desc": on_enter_desc,
+        "on_exit_actions": list(on_exit_actions_raw) or None,
+        "on_exit_desc": on_exit_desc,
+        "on_target_actions": list(on_target_actions_raw) or None,
+        "on_target_desc": on_target_desc,
+    }
+    conflict = [name for name in clear_slots if given.get(name) is not None]
+    if conflict:
+        _exit_error(f"--clear 与同名赋值 flag 互斥: {', '.join(sorted(conflict))}")
+
+    for prefix in ("on_enter", "on_exit", "on_target"):
+        if (
+            given[f"{prefix}_actions"] is not None
+            and given[f"{prefix}_desc"] is not None
+        ):
+            _exit_error(
+                f"{prefix} 不能同时设 --{prefix.replace('_', '-')}-action 和 "
+                f"--{prefix.replace('_', '-')}-desc"
+            )
+
+    body: dict[str, Any] = {}
+    for name, raw in given.items():
+        if raw is None:
+            continue
+        body[name] = (
+            # 走 rule 侧同一份校验: 非幂等必带冷却、场景必须非幂等。task 侧另写
+            # 一份就等于开了一个绕过口。
+            _parse_actions(tuple(raw), f"--{name[:-8].replace('_', '-')}-action")
+            if name.endswith("_actions")
+            else raw
+        )
+    for name in clear_slots:
+        body[name] = None
+
+    if not body:
+        _exit_error("至少要传一个动作槽或 --clear")
+
+    data = api_patch(f"{API_PREFIX}/{task_id}/actions", body)
     print_result(data, pretty)
 
 

@@ -15,13 +15,15 @@ from typing import TYPE_CHECKING
 
 from miloco.database.rule_repo import RuleRepo
 from miloco.database.task_repo import TaskNotFound, TaskRepo
-from miloco.rule.schema import SCENE_IID
+from miloco.rule.schema import SCENE_IID, RuleDirection
 from miloco.task.schema import (
     BackendSyncResult,
     BackendSyncRuleResult,
     CronRef,
     PendingOp,
     RuleBrief,
+    TaskActionsUpdateRequest,
+    TaskBoundaryActions,
     TaskCreateRequest,
     TaskDeleteBackendSynced,
     TaskDeleteResult,
@@ -35,6 +37,17 @@ if TYPE_CHECKING:
     from miloco.rule.service import RuleService
 
 logger = logging.getLogger(__name__)
+
+_ACTION_SLOT_NAMES = frozenset(
+    {
+        "on_enter_actions",
+        "on_enter_desc",
+        "on_exit_actions",
+        "on_exit_desc",
+        "on_target_actions",
+        "on_target_desc",
+    }
+)
 
 
 def _action_desc(a) -> str:
@@ -79,6 +92,28 @@ class TaskService:
         """按 task_id 取任务描述（住户日志「所属任务」用）。"""
         return self.repo.get_description(task_id)
 
+    def set_boundary_actions(self, task_id: str, req: TaskActionsUpdateRequest) -> bool:
+        """写 task 的边界动作槽 —— 多 rule 的 task 唯一能改动作的路径。
+
+        rule 侧的动作 flag 在一 task 多 rule 时不透传 (从一条 rule 单向覆盖会冲掉
+        另一条的动作), 所以那种 task 只能从这里改。
+
+        写完必须重新配置: runner 手里的动作快照是内存副本, 不刷新的话改了不生效,
+        而 CLI 已经返回成功 —— 正是"静默不生效"那种最难查的形态。
+        """
+        slots = {
+            name: getattr(req, name)
+            for name in req.model_fields_set
+            if name in _ACTION_SLOT_NAMES
+        }
+        if not slots:
+            return self.repo.get_description(task_id) is not None
+        if not self.repo.set_boundary_actions(task_id, **slots):
+            return False
+        if self._rule_service is not None:
+            self._rule_service.reconfigure_task(task_id)
+        return True
+
     def get_full_view(self, task_id: str) -> TaskFullView | None:
         raw = self.repo.get_full_view(task_id)
         if raw is None:
@@ -113,6 +148,7 @@ class TaskService:
                 RuleBrief(
                     rule_id=rule.id,
                     query=rule.condition.query,
+                    direction=rule.resolved_direction.value,
                     actions_desc=self._rule_actions_desc(rule),
                 )
             )
@@ -127,6 +163,9 @@ class TaskService:
             last_decision=self._last_decision(raw["task_id"]),
             rule_briefs=rule_briefs,
             cron_refs=[CronRef(**c) for c in raw["cron_refs"]],
+            actions=(
+                TaskBoundaryActions(**raw["actions"]) if raw.get("actions") else None
+            ),
         )
 
     def _runtime_state(self, task_id: str) -> str:
@@ -156,8 +195,12 @@ class TaskService:
 
     @staticmethod
     def _rule_actions_desc(rule) -> list[str]:
-        """rule 动作摘要 — event/state 模式下各按"动作 / 描述"路径各取一份。"""
-        if rule.mode.value == "event":
+        """rule 动作摘要 — 单方向的 rule 取"动作 / 描述", session 取两个槽。
+
+        按 direction 而不是 mode 分: exit 型的 mode 也是 event, 它的动作同样填在
+        ``actions`` / ``action_descriptions`` 上。
+        """
+        if rule.resolved_direction is not RuleDirection.SESSION:
             if rule.actions:
                 return [_action_desc(a) for a in rule.actions]
             return list(rule.action_descriptions)

@@ -434,3 +434,109 @@ def test_target_gate_falls_back_to_rule_when_task_not_owned(env):
     rule = RuleRepo().get_by_id(ids[0])
 
     assert runner._has_target_slot(rule) is True
+
+
+# ── 动作槽按 direction 分 ──────────────────────────────────────────────
+
+
+def _single_edge_rule(direction, task_id="t1", descs=("做事",)):
+    r = Rule(
+        name=f"[{task_id}] {direction.value}",
+        task_id=task_id,
+        mode=RuleMode.EVENT,
+        condition=RuleCondition(perceive_device_ids=["cam1"], query="有人"),
+        action_descriptions=list(descs),
+    )
+    r.direction = direction
+    return r
+
+
+def test_enter_rule_writes_only_the_enter_slot(env):
+    """enter 型 rule 不该碰 on_exit / on_target —— 那两个槽不属于它管辖。
+
+    从 task set-actions 配好的达标动作, 不能被一次 rule create 顺手清掉。
+    """
+    from miloco.rule.service import _rule_action_slots
+
+    assert set(_rule_action_slots(_single_edge_rule(RuleDirection.ENTER))) == {
+        "on_enter_actions",
+        "on_enter_desc",
+    }
+
+
+def test_exit_rule_writes_the_exit_slot(env):
+    """exit 型的动作填在 --action-desc 上, 但落的是 on_exit 槽。"""
+    from miloco.rule.service import _rule_action_slots
+
+    slots = _rule_action_slots(_single_edge_rule(RuleDirection.EXIT, descs=("该退了",)))
+    assert slots == {"on_exit_actions": [], "on_exit_desc": "1. 该退了"}
+
+
+def test_session_rule_writes_both_edges_and_target(env):
+    from miloco.rule.service import _rule_action_slots
+
+    slots = _rule_action_slots(_rule("[t1] s", on_target_desc="达标"))
+    assert set(slots) == {
+        "on_enter_actions",
+        "on_enter_desc",
+        "on_exit_actions",
+        "on_exit_desc",
+        "on_target_desc",
+    }
+    assert slots["on_target_desc"] == "达标"
+
+
+def test_milestone_rule_does_not_touch_task_slots(env):
+    """迁移补建的 milestone rule 动作字段恒空, 透传只会清掉 task 上的达标动作。"""
+    from miloco.rule.service import _rule_action_slots
+
+    r = _single_edge_rule(RuleDirection.MILESTONE, descs=())
+    assert _rule_action_slots(r) == {}
+
+
+def test_exit_rule_entered_edge_reads_the_exit_slot(env):
+    """exit 型的"条件成立"就是 task 该退出 → 它的 ENTERED 边沿取 on_exit 槽。
+
+    按边沿名直接映射会取到 on_enter, 拿到的就是别的 rule 写的进入文本。
+    """
+    _service, runner, _ids, _ = _build(_ACTIONS, [])
+    runner.set_task_actions("t1", _ACTIONS)
+    r = _single_edge_rule(RuleDirection.EXIT)
+
+    assert runner._select_task_slot(r, RuleEvent.ENTERED) == (
+        "dynamic",
+        "task 侧退出",
+    )
+
+
+def test_enter_rule_entered_edge_reads_the_enter_slot(env):
+    _service, runner, _ids, _ = _build(_ACTIONS, [])
+    runner.set_task_actions("t1", _ACTIONS)
+    r = _single_edge_rule(RuleDirection.ENTER)
+
+    assert runner._select_task_slot(r, RuleEvent.ENTERED) == ("dynamic", "task 侧")
+
+
+def test_single_edge_rule_has_no_exited_slot(env):
+    """单方向的 rule 只有一个边沿, EXITED 不该取到任何槽。"""
+    _service, runner, _ids, _ = _build(_ACTIONS, [])
+    runner.set_task_actions("t1", _ACTIONS)
+
+    for direction in (RuleDirection.ENTER, RuleDirection.EXIT):
+        r = _single_edge_rule(direction)
+        assert runner._select_task_slot(r, RuleEvent.EXITED) is None
+
+
+def test_direction_flip_resets_runtime_state(env):
+    """enter ↔ exit 互换时 mode 都是 event, 只看 mode 的话残留状态不会清。"""
+    _service, runner, _ids, _ = _build(_ACTIONS, [])
+    r = _single_edge_rule(RuleDirection.ENTER)
+    r.id = "r-flip"
+    runner.add_rule(r)
+    runner._ensure_state(r.id).last_rule_state = True
+
+    flipped = _single_edge_rule(RuleDirection.EXIT)
+    flipped.id = "r-flip"
+    runner.add_rule(flipped)
+
+    assert runner._ensure_state(r.id).last_rule_state is False
