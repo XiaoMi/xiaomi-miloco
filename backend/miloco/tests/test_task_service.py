@@ -205,6 +205,26 @@ async def test_effectively_enabled_rules_drops_paused_task(real_db):
     assert len(await rule_service.get_all_rules(enabled_only=True)) == 1
 
 
+def test_disable_task_cancels_target_timers(real_db, monkeypatch):
+    """停用要连带取消已起的达标 timer, 否则它到点仍会走一遍 fire 路径。
+
+    enable 不该再调 —— 那时没有遗留 timer 要清。
+    """
+    from miloco.task.service import TaskService
+
+    rule_service, runner = _real_rule_service()
+    cancelled: list[str] = []
+    monkeypatch.setattr(runner, "cancel_task_target_timers", cancelled.append)
+    svc = TaskService(rule_repo=RuleRepo(), rule_service=rule_service)
+    _setup_task_with_rule(svc)
+
+    svc.disable_task("t1")
+    assert cancelled == ["t1"]
+
+    svc.enable_task("t1")
+    assert cancelled == ["t1"]
+
+
 def test_enable_task_restores_effective_enabled(real_db):
     from miloco.task.service import TaskService
 

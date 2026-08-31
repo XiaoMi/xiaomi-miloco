@@ -775,6 +775,7 @@ class RuleService:
             # enable: 停用期间 rule 可能被改过, 要重新登记拓扑
             self.reconfigure_task(task_id)
             return
+        self._runner.cancel_task_target_timers(task_id)
         sm = self._runner.state_machine
         if sm is not None and sm.owns(task_id):
             sm.suspend(task_id)

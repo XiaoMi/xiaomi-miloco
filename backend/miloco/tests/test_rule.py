@@ -3391,6 +3391,54 @@ class TestRuleRunnerOnTargetDesc:
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_timer_fire_blocked_when_task_not_in_session(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """timer 到点那条路也要过许可闸。
+
+        守卫 1 只看自己那条的 condition —— task 被停用打成 off 时它仍可能为真,
+        那时不该再发达标, 也不该消耗「本周期已达标」的额度。
+        """
+        from miloco.task.state_machine import TaskRuntimeState
+
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        rule = _make_state_rule_with_target(rule_id="rule-tgt-timer-gated")
+        r.add_rule(rule)
+        r._ensure_state(rule.id).last_rule_state = True
+        sm = MagicMock()
+        sm.owns.return_value = True
+        sm.runtime_state.return_value = TaskRuntimeState.OFF
+        r.attach_state_machine(sm)
+
+        await r._await_and_fire_target(
+            rule, ["cam-001"], "ctx", 0.0, target_minutes=60,
+        )
+        await r.drain()
+
+        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
+        assert RuleEvent.TARGET_FIRED not in events
+        assert rule.id not in r._target_fired
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_cancel_task_target_timers_drops_pending_timer(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """按 task 取消: timer 是 asyncio task, 不受 update_state 早返影响。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
+        rule = _make_state_rule_with_target(rule_id="rule-tgt-pause")
+        r.add_rule(rule)
+        await r.update_state(rule.id, "cam-001", True, "")
+        assert rule.id in r._target_timers
+
+        r.cancel_task_target_timers(rule.task_id)
+
+        assert rule.id not in r._target_timers
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
     async def test_target_not_refired_by_sibling_rule(
         self, mock_send, mock_miot_proxy, mock_log_repo,
     ):

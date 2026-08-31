@@ -1276,6 +1276,10 @@ class RuleRunner:
         # 守卫 2：本周期已 fire 过（理论上不会，防御性）
         if self._task_target_fired(rule.task_id):
             return
+        # 守卫 3：task 得在 session 里。守卫 1 只是 per-rule 的近似 —— task 被
+        # 停用打成 off 时自己那条的 condition 仍可能是真的。
+        if not self._state_machine_allows(rule, RuleEvent.TARGET_FIRED):
+            return
         rs.target_fired = True
         actual_target_at = ms_to_iso_local(now_ms())
         # fire 时刻 read 最新 accumulated（含 in-flight session）作为真实值；
@@ -1297,6 +1301,16 @@ class RuleRunner:
             logger.exception(
                 "Rule %s on_target fire failed", rule.id
             )
+
+    def cancel_task_target_timers(self, task_id: str) -> None:
+        """取消该 task 名下已起的达标 timer。
+
+        timer 是 asyncio task, 不受 ``update_state`` 入口早返的影响 —— 停用时不
+        取消的话, 到点仍会走一遍 fire 路径。
+        """
+        for rule in self._rules.values():
+            if rule.task_id == task_id:
+                self._cancel_target_timer(rule.id)
 
     def _cancel_target_timer(self, rule_id: str) -> None:
         """只 cancel 未触发的 timer，不动 target_fired 标记。
