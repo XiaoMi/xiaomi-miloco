@@ -301,6 +301,10 @@ export interface ScopeCamera {
   // voiceInUse 正交：关着的相机也能预配，仅在被感知时注入生效。多通道相机按 channel 存取。
   perceptionPrompt: string;
   connected: boolean;
+  // 附加诊断信息（默认 undefined）。目前仅 "cross_subnet_nat"：跨网段 + 云端在线 +
+  // 探测可达 + 拉流长期卡在连接中——大概率是路由器 NAT 类型限制拉流，不是暂时抖动。
+  // 云端已离线时不给这条诊断：相机自己掉线了，问题不在路由器 NAT 上。
+  streamError?: "cross_subnet_nat";
 }
 
 // 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。

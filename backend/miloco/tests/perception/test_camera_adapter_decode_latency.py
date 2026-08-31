@@ -108,7 +108,7 @@ class TestCallbackIntegration:
             lambda: 1_700_000_005_000,
         )
 
-        cb = adapter._make_decoded_video_callback("cam1")
+        cb = adapter._make_decoded_video_callback("cam1", state)
         # recv=...090, decoded=...130 → decode=40ms
         asyncio.run(
             cb(
@@ -138,7 +138,7 @@ class TestCallbackIntegration:
             lambda: 4_925,
         )
 
-        cb = adapter._make_decoded_audio_callback("cam1")
+        cb = adapter._make_decoded_audio_callback("cam1", state)
         # recv=...870, decoded=...995 → decode=125ms
         asyncio.run(
             cb(
@@ -159,8 +159,8 @@ class TestCallbackIntegration:
         assert decoded.decode_latency_ms == 125.0
 
     def test_missing_device_is_noop(self, monkeypatch):
-        adapter, _ = self._make_adapter_with_device()
-        cb = adapter._make_decoded_video_callback("cam_unknown")
+        adapter, state = self._make_adapter_with_device()
+        cb = adapter._make_decoded_video_callback("cam_unknown", state)
         # Should not raise and should produce nothing useful.
         asyncio.run(
             cb(

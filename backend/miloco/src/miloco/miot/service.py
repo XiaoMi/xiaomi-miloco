@@ -41,6 +41,7 @@ from miloco.miot.filter import (
     denied_camera_dids,
     denied_channels_of,
     filter_by_home,
+    is_camera_connected,
     is_home_allowed,
     physical_camera_did,
     select_active_camera_dids,
@@ -1299,7 +1300,30 @@ class MiotService:
         out: list[dict] = []
         for did, info in cameras.items():
             cloud_online = bool(getattr(info, "online", False))
-            lan_reachable = bool(getattr(info, "lan_online", False))
+            device_connected = is_camera_connected(info)
+            # 已连上的相机即视为局域网可达（直连掐死 OTU 保活令 lan_online 掉 False，
+            # 但连都连上了、可达是显然的），口径与 select_active / toggle gate 一致。
+            lan_reachable = bool(getattr(info, "lan_online", False)) or device_connected
+            # 跨网段 + 探测可达 + 拉流一直连不上 → 明确提示 NAT 类型限制，而不是让
+            # 用户干等一个永远连不上的"连接中"。可达探测走**固定控制口 54321**
+            # （lan.py OT_PORT，收包侧 __socket_read_handler 的第一道过滤就是
+            # `addr[1] != OT_PORT` 直接丢，所以回包只可能来自这个源口），而媒体流走
+            # 的是握手时协商出来的另一组端口；客户端侧路由器若是严格 conntrack
+            # （非全锥 NAT），媒体口方向没有"先出后进"的映射可复用，于是控制口探测
+            # 通、媒体流恒超时。
+            # ⚠️ 别把成因写成"回包源口是动态口"：那与上面那道固定源口过滤直接冲突，
+            # 按那个说法跨网段相机的每个回包都会被丢掉、lan_online 恒 False，整条
+            # cross_subnet_nat 诊断会是永不触发的死代码——而它是实测生效的。
+            # 「当下是否连着」由 stream_nat_blocked 内部按连接起始时间戳判——那是状态
+            # 回调的实时信号（CONNECTED 时被 pop）。这里不能再叠一道 device_connected：
+            # 它读的是 _camera_info_dict 缓存，只由完整刷新（refresh_camera_online_status /
+            # 云端上下线推送）写入。网页每次加载列表前都先打一次轻量刷新，缓存是新的；
+            # CLI（scope camera list）不走那个端点，直接打这个接口，缓存可能停在"曾经
+            # 连上过"的旧值——叠这道门会让缓存陈旧时 stream_error 恒为 None，CLI 那条路
+            # 排障时看不到跨 NAT 提示，而同一时刻网页上正显示着。
+            stream_error = (
+                "cross_subnet_nat" if self._miot_proxy.stream_nat_blocked(did) else None
+            )
             channel_count = getattr(info, "channel_count", None) or 1
             lens_awake = awake_map.get(did) or {}
             # 全拆后每路是独立一等相机：``did`` 仍是物理 did（会话/拾音按整台），``channel``
@@ -1318,6 +1342,8 @@ class MiotService:
                 "lan_reachable": lan_reachable,
                 # 兼容旧字段：纯连通性(云端+局域网)，不含镜头开关维度。
                 "is_online": cloud_online and lan_reachable,
+                # 附加诊断字段，默认 None；目前只有 "cross_subnet_nat" 一种取值。
+                "stream_error": stream_error,
                 # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。拾音按整台存
                 # （只球机/ch0 有 mic），前端在无 mic 的通道上隐藏该开关。
                 "voice_in_use": did in voice_allowed,
@@ -1401,7 +1427,10 @@ class MiotService:
             return bool(getattr(cameras[pdid], "online", False))
 
         def _lan(pdid: str) -> bool:
-            return bool(getattr(cameras[pdid], "lan_online", False))
+            # 已连上的相机即视为可达（直连会掐死 OTU 保活令 lan_online 掉 False）。
+            return bool(
+                getattr(cameras[pdid], "lan_online", False)
+            ) or is_camera_connected(cameras[pdid])
 
         enabling = [
             (p, ch) for p, chs in updates.items() for ch, iu in chs.items() if iu
