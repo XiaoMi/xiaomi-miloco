@@ -148,8 +148,8 @@ def test_fresh_build_is_v2_form(fresh_db):
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
-        # user_version = 2
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # user_version = 当前基线 (v3: task 运行态 expand-contract 阶段 A)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         # task_link 表不存在
         tables = {
             row["name"]
@@ -447,7 +447,7 @@ def test_migrate_cron_dangling_skipped_with_log(v1_db, caplog):
 
 
 def test_migrate_final_invariants(v1_db):
-    """迁移完成后: user_version=2, task_link DROP, FK 干净, rule.task_id 无 NULL."""
+    """迁移完成后: user_version=当前基线, task_link DROP, FK 干净, rule.task_id 无 NULL."""
     conn = sqlite3.connect(str(v1_db))
     cursor = conn.cursor()
     _insert_task(cursor, "task-1")
@@ -464,7 +464,7 @@ def test_migrate_final_invariants(v1_db):
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
         tables = {
             r["name"]
             for r in conn.execute(
@@ -506,7 +506,20 @@ def test_migrate_is_skipped_on_v2_db(fresh_db):
             ).fetchone()[0]
             == 1
         )
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+
+
+def _pin_to_v2(db_file):
+    """把库钉回 v2 —— rollback_v2_to_v1 只接受 v2 库 (它反的就是那一步)。
+
+    正常启动路径永远把库推到当前基线, 所以 v3 之后没有任何自然途径能拿到 v2 库;
+    要测这个函数就必须显式造一个。这不是测试取巧, 是该函数真实的使用前提:
+    v3+ 的库得先各自反向退回 v2 才轮到它。
+    """
+    conn = sqlite3.connect(str(db_file))
+    conn.execute("PRAGMA user_version = 2")
+    conn.commit()
+    conn.close()
 
 
 # ── rollback ──────────────────────────────────────────────────────────
@@ -522,7 +535,8 @@ def test_rollback_reverses_v2_to_v1(v1_db):
     conn.commit()
     conn.close()
 
-    _run_init(v1_db)  # v1 → v2
+    _run_init(v1_db)  # v1 → 当前基线
+    _pin_to_v2(v1_db)
 
     from miloco.database.connector import get_db_connector, rollback_v2_to_v1
 
@@ -563,7 +577,8 @@ def test_rollback_reverses_v2_to_v1(v1_db):
 
 def test_rollback_refuses_when_internal_cron_present(v1_db):
     """rollback 前置断言: internal cron 未清空 → raise."""
-    _run_init(v1_db)  # v1 → v2 (无数据)
+    _run_init(v1_db)  # v1 → 当前基线 (无数据)
+    _pin_to_v2(v1_db)
 
     from miloco.database.connector import get_db_connector, rollback_v2_to_v1
 
