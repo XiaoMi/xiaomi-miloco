@@ -294,7 +294,7 @@ class OmniContext:
     # 逐窗实时读取（不在关闭集 = True，故**默认 True**）。与全局双闸
     # perception.engine.crop_enhance.enabled / user_enabled **相与**才裁切，见
     # omni/prompt_builder._maybe_encode_adaptive。False = 该机位改走全景路径（不裁切）。
-    # 名字带 per_camera_ 前缀是刻意的：admin API 的 PerceptionConfigUpdate 有个
+    # 名字带 per_camera_ 前缀是刻意的：admin API 的 PerceptionConfigBody 有个
     # smart_crop_enabled，指的是**全局**用户闸（= crop_enhance.user_enabled，见
     # admin/router.py），与本字段是相与关系的两个不同层级。两者都是 bool，同名的话跨层
     # 搬字段时接错哪一个不会有任何类型信号。
