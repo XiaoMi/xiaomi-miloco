@@ -3273,8 +3273,59 @@ def _make_runner_with_record(
     )
 
 
+_TASK_SLOTS_WITH_TARGET = {
+    "on_enter_actions": [],
+    "on_enter_desc": "task 侧进入",
+    "on_exit_actions": [],
+    "on_exit_desc": None,
+    "on_target_actions": [],
+    "on_target_desc": "task 侧达标",
+}
+
+
 class TestRuleRunnerOnTargetDesc:
     """spec §9 测试矩阵 T1-T8 的核心子集（不真等分钟级时延）。"""
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_target_fires_from_task_slot_when_rule_has_none(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """接管后达标闸门看 task 列 —— 真 fire 的那条 rule 自己没配也要发。
+
+        闸门只看 ``rule.on_target_desc`` 的话, 「task 配了达标动作、而 fire 的
+        那条 rule 没配」的组合永远发不出达标。
+        """
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        rule = _make_state_rule(rule_id="rule-tgt-from-task", on_enter_desc="rule 侧")
+        assert rule.on_target_desc is None
+        r.add_rule(rule)
+        r.set_task_actions(rule.task_id, _TASK_SLOTS_WITH_TARGET)
+
+        await r.update_state("rule-tgt-from-task", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
+        assert RuleEvent.TARGET_FIRED in events
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_target_timer_scheduled_from_task_slot_when_rule_has_none(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """还没达标时也要按 task 列起 timer, 否则到点没人 fire。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
+        rule = _make_state_rule(rule_id="rule-tgt-sched-task", on_enter_desc="rule 侧")
+        r.add_rule(rule)
+        r.set_task_actions(rule.task_id, _TASK_SLOTS_WITH_TARGET)
+
+        await r.update_state("rule-tgt-sched-task", "cam-001", True, "")
+
+        assert "rule-tgt-sched-task" in r._target_timers
+        r._state["rule-tgt-sched-task"].target_timer.cancel()
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
@@ -3986,6 +4037,40 @@ class TestRuleExitDebounceTargetCheck:
             task_record_service=mock_svc,
         )
         return r, state_holder
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_exit_fires_target_from_task_slot_when_rule_has_none(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """EXIT 抢先 fire 达标这条路也要按 task 列判闸门。
+
+        ENTERED 那条路的闸门在 schedule 里, 这条路直接进 ``_fire_target_if_reached``,
+        两处必须同口径。
+        """
+        mock_send.return_value = True
+        r, state_holder = self._make_runner_with_dynamic_state(
+            (5, 0), mock_miot_proxy, mock_log_repo,
+        )
+        rule = _make_state_rule(
+            rule_id="rule-exit-target-task",
+            on_enter_desc="rule 侧",
+            on_exit_desc="rule 侧退出",
+            exit_debounce_seconds=0,
+        )
+        assert rule.on_target_desc is None
+        r.add_rule(rule)
+        r.set_task_actions(rule.task_id, _TASK_SLOTS_WITH_TARGET)
+        await r.update_state(rule.id, "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        state_holder["value"] = (5, 5)
+        await r.update_state(rule.id, "cam-001", False, "")
+        await r.update_state(rule.id, "cam-001", False, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
+        assert RuleEvent.TARGET_FIRED in events
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)

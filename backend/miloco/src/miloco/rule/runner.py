@@ -1172,7 +1172,7 @@ class RuleRunner:
         ENTERED schedule 与 EXIT cancel 路径共用此入口：保证「达标必通知」语义
         不依赖 timer 时序——EXIT debounce 抢先于 timer 触发时，cancel 之前也要兑现。
         state 由调用方预读时直接传入，避免重复 SQL 查询。"""
-        if not rule.on_target_desc:
+        if not self._has_target_slot(rule):
             return False
         rs = self._ensure_state(rule.id)
         if rs.target_fired:
@@ -1217,7 +1217,7 @@ class RuleRunner:
         if old is not None and not old.done():
             old.cancel()
         rs.target_timer = None
-        if not rule.on_target_desc:
+        if not self._has_target_slot(rule):
             return
         if rs.target_fired:
             return
@@ -1568,6 +1568,18 @@ class RuleRunner:
                 return ("dynamic", rule.on_target_desc)
             return None
         return None
+
+    def _has_target_slot(self, rule: Rule) -> bool:
+        """这个 task 有没有配达标动作 —— 接管后看 task 列, 未接管回退 rule 列。
+
+        动作内容走 ``_select_task_slot`` 从 task 读, 闸门必须同源: 只看
+        ``rule.on_target_desc`` 会让「task 配了达标动作、而真 fire 的那条 rule
+        没配」的组合永远起不了 timer, 达标发不出去。
+        """
+        slot = self._select_task_slot(rule, RuleEvent.TARGET_FIRED)
+        if slot is _NO_TASK_ACTIONS:
+            return bool(rule.on_target_desc)
+        return slot is not None
 
     # ---- 设备直控路径（V1 direct dispatch） ----
 

@@ -44,13 +44,14 @@ def env(tmp_path, monkeypatch):
     reset_settings()
 
 
-def _rule(name, task_id="t1", mode=RuleMode.STATE, direction=None):
+def _rule(name, task_id="t1", mode=RuleMode.STATE, direction=None, on_target_desc=None):
     r = Rule(
         name=name,
         task_id=task_id,
         mode=mode,
         condition=RuleCondition(perceive_device_ids=["cam1"], query="有人"),
         on_enter_desc="rule 侧",
+        on_target_desc=on_target_desc,
     )
     if direction is not None:
         r.direction = direction
@@ -392,3 +393,44 @@ def test_tracking_cleared_when_task_unregistered(env):
     runner.state_machine.unregister_task("t1")
 
     assert task_service.get_full_view("t1").last_decision is None
+
+
+# ── 达标闸门与动作内容同源 (§10.3 阶段 A 的读侧) ──────────────────────
+
+
+def test_target_gate_reads_task_slot(env):
+    """task 配了达标动作、真 fire 的那条 rule 没配 —— 闸门必须放行。
+
+    只看 ``rule.on_target_desc`` 的话 timer 永远起不来, 达标发不出去。
+    """
+    _service, runner, ids, _ = _build(
+        {**_ACTIONS, "on_target_desc": "task 侧达标"}, [_rule("[t1] s")]
+    )
+    rule = RuleRepo().get_by_id(ids[0])
+    assert rule.on_target_desc is None
+
+    assert runner._has_target_slot(rule) is True
+
+
+def test_target_gate_does_not_fall_back_when_task_slot_empty(env):
+    """接管了但 task 的达标槽是空的 → 不回退捡 rule 上的存量值。
+
+    回退会让用户故意留空的方向重新捡起旧动作 —— 与 ``_select_task_slot`` 同口径。
+    """
+    _service, runner, ids, _ = _build(
+        _ACTIONS, [_rule("[t1] s", on_target_desc="rule 侧达标")]
+    )
+    rule = RuleRepo().get_by_id(ids[0])
+    assert rule.on_target_desc == "rule 侧达标"
+
+    assert runner._has_target_slot(rule) is False
+
+
+def test_target_gate_falls_back_to_rule_when_task_not_owned(env):
+    """task 没有任何边界动作 → 不接管 → 闸门按 rule 列判, 与接管前逐字相同。"""
+    _service, runner, ids, _ = _build(
+        None, [_rule("[t1] s", on_target_desc="rule 侧达标")]
+    )
+    rule = RuleRepo().get_by_id(ids[0])
+
+    assert runner._has_target_slot(rule) is True
