@@ -31,6 +31,12 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot.client import MiotProxy
 from miloco.miot.filter import allowed_home_ids, filter_by_home
+from miloco.rule.record_source import (
+    MILESTONE_SENTINEL_DID,
+    RECORD_SOURCE_TYPE,
+    SUPPORTED_KIND,
+    SUPPORTED_OP,
+)
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
     SCENE_IID,
@@ -85,6 +91,57 @@ def _validate_query_phrasing(query: str) -> None:
             )
 
 
+def _validate_lifecycle(rule: Rule) -> None:
+    if rule.lifecycle == RuleLifecycle.TEMPORARY and not rule.terminate_when:
+        raise ValidationException("lifecycle=temporary requires terminate_when")
+
+
+def _validate_milestone_rule(rule: Rule) -> None:
+    """direction=milestone 的形态 (spec §9)。
+
+    单独一支是因为下面的矩阵按 ``mode`` 分，而 mode 表达不了 milestone —— milestone
+    rule 的 mode 只是个占位值。
+    """
+    if (
+        rule.on_enter_actions
+        or rule.on_enter_desc
+        or rule.on_exit_actions
+        or rule.on_exit_desc
+    ):
+        raise ValidationException(
+            "direction=milestone 只有达标一个方向，不能配 on_enter_* / on_exit_*"
+        )
+    if rule.actions or rule.action_descriptions:
+        raise ValidationException(
+            "direction=milestone 的动作走 task 的 on_target 槽，"
+            "不配 actions / action_descriptions"
+        )
+
+    # 那一列由服务端定, 不信客户端传的: 填成真设备 did 会让 milestone rule 被感知
+    # 认领, "累计达标"当成一句视觉 query 进摄像头 prompt。
+    rule.condition.perceive_device_ids = [MILESTONE_SENTINEL_DID]
+
+    dnf = rule.condition_dnf
+    items = [item for conj in (dnf.any_of if dnf else []) for item in conj]
+    if len(items) != 1 or items[0].source_type != RECORD_SOURCE_TYPE:
+        raise ValidationException(
+            "direction=milestone 本次只接受恰好一条 record 条件项，"
+            f"当前 {len(items)} 条"
+        )
+    spec = items[0].spec or {}
+    if not spec.get("task_id"):
+        raise ValidationException("record 条件项必须写 task_id（引用哪个 task 的累计）")
+    if spec.get("kind") != SUPPORTED_KIND:
+        raise ValidationException(
+            f"record 条件项本次只支持 kind={SUPPORTED_KIND!r}，"
+            f"当前 {spec.get('kind')!r}"
+        )
+    if spec.get("op") != SUPPORTED_OP:
+        raise ValidationException(
+            f"record 条件项本次只支持 op={SUPPORTED_OP!r}，当前 {spec.get('op')!r}"
+        )
+
+
 def _validate_rule_consistency(rule: Rule) -> None:
     """Apply V3 validation matrix to a fully-formed Rule.
 
@@ -92,6 +149,12 @@ def _validate_rule_consistency(rule: Rule) -> None:
     """
     # ---- 1. condition.query 措辞 ----
     _validate_query_phrasing(rule.condition.query)
+
+    if rule.resolved_direction is RuleDirection.MILESTONE:
+        # 动作槽已校验为空, 所以下面第 4 节的 action 闸门对它是空转, 不用再走。
+        _validate_milestone_rule(rule)
+        _validate_lifecycle(rule)
+        return
 
     # ---- 2. mode matrix（执行路径由 actions / action_descriptions 哪个非空决定）----
     if rule.mode == RuleMode.EVENT:
@@ -138,10 +201,7 @@ def _validate_rule_consistency(rule: Rule) -> None:
             )
 
     # ---- 3. lifecycle ----
-    if rule.lifecycle == RuleLifecycle.TEMPORARY and not rule.terminate_when:
-        raise ValidationException(
-            "lifecycle=temporary requires terminate_when"
-        )
+    _validate_lifecycle(rule)
 
     # ---- 4. action idempotent / cooldown 配对 ----
     # idempotent=False 的 action 不会做"读现值后判跳过"，必须靠 cooldown_minutes
@@ -331,36 +391,70 @@ class RuleService:
             task_record_service = TaskRecordService()
         self._task_record_service = task_record_service
 
-    def _validate_on_target_desc_compat(self, rule: Rule) -> None:
-        """on_target_desc 非空 → task 必须有 duration record + target_minutes。
+    def _target_record_task_id(self, rule: Rule) -> str | None:
+        """这条 rule 的达标看哪个 task 的 record —— 看不出达标就返 None。
 
+        milestone rule 读条件项里引用的 task（spec §9 允许引用别的 task）；存量的
+        rule 侧 ``on_target_desc`` 看自己所属的 task。
+        """
+        if rule.resolved_direction is RuleDirection.MILESTONE:
+            dnf = rule.condition_dnf
+            items = [item for conj in (dnf.any_of if dnf else []) for item in conj]
+            return (items[0].spec or {}).get("task_id") if items else None
+        return rule.task_id if rule.on_target_desc else None
+
+    def _require_target_action(self, rule: Rule) -> None:
+        """达标规则要求 task 已配达标动作 (spec §9)。
+
+        没配的话边沿照样被消耗、动作槽是空的 —— 用户看到规则建成功、然后什么都
+        不发生, 且从规则本身看不出缺什么。
+        """
+        if rule.resolved_direction is not RuleDirection.MILESTONE:
+            return
+        actions = self._task_repo.get_full_view(rule.task_id) or {}
+        slots = actions.get("actions") or {}
+        if slots.get("on_target_actions") or slots.get("on_target_desc"):
+            return
+        if rule.on_target_desc:
+            return
+        raise ValidationException(
+            f"达标规则要求 task {rule.task_id!r} 先配达标动作。修复："
+            f'miloco-cli task set-actions {rule.task_id} --on-target-desc "..."'
+        )
+
+    def _validate_target_record(self, rule: Rule) -> None:
+        """达标要求被引用的 task 有 duration record + target_minutes。
+
+        没有阈值的达标通知永远不会触发，建成 active 等于留一个用户发现不了的失效项。
         报错按当前 record 状态分三种 case，每种附可执行的 CLI 修复命令。
         """
-        if not rule.on_target_desc:
+        task_id = self._target_record_task_id(rule)
+        if not task_id:
             return
-        kind = self._task_record_service.detect_record_kind(rule.task_id)
+        self._require_target_action(rule)
+        kind = self._task_record_service.detect_record_kind(task_id)
         if kind is None:
             raise ValidationException(
-                f"on_target_desc 要求 task {rule.task_id!r} 配 duration record + "
+                f"累计达标要求 task {task_id!r} 配 duration record + "
                 f"target_minutes，但 task 当前无活跃 record。修复："
-                f"miloco-cli task record init {rule.task_id} --kind duration "
+                f"miloco-cli task record init {task_id} --kind duration "
                 f'--content \'{{"target_minutes":N,'
                 f'"recurring_pattern":{{"window":"day"}}}}\''
             )
         if kind != "duration":
             raise ValidationException(
-                f"on_target_desc 要求 task {rule.task_id!r} 配 duration record，"
+                f"累计达标要求 task {task_id!r} 配 duration record，"
                 f"当前 record kind={kind!r}（仅 duration 支持累计达标）。修复："
-                f"先 miloco-cli task delete {rule.task_id}（连带删 record），"
+                f"先 miloco-cli task delete {task_id}（连带删 record），"
                 f"再 task create + task record init --kind duration"
             )
-        state = self._task_record_service.read_duration_target_state(rule.task_id)
+        state = self._task_record_service.read_duration_target_state(task_id)
         target_minutes = state[0] if state is not None else None
         if target_minutes is None:
             raise ValidationException(
-                f"on_target_desc 要求 task {rule.task_id!r} 的 duration record "
+                f"累计达标要求 task {task_id!r} 的 duration record "
                 f"设置 target_minutes（当前为空）。修复："
-                f"miloco-cli task record update {rule.task_id} "
+                f"miloco-cli task record update {task_id} "
                 f'--patch \'{{"target_minutes":N}}\''
             )
 
@@ -376,6 +470,12 @@ class RuleService:
         valid = [device.did for device in devices]
         physical = {d.rsplit(":ch", 1)[0] for d in valid if ":ch" in d}
         return valid + sorted(physical - set(valid))
+
+    async def _validate_perceive_devices_of(self, rule: Rule) -> None:
+        """milestone rule 的那一列是占位, 不是真设备 —— 按真设备校验会直接拒掉。"""
+        if rule.resolved_direction is RuleDirection.MILESTONE:
+            return
+        await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
 
     async def _validate_perceive_device_ids(self, dids: list[str]) -> None:
         valid_dids = await self._get_valid_perceive_device_ids()
@@ -454,9 +554,9 @@ class RuleService:
 
         self._fill_default_duration_ratio(rule)
 
-        await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
+        await self._validate_perceive_devices_of(rule)
         _validate_rule_consistency(rule)
-        self._validate_on_target_desc_compat(rule)
+        self._validate_target_record(rule)
         await self._validate_scene_ids(rule)
 
         rule_id = self._repo.create(rule)
@@ -496,9 +596,9 @@ class RuleService:
         pre_rollover_state: tuple[int | None, int] | None = None,
     ) -> None:
         """task_record rollover 完成后由 daily job 调入，触发 rule engine 跨日
-        强制 on_exit + on_enter + 重 schedule on_target timer。pre_rollover_state
+        强制 on_exit + on_enter，并让 record 源按新一天重排。pre_rollover_state
         为 rollover_one 执行前 snapshot 的 ``(target_minutes, accumulated_minutes_today)``，
-        用于 rule engine 兜底 fire on_target（旧一天达标但 timer 还没到点的场景）。"""
+        用于兑现旧一天已达标但 timer 还没到点的场景。"""
         self._runner.force_cross_day_reset(task_id, pre_rollover_state)
 
     def get_enabled_rule_ids(self) -> list[str]:
@@ -521,9 +621,9 @@ class RuleService:
 
         self._fill_default_duration_ratio(rule)
 
-        await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
+        await self._validate_perceive_devices_of(rule)
         _validate_rule_consistency(rule)
-        self._validate_on_target_desc_compat(rule)
+        self._validate_target_record(rule)
         await self._validate_scene_ids(rule)
 
         success = self._repo.update(rule)
@@ -640,7 +740,7 @@ class RuleService:
             existing.duration_ratio = update.duration_ratio
 
         _validate_rule_consistency(existing)
-        self._validate_on_target_desc_compat(existing)
+        self._validate_target_record(existing)
         # 与上面 perceive_device_ids 同口径:只校验这次 PATCH 真的动了的东西。
         # 无条件跑的话,场景被删 / 家庭被关之后连 `rule disable`(它本身就是一次
         # PATCH)都会 400 —— 规则坏掉的那一刻正好把「先关掉它」这条路堵死。
@@ -786,7 +886,7 @@ class RuleService:
             # enable: 停用期间 rule 可能被改过, 要重新登记拓扑
             self.reconfigure_task(task_id)
             return
-        self._runner.cancel_task_target_timers(task_id)
+        self._runner.record_source.disarm(task_id)
         sm = self._runner.state_machine
         if sm is not None and sm.owns(task_id):
             sm.suspend(task_id)

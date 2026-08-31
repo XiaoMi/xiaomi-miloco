@@ -184,7 +184,7 @@ def _filter_completed_event_rules(
     - duration recurring + accumulated >= target_minutes * 60
 
     state mode 不过滤（剔除会让 ENTERED→EXITED 翻转、取消 on_exit 设备动作；
-    state 路径靠 rule engine ``_target_fired`` runtime 做周期达标静默）。
+    state 路径的周期达标静默靠达标条件项自身的边沿）。
     无 record 的 event rule 保留（维持现状）。
 
     返回 (kept_rules, skipped_task_ids)。skipped_task_ids 按 task 去重后排序，

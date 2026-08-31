@@ -166,9 +166,9 @@ def _recompute_progress_status(
 ) -> None:
     """progress.target 变更后,按 current vs target 重算 status。
 
-    recurring task 永不翻 completed —— recurring 的语义是循环，没有"完成"
-    终点；本周期内达标的"防重复通知"由 rule engine `_target_fired` runtime
-    状态承担，跨周期 rollover 重置，不入 DB。
+    recurring task 永不翻 completed —— recurring 的语义是循环，没有"完成"终点。
+    progress 没有达标通知这条路（record 源本次只支持 duration），所以这里也没有
+    防重复要考虑。
     """
     row = ProgressRepo.get_active(cursor, task_id)
     if row is None:
@@ -198,8 +198,8 @@ def _recompute_duration_status(
 
     target=None 时 status 永远 active（无达标语义）。
     recurring task 永不翻 completed —— recurring 的语义是循环，没有"完成"
-    终点；本周期内达标的"防重复通知"由 rule engine `_target_fired` runtime
-    状态承担，跨周期 rollover 重置，不入 DB。
+    终点；本周期内达标的"防重复通知"由达标条件项自身的边沿承担（条件已为真就
+    产不出新边沿），跨周期归零把它翻假，不入 DB。
     """
     row = DurationRepo.get_active(cursor, task_id)
     if row is None:
@@ -627,8 +627,7 @@ class TaskRecordService:
                         "derived": _derive_progress(row).model_dump(),
                     }
 
-                # recurring task 永不翻 completed（循环没有终点；本周期"已达标"
-                # 防重复由 rule engine `_target_fired` runtime 承担）。
+                # recurring task 永不翻 completed（循环没有终点）。
                 is_recurring = row["recurring_pattern"] is not None
                 if delta >= 0:
                     new_current = min(current + delta, target)
@@ -843,7 +842,7 @@ class TaskRecordService:
                     cursor, task_id=task_id
                 )
                 # recurring task 永不翻 completed（循环没有终点；本周期"已达标"
-                # 防重复由 rule engine `_target_fired` runtime 承担）。
+                # 防重复由达标条件项自身的边沿承担）。
                 is_recurring = row["recurring_pattern"] is not None
                 target_raw = row["target_minutes"]
                 if (

@@ -167,30 +167,54 @@ def test_exit_when_off_is_blocked(monkeypatch):
     assert runner._state_machine_allows(r, RuleEvent.EXITED) is False
 
 
-def test_target_fired_requires_session(monkeypatch):
-    """milestone 只在 task 处于 on 时放行 (§5.3)。"""
+def test_milestone_edge_requires_session(monkeypatch):
+    """milestone 的进入边沿只在 task 处于 on 时放行 (§5.3)。
+
+    走 ENTERED 而不是 TARGET_FIRED: 达标信号现在来自一条独立的 milestone rule,
+    它的进入边沿由 ``slot_for_edge`` 映射成达标槽 —— 许可闸不再单判达标。
+    """
+    enter_rule = _rule(rule_id="r-enter", mode=RuleMode.STATE, on_enter_desc="x")
+    milestone = _rule(
+        rule_id="r-ms", mode=RuleMode.EVENT, direction=RuleDirection.MILESTONE
+    )
+    exit_rule = _rule(
+        rule_id="r-exit", mode=RuleMode.EVENT, direction=RuleDirection.EXIT
+    )
+    runner = _runner([enter_rule, milestone, exit_rule], monkeypatch)
+    _attach(runner, "t1", [enter_rule, milestone, exit_rule], _TASK_DESC)
+
+    assert runner._state_machine_allows(milestone, RuleEvent.ENTERED) is False
+    runner._state_machine_allows(enter_rule, RuleEvent.ENTERED)
+    assert runner._state_machine_allows(milestone, RuleEvent.ENTERED) is True
+
+
+def test_milestone_edge_does_not_change_state(monkeypatch):
+    """从 off 观测: 方向映射错了会把 milestone 当成进入边沿、把 task 推进 on。
+
+    必须从 off 观测 —— 从 on 观测的话映射错了也会命中"已在态内", 状态照旧是 on,
+    对错给同样结果。
+    """
+    milestone = _rule(
+        rule_id="r-ms", mode=RuleMode.EVENT, direction=RuleDirection.MILESTONE
+    )
+    exit_rule = _rule(
+        rule_id="r-exit", mode=RuleMode.EVENT, direction=RuleDirection.EXIT
+    )
+    runner = _runner([milestone, exit_rule], monkeypatch)
+    sm = _attach(runner, "t1", [milestone, exit_rule], _TASK_DESC)
+
+    runner._state_machine_allows(milestone, RuleEvent.ENTERED)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+def test_non_edge_event_is_not_allowed(monkeypatch):
+    """许可闸只认进/出边沿。收到别的事件要拒, 不能 KeyError 崩在感知热路径上。"""
     r = _rule(mode=RuleMode.STATE, on_enter_desc="x")
     runner = _runner([r], monkeypatch)
     _attach(runner, "t1", [r], _TASK_DESC)
 
     assert runner._state_machine_allows(r, RuleEvent.TARGET_FIRED) is False
-    runner._state_machine_allows(r, RuleEvent.ENTERED)
-    assert runner._state_machine_allows(r, RuleEvent.TARGET_FIRED) is True
-
-
-def test_target_fired_does_not_change_state(monkeypatch):
-    """从 off 观测: milestone 走普通信号路径会把 task 推进 on, 从 on 观测则看不出。
-
-    这条一开始是从 on 观测的, 删掉 milestone 分支后 TARGET_FIRED 当成 ENTERED
-    走普通路径、命中"已在态内"、状态照旧是 on —— 对错给同样结果。
-    """
-    r = _rule(mode=RuleMode.STATE, on_enter_desc="x")
-    runner = _runner([r], monkeypatch)
-    sm = _attach(runner, "t1", [r], _TASK_DESC)
-
-    runner._state_machine_allows(r, RuleEvent.TARGET_FIRED)
-
-    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
 
 
 # ── 注入点: is_condition_satisfied ────────────────────────────────────

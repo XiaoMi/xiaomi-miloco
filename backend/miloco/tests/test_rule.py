@@ -22,11 +22,14 @@ from miloco.middleware.exceptions import (
 )
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
+    ConditionItem,
     Rule,
     RuleAction,
     RuleActionExecuteResult,
     RuleCondition,
+    RuleConditionDNF,
     RuleConditionUpdate,
+    RuleDirection,
     RuleEvent,
     RuleExecuteResult,
     RuleLifecycle,
@@ -37,6 +40,7 @@ from miloco.rule.schema import (
     aggregate_outcomes,
 )
 from miloco.rule.service import RuleService
+from miloco.task.state_machine import TaskRuntimeState
 
 # ---- Helpers ----
 
@@ -3283,580 +3287,450 @@ _TASK_SLOTS_WITH_TARGET = {
 }
 
 
-class TestRuleRunnerOnTargetDesc:
-    """spec §9 测试矩阵 T1-T8 的核心子集（不真等分钟级时延）。"""
+def _make_milestone_rule(rule_id="rule-ms", task_id=TASK_ID, on_target_desc=None):
+    """带 record 条件项的 milestone rule —— 达标通知的承载物 (spec §6.4)。
+
+    ``spec.value`` 故意写成一个错的阈值: 真阈值读 record 上的 ``target_minutes``,
+    抄进条件项那份只是迁移遗留。写对了就分不出读的是哪一份。
+    """
+    return Rule(
+        id=rule_id,
+        name=f"[{task_id}] 累计达标",
+        task_id=task_id,
+        mode=RuleMode.EVENT,
+        direction=RuleDirection.MILESTONE,
+        lifecycle=RuleLifecycle.PERMANENT,
+        enabled=True,
+        condition=RuleCondition(
+            perceive_device_ids=["__milestone_no_camera__"], query="累计达标",
+        ),
+        condition_dnf=RuleConditionDNF(any_of=[[ConditionItem(
+            source_type="record",
+            spec={"task_id": task_id, "kind": "duration", "op": ">=",
+                  "value": 999999},
+        )]]),
+        on_target_desc=on_target_desc,
+    )
+
+
+def _fired_events(mock_send):
+    return [it.event for call in mock_send.call_args_list for it in call.args[1]]
+
+
+class TestRecordMilestoneFire:
+    """达标通知走 record 源 → 条件层 → milestone rule → task 的达标槽。
+
+    防重复不靠标记, 靠条件项自身的边沿: 条件已经为真就说明发过了, 再喂真不产生
+    边沿。跨日归零把它翻假, 第二天达标是一次全新的假→真。
+    """
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_target_fires_from_task_slot_when_rule_has_none(
+    async def test_fires_when_already_accumulated_at_session_start(
         self, mock_send, mock_miot_proxy, mock_log_repo,
     ):
-        """接管后达标闸门看 task 列 —— 真 fire 的那条 rule 自己没配也要发。
-
-        闸门只看 ``rule.on_target_desc`` 的话, 「task 配了达标动作、而 fire 的
-        那条 rule 没配」的组合永远发不出达标。
-        """
+        """进 session 时累计已达标 → 立即发达标。"""
         mock_send.return_value = True
         r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
-        rule = _make_state_rule(rule_id="rule-tgt-from-task", on_enter_desc="rule 侧")
-        assert rule.on_target_desc is None
-        r.add_rule(rule)
-        r.set_task_actions(rule.task_id, _TASK_SLOTS_WITH_TARGET)
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入")
+        ms = _make_milestone_rule(on_target_desc="达标了")
+        r.add_rule(main)
+        r.add_rule(ms)
 
-        await r.update_state("rule-tgt-from-task", "cam-001", True, "")
+        await r.update_state("rule-main", "cam-001", True, "")
         await asyncio.sleep(0.05)
         await r.drain()
 
-        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
-        assert RuleEvent.TARGET_FIRED in events
+        assert RuleEvent.TARGET_FIRED in _fired_events(mock_send)
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_target_timer_scheduled_from_task_slot_when_rule_has_none(
+    async def test_fires_from_task_slot_when_milestone_rule_has_none(
         self, mock_send, mock_miot_proxy, mock_log_repo,
     ):
-        """还没达标时也要按 task 列起 timer, 否则到点没人 fire。"""
-        mock_send.return_value = True
-        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
-        rule = _make_state_rule(rule_id="rule-tgt-sched-task", on_enter_desc="rule 侧")
-        r.add_rule(rule)
-        r.set_task_actions(rule.task_id, _TASK_SLOTS_WITH_TARGET)
-
-        await r.update_state("rule-tgt-sched-task", "cam-001", True, "")
-
-        assert "rule-tgt-sched-task" in r._target_timers
-        r._state["rule-tgt-sched-task"].target_timer.cancel()
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_target_immediate_when_already_accumulated(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """T8: ENTERED 时 accumulated 已 ≥ target → 立即 fire on_target。"""
-        mock_send.return_value = True
-        # target=60min, accumulated=60min → remaining=0
-        r = _make_runner_with_record(
-            (60, 60), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-immediate")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-immediate", "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        await r.drain()
-        events = [
-            it.event
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-        ]
-        assert RuleEvent.TARGET_FIRED in events
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_target_scheduled_and_fired_after_delay(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """T1: target=1min, accumulated=0 → schedule timer，到点 fire on_target。
-
-        测试不等真 60s：mock target=1s，await 1.2s 后验 TARGET_FIRED。
-        """
-        mock_send.return_value = True
-        # target=1min（被 minutes 单位放大为 60s）；为加速测试，直接调内部 helper
-        r = _make_runner_with_record(
-            (60, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-sched")
-        r.add_rule(rule)
-        # 直接走 ENTERED schedule 路径
-        await r.update_state("rule-tgt-sched", "cam-001", True, "")
-        # ENTERED 已 spawn timer，但 60min 太长——手动 cancel + 用短延迟重 schedule
-        # 通过覆盖 task_record_service 让 remaining=0 已在上面覆盖；
-        # 这个 case 通过直接调 _await_and_fire_target 验达标 fire 即可
-        assert "rule-tgt-sched" in r._target_timers
-        # 取消长 timer，模拟到点：直接调 _await_and_fire_target with 0 delay
-        _sched_timer = r._state["rule-tgt-sched"].target_timer
-        r._state["rule-tgt-sched"].target_timer = None
-        _sched_timer.cancel()
-        # 直接调达标 fire
-        await r._await_and_fire_target(
-            rule, ["cam-001"], "ctx", 0.0, target_minutes=60,
-        )
-        await r.drain()
-        events = [
-            it.event
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-        ]
-        assert RuleEvent.TARGET_FIRED in events
-        assert rule.id in r._target_fired
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_timer_fire_blocked_when_task_not_in_session(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """timer 到点那条路也要过许可闸。
-
-        守卫 1 只看自己那条的 condition —— task 被停用打成 off 时它仍可能为真,
-        那时不该再发达标, 也不该消耗「本周期已达标」的额度。
-        """
-        from miloco.task.state_machine import TaskRuntimeState
-
+        """milestone rule 自己没配达标文案、task 列配了 —— 也要发。"""
         mock_send.return_value = True
         r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-timer-gated")
-        r.add_rule(rule)
-        r._ensure_state(rule.id).last_rule_state = True
-        sm = MagicMock()
-        sm.owns.return_value = True
-        sm.runtime_state.return_value = TaskRuntimeState.OFF
-        r.attach_state_machine(sm)
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入")
+        ms = _make_milestone_rule()
+        assert ms.on_target_desc is None
+        r.add_rule(main)
+        r.add_rule(ms)
+        r.set_task_actions(TASK_ID, _TASK_SLOTS_WITH_TARGET)
 
-        await r._await_and_fire_target(
-            rule, ["cam-001"], "ctx", 0.0, target_minutes=60,
-        )
+        await r.update_state("rule-main", "cam-001", True, "")
+        await asyncio.sleep(0.05)
         await r.drain()
 
-        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
-        assert RuleEvent.TARGET_FIRED not in events
-        assert rule.id not in r._target_fired
+        assert RuleEvent.TARGET_FIRED in _fired_events(mock_send)
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_cancel_task_target_timers_drops_pending_timer(
+    async def test_reads_target_from_record_not_from_condition_item(
         self, mock_send, mock_miot_proxy, mock_log_repo,
     ):
-        """按 task 取消: timer 是 asyncio task, 不受 update_state 早返影响。"""
-        mock_send.return_value = True
-        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-pause")
-        r.add_rule(rule)
-        await r.update_state(rule.id, "cam-001", True, "")
-        assert rule.id in r._target_timers
-
-        r.cancel_task_target_timers(rule.task_id)
-
-        assert rule.id not in r._target_timers
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_target_not_refired_by_sibling_rule(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """「本周期已达标」是 task 维度 —— 换一条同 task 的 rule 不该再发一次。"""
+        """阈值取 record 上的当前值。取条件项里抄的那份 (999999) 就永远发不出。"""
         mock_send.return_value = True
         r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
-        rule_a = _make_state_rule_with_target(rule_id="rule-tgt-sib-a")
-        rule_b = _make_state_rule_with_target(rule_id="rule-tgt-sib-b")
-        assert rule_a.task_id == rule_b.task_id
-        r.add_rule(rule_a)
-        r.add_rule(rule_b)
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入")
+        r.add_rule(main)
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
 
-        assert r._fire_target_if_reached(rule_a, ["cam-001"], "ctx") is True
-        assert r._fire_target_if_reached(rule_b, ["cam-001"], "ctx") is False
-        await r.drain()
-
-        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
-        assert events.count(RuleEvent.TARGET_FIRED) == 1
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_target_fires_independently_for_different_tasks(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """达标静默只按 task 收口, 不同 task 之间互不影响。"""
-        mock_send.return_value = True
-        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
-        rule_a = _make_state_rule_with_target(rule_id="rule-tgt-t1", task_id="task-1")
-        rule_b = _make_state_rule_with_target(rule_id="rule-tgt-t2", task_id="task-2")
-        r.add_rule(rule_a)
-        r.add_rule(rule_b)
-
-        assert r._fire_target_if_reached(rule_a, ["cam-001"], "ctx") is True
-        assert r._fire_target_if_reached(rule_b, ["cam-001"], "ctx") is True
-        await r.drain()
-
-        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
-        assert events.count(RuleEvent.TARGET_FIRED) == 2
-
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    def test_target_gate_rejection_does_not_consume_fired_marker(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """被许可闸拦掉的那次不能消耗「本周期已达标」的额度。
-
-        置位在闸门之前的话, task 回到 session 后达标通知被永久吞掉 —— 多 rule
-        时一条先退出把 task 打成 off, 另一条的达标就再也发不出来。
-        """
-        from miloco.task.state_machine import TaskRuntimeState
-
-        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-gated")
-        r.add_rule(rule)
-        sm = MagicMock()
-        sm.owns.return_value = True
-        sm.runtime_state.return_value = TaskRuntimeState.OFF
-        r.attach_state_machine(sm)
-
-        fired = r._fire_target_if_reached(rule, ["cam-001"], "ctx")
-
-        assert fired is False
-        assert rule.id not in r._target_fired
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_target_gate_pass_sets_fired_marker(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """闸门放行时照常置位, 否则同一周期会重复发。"""
-        from miloco.task.state_machine import TaskRuntimeState
-
-        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-allowed")
-        r.add_rule(rule)
-        sm = MagicMock()
-        sm.owns.return_value = True
-        sm.runtime_state.return_value = TaskRuntimeState.ON
-        r.attach_state_machine(sm)
-
-        fired = r._fire_target_if_reached(rule, ["cam-001"], "ctx")
-        await r.drain()
-
-        assert fired is True
-        assert rule.id in r._target_fired
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_target_dropped_when_state_false_at_fire(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """T3: timer 到点但 condition 已 false → drop，不 fire on_target。"""
-        mock_send.return_value = True
-        r = _make_runner_with_record(
-            (60, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-drop")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-drop", "cam-001", True, "")
-        _drop_timer = r._state["rule-tgt-drop"].target_timer
-        r._state["rule-tgt-drop"].target_timer = None
-        _drop_timer.cancel()
-        # 模拟 condition 已 false
-        r._state[rule.id].last_rule_state = False
-        await r._await_and_fire_target(
-            rule, ["cam-001"], "ctx", 0.0, target_minutes=60,
-        )
-        await r.drain()
-        events = [
-            it.event
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-        ]
-        assert RuleEvent.TARGET_FIRED not in events
-        assert rule.id not in r._target_fired
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_exited_cancels_timer_keeps_fired_marker(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """EXITED 真 fire 时 cancel pending timer，但保留 _target_fired（record-session
-        维度，跨日才清）——同一天 EXITED 后再 ENTERED 不该重复 fire。"""
-        mock_send.return_value = True
-        r = _make_runner_with_record(
-            (60, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(
-            rule_id="rule-tgt-exit", exit_debounce_seconds=0,
-        )
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-exit", "cam-001", True, "")
-        assert "rule-tgt-exit" in r._target_timers
-        # 模拟 timer 已 fire（手动设 fired 标记）
-        r._state[rule.id].target_fired = True
-        # EXITED
-        await r.update_state("rule-tgt-exit", "cam-001", False, "")
-        await r.update_state("rule-tgt-exit", "cam-001", False, "")
+        await r.update_state("rule-main", "cam-001", True, "")
         await asyncio.sleep(0.05)
         await r.drain()
-        assert "rule-tgt-exit" not in r._target_timers
-        # fired 标记必须保留，防同一天重复 fire
-        assert rule.id in r._target_fired
 
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_same_day_reentered_does_not_refire_target(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """同一天 fire on_target 后 EXITED → 再 ENTERED（accumulated 仍 ≥ target），
-        _schedule_target_timer_if_needed 守卫早返，不重复 fire。"""
-        mock_send.return_value = True
-        # mock 一直返回 (60, 65)（达标后用户继续累积，accumulated 涨到 65）
-        r = _make_runner_with_record(
-            (60, 65), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(
-            rule_id="rule-tgt-noref", exit_debounce_seconds=0,
-        )
-        r.add_rule(rule)
-        # 第一次 ENTERED → 立即 fire（accumulated ≥ target）
-        await r.update_state("rule-tgt-noref", "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        await r.drain()
-        fire_count_first = sum(
-            1 for call in mock_send.call_args_list
-            for it in call.args[1]
-            if it.event == RuleEvent.TARGET_FIRED
-        )
-        assert fire_count_first == 1
-        # EXITED
-        await r.update_state("rule-tgt-noref", "cam-001", False, "")
-        await r.update_state("rule-tgt-noref", "cam-001", False, "")
-        await asyncio.sleep(0.05)
-        await r.drain()
-        # 再 ENTERED（同一天，accumulated 仍 ≥ target）
-        await r.update_state("rule-tgt-noref", "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        await r.drain()
-        fire_count_after = sum(
-            1 for call in mock_send.call_args_list
-            for it in call.args[1]
-            if it.event == RuleEvent.TARGET_FIRED
-        )
-        # 关键断言：第二次 ENTERED 不重复 fire
-        assert fire_count_after == 1, (
-            f"expected 1 TARGET_FIRED, got {fire_count_after}"
-        )
-
-    @pytest.mark.asyncio
-    async def test_no_target_desc_no_timer(
-        self, mock_miot_proxy, mock_log_repo,
-    ):
-        """on_target_desc=None → ENTERED 不 schedule timer。"""
-        r = _make_runner_with_record(
-            (60, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule(
-            rule_id="rule-no-tgt",
-            on_enter_desc="开始计时\ntask_id=no-tgt",
-            on_exit_desc="结束计时\ntask_id=no-tgt",
-            exit_debounce_seconds=0,
-        )
-        rule.on_target_desc = None
-        r.add_rule(rule)
-        await r.update_state("rule-no-tgt", "cam-001", True, "")
-        await r.drain()
-        assert "rule-no-tgt" not in r._target_timers
-
-    @pytest.mark.asyncio
-    async def test_target_skipped_when_no_duration_record(
-        self, mock_miot_proxy, mock_log_repo,
-    ):
-        """read_duration_target_state=None → 不 schedule。"""
-        r = _make_runner_with_record(
-            None, mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-none")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-none", "cam-001", True, "")
-        await r.drain()
-        assert "rule-tgt-none" not in r._target_timers
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_force_cross_day_reset_fires_exit_then_enter(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """T6: 跨日 force-reset 真 fire on_exit + on_enter + 重 schedule timer。"""
-        mock_send.return_value = True
-        # 第一次进入时 accumulated=30，第二次（跨日后）accumulated=0
-        states = iter([(60, 30), (60, 0)])
-        mock_svc = MagicMock()
-        mock_svc.detect_record_kind = MagicMock(return_value="duration")
-        mock_svc.read_duration_target_state = MagicMock(
-            side_effect=lambda task_id: next(states)
-        )
-        r = RuleRunner(
-            rules=[],
-            miot_proxy=mock_miot_proxy,
-            rule_log_repo=mock_log_repo,
-            task_record_service=mock_svc,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-xday")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-xday", "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        assert "rule-tgt-xday" in r._target_timers
-        # 跨日触发
-        r.force_cross_day_reset(rule.task_id)
-        await asyncio.sleep(0.05)
-        await r.drain()
-        events = [
-            it.event
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-        ]
-        # 应该看到 ENTERED（首次） + EXITED（跨日） + ENTERED（跨日 force）
-        assert events.count(RuleEvent.ENTERED) >= 2
-        assert RuleEvent.EXITED in events
-        # 重 schedule 后 timer 仍在（新一天 accumulated=0 → remaining=60min）
-        assert "rule-tgt-xday" in r._target_timers
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_cross_day_reset_clears_fired_marker(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """跨日 force-reset 必须清 _target_fired，新一天才能再 fire。"""
-        mock_send.return_value = True
-        r = _make_runner_with_record(
-            (60, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-xday-fired")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-xday-fired", "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        # 模拟已 fire 过 on_target
-        r._state[rule.id].target_fired = True
-        # 跨日 reset
-        r.force_cross_day_reset(rule.task_id)
-        await asyncio.sleep(0.05)
-        await r.drain()
-        # fired 必须清掉
-        assert rule.id not in r._target_fired
-        # 新一天 timer 重新挂上
-        assert "rule-tgt-xday-fired" in r._target_timers
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_cross_day_reset_fires_target_when_pre_state_reached(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """旧一天累计已达标但 timer 还没到点 → 跨日兜底 fire TARGET。"""
-        mock_send.return_value = True
-        # 新一天 state=(5, 0)，旧一天 pre_state=(5, 5) 已达标
-        r = _make_runner_with_record(
-            (5, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-xday-reach")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-xday-reach", "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        # ENTERED 时 state=(5,0) 未达标，未 fire TARGET
-        assert rule.id not in r._target_fired
-        r.force_cross_day_reset(rule.task_id, pre_rollover_state=(5, 5))
-        await asyncio.sleep(0.05)
-        await r.drain()
-        target_count = sum(
-            1
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-            if it.event == RuleEvent.TARGET_FIRED
-        )
-        assert target_count == 1
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_cross_day_reset_skips_target_when_pre_state_below(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """旧一天累计 < target → 跨日不 fire TARGET。"""
-        mock_send.return_value = True
-        r = _make_runner_with_record(
-            (5, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-xday-below")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-xday-below", "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        r.force_cross_day_reset(rule.task_id, pre_rollover_state=(5, 2))
-        await asyncio.sleep(0.05)
-        await r.drain()
-        events = [
-            it.event
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-        ]
-        assert RuleEvent.TARGET_FIRED not in events
-
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_cross_day_reset_skips_target_when_pre_state_none(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """pre_rollover_state 缺省 → 不调兜底（向后兼容）。"""
-        mock_send.return_value = True
-        r = _make_runner_with_record(
-            (5, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-xday-none")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-xday-none", "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        r.force_cross_day_reset(rule.task_id)
-        await asyncio.sleep(0.05)
-        await r.drain()
-        events = [
-            it.event
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-        ]
-        assert RuleEvent.TARGET_FIRED not in events
-
-
-class TestRuleOnTargetMetadata:
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_immediate_fire_metadata_in_prompt(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """已达标立即 fire：prompt_text 末尾含 target_minutes / actual_target_at /
-        accumulated_at_fire 三个 metadata 行。"""
-        mock_send.return_value = True
-        r = _make_runner_with_record(
-            (60, 75), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-meta-imm")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-meta-imm", "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        await r.drain()
         prompt = _last_dispatched_prompt(mock_send, event=RuleEvent.TARGET_FIRED)
-        info = _extra_info(prompt)
+        assert _extra_info(prompt).get("target_minutes") == 60
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_fire_metadata_carries_the_numbers(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """达标文案要用真实数字，所以目标 / 实际累计 / 达标时刻都得进 prompt。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 75), mock_miot_proxy, mock_log_repo)
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入")
+        r.add_rule(main)
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+
+        await r.update_state("rule-main", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        info = _extra_info(
+            _last_dispatched_prompt(mock_send, event=RuleEvent.TARGET_FIRED)
+        )
         assert info.get("target_minutes") == 60
         assert info.get("accumulated_at_fire") == 75
         assert "actual_target_at" in info
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_timer_fire_metadata_in_prompt(
+    async def test_milestone_fire_does_not_carry_session_start(
         self, mock_send, mock_miot_proxy, mock_log_repo,
     ):
-        """timer 到点 fire：prompt_text 末尾含三 metadata 行；
-        accumulated_at_fire 取 fire 时刻最新读到的累计值。"""
+        """达标不是 session 起点 —— 注入 actual_started_at 会让 agent 去建 session。"""
         mock_send.return_value = True
-        # 起 timer 时 (60, 0)，fire 时读到 (60, 60)（mock 同一返回值即可）
-        r = _make_runner_with_record(
-            (60, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(rule_id="rule-tgt-meta-timer")
-        r.add_rule(rule)
-        await r.update_state("rule-tgt-meta-timer", "cam-001", True, "")
-        _meta_timer = r._state["rule-tgt-meta-timer"].target_timer
-        r._state["rule-tgt-meta-timer"].target_timer = None
-        _meta_timer.cancel()
-        # 改 mock，模拟 timer 到点时 accumulated 已涨到 60
-        r._task_record_service.read_duration_target_state = MagicMock(
-            return_value=(60, 60)
-        )
-        await r._await_and_fire_target(
-            rule, ["cam-001"], "ctx", 0.0, target_minutes=60,
-        )
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入")
+        r.add_rule(main)
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+
+        await r.update_state("rule-main", "cam-001", True, "")
+        await asyncio.sleep(0.05)
         await r.drain()
-        prompt = _last_dispatched_prompt(mock_send, event=RuleEvent.TARGET_FIRED)
-        info = _extra_info(prompt)
-        assert info.get("target_minutes") == 60
-        assert info.get("accumulated_at_fire") == 60
-        assert "actual_target_at" in info
+
+        info = _extra_info(
+            _last_dispatched_prompt(mock_send, event=RuleEvent.TARGET_FIRED)
+        )
+        assert "actual_started_at" not in info
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_second_arm_in_the_same_period_does_not_refire(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """条件已为真 → 再喂真不产生边沿。这就是原先那个内存标记的全部作用。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        r.add_rule(_make_state_rule(rule_id="rule-main", on_enter_desc="进入"))
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+
+        r.record_source.arm(TASK_ID)
+        await asyncio.sleep(0.05)
+        r.record_source.arm(TASK_ID)
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert _fired_events(mock_send).count(RuleEvent.TARGET_FIRED) == 1
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_refires_after_cross_day_zeroing(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """归零把条件翻假 → 第二天达标是一次全新的边沿, 必须再发一次。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        r.add_rule(_make_state_rule(rule_id="rule-main", on_enter_desc="进入"))
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+
+        r.record_source.arm(TASK_ID)
+        await asyncio.sleep(0.05)
+        await r.record_source.reset(TASK_ID)
+        r.record_source.arm(TASK_ID)
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert _fired_events(mock_send).count(RuleEvent.TARGET_FIRED) == 2
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_single_false_flips_the_condition(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """record 源喂假只喂一次 —— 留一帧观察窗会把这一次吸收掉, 条件永久停在真。
+
+        帧级抗抖是给会漏识的 omni 设的; record 的值来自 DB 算术, 不会抖。
+        """
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        ms = _make_milestone_rule(on_target_desc="达标了")
+        r.add_rule(_make_state_rule(rule_id="rule-main", on_enter_desc="进入"))
+        r.add_rule(ms)
+
+        r.record_source.arm(TASK_ID)
+        await asyncio.sleep(0.05)
+        assert r.is_condition_satisfied(ms.id) is True
+
+        await r.record_source.reset(TASK_ID)
+
+        assert r.is_condition_satisfied(ms.id) is False
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_blocked_when_task_not_in_session(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """task 没在进行时里程碑无处附着 (§5.3)。"""
+        from miloco.task.state_machine import TaskRuntimeState, TransitionOutcome
+
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        ms = _make_milestone_rule(on_target_desc="达标了")
+        r.add_rule(_make_state_rule(rule_id="rule-main", on_enter_desc="进入"))
+        r.add_rule(ms)
+        sm = MagicMock()
+        sm.owns.return_value = True
+        sm.handle.return_value = TransitionOutcome.NOT_IN_SESSION
+        sm.runtime_state.return_value = TaskRuntimeState.OFF
+        r.attach_state_machine(sm)
+
+        r.record_source.arm(TASK_ID)
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert RuleEvent.TARGET_FIRED not in _fired_events(mock_send)
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_zeroing_unlatches_a_condition_left_true_by_a_blocked_fire(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """被拦掉的那次会把条件留在真（置位排在闸门之前），归零是唯一的解锁点。
+
+        名字说的是归零解锁，不是"同日能重试"—— 同日不能，条件已经为真了。真正
+        的防线是不在 off 态喂真，那条由
+        ``TestRecordMilestoneSessionBoundary::test_exit_rule_does_not_arm_on_its_entering_edge``
+        钉住。
+        """
+        from miloco.task.state_machine import TaskRuntimeState, TransitionOutcome
+
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        ms = _make_milestone_rule(on_target_desc="达标了")
+        r.add_rule(_make_state_rule(rule_id="rule-main", on_enter_desc="进入"))
+        r.add_rule(ms)
+        sm = MagicMock()
+        sm.owns.return_value = True
+        sm.handle.return_value = TransitionOutcome.NOT_IN_SESSION
+        sm.runtime_state.return_value = TaskRuntimeState.OFF
+        r.attach_state_machine(sm)
+        r.record_source.arm(TASK_ID)
+        await asyncio.sleep(0.05)
+
+        # 回到 session: 条件得先翻假才能再产生边沿, 所以这里连带验了归零那条路
+        sm.handle.return_value = TransitionOutcome.MILESTONE_FIRED
+        sm.runtime_state.return_value = TaskRuntimeState.ON
+        await r.record_source.reset(TASK_ID)
+        r.record_source.arm(TASK_ID)
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert RuleEvent.TARGET_FIRED in _fired_events(mock_send)
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_no_record_item_no_timer(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """task 下没有 record 条件项 → 进 session 不排任何 timer。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
+        r.add_rule(_make_state_rule(rule_id="rule-main", on_enter_desc="进入"))
+
+        await r.update_state("rule-main", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+
+        assert r.record_source._timers == {}
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_schedules_timer_when_not_yet_reached(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
+        ms = _make_milestone_rule(on_target_desc="达标了")
+        r.add_rule(_make_state_rule(rule_id="rule-main", on_enter_desc="进入"))
+        r.add_rule(ms)
+
+        await r.update_state("rule-main", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+
+        assert ms.id in r.record_source._timers
+        assert RuleEvent.TARGET_FIRED not in _fired_events(mock_send)
+        r.record_source.disarm(TASK_ID)
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_no_duration_record_no_fire(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        mock_send.return_value = True
+        r = _make_runner_with_record(None, mock_miot_proxy, mock_log_repo)
+        r.add_rule(_make_state_rule(rule_id="rule-main", on_enter_desc="进入"))
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+
+        await r.update_state("rule-main", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert RuleEvent.TARGET_FIRED not in _fired_events(mock_send)
+        assert r.record_source._timers == {}
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_different_tasks_fire_independently(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """一个 task 发过达标不该让另一个 task 的达标被吞掉。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        r.add_rule(_make_milestone_rule(rule_id="ms-a", task_id="task_a",
+                                        on_target_desc="A 达标"))
+        r.add_rule(_make_milestone_rule(rule_id="ms-b", task_id="task_b",
+                                        on_target_desc="B 达标"))
+
+        r.record_source.arm("task_a")
+        r.record_source.arm("task_b")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert _fired_events(mock_send).count(RuleEvent.TARGET_FIRED) == 2
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_removing_the_rule_drops_its_timer(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """timer 存在 record 源那边, 不在 per-rule 的 state 里 —— 删 rule 要连带撤。"""
+        mock_send.return_value = True
+        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
+        ms = _make_milestone_rule(on_target_desc="达标了")
+        r.add_rule(ms)
+        r.record_source.arm(TASK_ID)
+        await asyncio.sleep(0.05)
+        assert ms.id in r.record_source._timers
+
+        r.remove_rule(ms.id)
+
+        assert r.record_source._timers == {}
+
+
+class TestRecordMilestoneAtExit:
+    """退出那一刻的兜底：timer 按挂起前的时钟排，睡过头醒来时可能早该达标。"""
+
+    @staticmethod
+    def _runner_with_switchable_record(initial, miot_proxy, log_repo):
+        """``read_duration_target_state`` 的返回值可在测试运行时切换。"""
+        mock_svc = MagicMock()
+        holder = {"value": initial}
+        mock_svc.read_duration_target_state = MagicMock(
+            side_effect=lambda task_id: holder["value"]
+        )
+        mock_svc.detect_record_kind = MagicMock(
+            return_value=None if initial is None else "duration"
+        )
+        r = RuleRunner(
+            rules=[], miot_proxy=miot_proxy, rule_log_repo=log_repo,
+            task_record_service=mock_svc,
+        )
+        return r, holder
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_fires_when_accumulated_reaches_during_debounce(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """debounce 窗口内跨过目标 → 退出前必须兑现, 否则这次达标永远丢。"""
+        mock_send.return_value = True
+        r, holder = self._runner_with_switchable_record(
+            (5, 0), mock_miot_proxy, mock_log_repo,
+        )
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入",
+                                on_exit_desc="离开", exit_debounce_seconds=0)
+        r.add_rule(main)
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+        await r.update_state("rule-main", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+
+        holder["value"] = (5, 5)
+        await r.update_state("rule-main", "cam-001", False, "")
+        await r.update_state("rule-main", "cam-001", False, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert RuleEvent.TARGET_FIRED in _fired_events(mock_send)
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_silent_when_accumulated_below_target(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        mock_send.return_value = True
+        r, _holder = self._runner_with_switchable_record(
+            (60, 10), mock_miot_proxy, mock_log_repo,
+        )
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入",
+                                on_exit_desc="离开", exit_debounce_seconds=0)
+        r.add_rule(main)
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+        await r.update_state("rule-main", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+
+        await r.update_state("rule-main", "cam-001", False, "")
+        await r.update_state("rule-main", "cam-001", False, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert RuleEvent.TARGET_FIRED not in _fired_events(mock_send)
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_does_not_refire_when_already_fired_this_period(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """进 session 时就发过了 —— 退出兜底不该再发一次。"""
+        mock_send.return_value = True
+        r, _holder = self._runner_with_switchable_record(
+            (5, 5), mock_miot_proxy, mock_log_repo,
+        )
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入",
+                                on_exit_desc="离开", exit_debounce_seconds=0)
+        r.add_rule(main)
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+        await r.update_state("rule-main", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+
+        await r.update_state("rule-main", "cam-001", False, "")
+        await r.update_state("rule-main", "cam-001", False, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert _fired_events(mock_send).count(RuleEvent.TARGET_FIRED) == 1
 
 
 class TestRuleForceCrossDayResetNoSessionTimestamps:
@@ -3933,8 +3807,8 @@ class TestRuleSelectSlotTargetFired:
         assert slot is None
 
 
-class TestRuleServiceOnTargetDescValidation:
-    """on_target_desc 配套校验：报错信息按当前 record 状态分三 case。"""
+class TestTargetRecordValidation:
+    """达标配套校验：报错信息按当前 record 状态分三 case。"""
 
     def _make_service_with_record_mock(
         self,
@@ -3971,7 +3845,7 @@ class TestRuleServiceOnTargetDescValidation:
         )
         rule = _make_state_rule_with_target(rule_id="r1", task_id="phone_time")
         with pytest.raises(ValidationException) as exc:
-            svc._validate_on_target_desc_compat(rule)
+            svc._validate_target_record(rule)
         msg = str(exc.value)
         assert "无活跃 record" in msg
         assert "miloco-cli task record init phone_time --kind duration" in msg
@@ -3985,7 +3859,7 @@ class TestRuleServiceOnTargetDescValidation:
         )
         rule = _make_state_rule_with_target(rule_id="r1", task_id="drink_8")
         with pytest.raises(ValidationException) as exc:
-            svc._validate_on_target_desc_compat(rule)
+            svc._validate_target_record(rule)
         msg = str(exc.value)
         assert "kind='progress'" in msg
         assert "仅 duration 支持累计达标" in msg
@@ -4000,7 +3874,7 @@ class TestRuleServiceOnTargetDescValidation:
         )
         rule = _make_state_rule_with_target(rule_id="r1", task_id="fall_alert")
         with pytest.raises(ValidationException) as exc:
-            svc._validate_on_target_desc_compat(rule)
+            svc._validate_target_record(rule)
         assert "kind='event'" in str(exc.value)
 
     def test_duration_no_target_minutes_error_includes_update_command(
@@ -4012,7 +3886,7 @@ class TestRuleServiceOnTargetDescValidation:
         )
         rule = _make_state_rule_with_target(rule_id="r1", task_id="reading")
         with pytest.raises(ValidationException) as exc:
-            svc._validate_on_target_desc_compat(rule)
+            svc._validate_target_record(rule)
         msg = str(exc.value)
         assert "target_minutes" in msg
         assert "当前为空" in msg
@@ -4027,7 +3901,7 @@ class TestRuleServiceOnTargetDescValidation:
         )
         rule = _make_state_rule_with_target(rule_id="r1", task_id="phone_time")
         # 不应 raise
-        svc._validate_on_target_desc_compat(rule)
+        svc._validate_target_record(rule)
 
     def test_on_target_desc_empty_skips_check(
         self, mock_miot_proxy, mock_log_repo, mock_rule_repo, mock_task_repo,
@@ -4053,7 +3927,7 @@ class TestRuleServiceOnTargetDescValidation:
             exit_debounce_seconds=0,
         )
         rule.on_target_desc = None
-        svc._validate_on_target_desc_compat(rule)
+        svc._validate_target_record(rule)
         # 没调 detect_record_kind 才证明早返
         mock_record_svc.detect_record_kind.assert_not_called()
 
@@ -4145,166 +4019,72 @@ class TestRuleExitedMetadata:
         assert "target_minutes" not in info
 
 
-class TestRuleExitDebounceTargetCheck:
-    """EXIT debounce 完成、cancel target timer 前的兜底：若此刻 accumulated 已
-    ≥ target，必须 fire TARGET 兑现累计达标承诺，否则 60s debounce 窗口内跨过
-    target 的累计永远丢失通知。"""
-
-    @staticmethod
-    def _make_runner_with_dynamic_state(
-        initial_state, miot_proxy, log_repo,
-    ):
-        """构造 read_duration_target_state 可在测试运行时切换返回值的 runner。
-        返回 (runner, state_holder)；测试代码改 state_holder["value"] 即可让
-        后续 read 返回新值。"""
-        mock_svc = MagicMock()
-        state_holder = {"value": initial_state}
-        mock_svc.read_duration_target_state = MagicMock(
-            side_effect=lambda task_id: state_holder["value"]
-        )
-        mock_svc.detect_record_kind = MagicMock(
-            return_value=None if initial_state is None else "duration"
-        )
-        r = RuleRunner(
-            rules=[],
-            miot_proxy=miot_proxy,
-            rule_log_repo=log_repo,
-            task_record_service=mock_svc,
-        )
-        return r, state_holder
+class TestRecordMilestoneCrossDay:
+    """跨日：兑现旧一天 → 归零 → 按新一天重排。"""
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_exit_fires_target_from_task_slot_when_rule_has_none(
+    async def test_settles_old_day_when_snapshot_reached(
         self, mock_send, mock_miot_proxy, mock_log_repo,
     ):
-        """EXIT 抢先 fire 达标这条路也要按 task 列判闸门。
+        """旧一天累计已达标但 timer 还没到点 → 跨日前必须兑现。
 
-        ENTERED 那条路的闸门在 schedule 里, 这条路直接进 ``_fire_target_if_reached``,
-        两处必须同口径。
+        rollover 已经清了累计，读当前值看不出旧一天达标过，只能靠快照。
         """
         mock_send.return_value = True
-        r, state_holder = self._make_runner_with_dynamic_state(
-            (5, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule(
-            rule_id="rule-exit-target-task",
-            on_enter_desc="rule 侧",
-            on_exit_desc="rule 侧退出",
-            exit_debounce_seconds=0,
-        )
-        assert rule.on_target_desc is None
-        r.add_rule(rule)
-        r.set_task_actions(rule.task_id, _TASK_SLOTS_WITH_TARGET)
-        await r.update_state(rule.id, "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        state_holder["value"] = (5, 5)
-        await r.update_state(rule.id, "cam-001", False, "")
-        await r.update_state(rule.id, "cam-001", False, "")
+        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入",
+                                on_exit_desc="离开")
+        r.add_rule(main)
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+        r._ensure_state(main.id).last_rule_state = True
+
+        r.force_cross_day_reset(TASK_ID, pre_rollover_state=(60, 90))
         await asyncio.sleep(0.05)
         await r.drain()
 
-        events = [it.event for call in mock_send.call_args_list for it in call.args[1]]
-        assert RuleEvent.TARGET_FIRED in events
+        assert RuleEvent.TARGET_FIRED in _fired_events(mock_send)
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_exit_fires_target_when_accumulated_reaches_during_debounce(
+    async def test_silent_when_snapshot_below_target(
         self, mock_send, mock_miot_proxy, mock_log_repo,
     ):
-        """ENTERED 时未达标起 timer，EXIT 时跨过 target → 兜底 fire TARGET + EXITED。"""
         mock_send.return_value = True
-        r, state_holder = self._make_runner_with_dynamic_state(
-            (5, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(
-            rule_id="rule-exit-target-reached", exit_debounce_seconds=0,
-        )
-        r.add_rule(rule)
-        await r.update_state(rule.id, "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        assert rule.id in r._target_timers
-        # 模拟 debounce 窗口内累计跨过 target
-        state_holder["value"] = (5, 5)
-        await r.update_state(rule.id, "cam-001", False, "")
-        await r.update_state(rule.id, "cam-001", False, "")
+        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入",
+                                on_exit_desc="离开")
+        r.add_rule(main)
+        r.add_rule(_make_milestone_rule(on_target_desc="达标了"))
+        r._ensure_state(main.id).last_rule_state = True
+
+        r.force_cross_day_reset(TASK_ID, pre_rollover_state=(60, 30))
         await asyncio.sleep(0.05)
         await r.drain()
-        events = [
-            it.event
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-        ]
-        assert RuleEvent.TARGET_FIRED in events
-        assert RuleEvent.EXITED in events
-        assert rule.id in r._target_fired
+
+        assert RuleEvent.TARGET_FIRED not in _fired_events(mock_send)
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_exit_skips_target_when_accumulated_below_target(
+    async def test_rearms_for_the_new_day(
         self, mock_send, mock_miot_proxy, mock_log_repo,
     ):
-        """EXIT 时 accumulated 仍 < target → 不 fire TARGET，只 fire EXITED + cancel timer。"""
+        """归零后按 accumulated=0 重排, 否则新一天永远发不出达标。"""
         mock_send.return_value = True
-        r, state_holder = self._make_runner_with_dynamic_state(
-            (5, 0), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(
-            rule_id="rule-exit-below-target", exit_debounce_seconds=0,
-        )
-        r.add_rule(rule)
-        await r.update_state(rule.id, "cam-001", True, "")
-        await asyncio.sleep(0.05)
-        state_holder["value"] = (5, 2)
-        await r.update_state(rule.id, "cam-001", False, "")
-        await r.update_state(rule.id, "cam-001", False, "")
-        await asyncio.sleep(0.05)
-        await r.drain()
-        events = [
-            it.event
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-        ]
-        assert RuleEvent.TARGET_FIRED not in events
-        assert RuleEvent.EXITED in events
-        assert rule.id not in r._target_fired
-        assert rule.id not in r._target_timers
+        r = _make_runner_with_record((60, 0), mock_miot_proxy, mock_log_repo)
+        main = _make_state_rule(rule_id="rule-main", on_enter_desc="进入",
+                                on_exit_desc="离开")
+        ms = _make_milestone_rule(on_target_desc="达标了")
+        r.add_rule(main)
+        r.add_rule(ms)
+        r._ensure_state(main.id).last_rule_state = True
 
-    @pytest.mark.asyncio
-    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
-    async def test_exit_does_not_refire_target_when_already_fired(
-        self, mock_send, mock_miot_proxy, mock_log_repo,
-    ):
-        """ENTERED 时已达标 fire 过 TARGET → EXIT 兜底检查不重复 fire。"""
-        mock_send.return_value = True
-        r, state_holder = self._make_runner_with_dynamic_state(
-            (5, 5), mock_miot_proxy, mock_log_repo,
-        )
-        rule = _make_state_rule_with_target(
-            rule_id="rule-exit-already-fired", exit_debounce_seconds=0,
-        )
-        r.add_rule(rule)
-        await r.update_state(rule.id, "cam-001", True, "")
+        r.force_cross_day_reset(TASK_ID, pre_rollover_state=(60, 90))
         await asyncio.sleep(0.05)
-        assert rule.id in r._target_fired
-        await r.update_state(rule.id, "cam-001", False, "")
-        await asyncio.sleep(0.05)
-        await r.drain()
-        target_count = sum(
-            1
-            for call in mock_send.call_args_list
-            for it in call.args[1]
-            if it.event == RuleEvent.TARGET_FIRED
-        )
-        assert target_count == 1
 
-
-# ============================================================
-# Per-device 状态机隔离(层 2): perception client 调用侧把 source_did 从字符串
-# "perception" 换成真 did 后,runner 内部 `_last_source_state[(rule_id, did)]`
-# 多桶天然 fan-out。下列 case lock 住 OR 聚合 / pending_exit 隔离 / duration 跨
-# 源 OR 三条核心语义,防止后续 regression。
-# ============================================================
+        assert r.is_condition_satisfied(ms.id) is False
+        assert ms.id in r.record_source._timers
+        r.record_source.disarm(TASK_ID)
 
 
 class TestRuleRunnerPerDeviceStateIndependence:
@@ -4825,3 +4605,221 @@ class TestRuleSceneCooldownFloor:
         )
         rule = _make_static_rule(rule_id="", actions=[good])
         assert await service.create_rule(rule) == "new-rule-id"
+
+
+class TestRecordMilestoneSessionBoundary:
+    """带真状态机的 session 边界。
+
+    上面那几个类用的 runner 没挂状态机，``_state_machine_allows`` 恒放行 ——
+    「翻 off 之前」在那里根本不存在，所以两条时序约束在那些用例里测不出来。
+    """
+
+    @staticmethod
+    def _build(record_state, rules, task_id=TASK_ID):
+        from miloco.task.state_machine import TaskStateMachine, derive_directions
+
+        svc = MagicMock()
+        svc.read_duration_target_state = MagicMock(return_value=record_state)
+        svc.detect_record_kind = MagicMock(return_value="duration")
+        r = RuleRunner(
+            rules=[], miot_proxy=AsyncMock(), rule_log_repo=MagicMock(),
+            task_record_service=svc,
+        )
+        sm = TaskStateMachine(
+            is_condition_satisfied=r.is_condition_satisfied,
+            reset_edge_baseline=r.reset_edge_baseline,
+            dispatch_action=lambda *_a: None,
+        )
+        r.attach_state_machine(sm)
+        for rule in rules:
+            r.add_rule(rule)
+        r.set_task_actions(task_id, _TASK_SLOTS_WITH_TARGET)
+        sm.register_task(
+            task_id,
+            derive_directions((x.id, x.resolved_direction.value) for x in rules),
+        )
+        return r, sm
+
+    @staticmethod
+    def _directional_rule(rule_id, direction, task_id=TASK_ID):
+        return Rule(
+            id=rule_id, name=rule_id, task_id=task_id,
+            mode=RuleMode.EVENT, direction=direction,
+            lifecycle=RuleLifecycle.PERMANENT,
+            condition=RuleCondition(perceive_device_ids=["cam-001"], query="有人"),
+            action_descriptions=["播报"],
+        )
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_exit_rule_settles_target_before_the_task_flips_off(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """非互反 task（enter + exit 两条 rule）的退出走 exit 型 rule 的进入边沿。
+
+        兑现排在状态机翻 off 之后的话，达标会被 NOT_IN_SESSION 拦掉，而条件已经
+        被置成真 —— 这一天再也产不出达标边沿。
+        """
+        mock_send.return_value = True
+        enter_rule = self._directional_rule("r-enter", RuleDirection.ENTER)
+        exit_rule = self._directional_rule("r-exit", RuleDirection.EXIT)
+        ms = _make_milestone_rule()
+        r, sm = self._build((60, 0), [enter_rule, exit_rule, ms])
+
+        await r.update_state("r-enter", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        assert sm.runtime_state(TASK_ID) is TaskRuntimeState.ON
+
+        # session 内累计跨过目标，随后 exit 条件成立
+        r._task_record_service.read_duration_target_state = MagicMock(
+            return_value=(60, 60)
+        )
+        await r.update_state("r-exit", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert sm.runtime_state(TASK_ID) is TaskRuntimeState.OFF
+        assert _fired_events(mock_send).count(RuleEvent.TARGET_FIRED) == 1
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_exit_rule_does_not_arm_on_its_entering_edge(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """exit 型 rule 的"条件成立"是"该退出了" —— 在那儿排达标 timer 是反的。
+
+        排下去的 timer 到点会在 off 态喂真，条件被锁死，当天再进 session 也发不出。
+        """
+        mock_send.return_value = True
+        enter_rule = self._directional_rule("r-enter", RuleDirection.ENTER)
+        exit_rule = self._directional_rule("r-exit", RuleDirection.EXIT)
+        ms = _make_milestone_rule()
+        r, _sm = self._build((60, 10), [enter_rule, exit_rule, ms])
+        await r.update_state("r-enter", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        assert ms.id in r.record_source._timers
+
+        await r.update_state("r-exit", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert r.record_source._timers == {}
+        assert r.is_condition_satisfied(ms.id) is not True
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_timer_survives_an_exit_that_another_condition_still_holds(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """两条 session rule，一条断开另一条还撑着 → session 没结束，别撤 timer。
+
+        撤了这一天的达标就丢了。这是 disarm 必须排在许可闸之后的理由。
+
+        用两条 session rule 而不是两条 exit 型：exit 型的条件一成立就已经把 task
+        推出去了，再进会被 §5.1 拦住，造不出「两个出口条件同时为真而 task 还在态内」。
+        """
+        mock_send.return_value = True
+
+        def session_rule(rule_id):
+            return Rule(
+                id=rule_id, name=rule_id, task_id=TASK_ID, mode=RuleMode.STATE,
+                direction=RuleDirection.SESSION,
+                lifecycle=RuleLifecycle.PERMANENT,
+                condition=RuleCondition(
+                    perceive_device_ids=["cam-001"], query="有人"
+                ),
+                on_enter_desc="开始", on_exit_desc="结束",
+                exit_debounce_seconds=0,
+            )
+
+        ms = _make_milestone_rule()
+        rule_a, rule_b = session_rule("r-ses-a"), session_rule("r-ses-b")
+        r, sm = self._build((60, 10), [rule_a, rule_b, ms])
+        await r.update_state("r-ses-a", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        # b 也看到人: 它这次进入被「已在态内」吞掉, 但条件留在真 —— 于是 a 断开时
+        # 出口侧还有 b 撑着。
+        await r.update_state("r-ses-b", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        entered = sm.runtime_state(TASK_ID)
+        assert ms.id in r.record_source._timers
+
+        await r.update_state("r-ses-a", "cam-001", False, "")
+        await r.update_state("r-ses-a", "cam-001", False, "")
+        await asyncio.sleep(0.1)
+        await r.drain()
+
+        # 中间态必须断言: 不断言的话「从没进过 session」与「进了又退出」终态一样
+        assert entered is TaskRuntimeState.ON
+        assert sm.runtime_state(TASK_ID) is TaskRuntimeState.ON
+        assert ms.id in r.record_source._timers
+        r.record_source.disarm(TASK_ID)
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_cross_day_does_not_force_an_edge_on_the_milestone_rule(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """milestone 的条件为真只表示今天发过达标，不表示 task 在态内。
+
+        不排除它的话午夜会给它强发一次进入边沿 —— 映射到达标槽，于是每天 00:00
+        多播一条达标通知，还标成 ENTERED、绕过许可闸。
+        """
+        mock_send.return_value = True
+        session_rule = Rule(
+            id="r-ses", name="r-ses", task_id=TASK_ID, mode=RuleMode.STATE,
+            direction=RuleDirection.SESSION, lifecycle=RuleLifecycle.PERMANENT,
+            condition=RuleCondition(perceive_device_ids=["cam-001"], query="有人"),
+            on_enter_desc="开始", on_exit_desc="结束",
+        )
+        ms = _make_milestone_rule()
+        r, _sm = self._build((60, 60), [session_rule, ms])
+        await r.update_state("r-ses", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+        assert r.is_condition_satisfied(ms.id) is True
+        mock_send.reset_mock()
+
+        # rollover_one 已清累计, 所以此刻读到的是新一天的 0
+        r._task_record_service.read_duration_target_state = MagicMock(
+            return_value=(60, 0)
+        )
+        r.force_cross_day_reset(TASK_ID, pre_rollover_state=(60, 60))
+        await asyncio.sleep(0.1)
+        await r.drain()
+
+        milestone_fires = [
+            it.rule_id
+            for call in mock_send.call_args_list
+            for it in call.args[1]
+            if it.rule_id == ms.id
+        ]
+        assert milestone_fires == []
+        assert r.is_condition_satisfied(ms.id) is False
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_state_machine_initiated_exit_drops_the_timer(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """重新配置的强制 on_exit 与手动注入也从 session 出来，timer 得撤。
+
+        不撤的话它到点在 off 态喂真，条件锁死。
+        """
+        mock_send.return_value = True
+        session_rule = Rule(
+            id="r-ses", name="r-ses", task_id=TASK_ID, mode=RuleMode.STATE,
+            direction=RuleDirection.SESSION, lifecycle=RuleLifecycle.PERMANENT,
+            condition=RuleCondition(perceive_device_ids=["cam-001"], query="有人"),
+            on_enter_desc="开始", on_exit_desc="结束",
+        )
+        ms = _make_milestone_rule()
+        r, _sm = self._build((60, 10), [session_rule, ms])
+        await r.update_state("r-ses", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        assert ms.id in r.record_source._timers
+
+        r.dispatch_task_action(TASK_ID, "on_exit")
+        await r.drain()
+
+        assert r.record_source._timers == {}

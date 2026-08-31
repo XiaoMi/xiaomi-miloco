@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from miloco.config import get_settings
+from miloco.rule.record_source import MILESTONE_SENTINEL_DID
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1277,11 +1278,6 @@ _V3_MODE_TO_DIRECTION = {"event": "enter", "state": "session"}
 
 _DEFAULT_EXIT_DEBOUNCE_SECONDS = 60
 
-# 自动补建的 milestone rule 在旧 condition 列上填这个 did。阶段 A 不删列, 万一
-# 回退到旧代码, 旧代码只认 perceive_device_ids —— 填真实 did 或留空, 都会让它把
-# "累计达标" 当成一句视觉 query 塞进摄像头 prompt。填一个不存在的 did, 建
-# device_rule_map 时无摄像头认领, 这条 rule 静静躺着不参与任何判定。
-_MILESTONE_SENTINEL_DID = "__milestone_no_camera__"
 
 
 def _table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
@@ -1402,7 +1398,7 @@ def _create_milestone_rule(
         ]
     }
     legacy_condition = {
-        "perceive_device_ids": [_MILESTONE_SENTINEL_DID],
+        "perceive_device_ids": [MILESTONE_SENTINEL_DID],
         "query": f"[milestone] task {task_id} 累计达标",
     }
     cursor.execute(

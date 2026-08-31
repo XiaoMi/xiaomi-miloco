@@ -214,7 +214,7 @@ def test_disable_task_cancels_target_timers(real_db, monkeypatch):
 
     rule_service, runner = _real_rule_service()
     cancelled: list[str] = []
-    monkeypatch.setattr(runner, "cancel_task_target_timers", cancelled.append)
+    monkeypatch.setattr(runner.record_source, "disarm", cancelled.append)
     svc = TaskService(rule_repo=RuleRepo(), rule_service=rule_service)
     _setup_task_with_rule(svc)
 

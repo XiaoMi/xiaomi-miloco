@@ -18,7 +18,7 @@ import sqlite3
 import pytest
 from miloco.database.rule_repo import RuleLogRepo, RuleRepo
 from miloco.database.task_repo import TaskRepo
-from miloco.rule.runner import RuleRunner
+from miloco.rule.runner import _NO_TASK_ACTIONS, RuleRunner
 from miloco.rule.schema import (
     Rule,
     RuleCondition,
@@ -402,10 +402,10 @@ def test_tracking_cleared_when_task_unregistered(env):
 # ── 达标闸门与动作内容同源 (§10.3 阶段 A 的读侧) ──────────────────────
 
 
-def test_target_gate_reads_task_slot(env):
-    """task 配了达标动作、真 fire 的那条 rule 没配 —— 闸门必须放行。
+def test_target_slot_reads_task_column(env):
+    """task 配了达标动作、真 fire 的那条 rule 没配 —— 也要取到 task 那份。
 
-    只看 ``rule.on_target_desc`` 的话 timer 永远起不来, 达标发不出去。
+    只看 ``rule.on_target_desc`` 的话达标永远发不出去。
     """
     _service, runner, ids, _ = _build(
         {**_ACTIONS, "on_target_desc": "task 侧达标"}, [_rule("[t1] s")]
@@ -413,13 +413,15 @@ def test_target_gate_reads_task_slot(env):
     rule = RuleRepo().get_by_id(ids[0])
     assert rule.on_target_desc is None
 
-    assert runner._has_target_slot(rule) is True
+    assert runner._select_task_slot(rule, RuleEvent.TARGET_FIRED) == (
+        "dynamic", "task 侧达标",
+    )
 
 
-def test_target_gate_does_not_fall_back_when_task_slot_empty(env):
+def test_target_slot_does_not_fall_back_when_task_column_empty(env):
     """接管了但 task 的达标槽是空的 → 不回退捡 rule 上的存量值。
 
-    回退会让用户故意留空的方向重新捡起旧动作 —— 与 ``_select_task_slot`` 同口径。
+    回退会让用户故意留空的方向重新捡起旧动作。
     """
     _service, runner, ids, _ = _build(
         _ACTIONS, [_rule("[t1] s", on_target_desc="rule 侧达标")]
@@ -427,17 +429,20 @@ def test_target_gate_does_not_fall_back_when_task_slot_empty(env):
     rule = RuleRepo().get_by_id(ids[0])
     assert rule.on_target_desc == "rule 侧达标"
 
-    assert runner._has_target_slot(rule) is False
+    assert runner._select_task_slot(rule, RuleEvent.TARGET_FIRED) is None
 
 
-def test_target_gate_falls_back_to_rule_when_task_not_owned(env):
-    """task 没有任何边界动作 → 不接管 → 闸门按 rule 列判, 与接管前逐字相同。"""
+def test_target_slot_falls_back_to_rule_when_task_not_owned(env):
+    """task 没有任何边界动作 → 不接管 → 按 rule 列取, 与接管前逐字相同。"""
     _service, runner, ids, _ = _build(
         None, [_rule("[t1] s", on_target_desc="rule 侧达标")]
     )
     rule = RuleRepo().get_by_id(ids[0])
 
-    assert runner._has_target_slot(rule) is True
+    assert runner._select_task_slot(rule, RuleEvent.TARGET_FIRED) is _NO_TASK_ACTIONS
+    assert runner._select_slot(rule, RuleEvent.TARGET_FIRED) == (
+        "dynamic", "rule 侧达标",
+    )
 
 
 # ── 动作槽按 direction 分 ──────────────────────────────────────────────
