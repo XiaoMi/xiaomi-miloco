@@ -128,7 +128,9 @@ $ miloco-cli scope home list
 
 $ miloco-cli scope camera list
   → {"code":0,"message":"ok","data":[
-       {"did":"1154253569","name":"小米智能摄像机C700","is_online":true,"in_use":true,"connected":true}]}
+       {"did":"1154253569","name":"小米智能摄像机C700","channel":0,"is_online":true,"in_use":true,
+        "connected":true,"awake":true,"voice_in_use":false,"crop_in_use":true,"crop_effective":true,
+        "perception_prompt":""}]}
 
 # 切换到 xiaomi 家庭（其余自动停用，返回全量家庭列表）
 $ miloco-cli scope home switch 611001866489
