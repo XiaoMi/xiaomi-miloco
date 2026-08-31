@@ -223,9 +223,13 @@ export function UsageOmniConfig() {
   const profiles = state?.profiles ?? [];
   const active = state?.active;
   const hasKey = active?.has_key ?? false;
+  // base_url 归一化（trim + 去尾斜杠），与后端 _key_by_label 的 rstrip("/") 对齐——
+  // 否则用户填 "https://openrouter.ai/api/v1/"（尾斜杠）就匹配不到已存档案、
+  // has_key 误判为 false → 前端先拦截报"请先填写 API Key"，而后端本可沿用存档 key。
+  const normUrl = (u: string) => u.trim().replace(/\/+$/, "");
   // 新增表单里同 (model, base_url) 是否已存(→ 改为更新该条)
   const existing = profiles.find(
-    (p) => p.base_url === baseUrl.trim() && p.model === model.trim(),
+    (p) => normUrl(p.base_url) === normUrl(baseUrl) && p.model === model.trim(),
   );
 
   function startAdd() {

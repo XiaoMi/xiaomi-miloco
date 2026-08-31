@@ -66,12 +66,25 @@ async def probe_reachable(base_url: str) -> dict | None:
     return {"code": "http_error", "message": f"服务返回异常（HTTP {r.status_code}）"}
 
 
+def is_gemini_base_url(base_url: str) -> bool:
+    """base_url 主机是否为 Gemini **原生**协议根（精确匹配，防 URL 子串绕过）。
+
+    与 provider.get_adapter 的 ``_GEMINI_NATIVE_HOSTS`` 同源（generativelanguage /
+    aiplatform）：这两个主机走 generateContent 原生协议 + x-goog-api-key 鉴权。
+    """
+    from miloco.perception.engine.omni.provider import _GEMINI_NATIVE_HOSTS
+
+    return (urlparse(base_url).hostname or "").lower() in _GEMINI_NATIVE_HOSTS
+
+
 async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
     """拉取 provider 模型列表(GET /models)。
 
     模型下拉在「选定 model 之前」拉取,没有 model 可路由 adapter,故按 base_url 判 provider:
-    Gemini 原生根(generativelanguage)用 ``x-goog-api-key`` 鉴权、响应形态 ``{models:[{name}]}``
-    (需剥 "models/" 前缀);其余按 OpenAI 兼容 ``{data:[{id}]}`` + ``Bearer`` 解析。
+    Gemini 原生根(generativelanguage / aiplatform)用 ``x-goog-api-key`` 鉴权、响应形态
+    ``{models:[{name}]}``(name 需剥前缀——Developer API 是 ``models/gemini-x``,
+    Vertex 是 ``publishers/google/models/gemini-x``,统一取最后一段);
+    其余按 OpenAI 兼容 ``{data:[{id}]}`` + ``Bearer`` 解析。
     (经代理转发的 Gemini 不含该域名时,仍走 OpenAI 兼容分支——用户可手填 model 名兜底。)
     """
     base, err = _normalize_base_url(base_url)
@@ -80,9 +93,7 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
     # 解析出主机名精确匹配,不用子串判断(``"…" in base_url`` 会被
     # ``https://evil.com/generativelanguage.googleapis.com`` 之类绕过——CodeQL 报的
     # incomplete URL substring sanitization)。
-    is_gemini = (
-        (urlparse(base).hostname or "").lower() == "generativelanguage.googleapis.com"
-    )
+    is_gemini = is_gemini_base_url(base)
     headers = (
         {"x-goog-api-key": api_key}
         if is_gemini
@@ -102,7 +113,7 @@ async def fetch_models(base_url: str, api_key: str) -> dict[str, Any]:
         try:
             if is_gemini:
                 ids = [
-                    (m.get("name") or "").removeprefix("models/")
+                    (m.get("name") or "").split("/")[-1]
                     for m in (r.json().get("models") or [])
                     if m.get("name")
                 ]

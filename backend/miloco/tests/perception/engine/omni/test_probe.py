@@ -429,3 +429,58 @@ async def test_probe_chat_stream_429_preserves_retry_after(monkeypatch):
     assert r["code"] == "rate_limited"
     # 关键:Retry-After 被解析出来传给上层 _grow_backoff_locked
     assert r["retry_after_seconds"] == 45.0
+
+
+# ─── Gemini 原生主机（generativelanguage / aiplatform）────────────────────
+
+
+async def test_is_gemini_base_url():
+    assert probe.is_gemini_base_url("https://generativelanguage.googleapis.com/v1beta") is True
+    assert probe.is_gemini_base_url("https://aiplatform.googleapis.com/v1/publishers/google") is True
+    assert probe.is_gemini_base_url("https://openrouter.ai/api/v1") is False
+    assert probe.is_gemini_base_url("https://evil.com/generativelanguage.googleapis.com") is False
+
+
+async def test_fetch_models_vertex_ai_uses_goog_key_and_strips_publisher_prefix(monkeypatch):
+    """Vertex AI publisher 端点：x-goog-api-key 鉴权 + models 字段 + name 剥前缀。
+
+    回归：曾把 aiplatform 当 OpenAI 兼容网关 → Bearer + {data:[{id}]} 解析
+    → 鉴权 401 且列表为空。
+    """
+    captured: dict = {}
+
+    class _CaptureClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, **kwargs):
+            captured["url"] = url
+            captured["headers"] = kwargs.get("headers") or {}
+            return _FakeResp(
+                200,
+                {
+                    "models": [
+                        {"name": "publishers/google/models/gemini-3.6-flash"},
+                        {"name": "publishers/google/models/gemini-2.5-pro"},
+                        {"name": "models/gemini-flash-lite-latest"},
+                    ]
+                },
+            )
+
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _CaptureClient)
+    r = await probe.fetch_models(
+        "https://aiplatform.googleapis.com/v1/publishers/google", "KEY"
+    )
+    assert captured["headers"] == {"x-goog-api-key": "KEY"}
+    assert captured["url"] == (
+        "https://aiplatform.googleapis.com/v1/publishers/google/models"
+    )
+    assert r == {"ok": True, "models": [
+        "gemini-2.5-pro", "gemini-3.6-flash", "gemini-flash-lite-latest",
+    ]}

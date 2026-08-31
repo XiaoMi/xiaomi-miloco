@@ -524,6 +524,17 @@ _QWEN_ADAPTER = QwenOmniAdapter()
 _GEMINI_ADAPTER = GeminiAdapter()
 _GEMINI_OPENAI_COMPAT_ADAPTER = GeminiOpenAICompatAdapter()
 
+# Gemini **原生** generateContent 协议的主机集合：
+#   - generativelanguage.googleapis.com —— Gemini Developer API（AI Studio key）
+#   - aiplatform.googleapis.com        —— Vertex AI publisher 端点
+#     （``/v1/publishers/google/models/{model}:generateContent``，同样接受
+#     ``x-goog-api-key`` 头 + 原生协议；endpoint 拼接天然正确：base_url 形如
+#     ``https://aiplatform.googleapis.com/v1/publishers/google`` + ``/models/{model}:...``）
+# 其余主机上的 gemini（OpenRouter 等 OpenAI 兼容网关）走 chat/completions。
+_GEMINI_NATIVE_HOSTS = frozenset(
+    {"generativelanguage.googleapis.com", "aiplatform.googleapis.com"}
+)
+
 
 def get_adapter(model: str, base_url: str = "") -> OmniProviderAdapter:
     """按 model（+ base_url）返回对应 adapter，默认 MiMo。
@@ -531,9 +542,10 @@ def get_adapter(model: str, base_url: str = "") -> OmniProviderAdapter:
     Qwen 侧仅支持 Qwen3.5-Omni 系列（qwen3.5-omni-plus / qwen3.5-omni-flash），
     旧版 qwen3-omni-flash 不支持多模态组合输入，无法满足 fused 模式需求。
 
-    Gemini 按 base_url 区分协议：
-      - base_url 主机为 ``generativelanguage.googleapis.com``（或为空，历史行为）
-        → GeminiAdapter（原生 ``generateContent`` 协议）；
+    Gemini 按 base_url 主机区分协议：
+      - ``_GEMINI_NATIVE_HOSTS``（generativelanguage.googleapis.com / 
+        aiplatform.googleapis.com，或 base_url 为空的历史行为）→ GeminiAdapter
+        （原生 ``generateContent`` 协议 + ``x-goog-api-key`` 头）；
       - 其他 OpenAI 兼容网关（如 OpenRouter ``/api/v1``）→
         GeminiOpenAICompatAdapter（``chat/completions`` + ``reasoning``）——
         这些网关没有 generateContent 端点，硬走原生协议会 404。
@@ -543,7 +555,7 @@ def get_adapter(model: str, base_url: str = "") -> OmniProviderAdapter:
         return _QWEN_ADAPTER
     if "gemini" in name:
         host = (urlparse(base_url).hostname or "").lower() if base_url else ""
-        if host and host != "generativelanguage.googleapis.com":
+        if host and host not in _GEMINI_NATIVE_HOSTS:
             return _GEMINI_OPENAI_COMPAT_ADAPTER
         return _GEMINI_ADAPTER
     return _DEFAULT_ADAPTER

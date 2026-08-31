@@ -396,3 +396,37 @@ class TestGeminiAdapter:
         )
         assert delta is None
         assert usage == {"prompt_tokens": 5, "completion_tokens": 2}
+
+
+class TestVertexAiRouting:
+    """Vertex AI（aiplatform.googleapis.com）应走 Gemini 原生 generateContent 协议。"""
+
+    def test_vertex_ai_uses_native_adapter(self):
+        # 回归：曾把 aiplatform 当 OpenAI 兼容网关 → chat/completions + Bearer → 404
+        adapter = get_adapter(
+            "gemini-3.6-flash",
+            "https://aiplatform.googleapis.com/v1/publishers/google",
+        )
+        assert isinstance(adapter, GeminiAdapter)
+        assert not isinstance(adapter, OpenAICompatAdapter)
+
+    def test_vertex_ai_endpoint_generate_content(self):
+        adapter = get_adapter(
+            "gemini-3.6-flash",
+            "https://aiplatform.googleapis.com/v1/publishers/google",
+        )
+        assert adapter.endpoint(
+            "https://aiplatform.googleapis.com/v1/publishers/google",
+            "gemini-3.6-flash",
+            stream=False,
+        ) == (
+            "https://aiplatform.googleapis.com/v1/publishers/google/"
+            "models/gemini-3.6-flash:generateContent"
+        )
+
+    def test_vertex_ai_auth_goog_key(self):
+        adapter = get_adapter(
+            "gemini-3.6-flash",
+            "https://aiplatform.googleapis.com/v1/publishers/google",
+        )
+        assert adapter.auth_headers("KEY") == {"x-goog-api-key": "KEY"}
