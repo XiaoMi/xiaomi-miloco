@@ -40,7 +40,11 @@ class CropEnhanceConfig:
     crop_enhance.crop_enhance_config_from_settings() 每窗口热读 settings 字典
     (perception.engine.crop_enhance),同 video_short_edge 的模式,改配置免重启。
 
-    激活条件:enabled **且** user_enabled。分两个 key 不是访问控制(本地部署,用户对两个
+    激活条件:enabled **且** user_enabled **且** per-camera 闸。前两个是本配置里的全局闸;
+    第三个不在本配置里 —— 它按机位存在 KV(CAMERA_CROP_DENY_LIST_KEY,deny-list / 默认开),
+    经 OmniContext.per_camera_crop_enabled 透传进
+    omni/prompt_builder._maybe_encode_adaptive 与这两个相与(裁不裁取决于该路镜头的视野,
+    故可单独关掉某个机位)。全局两闸分两个 key 不是访问控制(本地部署,用户对两个
     配置文件都有全权、拦不住),而是配置层与用途不同:
       · enabled = 发版级开关(随包默认层 settings.yaml,不由 admin API 写)——团队随包关/开
         整个能力、或线上出问题时发一版止损;false 时前端开关随之置灰。

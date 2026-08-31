@@ -106,7 +106,9 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "",
         "仅 Gemini：每帧视觉 token 预算档位（\"\"/\"low\"=省，\"high\"=小目标更清但 4× token），下一周期生效",
     ),
-    # Smart Crop 双闸相与，两者都 true 才裁切；默认值同下方注释的对齐约定（yaml 里都是 true）。
+    # 本表这两个是 Smart Crop 的**全局**闸，相与后仍只是必要条件——还要该机位自己的
+    # per-camera 闸也开（`miloco-cli scope camera crop-on/crop-off` 逐路配，默认开），
+    # 三闸相与才裁切。默认值同下方注释的对齐约定（yaml 里都是 true）。
     # 写「重启生效」而非「热读」：闸位在**后端进程内**确实是每窗口热读的，但 get_settings() 有
     # 进程级 lru_cache，只有 admin PUT 那条路会跟着调 reset_settings() 清缓存。CLI 是另一个进程、
     # 只落盘，清不掉运行中后端的缓存 —— `--no-restart` 时改了等于没改（正是「以为已经关掉了、

@@ -116,6 +116,24 @@ def _camera_prompt_map() -> dict[str, str]:
         return {}
 
 
+def _crop_denied_dids() -> set[str]:
+    """实时读已**关闭** Smart Crop 的机位集合（合成 did，deny-list / 默认开）。
+    与 ``_camera_prompt_map`` 同构（同一处 miloco.manager 延迟导入模式）。
+
+    读 KV（进程内缓存）失败时返回空集 —— 即全部机位照旧允许裁切（fail-open：本项只影响
+    视频编码构图、不涉隐私，且"默认开"的语义就是"缺信息即为开"；反向 fail-closed 会让一次
+    KV 抖动静默关掉全家 Smart Crop，更难发现）。与 voice 的 fail-closed 相反，同 prompt。
+    """
+    from miloco.manager import get_manager
+    from miloco.miot.filter import crop_denied_camera_dids
+
+    try:
+        return crop_denied_camera_dids(get_manager().kv_repo)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("crop deny list lookup failed, keeping crop enabled: %s", e)
+        return set()
+
+
 class PerceptionEngine(BasePerceptionEngine):
     """Real perception proxy backed by perception-engine batch pipeline.
 
@@ -983,6 +1001,10 @@ class PerceptionEngine(BasePerceptionEngine):
         # 每摄像头自定义「感知须知」prompt：整表读一次、循环内按 did 取（实时、改动下一窗
         # 即生效、不重启；读失败 fail-open 注入空）。逐窗一次 KV 读，避免 per-device 重复。
         prompt_map = _camera_prompt_map()
+        # per-camera Smart Crop 闸（deny-list，不在集内 = 开）。同样逐窗一次 KV 读、循环内按
+        # 合成 did 取，改开关下一窗即生效、不重启。与全局双闸在
+        # prompt_builder._maybe_encode_adaptive 里相与。
+        crop_denied = _crop_denied_dids()
         for room_name, snapshots in batch.by_room().items():
             for snapshot in snapshots:
                 did = snapshot.device.did
@@ -1013,6 +1035,7 @@ class PerceptionEngine(BasePerceptionEngine):
                     current_time=_fmt_clock(snapshot.start_timestamp),
                     room_name=room_name,
                     camera_prompt=camera_prompt,
+                    per_camera_crop_enabled=did not in crop_denied,
                 )
 
         # Prepend audio tail from previous window (overlap to reduce boundary truncation)

@@ -9,6 +9,7 @@ _HOMES_PATH = "/api/miot/scope/homes"
 _CAMERAS_PATH = "/api/miot/scope/cameras"
 _CAMERAS_VOICE_PATH = "/api/miot/scope/cameras/voice"
 _CAMERAS_PROMPT_PATH = "/api/miot/scope/cameras/prompt"
+_CAMERAS_CROP_PATH = "/api/miot/scope/cameras/crop"
 
 
 def _compose_channel_dids(resp: dict) -> dict:
@@ -78,7 +79,17 @@ def scope_camera_list(pretty):
     lan_reachable(局域网可达)/awake(镜头开关:true=开/false=关/null=未知)，connected=视频流已连接。
     多通道相机(双摄)每路一行，did 显示为合成 did did:chN(单摄保持裸 did)——该 did 可直接复制给
     enable/disable 精确到某一路；mic-on/off 是相机级(拾音只在球机/ch0，:chN 会被归一到整台，
-    不精确到路)。"""
+    不精确到路)；crop-on/off 与 prompt-set 一样**精确到路**(裁不裁取决于该路镜头的视野)。
+    crop_in_use=该路的智能裁切**存储偏好**(默认 true)；crop_effective=**三道闸是否全开**
+    (= in_use AND 全局双闸 AND crop_in_use)。crop_effective=false 时按三种情形反查：in_use=false
+    是这台不在感知范围里；crop_in_use=false 是这一路自己关的；两者都 true 则是被全局闸挡住、
+    逐机位全白设。注意 crop_effective=true 只说明闸开着,**不含**
+    "流是否真订阅上"(看同一行 connected；connected=false 时这一路没进感知窗、裁切判定一次都
+    没跑),也**不保证每窗都在裁**——本窗无检测框且无显著运动块
+    (reason=no_activity,空房间最常见、属正常)、裁切区域面积超/不足上下限、区域退化、本窗无帧、
+    编码或 JPEG 产物过短等**内容层**回退只在后端日志 event=adaptive_crop_fallback 的 reason=
+    里可见(完整 11 项见 _maybe_encode_adaptive 的 docstring;注意 per_camera_off 是 debug 级、
+    默认级别下 grep 不到)。"""
     print_result(_compose_channel_dids(api_get(_CAMERAS_PATH)), pretty)
 
 
@@ -127,6 +138,39 @@ def scope_camera_mic_off(dids, pretty):
     result = api_put(
         _CAMERAS_VOICE_PATH,
         {"items": [{"did": d, "voice_in_use": False} for d in dids]},
+    )
+    print_result(result, pretty)
+
+
+# ── Smart Crop（智能裁切增强）逐机位开关：默认开，关掉即该路改走全景 ──
+#
+# 裁不裁是**机位级**判断：门口窄视野机位裁了收益小，客厅广角机位收益大，故逐路可配
+# （did 精确到 :chN，同 prompt-set；裸多通道 did = 该台全部通道）。与全局双闸
+# perception.engine.crop_enhance.enabled / user_enabled **相与** —— 全局关时这里设了也不
+# 生效（不报错，允许预配置）。与启用/拾音开关正交、不重启引擎，下一感知窗即生效。
+# 当前状态看 scope camera list 的 crop_in_use 字段。
+
+
+@scope_camera.command("crop-on")
+@click.argument("dids", nargs=-1, required=True)
+@click.option("--pretty", is_flag=True)
+def scope_camera_crop_on(dids, pretty):
+    """开启指定机位的智能裁切增强（回到默认；DIDS 可用 did:chN 精确到某一路）。"""
+    result = api_put(
+        _CAMERAS_CROP_PATH,
+        {"items": [{"did": d, "crop_in_use": True} for d in dids]},
+    )
+    print_result(result, pretty)
+
+
+@scope_camera.command("crop-off")
+@click.argument("dids", nargs=-1, required=True)
+@click.option("--pretty", is_flag=True)
+def scope_camera_crop_off(dids, pretty):
+    """关闭指定机位的智能裁切增强（该路改走全景、不裁切；分辨率档不变）。"""
+    result = api_put(
+        _CAMERAS_CROP_PATH,
+        {"items": [{"did": d, "crop_in_use": False} for d in dids]},
     )
     print_result(result, pretty)
 

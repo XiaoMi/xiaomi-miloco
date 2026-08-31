@@ -25,6 +25,7 @@ from miloco.middleware import (
 from miloco.middleware.exceptions import HTTPException
 from miloco.miot.schema import (
     AuthorizeRequest,
+    CameraCropToggleRequest,
     CameraPromptRequest,
     CameraToggleRequest,
     CameraVoiceToggleRequest,
@@ -538,6 +539,22 @@ async def toggle_scope_camera_voice(
     # 与相机启用开关的 refresh/sync/restart 逻辑正交,分开更清晰。
     data = await manager.miot_service.toggle_camera_voice(
         [{"did": i.did, "voice_in_use": i.voice_in_use} for i in request.items]
+    )
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.put(
+    path="/scope/cameras/crop",
+    summary="Batch toggle per-camera Smart Crop (adaptive crop) state",
+    response_model=NormalResponse,
+)
+async def toggle_scope_camera_crop(
+    request: CameraCropToggleRequest, current_user: str = Depends(verify_token)
+):
+    # 单独端点：裁切开关无投喂上限/离线校验、不从属于感知开关、不重启感知引擎（引擎逐窗
+    # 实时读 KV）。按合成 did 逐路存取，与 prompt 同口径、与按整台走的启停/拾音不同。
+    data = await manager.miot_service.toggle_camera_crop(
+        [{"did": i.did, "crop_in_use": i.crop_in_use} for i in request.items]
     )
     return NormalResponse(code=0, message="ok", data=data)
 

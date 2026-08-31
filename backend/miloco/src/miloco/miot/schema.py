@@ -265,6 +265,32 @@ class CameraVoiceToggleRequest(BaseModel):
     items: list[CameraVoiceToggleItem] = Field(..., min_length=1)
 
 
+class CameraCropToggleItem(BaseModel):
+    """单个相机（通道）的 Smart Crop 开/关操作。"""
+
+    did: str = Field(
+        ...,
+        min_length=1,
+        description="相机 did：合成通道 did（cam:chN，逐路）或裸物理 did（多通道 = 全通道）",
+    )
+    crop_in_use: bool = Field(
+        ...,
+        description=(
+            "true = 该机位允许智能裁切增强（默认）；false = 该机位改走全景路径不裁切。"
+            "与全局双闸 crop_enhance.enabled / user_enabled 相与"
+        ),
+    )
+
+
+class CameraCropToggleRequest(BaseModel):
+    """批量切换相机 Smart Crop 状态。每项独立指定 did + crop_in_use。
+
+    与拾音不同，**不**要求相机感知已启用（裁切不涉隐私，允许预配置）。
+    """
+
+    items: list[CameraCropToggleItem] = Field(..., min_length=1)
+
+
 class CameraPromptItem(BaseModel):
     """单个相机的自定义「感知须知」prompt 设置。"""
 

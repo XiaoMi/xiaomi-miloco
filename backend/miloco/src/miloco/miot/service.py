@@ -38,6 +38,7 @@ from miloco.miot.filter import (
     allowed_home_ids,
     camera_prompts,
     clear_camera_prompt,
+    crop_denied_camera_dids,
     denied_camera_dids,
     denied_channels_of,
     filter_by_home,
@@ -46,6 +47,7 @@ from miloco.miot.filter import (
     select_active_camera_dids,
     set_camera_prompt,
     set_cameras_channels_in_use,
+    set_cameras_crop_in_use,
     set_cameras_voice_in_use,
     set_homes_in_use,
     synthetic_camera_did,
@@ -366,6 +368,12 @@ class MiotService:
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
+        # 裁切关闭集同样按合成 did 逐路存、绑在当前账号的相机 did 上：换账号后旧 did 既读不到
+        # 也删不掉(读侧只遍历现账号相机)；同账号解绑重绑时 did 不变,不清就会让上一轮的关闭态
+        # 越过"回到出厂默认"这一步存活下来,而它几乎不可见(前端未消费 crop_in_use、那行日志是
+        # debug 且不带 did)。**本清单是手写的:每加一项 per-camera 配置都要往这里补一行**,
+        # 由 test_clear_account_scope_state_clears_all_scope_keys 钉住。
+        self._kv_repo.delete(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY)
         self._lru.clear()
 
     @property
@@ -1277,9 +1285,45 @@ class MiotService:
         也不算开。兼容字段 ``is_online`` = ``cloud_online and lan_reachable``（纯连通性）。
         ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**），与
         ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
+        ``crop_in_use`` 是**存储的 Smart Crop 偏好**（不在关闭集即 True，**默认 True**），
+        逐通道给（按合成 did，同 ``perception_prompt``）；``crop_effective`` 是**生效态**
+        （= ``in_use`` AND 全局双闸 ``crop_enhance.enabled`` / ``user_enabled``
+        AND ``crop_in_use``）——不在活跃集的相机根本没在投喂，不可能在裁。
+        这里合并而 ``voice_in_use`` 不合并，是因为拾音的生效态有前端在派生，而裁切没有
+        任何消费方——不在此合并就没有单一来源能回答"这台的三道闸有没有全开"。
+
+        本字段用 ``in_use``（是否被选中）而**不是** ``connected``（流是否真订阅上）：
+        选中但没订阅上时本字段仍为 True，而该路根本没进感知窗、裁切判定一次都没跑——那一层
+        要看同一行的 ``connected``（口径同说明书与 CLI help 里给的排查第一跳）。
+
+        注意本字段**只覆盖配置层**，**不含**逐窗内容判定：闸全开之后，裁切区域面积超/不足
+        上下限、区域退化、本窗无帧、候选框换算失败、编码或 JPEG 产物过短等都会回退全景，
+        而本字段仍为 True。上面这几项是举例、**不是全集**；全集只维护在一处——
+        omni/prompt_builder._maybe_encode_adaptive 的 docstring（含每项对应的 reason= 取值），
+        排查时以那份为准，别在此处复制它的子集。也就是说 ``crop_effective=True`` 不等于"这一窗真的裁了"；那一层只能
+        看日志 ``event=adaptive_crop_fallback`` 的 ``reason=``。
         """
         voice_allowed = voice_allowed_camera_dids(self._kv_repo)
         prompt_map = camera_prompts(self._kv_repo)
+        crop_denied = crop_denied_camera_dids(self._kv_repo)
+        # Smart Crop 全局双闸，用于派生 crop_effective。延迟导入（同 admin/router
+        # _perception_config_payload 的先例）——miot 层不在模块级依赖感知引擎。
+        # 读失败按**关闭**处理：crop_enhance_config_from_settings 内部对坏配置就是
+        # fail-closed 退默认（enabled=user_enabled=False，即不裁），这里跟它同向，
+        # 免得列表显示"在裁"而引擎实际没裁。
+        try:
+            from miloco.perception.engine.omni.crop_enhance import (
+                crop_enhance_config_from_settings,
+            )
+
+            _ce = crop_enhance_config_from_settings()
+            crop_global_on = bool(_ce.enabled) and bool(_ce.user_enabled)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "event=crop_global_gate_read_failed 列表按全局关闭派生 crop_effective",
+                exc_info=True,
+            )
+            crop_global_on = False
         connected = self._connected_camera_dids()
         cameras = filter_by_home(
             self._kv_repo, await self._miot_proxy.get_cameras() or {}
@@ -1336,6 +1380,31 @@ class MiotService:
                         # 每摄像头的自定义「感知须知」prompt（无则 ""）。
                         # 按合成 did 存取，双摄每路可有独立须知。
                         "perception_prompt": prompt_map.get(syn_did, ""),
+                        # 存储偏好：不在关闭集 = 该路允许 Smart Crop（**默认开**）。同样按
+                        # 合成 did 逐路存取。这是 per-camera 闸的**存储态**——只反映用户配了
+                        # 什么，不含全局闸、也不含该路是否真在投喂；生效态看下面
+                        # crop_effective（本字段保持纯存储语义，故关掉相机不改写它、
+                        # 重新启用后旧偏好自动回来，同 voice_in_use 的存储偏好口径）。
+                        "crop_in_use": syn_did not in crop_denied,
+                        # **生效态**：该路在感知**活跃集**里 AND 全局双闸 AND 本路存储偏好。
+                        # 三者缺一就没在裁。注意用的是 in_use（是否被选中），**不是**上面的
+                        # connected（流是否真订阅上）——选中但没订阅上时本字段仍为 True，那一
+                        # 层要看同一行的 connected（口径同 voice 的生效态，前端也只含 in_use）。
+                        # 与 voice_in_use 刻意不同——那项的生效态有前端在合
+                        # （HeroNow 渲染 `inUse && voiceInUse`，同样含 in_use），而 crop
+                        # 没有任何消费方，不在这里合就没有单一来源可回答"这台到底在不在裁"。
+                        # 本字段为 false 时,三种成因由 (in_use, crop_in_use) 反查区分：
+                        #   in_use=false                        → 这台压根不在感知范围里
+                        #   in_use=true, crop_in_use=false      → 这一路自己关了裁切
+                        #   in_use=true, crop_in_use=true       → 被全局双闸挡住
+                        # 另有一格**本字段为 true 却仍没在裁**,不由上面那对键区分:
+                        #   connected=false（in_use=true）       → 选中了但流没订阅上,该路没进
+                        #                                          感知窗、裁切判定一次都没跑
+                        "crop_effective": (
+                            syn_did in active
+                            and crop_global_on
+                            and syn_did not in crop_denied
+                        ),
                     }
                 )
         return out
@@ -1600,6 +1669,46 @@ class MiotService:
         for syn_dids in resolved:
             for syn in syn_dids:
                 clear_camera_prompt(self._kv_repo, syn)
+        all_cameras = await self.list_cameras_with_state()
+        affected = [cam for cam in all_cameras if cam["did"] in touched_physical]
+        return affected
+
+    async def toggle_camera_crop(self, items: list[dict]) -> list[dict]:
+        """批量切换相机 Smart Crop（智能裁切增强）状态。每项 {"did": str, "crop_in_use": bool}。
+
+        关闭 = 该机位改走全景路径（不裁切），视频分辨率档不变。裁不裁是**机位级**判断：
+        门口窄视野机位裁了收益小、客厅广角机位收益大，故逐路可配。
+
+        ``did`` 可为合成通道 did（``cam:chN``，双摄逐路）或裸物理 did（多通道 = 全通道设同一
+        值），口径与 ``set_camera_prompt`` 完全一致（复用 ``_resolve_prompt_target_dids``：
+        未知 did / 通道号格式非法 / 通道越界都在那里拒，后端是唯一执法点）。**全部校验通过
+        后才写**，不半写。
+
+        与全局双闸（``crop_enhance.enabled`` / ``user_enabled``）相与：全局关时本开关设了也
+        不生效（不报错——允许预配置，同 prompt）。**不**像拾音那样要求相机感知已启用：裁切
+        不涉隐私，给已关闭的机位预配置无害。
+
+        不 refresh / _sync / _restart —— 引擎每感知窗按合成 did 实时读 KV，下一窗即生效。
+        """
+        cameras = await self._miot_proxy.get_cameras() or {}
+        # 先整批解析 + 校验（任一项非法即抛，不写任何 KV），再统一写。
+        resolved = [
+            (self._resolve_prompt_target_dids(i["did"], cameras), bool(i["crop_in_use"]))
+            for i in items
+        ]
+        touched_physical = {physical_camera_did(i["did"]) for i in items}
+        # 同一 did 出现多次时按最后一项为准（同 toggle_camera 的"后到覆盖先到"）：先收敛成
+        # syn_did → in_use，再按值分两批写，避免同一 did 先加后删的中间写。
+        wanted: dict[str, bool] = {}
+        for syn_dids, in_use in resolved:
+            for syn in syn_dids:
+                wanted[syn] = in_use
+        enable_dids = [d for d, v in wanted.items() if v]
+        disable_dids = [d for d, v in wanted.items() if not v]
+        if disable_dids:
+            set_cameras_crop_in_use(self._kv_repo, disable_dids, False)
+        if enable_dids:
+            set_cameras_crop_in_use(self._kv_repo, enable_dids, True)
         all_cameras = await self.list_cameras_with_state()
         affected = [cam for cam in all_cameras if cam["did"] in touched_physical]
         return affected
