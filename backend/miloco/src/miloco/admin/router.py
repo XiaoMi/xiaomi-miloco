@@ -1492,6 +1492,9 @@ class PerceptionConfigBody(BaseModel):
     window_size: int | None = Field(default=None, ge=1, le=60)
     # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
     # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
+    # 注意本开关（连同 enabled）只是**必要非充分**条件：还要该机位自己的 per-camera 闸也开
+    # （KV CAMERA_CROP_DENY_LIST_KEY，deny-list/默认开，`scope camera crop-on/crop-off` 逐路配），
+    # 三闸相与才裁。生效态看 /api/miot/scope/cameras 的 crop_effective。
     smart_crop_enabled: bool | None = None
     min_suggestion_urgency: Literal["low", "medium", "high"] | None = Field(
         default=None,

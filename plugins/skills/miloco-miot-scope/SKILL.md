@@ -157,23 +157,35 @@ $ miloco-cli scope camera enable 1154253569
 $ miloco-cli scope camera list        # 按 room/name 找到客厅摄像头 did
 $ miloco-cli scope camera mic-off 1154253569
   → {"code":0,"message":"ok","data":[
-       {"did":"1154253569","name":"小米智能摄像机C700","is_online":true,"in_use":true,"voice_in_use":false,"connected":true}]}
+       {"did":"1154253569","name":"小米智能摄像机C700","channel":0,"is_online":true,"in_use":true,
+        "connected":true,"awake":true,"voice_in_use":false,"crop_in_use":true,"crop_effective":true,
+        "perception_prompt":""}]}
 
 # 「次卧很安静，把声音打开」——开声音
 $ miloco-cli scope camera mic-on 1154253570
   → {"code":0,"message":"ok","data":[
        {"did":"1154253570","name":"小米智能摄像机C700","is_online":true,"in_use":true,"voice_in_use":true,"connected":true}]}
 
+# 「客厅这台别裁了 / 只看整个画面」——画面**构图**类诉求，逐机位关裁切
+#  注意与下面的「误识」场景分界：认错东西（把 A 当 B）→ 写感知须知；
+#  构图粗细（裁主体 vs 送整幅）→ crop-off/crop-on。别互相套用。
+$ miloco-cli scope camera crop-off 1154253570:ch0    # 精确到某一路
+$ miloco-cli scope camera crop-on  1154253570        # 裸 did = 该台全部通道，开回默认
+  → {"code":0,"message":"ok","data":[
+       {"did":"1154253570","name":"小米智能摄像机C700","channel":0,"is_online":true,"in_use":true,
+        "connected":true,"awake":true,"voice_in_use":false,"crop_in_use":false,"crop_effective":false,
+        "perception_prompt":""}]}
+
+# 「这台裁切开了、小目标还是看不清」——按 list 的四个字段反查
+$ miloco-cli scope camera list
+#   crop_effective=false 时：in_use=false → 不在感知范围（先看 is_online/connected/awake，
+#     别急着 enable）；crop_in_use=false → 这一路自己关的；两者都 true → 被全局闸挡住。
+#   crop_effective=true 仍反馈没效果 → 先看 connected（false = 流没订阅上，裁切判定一次都没跑），
+#     再看后端日志：miloco-cli service logs -n 200 | grep adaptive_crop_fallback
+
 # 「门口摄像头老把电梯门开了当成我家门开了」——画面类误识，写感知须知（不是关摄像头）
 $ miloco-cli scope camera list        # 按 room/name 找到门口那台 did
 # （先复述须知给用户确认："画面右侧公共走廊里的电梯门，与本户无关……"，确认后再写）
-$ miloco-cli scope camera crop-off <did>:ch0        # 关掉某一路的智能裁切
-$ miloco-cli scope camera crop-on  <did>            # 裸 did = 该台全部通道，开回默认
-$ miloco-cli scope camera list                      # 排查链要读的四个字段：
-#   in_use / connected / crop_in_use / crop_effective
-#   crop_effective=false 时：in_use=false → 不在感知范围；crop_in_use=false → 这一路自己关的；
-#   两者都 true → 被全局闸挡住。crop_effective=true 仍反馈没效果 → 先看 connected，再看后端日志。
-
 $ miloco-cli scope camera prompt-set 1154253571 "本摄像头装在入户门内，画面右侧公共走廊里可见电梯门。电梯门开合与本户无关，不要据此判断有人回家/开门；只有画面正中的木色入户门开合才是本户事件。"
   → {"code":0,"message":"ok","data":[
        {"did":"1154253571","name":"小米智能摄像机C700","is_online":true,"in_use":true,"voice_in_use":false,"perception_prompt":"本摄像头装在入户门内……","connected":true}]}
