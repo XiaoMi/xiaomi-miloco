@@ -3389,6 +3389,52 @@ class TestRuleRunnerOnTargetDesc:
         assert RuleEvent.TARGET_FIRED in events
         assert rule.id in r._target_fired
 
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    def test_target_gate_rejection_does_not_consume_fired_marker(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """被许可闸拦掉的那次不能消耗「本周期已达标」的额度。
+
+        置位在闸门之前的话, task 回到 session 后达标通知被永久吞掉 —— 多 rule
+        时一条先退出把 task 打成 off, 另一条的达标就再也发不出来。
+        """
+        from miloco.task.state_machine import TaskRuntimeState
+
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        rule = _make_state_rule_with_target(rule_id="rule-tgt-gated")
+        r.add_rule(rule)
+        sm = MagicMock()
+        sm.owns.return_value = True
+        sm.runtime_state.return_value = TaskRuntimeState.OFF
+        r.attach_state_machine(sm)
+
+        fired = r._fire_target_if_reached(rule, ["cam-001"], "ctx")
+
+        assert fired is False
+        assert rule.id not in r._target_fired
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_target_gate_pass_sets_fired_marker(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """闸门放行时照常置位, 否则同一周期会重复发。"""
+        from miloco.task.state_machine import TaskRuntimeState
+
+        r = _make_runner_with_record((60, 60), mock_miot_proxy, mock_log_repo)
+        rule = _make_state_rule_with_target(rule_id="rule-tgt-allowed")
+        r.add_rule(rule)
+        sm = MagicMock()
+        sm.owns.return_value = True
+        sm.runtime_state.return_value = TaskRuntimeState.ON
+        r.attach_state_machine(sm)
+
+        fired = r._fire_target_if_reached(rule, ["cam-001"], "ctx")
+        await r.drain()
+
+        assert fired is True
+        assert rule.id in r._target_fired
+
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
     async def test_target_dropped_when_state_false_at_fire(

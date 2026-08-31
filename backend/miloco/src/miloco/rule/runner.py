@@ -1192,10 +1192,12 @@ class RuleRunner:
             "TARGET_IMMEDIATE: rule=%s task=%s accumulated_min=%s target_min=%s",
             rule.id, rule.task_id, accumulated_min, target_minutes,
         )
-        rs.target_fired = True
-        actual_target_at = ms_to_iso_local(now_ms())
+        # 置位必须在闸门之后: 被拦掉的那次若消耗了「本周期已达标」的额度, task
+        # 回到 session 后达标通知就被永久吞掉。
         if not self._state_machine_allows(rule, RuleEvent.TARGET_FIRED):
             return False
+        rs.target_fired = True
+        actual_target_at = ms_to_iso_local(now_ms())
 
         self._spawn_fire(
             rule, RuleEvent.TARGET_FIRED, list(sources), context,
