@@ -75,6 +75,9 @@ rule:
 perception:
   log_ttl: 30                  # 感知日志保留天数
   tier_u_dump_enable: false    # POST /api/identity/pool/dump 调试端点开关（生产保持 false，本地调试可设 true）
+  stale_window_sec: 10         # 窗口新鲜度门控(秒)：窗口采集时间距今超过该值=积压过期窗口(网络中断/休眠恢复后
+                               # 批量补处理)，直接丢弃——不调 omni、不触发规则；0=关闭。正常 in_delay 毫秒~秒级，
+                               # 实测故障可达 60+ 分钟
   collect:
     window_size: 5           # 时间窗口大小（秒）
     max_windows: 3           # 最大待处理窗口数

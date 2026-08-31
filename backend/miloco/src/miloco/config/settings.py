@@ -349,6 +349,16 @@ class PerceptionSettings(BaseModel):
         default=7,
         description="事件 clip 按 mtime 清理的保留天数;跟 event_ttl_days 一致",
     )
+    stale_window_sec: float = Field(
+        default=10.0,
+        ge=0,
+        description=(
+            "感知窗口新鲜度门控(秒):窗口采集时间距当前超过该值即判定为积压的过期"
+            "窗口(网络中断 / 系统休眠恢复后摄像头缓冲的旧窗口会被批量补处理),直接"
+            "丢弃——不调 omni、不触发规则,避免拿几分钟前的画面触发场景/规则。"
+            "正常 in_delay 为几十毫秒~几秒级;实测故障时可达 60+ 分钟。0 = 关闭门控。"
+        ),
+    )
     snapshot_max_disk_mb: int = Field(
         default=5000,
         description=(

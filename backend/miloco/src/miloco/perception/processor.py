@@ -448,6 +448,32 @@ class PipelineProcessor:
 
             in_delay_s = (datetime.now().astimezone() - end_dt).total_seconds()
 
+            # ---- 窗口新鲜度门控 ----
+            # 网络中断 / 系统休眠恢复后,摄像头缓冲的旧窗口会被批量补处理——画面早已
+            # 过时,用它触发规则等于拿几分钟前的画面做决策(实测:61 分钟积压窗口在
+            # 网络恢复瞬间触发了扫地场景)。超过 stale_window_sec 直接丢弃:不调 omni、
+            # 不触发规则,只留 perf trace 便于回看。正常 in_delay 为几十毫秒~秒级。
+            stale_limit_s = get_settings().perception.stale_window_sec
+            if stale_limit_s > 0 and in_delay_s > stale_limit_s:
+                logger.warning(
+                    "[processor] 丢弃过期感知窗口: window=[%s-%s] in_delay=%.1fs "
+                    "> stale_window_sec=%.0fs — 不调 omni、不触发规则",
+                    start_dt.strftime("%H:%M:%S"),
+                    end_dt.strftime("%H:%M:%S"),
+                    in_delay_s,
+                    stale_limit_s,
+                )
+                if self._perf_enabled:
+                    self._publish_stale_trace(
+                        trace_id=trace_id,
+                        cycle_start_unix_ms=cycle_start_unix_ms,
+                        batch=batch,
+                        in_delay_s=in_delay_s,
+                        collect_ms=collect_ms,
+                        t_cycle=t_cycle,
+                    )
+                return False  # data consumed but dropped — caller should continue
+
             # 2. Single batch inference call (convert + gate + edge + omni)
             # 旁路收集 omni 拿到的 clip 字节 + omni HTTP trace 给 meaningful_events 复用.
             # 因为 omni 推理跑在 inference thread executor 里(asyncio.run 起新 loop,
@@ -786,6 +812,49 @@ class PipelineProcessor:
             timing={},
             stream_lag_ms=stream_lag_ms,
             cycle_error_msg=error_msg,
+        )
+
+    def _publish_stale_trace(
+        self,
+        *,
+        trace_id: str,
+        cycle_start_unix_ms: int,
+        batch: PerceptionBatch,
+        in_delay_s: float,
+        collect_ms: float,
+        t_cycle: float,
+    ) -> None:
+        """过期窗口丢弃路径的最小 trace:skipped=True + cycle_error_msg 标记 stale。
+
+        与 _publish_failed_trace 同构;in_delay_ms 保留原始值,perf 页面能直接
+        看到「窗口滞后了多久被丢」,便于确认门控是否误伤正常窗口。
+        """
+        stream_lag_ms = 0.0
+        if batch.window_first_frame_recv_ms is not None:
+            stream_lag_ms = max(
+                0.0,
+                float(batch.end_timestamp - batch.window_first_frame_recv_ms),
+            )
+        window_duration_ms = float(batch.end_timestamp - batch.start_timestamp)
+        latency = PerceptionLatency(
+            in_delay_ms=in_delay_s * 1000,
+            decode_ms=batch.decode_avg_ms,
+            collect_ms=collect_ms,
+            cycle_total_ms=_ms_since(t_cycle),
+            window_duration_ms=window_duration_ms,
+            stream_lag_ms=stream_lag_ms,
+            device_count=batch.device_count,
+            skipped=True,
+            timestamp=time.time() * 1000,
+        )
+        self._publish_trace(
+            trace_id=trace_id,
+            cycle_start_unix_ms=cycle_start_unix_ms,
+            batch=batch,
+            latency=latency,
+            timing={},
+            stream_lag_ms=stream_lag_ms,
+            cycle_error_msg=f"stale_window_dropped: in_delay={in_delay_s:.0f}s",
         )
 
     async def process_on_demand(
