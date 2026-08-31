@@ -170,6 +170,8 @@ class TaskStateMachine:
         self._dispatch_action = dispatch_action
         self._track = track or (lambda outcome, signal: None)
 
+        # handle(dispatch=False) 期间关掉派发 —— 见 handle 的 docstring
+        self._dispatching = True
         self._topologies: dict[str, TaskTopology] = {}
         self._states: dict[str, TaskRuntimeState] = {}
         self._queues: dict[str, deque[TaskSignal]] = {}
@@ -248,8 +250,14 @@ class TaskStateMachine:
 
     # ── 状态转换 ──────────────────────────────────────────────────
 
-    def handle(self, signal: TaskSignal) -> TransitionOutcome:
-        """处理一个信号。同步且不抛 —— 它跑在消费链上, 抛出去会把整条链带死。"""
+    def handle(self, signal: TaskSignal, *, dispatch: bool = True) -> TransitionOutcome:
+        """处理一个信号。同步且不抛 —— 它跑在消费链上, 抛出去会把整条链带死。
+
+        ``dispatch=False``: 只要结论、不派动作。给"上游已经拿着一次边沿、自己会
+        fire"的调用方用 (rule runner 走的就是这条)。默认 True 是给消费链和状态机
+        自己发起的路径用的。
+        """
+        self._dispatching = dispatch
         try:
             return self._handle(signal)
         except Exception as e:  # noqa: BLE001
@@ -286,7 +294,7 @@ class TaskStateMachine:
             # milestone 的语义是"这个 task 进行期间发生了什么"; task 没在进行,
             # 里程碑无处附着。
             return self._done(TransitionOutcome.NOT_IN_SESSION, signal)
-        self._dispatch_action(signal.task_id, ActionSlot.ON_TARGET, signal.payload)
+        self._maybe_dispatch(signal.task_id, ActionSlot.ON_TARGET, signal.payload)
         return self._done(TransitionOutcome.MILESTONE_FIRED, signal)
 
     def _handle_enter(
@@ -294,7 +302,7 @@ class TaskStateMachine:
     ) -> TransitionOutcome:
         if not topology.is_session_type:
             # 事件型: runtime_state 恒 off, 每次进信号都执行 on_enter, 不卡死。
-            self._dispatch_action(signal.task_id, ActionSlot.ON_ENTER, signal.payload)
+            self._maybe_dispatch(signal.task_id, ActionSlot.ON_ENTER, signal.payload)
             return self._done(TransitionOutcome.EVENT_FIRED, signal)
 
         if self.runtime_state(signal.task_id) is TaskRuntimeState.ON:
@@ -307,7 +315,7 @@ class TaskStateMachine:
             return self._done(TransitionOutcome.BLOCKED_BY_EXIT_CONDITION, signal)
 
         self._states[signal.task_id] = TaskRuntimeState.ON
-        self._dispatch_action(signal.task_id, ActionSlot.ON_ENTER, signal.payload)
+        self._maybe_dispatch(signal.task_id, ActionSlot.ON_ENTER, signal.payload)
         return self._done(TransitionOutcome.ENTERED, signal)
 
     def _handle_exit(
@@ -317,7 +325,7 @@ class TaskStateMachine:
             return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
         self._states[signal.task_id] = TaskRuntimeState.OFF
-        self._dispatch_action(signal.task_id, ActionSlot.ON_EXIT, signal.payload)
+        self._maybe_dispatch(signal.task_id, ActionSlot.ON_EXIT, signal.payload)
 
         # §5.2 基线重置: 要求进入条件先变假、再变真, 才算新一次进入。
         # 不引入第三个状态、不引入冷却时长。
@@ -340,6 +348,12 @@ class TaskStateMachine:
             if self._is_condition_satisfied(rule_id) is True:
                 return True
         return False
+
+    def _maybe_dispatch(
+        self, task_id: str, slot: ActionSlot, payload: object | None
+    ) -> None:
+        if self._dispatching:
+            self._dispatch_action(task_id, slot, payload)
 
     def _done(
         self, outcome: TransitionOutcome, signal: TaskSignal

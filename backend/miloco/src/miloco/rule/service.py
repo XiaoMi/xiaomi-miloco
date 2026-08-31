@@ -226,8 +226,11 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
     state_machine = TaskStateMachine(
         is_condition_satisfied=rule_runner.is_condition_satisfied,
         reset_edge_baseline=rule_runner.reset_edge_baseline,
+        # 只有状态机自己发起动作时才会走到这里 (重新配置时强制 on_exit、手动
+        # 注入)。边沿驱动的那条路由 runner 传 dispatch=False, 动作走它自己的
+        # fire 路径。这个槽还没有真实消费方, 先留一条日志。
         dispatch_action=lambda task_id, slot, payload: logger.info(
-            "task %s state machine requested %s (no upstream edge)", task_id, slot.value
+            "task %s state machine self-initiated %s", task_id, slot.value
         ),
     )
     rule_runner.attach_state_machine(state_machine)
@@ -235,6 +238,10 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
     rules_by_task: dict[str, list] = {}
     for rule in rule_runner.get_all_rules():
         rules_by_task.setdefault(rule.task_id, []).append(rule)
+
+    # 派生量 seed: 重启后按 DB 里的 task.status 重算「有效启用」(§19.9)
+    for row in task_repo.list_all():
+        rule_runner.set_task_paused(row["task_id"], row["status"] != "active")
 
     owned = 0
     for task_id, rules in rules_by_task.items():
@@ -411,6 +418,7 @@ class RuleService:
 
         rule.id = rule_id
         self._runner.add_rule(rule)
+        self.reconfigure_task(rule.task_id)
         logger.info("Rule created: %s", rule_id)
         return rule_id
 
@@ -462,6 +470,7 @@ class RuleService:
         success = self._repo.update(rule)
         if success:
             self._runner.add_rule(rule)
+            self.reconfigure_task(rule.task_id)
         return success
 
     async def patch_rule(self, rule_id: str, update: RuleUpdate) -> bool:
@@ -578,15 +587,23 @@ class RuleService:
         success = self._repo.update(existing)
         if success:
             self._runner.add_rule(existing)
+            self.reconfigure_task(existing.task_id)
         return success
 
     async def delete_rule(self, rule_id: str) -> bool:
         if not self._repo.exists(rule_id):
             raise ResourceNotFoundException(f"Rule '{rule_id}' not found")
 
+        # 删之前先取归属 —— 删完就查不到了。exists 与 get_by_id 之间行可能已经
+        # 消失, 取不到就跳过重新配置而不是崩在这里。
+        existing = self._repo.get_by_id(rule_id)
+        task_id = existing.task_id if existing is not None else None
+
         success = self._repo.delete(rule_id)
         if success:
             self._runner.remove_rule(rule_id)
+            if task_id:
+                self.reconfigure_task(task_id)
             self._log_repo.delete_by_rule_id(rule_id)
         return success
 
@@ -596,6 +613,49 @@ class RuleService:
         双清, 但 task delete 场景 DB 由 CASCADE 走完, 只需清内存, 避免二次删表。
         """
         self._runner.remove_rule(rule_id)
+
+    # ---- 重新配置路径 (§19.5) ----
+
+    def reconfigure_task(self, task_id: str) -> None:
+        """rule 增删改、rule 单独启停、task 重新 enable 统一走这条。
+
+        做四件事: 刷新 task 动作快照 → 重算拓扑 → 失去全部出路径且当前为 on 时
+        先跑 on_exit → 清运行态从 off 起。前三件由 ``TaskStateMachine.reconfigure``
+        承担, 这里只负责把最新的拓扑与动作喂进去。
+
+        没接管该 task (没有边界动作 / 名下已无 rule) → 撤销登记, 回到旧路径。
+        不 reconfigure 而是 unregister: 前者会把没接管的 task 登记进去。
+        """
+        sm = self._runner.state_machine
+        if sm is None:
+            return
+
+        from miloco.database.task_repo import TaskRepo
+        from miloco.task.state_machine import derive_directions
+
+        self._runner.set_task_actions(task_id, TaskRepo().get_boundary_actions(task_id))
+        rules = [r for r in self._runner.get_all_rules() if r.task_id == task_id]
+        if not rules or not self._runner.task_owns_actions(task_id):
+            if sm.owns(task_id):
+                # 空拓扑先走一次 reconfigure：删掉最后一条 rule 也是「失去全部
+                # 出路径」，task 在 on 时必须先跑 on_exit，直接 unregister 会让
+                # 那次退出动作永远不执行。
+                sm.reconfigure(task_id, {})
+                sm.unregister_task(task_id)
+            return
+        sm.reconfigure(
+            task_id,
+            derive_directions((r.id, r.resolved_direction.value) for r in rules),
+        )
+
+    def apply_task_status(self, task_id: str, active: bool) -> None:
+        """task 启停 → 刷新派生的「有效启用」并走重新配置路径。
+
+        **不写 rule.enabled** —— 它是用户意图, task 启停覆写它会把用户手动关掉
+        的那条 rule 在 task 重新 enable 时错误地打开 (§19.9)。
+        """
+        self._runner.set_task_paused(task_id, not active)
+        self.reconfigure_task(task_id)
 
     # ---- Trigger ----
 

@@ -259,6 +259,10 @@ class RuleRunner:
         # task 边界动作快照, 由接管方在登记拓扑时喂进来。runner 不查 DB:
         # _select_slot 在 fire 路径上, 查一次 DB 就把 hot path 拖进 IO。
         self._task_actions: dict[str, dict] = {}
+        # 停用中的 task。「有效启用」= rule.enabled AND task 不在这个集合里,
+        # 是派生量、无人直接写 (§19.9)。放内存是因为 get_enabled_rules 每个判定
+        # 周期都要走一遍, 不能查 DB。
+        self._paused_tasks: set[str] = set()
 
         logger.info("RuleRunner init, rules: %d", len(self._rules))
 
@@ -480,7 +484,30 @@ class RuleRunner:
         return list(self._rules.values())
 
     def get_enabled_rules(self) -> list[Rule]:
-        return [r for r in self._rules.values() if r.enabled]
+        """「有效启用」的 rule —— 用户意图 AND 所属 task 没被停用 (§19.9)。
+
+        ``rule.enabled`` 只表示用户想不想开; task 停用不再覆写它, 所以这里必须
+        两个条件都判, 否则 task 停用后规则会继续参与判定。
+        """
+        return [
+            r
+            for r in self._rules.values()
+            if r.enabled and r.task_id not in self._paused_tasks
+        ]
+
+    def set_task_paused(self, task_id: str, paused: bool) -> None:
+        """刷新派生量。task 启停的唯一入口。"""
+        if paused:
+            self._paused_tasks.add(task_id)
+        else:
+            self._paused_tasks.discard(task_id)
+
+    def is_task_paused(self, task_id: str) -> bool:
+        return task_id in self._paused_tasks
+
+    @property
+    def state_machine(self) -> TaskStateMachine | None:
+        return self._state_machine
 
     # ---- Main entry: per-frame, per-source state report ----
 
@@ -1041,7 +1068,9 @@ class RuleRunner:
             return in_session
 
         kind = SignalKind.EXITED if event == RuleEvent.EXITED else SignalKind.ENTERED
-        outcome = sm.handle(TaskSignal(rule.task_id, rule.id, kind))
+        # dispatch=False: 本调用只要结论。动作由下面的 _spawn_fire / _fire 走
+        # 原路径执行, 让状态机再派一次会重复触发。
+        outcome = sm.handle(TaskSignal(rule.task_id, rule.id, kind), dispatch=False)
         return outcome in _FIRING_OUTCOMES
 
     def _spawn_fire(

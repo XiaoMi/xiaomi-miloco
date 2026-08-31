@@ -159,13 +159,24 @@ class TaskService:
         if meta_result == "not_found":
             raise TaskNotFound(f"task {task_id!r} not found")
 
+        # **不写 rule.enabled** —— 它是用户意图, 不是 task.status 的镜像 (§19.9)。
+        # 覆写它会让「用户手动关掉的那一条」在 task 重新 enable 时被错误打开。
+        # 生效与否由派生量「有效启用」= rule.enabled AND task 未停用 决定, 刷新
+        # 它是 rule_service 的事 —— runner 内存里那份不刷, 停用就只写了 DB、规则
+        # 会继续触发到进程重启为止 (get_enabled_rule_ids 明确不走 DB)。
+        active = target_status == "active"
         rule_results: list[BackendSyncRuleResult] = []
+        refreshed = self._rule_service is not None
+        if refreshed:
+            try:
+                self._rule_service.apply_task_status(task_id, active)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("apply_task_status failed for task=%s: %s", task_id, e)
+                refreshed = False
         for rule in self.rule_repo.list_by_task(task_id):
-            rule.enabled = target_status == "active"
-            ok = self.rule_repo.update(rule)
             rule_results.append(
                 BackendSyncRuleResult(
-                    rule_id=rule.id, result="ok" if ok else "fail"
+                    rule_id=rule.id, result="ok" if refreshed else "fail"
                 )
             )
 

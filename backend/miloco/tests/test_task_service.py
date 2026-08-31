@@ -135,13 +135,99 @@ def test_create_task_409_on_duplicate_id(service):
         service.create_task(TaskCreateRequest(task_id="t1", description="d2"))
 
 
-def test_disable_task_marks_meta_paused_and_disables_rules(service):
+def _real_rule_service():
+    """真的 RuleService + RuleRunner —— 停用生效与否要看 runner 内存那份。
+
+    用 stub 顶替会变成「测了实现、没测接线」: 现状那个洞恰恰是 task 只写了 DB、
+    没通知 runner (§19.9)。
+    """
+    from miloco.database.rule_repo import RuleLogRepo
+    from miloco.rule.runner import RuleRunner
+    from miloco.rule.service import RuleService
+
+    rule_repo = RuleRepo()
+    runner = RuleRunner(
+        rules=rule_repo.get_all(enabled_only=False),
+        miot_proxy=None,
+        rule_log_repo=RuleLogRepo(),
+    )
+    return RuleService(rule_repo, RuleLogRepo(), runner, None), runner
+
+
+def test_disable_task_marks_meta_paused(service):
     rid = _setup_task_with_rule(service)
     result = service.disable_task("t1")
     assert result.status == "paused"
     assert result.backend_synced.meta_status == "ok"
     assert result.backend_synced.rules[0].rule_id == rid
-    assert RuleRepo().get_by_id(rid).enabled is False
+
+
+def test_disable_task_does_not_overwrite_rule_enabled(real_db):
+    """rule.enabled 是用户意图, task 停用不再覆写它 (§19.9)。
+
+    生效与否看派生量「有效启用」—— runner 内存里那条 rule 不再进判定。
+    """
+    from miloco.task.service import TaskService
+
+    rule_service, runner = _real_rule_service()
+    svc = TaskService(rule_repo=RuleRepo(), rule_service=rule_service)
+    rid = _setup_task_with_rule(svc)
+    runner.add_rule(RuleRepo().get_by_id(rid))
+    assert len(runner.get_enabled_rules()) == 1
+
+    result = svc.disable_task("t1")
+
+    assert result.backend_synced.rules[0].result == "ok"
+    assert RuleRepo().get_by_id(rid).enabled is True
+    assert runner.get_enabled_rules() == []
+    assert runner.is_task_paused("t1") is True
+
+
+def test_enable_task_restores_effective_enabled(real_db):
+    from miloco.task.service import TaskService
+
+    rule_service, runner = _real_rule_service()
+    svc = TaskService(rule_repo=RuleRepo(), rule_service=rule_service)
+    rid = _setup_task_with_rule(svc)
+    runner.add_rule(RuleRepo().get_by_id(rid))
+    svc.disable_task("t1")
+    # 中间态必须断言：不断言的话「停用从没生效过」与「停用后又恢复了」终态一样
+    assert runner.get_enabled_rules() == []
+
+    svc.enable_task("t1")
+
+    assert len(runner.get_enabled_rules()) == 1
+    assert runner.is_task_paused("t1") is False
+
+
+def test_user_disabled_rule_stays_disabled_across_task_toggle(real_db):
+    """现状 bug 的回归测试: 用户手动关掉的那条, task 停用再启用后不该被打开。"""
+    from miloco.task.service import TaskService
+
+    rule_service, runner = _real_rule_service()
+    svc = TaskService(rule_repo=RuleRepo(), rule_service=rule_service)
+    svc.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    keep = RuleRepo().create(_make_rule_obj(task_id="t1", name="[t1] keep"))
+    off = RuleRepo().create(_make_rule_obj(task_id="t1", name="[t1] off"))
+    off_rule = RuleRepo().get_by_id(off)
+    off_rule.enabled = False
+    RuleRepo().update(off_rule)
+    for rid in (keep, off):
+        runner.add_rule(RuleRepo().get_by_id(rid))
+
+    svc.disable_task("t1")
+    svc.enable_task("t1")
+
+    assert RuleRepo().get_by_id(off).enabled is False
+    assert [r.id for r in runner.get_enabled_rules()] == [keep]
+
+
+def test_disable_task_reports_fail_without_rule_service(service):
+    """没注入 rule_service → 内存态没人刷, 停用实际没生效, 不该报 ok。"""
+    rid = _setup_task_with_rule(service)
+    result = service.disable_task("t1")
+    assert result.backend_synced.rules[0].rule_id == rid
+    assert result.backend_synced.rules[0].result == "fail"
 
 
 def test_disable_pending_ops_for_cron_only(service):
