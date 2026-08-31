@@ -122,9 +122,37 @@ class TaskService:
             status=raw["status"],
             paused_at=raw["paused_at"],
             created_at=raw["created_at"],
+            lifecycle=raw.get("lifecycle") or "permanent",
+            runtime_state=self._runtime_state(raw["task_id"]),
+            last_decision=self._last_decision(raw["task_id"]),
             rule_briefs=rule_briefs,
             cron_refs=[CronRef(**c) for c in raw["cron_refs"]],
         )
+
+    def _runtime_state(self, task_id: str) -> str:
+        """模式此刻开着还是关着。内存派生, 取不到就按 off (§4.2 重启也从 off 起)。
+
+        rule_service 未注入 (老库启动路径 / 单测) 或该 task 未被状态机接管时都是
+        off —— 未接管的 task 本来就没有运行态这个概念。
+        """
+        if self._rule_service is None:
+            return "off"
+        try:
+            sm = self._rule_service.runner_state_machine
+        except Exception:  # noqa: BLE001
+            return "off"
+        if sm is None:
+            return "off"
+        return sm.runtime_state(task_id).value
+
+    def _last_decision(self, task_id: str) -> dict | None:
+        if self._rule_service is None:
+            return None
+        try:
+            tracker = self._rule_service.decision_tracker
+        except Exception:  # noqa: BLE001
+            return None
+        return tracker.summary(task_id) if tracker is not None else None
 
     @staticmethod
     def _rule_actions_desc(rule) -> list[str]:

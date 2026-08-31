@@ -35,6 +35,7 @@ from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
     SCENE_IID,
     Rule,
+    RuleDirection,
     RuleExecuteResult,
     RuleLifecycle,
     RuleLog,
@@ -210,6 +211,31 @@ async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
     )
 
 
+def _rule_action_slots(rule: Rule) -> tuple[list, str | None, list, str | None]:
+    """rule 的动作字段 → task 的四个槽。与 v2→v3 迁移里那份映射同一套口径。
+
+    event rule 的动作全部归进方向 —— event 语义就是"发生了就做", 对应 on_enter。
+    多条 agent 回调描述合成一条时的编号规则必须与 runner 的选槽逻辑逐字一致。
+    """
+    if rule.resolved_direction is RuleDirection.SESSION:
+        return (
+            [a.model_dump(mode="json") for a in rule.on_enter_actions],
+            rule.on_enter_desc,
+            [a.model_dump(mode="json") for a in rule.on_exit_actions],
+            rule.on_exit_desc,
+        )
+    joined = (
+        "\n".join(f"{i + 1}. {d}" for i, d in enumerate(rule.action_descriptions))
+        or None
+    )
+    return (
+        [a.model_dump(mode="json") for a in rule.actions],
+        joined,
+        [],
+        None,
+    )
+
+
 def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> None:
     """建 task 状态机并把每个 task 的拓扑与边界动作登记进去。
 
@@ -221,19 +247,27 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
     """
     from miloco.database.task_repo import TaskRepo
     from miloco.task.state_machine import TaskStateMachine, derive_directions
+    from miloco.task.tracking import DecisionTracker
+    from miloco.utils.time_utils import now_ms
 
     task_repo = TaskRepo()
+    tracker = DecisionTracker()
     state_machine = TaskStateMachine(
         is_condition_satisfied=rule_runner.is_condition_satisfied,
         reset_edge_baseline=rule_runner.reset_edge_baseline,
         # 只有状态机自己发起动作时才会走到这里 (重新配置时强制 on_exit、手动
         # 注入)。边沿驱动的那条路由 runner 传 dispatch=False, 动作走它自己的
-        # fire 路径。这个槽还没有真实消费方, 先留一条日志。
-        dispatch_action=lambda task_id, slot, payload: logger.info(
-            "task %s state machine self-initiated %s", task_id, slot.value
+        # fire 路径。
+        dispatch_action=lambda task_id, slot, payload: rule_runner.dispatch_task_action(
+            task_id, slot.value
         ),
+        track=lambda outcome, signal: tracker.record(
+            signal.task_id, signal.rule_id, outcome.value, now_ms()
+        ),
+        on_forget=tracker.forget,
     )
     rule_runner.attach_state_machine(state_machine)
+    rule_runner.attach_tracker(tracker)
 
     rules_by_task: dict[str, list] = {}
     for rule in rule_runner.get_all_rules():
@@ -418,6 +452,8 @@ class RuleService:
 
         rule.id = rule_id
         self._runner.add_rule(rule)
+        # 顺序要紧: 先把动作写进 task 列, 再 reconfigure —— 后者刷的是 task 列的快照
+        self.sync_rule_actions_to_task(rule)
         self.reconfigure_task(rule.task_id)
         logger.info("Rule created: %s", rule_id)
         return rule_id
@@ -470,6 +506,7 @@ class RuleService:
         success = self._repo.update(rule)
         if success:
             self._runner.add_rule(rule)
+            self.sync_rule_actions_to_task(rule)
             self.reconfigure_task(rule.task_id)
         return success
 
@@ -587,6 +624,7 @@ class RuleService:
         success = self._repo.update(existing)
         if success:
             self._runner.add_rule(existing)
+            self.sync_rule_actions_to_task(existing)
             self.reconfigure_task(existing.task_id)
         return success
 
@@ -601,9 +639,13 @@ class RuleService:
 
         success = self._repo.delete(rule_id)
         if success:
-            self._runner.remove_rule(rule_id)
+            # 顺序要紧: 先 reconfigure。DB 行已删, 拓扑因此为空、会触发 on_exit,
+            # 而 runner 内存里那条 rule 还在, 动作有 rule 可归属 (日志与冷却按
+            # rule 记)。反过来先 remove_rule, 那次 on_exit 会因为"名下已无 rule"
+            # 被跳过 —— 而这正是 §19.5 要解的那个卡死场景。
             if task_id:
                 self.reconfigure_task(task_id)
+            self._runner.remove_rule(rule_id)
             self._log_repo.delete_by_rule_id(rule_id)
         return success
 
@@ -614,7 +656,69 @@ class RuleService:
         """
         self._runner.remove_rule(rule_id)
 
+    @property
+    def decision_tracker(self):
+        """给 task 层读判定摘要用。没接管时为 None。"""
+        return self._runner.tracker
+
+    @property
+    def runner_state_machine(self):
+        """给 task 层读运行态用。没接管时为 None。"""
+        return self._runner.state_machine
+
     # ---- 重新配置路径 (§19.5) ----
+
+    def sync_rule_actions_to_task(self, rule: Rule) -> None:
+        """把 rule 上的动作写进它所属 task 的边界动作列。
+
+        §10.3 阶段 A 说「CLI 加新 flag，旧 flag 仍可用」——**旧 flag 仍可用意味着
+        它的写入必须落到新位置**。读侧的双路回退只解决了「读哪一份」, 写侧不透传
+        的话, 迁移后用现有 CLI 改动作会静默不生效: rule 列改了、fire 读的是 task
+        列的旧值, 而 CLI 返回成功、``rule get`` 也显示新值。
+
+        一 task 多 rule 且动作不一致时跳过并告警 —— 口径与迁移一致 (§10.1): 从
+        一条 rule 单向覆盖会把另一条的动作悄悄冲掉。
+
+        阶段 B 动作 flag 落到 task 上之后这个函数整体删除。
+        """
+        from miloco.database.task_repo import TaskRepo
+
+        siblings = [r for r in self._repo.list_by_task(rule.task_id) if r.id != rule.id]
+        if siblings:
+            logger.warning(
+                "task %s 名下有 %d 条其它 rule, 不把 rule %s 的动作透传到 task 列; "
+                "请改用 task 侧的动作入口",
+                rule.task_id,
+                len(siblings),
+                rule.id,
+            )
+            return
+
+        enter_actions, enter_desc, exit_actions, exit_desc = _rule_action_slots(rule)
+        # rule 写入已经成功并且是主要效果, 不能被 task 侧同步的失败带崩。但也不能
+        # 静默 —— 同步没成功就意味着"动作只读"那个坑还在, 必须留下明显的线索。
+        try:
+            written = TaskRepo().set_boundary_actions(
+                rule.task_id,
+                on_enter_actions=enter_actions,
+                on_enter_desc=enter_desc,
+                on_exit_actions=exit_actions,
+                on_exit_desc=exit_desc,
+                on_target_desc=rule.on_target_desc,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "把 rule %s 的动作同步到 task %s 失败: %s; "
+                "该 task 若已被状态机接管, 这次动作改动不会生效",
+                rule.id,
+                rule.task_id,
+                e,
+            )
+            return
+        if not written:
+            logger.warning(
+                "task %s 没有对应行, rule %s 的动作没同步过去", rule.task_id, rule.id
+            )
 
     def reconfigure_task(self, task_id: str) -> None:
         """rule 增删改、rule 单独启停、task 重新 enable 统一走这条。
@@ -634,7 +738,9 @@ class RuleService:
         from miloco.task.state_machine import derive_directions
 
         self._runner.set_task_actions(task_id, TaskRepo().get_boundary_actions(task_id))
-        rules = [r for r in self._runner.get_all_rules() if r.task_id == task_id]
+        # 从 DB 读而非内存: DB 是归属的权威源, 且删 rule 时行已落库、runner 内存
+        # 还留着那条 —— 正需要这个错位, 空拓扑触发 on_exit 时动作还有 rule 可归属。
+        rules = self._repo.list_by_task(task_id)
         if not rules or not self._runner.task_owns_actions(task_id):
             if sm.owns(task_id):
                 # 空拓扑先走一次 reconfigure：删掉最后一条 rule 也是「失去全部

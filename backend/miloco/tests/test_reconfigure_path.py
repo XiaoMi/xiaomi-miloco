@@ -13,6 +13,8 @@ on_exit 永不执行。
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 from miloco.database.rule_repo import RuleLogRepo, RuleRepo
 from miloco.database.task_repo import TaskRepo
@@ -83,6 +85,33 @@ async def _anoop(*_a, **_kw):
 
 
 # ── 删掉唯一出边 rule ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delete_last_exit_rule_actually_fires_on_exit(env, monkeypatch):
+    """**动作真的被执行**, 不只是"状态机请求了"。
+
+    这条与下面那条 recorder 版本的区别很重要: recorder 顶掉派发口之后, 无论
+    真实派发能不能拿到归属 rule, 断言都会绿。而删掉最后一条 rule 时 runner 内存
+    里那条随时会被摘掉, 动作就无处归属、被跳过 —— 恰好是 §19.5 要解的那个卡死。
+    """
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    # 换回真实派发口 —— _build 里那个 recorder 恰好遮住本条要验的东西
+    runner.state_machine._dispatch_action = lambda t, sl, _p: (
+        runner.dispatch_task_action(t, sl.value)
+    )
+    rule = RuleRepo().get_by_id(ids[0])
+    runner._state_machine_allows(rule, RuleEvent.ENTERED)
+    fired: list[tuple[str, RuleEvent]] = []
+    monkeypatch.setattr(
+        RuleRunner,
+        "_spawn_fire",
+        lambda self, r, ev, *a, **kw: fired.append((r.id, ev)),
+    )
+
+    await service.delete_rule(ids[0])
+
+    assert fired == [(ids[0], RuleEvent.EXITED)]
 
 
 @pytest.mark.asyncio
@@ -207,3 +236,159 @@ def test_apply_task_status_pauses_and_reconfigures(env):
     assert dispatched == []
     # 但运行态清掉, enable 回来按 §7 重建
     assert runner.state_machine.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+# ── 动作写入透传 (§10.3 阶段 A 的写侧) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_rule_action_edit_reaches_task_column(env, monkeypatch):
+    """迁移后用现有 CLI 改动作必须生效。
+
+    读侧回退只解决"读哪一份"; 写侧不透传的话 rule 列改了、fire 读的是 task 列的
+    旧值, 而 CLI 返回成功、rule get 也显示新值 —— 静默不生效。
+    """
+    from miloco.rule.schema import RuleUpdate
+
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+    rule = RuleRepo().get_by_id(ids[0])
+    assert runner._select_slot(rule, RuleEvent.ENTERED) == ("dynamic", "task 侧")
+
+    await service.patch_rule(ids[0], RuleUpdate(on_enter_desc="改过的文案"))
+
+    updated = RuleRepo().get_by_id(ids[0])
+    assert runner._select_slot(updated, RuleEvent.ENTERED) == (
+        "dynamic",
+        "改过的文案",
+    )
+
+
+@pytest.mark.asyncio
+async def test_write_through_skipped_when_task_has_other_rules(env, monkeypatch):
+    """多 rule 时从一条单向覆盖会把另一条的动作悄悄冲掉 —— 口径同迁移。"""
+    from miloco.rule.schema import RuleUpdate
+
+    service, _runner, ids, _ = _build(_ACTIONS, [_rule("[t1] a"), _rule("[t1] b")])
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+
+    await service.patch_rule(ids[0], RuleUpdate(on_enter_desc="只改了 a"))
+
+    assert TaskRepo().get_boundary_actions("t1")["on_enter_desc"] == "task 侧"
+
+
+def test_write_through_warns_when_task_row_missing(env, caplog):
+    """task 行不存在 → 只是没写进去, 不抛。但必须留日志。"""
+    service, _runner, _ids, _ = _build(_ACTIONS, [])
+    orphan = _rule("[nope] r", task_id="does_not_exist")
+    orphan.id = "r-orphan"
+
+    with caplog.at_level("WARNING"):
+        service.sync_rule_actions_to_task(orphan)
+
+    assert any("没同步过去" in r.message for r in caplog.records)
+
+
+def test_write_through_survives_repo_exception(env, monkeypatch, caplog):
+    """rule 写入是主要效果, 不能被 task 侧同步抛出的异常带崩。
+
+    真实触发形态是 task 表缺失（部分单测库就是这样）—— 传一个不存在的 task_id
+    不会抛, 只是 rowcount 0, 所以那条路走不到这个分支。
+    """
+    from miloco.database.task_repo import TaskRepo as _TR
+
+    service, _runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    rule = RuleRepo().get_by_id(ids[0])
+
+    def _boom(*_a, **_kw):
+        raise sqlite3.OperationalError("no such table: task")
+
+    monkeypatch.setattr(_TR, "set_boundary_actions", _boom)
+
+    with caplog.at_level("WARNING"):
+        service.sync_rule_actions_to_task(rule)
+
+    assert any("不会生效" in r.message for r in caplog.records)
+
+
+def test_self_initiated_action_needs_a_rule_for_attribution(env, monkeypatch):
+    """名下无 rule 时动作无处归属（日志与冷却按 rule 记）→ 跳过, 不崩。"""
+    _service, runner, _ids, _ = _build(_ACTIONS, [])
+    fired: list = []
+    monkeypatch.setattr(
+        RuleRunner, "_spawn_fire", lambda self, *a, **kw: fired.append(a)
+    )
+
+    assert runner.dispatch_task_action("t1", "on_exit") is False
+    assert fired == []
+
+
+def test_self_initiated_action_rejects_unknown_slot(env):
+    _service, runner, _ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+
+    assert runner.dispatch_task_action("t1", "on_nonsense") is False
+
+
+# ── runtime_state / lifecycle 进视图 ──────────────────────────────────
+
+
+def test_task_full_view_exposes_runtime_state(env):
+    from miloco.task.service import TaskService
+
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    task_service = TaskService(rule_repo=RuleRepo(), rule_service=service)
+    assert task_service.get_full_view("t1").runtime_state == "off"
+
+    runner._state_machine_allows(RuleRepo().get_by_id(ids[0]), RuleEvent.ENTERED)
+
+    assert task_service.get_full_view("t1").runtime_state == "on"
+
+
+def test_task_full_view_exposes_lifecycle(env):
+    from miloco.task.service import TaskService
+
+    service, _runner, _ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    TaskRepo().set_boundary_actions("t1", lifecycle="temporary")
+
+    view = TaskService(rule_repo=RuleRepo(), rule_service=service).get_full_view("t1")
+
+    assert view.lifecycle == "temporary"
+
+
+# ── 判定跟踪接线 (§18.5) ──────────────────────────────────────────────
+
+
+def test_last_decision_reaches_task_view(env):
+    """状态机吞掉一次进入时, 视图要能说出是被哪一层压制的。
+
+    不接这条线的话「被对侧条件拦住」和「已在态内」在住户那边表现完全一样 ——
+    都是"没触发"。
+    """
+    from miloco.task.service import TaskService
+
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    task_service = TaskService(rule_repo=RuleRepo(), rule_service=service)
+    rule = RuleRepo().get_by_id(ids[0])
+
+    runner._state_machine_allows(rule, RuleEvent.ENTERED)
+    assert task_service.get_full_view("t1").last_decision["outcome"] == "entered"
+
+    runner._state_machine_allows(rule, RuleEvent.ENTERED)
+    d = task_service.get_full_view("t1").last_decision
+    assert d["outcome"] == "already_in_state"
+    assert d["suppressed"] is True
+
+
+def test_tracking_cleared_when_task_unregistered(env):
+    from miloco.task.service import TaskService
+
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    task_service = TaskService(rule_repo=RuleRepo(), rule_service=service)
+    runner._state_machine_allows(RuleRepo().get_by_id(ids[0]), RuleEvent.ENTERED)
+    assert task_service.get_full_view("t1").last_decision is not None
+
+    runner.state_machine.unregister_task("t1")
+
+    assert task_service.get_full_view("t1").last_decision is None

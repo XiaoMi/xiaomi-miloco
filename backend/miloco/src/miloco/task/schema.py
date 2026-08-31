@@ -74,6 +74,9 @@ class TaskFullView(BaseModel):
     # 只读: 模式此刻开着还是关着。内存派生, 不落库 —— 重启一律从 off 起 (§4.2)
     runtime_state: Literal["off", "on"] = "off"
     lifecycle: Literal["permanent", "temporary"] = "permanent"
+    # 最后一次判定的结论摘要, 回答「我的规则现在为什么不触发」(§18.5)。
+    # None = 该 task 还没被状态机接管, 或接管后一次判定都没发生过。
+    last_decision: dict | None = None
     rule_briefs: list[RuleBrief] = Field(default_factory=list)
     cron_refs: list[CronRef] = Field(default_factory=list)
 

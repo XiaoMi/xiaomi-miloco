@@ -155,6 +155,7 @@ class TaskStateMachine:
     - ``dispatch_action(task_id, slot, payload)``: 交出去异步跑, **必须立即返回**。
       ``payload`` 是 submit 时带的上下文, 状态机原样转交。
     - ``track(outcome, signal)``: 跟踪一次结论, 必须是同步内存操作 (§18.3)。
+    - ``on_forget(task_id)``: task 撤销登记时清跟踪数据。
     """
 
     def __init__(
@@ -164,11 +165,13 @@ class TaskStateMachine:
         reset_edge_baseline: Callable[[str], None],
         dispatch_action: Callable[[str, ActionSlot, object | None], None],
         track: Callable[[TransitionOutcome, TaskSignal], None] | None = None,
+        on_forget: Callable[[str], None] | None = None,
     ) -> None:
         self._is_condition_satisfied = is_condition_satisfied
         self._reset_edge_baseline = reset_edge_baseline
         self._dispatch_action = dispatch_action
         self._track = track or (lambda outcome, signal: None)
+        self._on_forget = on_forget or (lambda task_id: None)
 
         # handle(dispatch=False) 期间关掉派发 —— 见 handle 的 docstring
         self._dispatching = True
@@ -199,6 +202,8 @@ class TaskStateMachine:
         self._wakeups.setdefault(task_id, asyncio.Event())
 
     def unregister_task(self, task_id: str) -> None:
+        # 跟踪层也要跟着清 —— 不清就是一条随 task 数单调增长的内存泄漏
+        self._on_forget(task_id)
         self._stop_consumer(task_id)
         self._topologies.pop(task_id, None)
         self._states.pop(task_id, None)

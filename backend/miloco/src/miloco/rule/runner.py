@@ -509,6 +509,13 @@ class RuleRunner:
     def state_machine(self) -> TaskStateMachine | None:
         return self._state_machine
 
+    def attach_tracker(self, tracker) -> None:
+        self._tracker = tracker
+
+    @property
+    def tracker(self):
+        return getattr(self, "_tracker", None)
+
     # ---- Main entry: per-frame, per-source state report ----
 
     async def update_state(
@@ -1035,6 +1042,38 @@ class RuleRunner:
             )
 
     # ---- Fire-and-forget plumbing ----
+
+    _SLOT_TO_EVENT = {
+        "on_enter": RuleEvent.ENTERED,
+        "on_exit": RuleEvent.EXITED,
+        "on_target": RuleEvent.TARGET_FIRED,
+    }
+
+    def dispatch_task_action(self, task_id: str, slot_name: str) -> bool:
+        """状态机自己发起的动作 —— 没有上游边沿, 由本函数补出一次 fire。
+
+        用在 §19.5 重新配置时的强制 ``on_exit`` 与 §5 的手动注入。感知路径不走
+        这里 (它有自己的边沿与上下文, 状态机对它只做许可闸)。
+
+        动作在 task 行上, 但日志与冷却仍按 rule 归属, 所以要挑一条代表 rule。
+        名下无 rule 时返回 False —— 那正是"删掉最后一条 rule"的情形, 动作已经无处
+        归属, 只能记日志。
+        """
+        event = self._SLOT_TO_EVENT.get(slot_name)
+        if event is None:
+            logger.warning("unknown action slot %r for task %s", slot_name, task_id)
+            return False
+        rules = [r for r in self._rules.values() if r.task_id == task_id]
+        if not rules:
+            logger.warning(
+                "task %s 请求 %s 但名下已无 rule, 动作无处归属, 跳过",
+                task_id,
+                slot_name,
+            )
+            return False
+        rule = rules[0]
+        self._spawn_fire(rule, event, [], f"task_state_machine_{slot_name}")
+        return True
 
     def _state_machine_allows(self, rule: Rule, event: RuleEvent) -> bool:
         """问 task 状态机: 这次已确认的边沿该不该 fire。
