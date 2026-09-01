@@ -4857,6 +4857,78 @@ class TestRecordMilestoneSessionBoundary:
 
     @pytest.mark.asyncio
     @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_cross_day_does_not_force_a_pair_on_an_exit_rule(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """exit 型的条件为真是"该退出了", 不表示 task 在态内。
+
+        不排除它的话: 用户 23:00 离开沙发, "沙发上没人"整夜为真, 00:00 强发一次进入
+        边沿 → 映射到退出槽 → 在 task 已经关闭的情况下多执行一次退出动作。
+        """
+        mock_send.return_value = True
+        enter_rule = self._directional_rule("r-enter", RuleDirection.ENTER)
+        exit_rule = self._directional_rule("r-exit", RuleDirection.EXIT)
+        r, sm = self._build((None, 0), [enter_rule, exit_rule])
+
+        await r.update_state("r-enter", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        assert sm.runtime_state(TASK_ID) is TaskRuntimeState.ON
+        # 离开: exit 条件成立 → 退出。条件之后整夜保持为真。
+        await r.update_state("r-exit", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+        assert sm.runtime_state(TASK_ID) is TaskRuntimeState.OFF
+        assert r.is_condition_satisfied(exit_rule.id) is True
+        mock_send.reset_mock()
+
+        r.force_cross_day_reset(TASK_ID)
+        await asyncio.sleep(0.1)
+        await r.drain()
+
+        fired = [
+            it.rule_id
+            for call in mock_send.call_args_list
+            for it in call.args[1]
+        ]
+        assert fired == []
+        assert sm.runtime_state(TASK_ID) is TaskRuntimeState.OFF
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_duration_exit_rule_settles_target_before_flipping_off(
+        self, mock_send, mock_miot_proxy, mock_log_repo,
+    ):
+        """配了 duration_seconds 的 exit 型 rule 走的是滑窗那条路, 不是瞬时翻转。
+
+        那条路问许可闸之前没有兑现的话, 状态机先翻 off, timer 到点被"不在会话中"
+        拦掉, 而条件已经被置真 —— 这一天的达标永久消失。
+        """
+        mock_send.return_value = True
+        enter_rule = self._directional_rule("r-enter", RuleDirection.ENTER)
+        exit_rule = self._directional_rule("r-exit", RuleDirection.EXIT)
+        # duration_seconds 小于采样间隔 → 滑窗长度 1, 一帧就凑满
+        exit_rule.duration_seconds = 1
+        exit_rule.duration_ratio = 1.0
+        ms = _make_milestone_rule()
+        r, sm = self._build((60, 0), [enter_rule, exit_rule, ms])
+
+        await r.update_state("r-enter", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        assert sm.runtime_state(TASK_ID) is TaskRuntimeState.ON
+
+        # session 内累计跨过目标, 随后 exit 条件成立
+        r._task_record_service.read_duration_target_state = MagicMock(
+            return_value=(60, 60)
+        )
+        await r.update_state("r-exit", "cam-001", True, "")
+        await asyncio.sleep(0.05)
+        await r.drain()
+
+        assert sm.runtime_state(TASK_ID) is TaskRuntimeState.OFF, "前提没成立: 没退出"
+        assert _fired_events(mock_send).count(RuleEvent.TARGET_FIRED) == 1
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
     async def test_state_machine_initiated_exit_drops_the_timer(
         self, mock_send, mock_miot_proxy, mock_log_repo,
     ):

@@ -632,7 +632,7 @@ class RuleRunner:
                     for did, s in rule_state.sources.items()
                     if did not in observed_states
                 )
-                dur_outcome = self._evaluate_duration(
+                dur_outcome = await self._evaluate_duration(
                     rule, effective_state, source_did, context, caption, device_name
                 )
                 # out() 对 duration 规则一律取 dur_outcome，其非空由本块位置维持——静态类型
@@ -789,7 +789,7 @@ class RuleRunner:
 
     # ---- EVENT duration sliding-window evaluator ----
 
-    def _evaluate_duration(
+    async def _evaluate_duration(
         self,
         rule: Rule,
         new_rule_state: bool,
@@ -880,6 +880,13 @@ class RuleRunner:
                 maxlen,
                 rule.duration_ratio,
             )
+            slot = _slot_for(rule, RuleEvent.ENTERED)
+            if slot is ActionSlot.ON_EXIT:
+                # exit 型的进入边沿就是"该退出了"。达标兜底必须排在状态机翻 off
+                # 之前 —— 翻完再喂会被"不在会话中"拦掉, 这一天的达标就丢了。与
+                # 瞬时翻转那条路同一份处理, 两条都是退出的入口。
+                await self._record_source.settle(rule.task_id)
+
             if not self._state_machine_allows(rule, RuleEvent.ENTERED):
                 # 在清窗口 / 标记 fired 之前问闸：被吞掉时这两样都不该动，否则
                 # 白丢一次累积。
@@ -907,7 +914,7 @@ class RuleRunner:
                 },
                 caption=caption, device_name=device_name,
             )
-            self._sync_record_source(rule, _slot_for(rule, RuleEvent.ENTERED))
+            self._sync_record_source(rule, slot)
             return TriggerOutcome.FIRED
 
         return TriggerOutcome.COUNTING
@@ -1284,13 +1291,14 @@ class RuleRunner:
         ``(target_minutes, accumulated_minutes_today)``——rollover 已清旧累计，
         record 源读不到「旧一天已达标」这个信号，必须靠 snapshot 兑现。
         """
-        # 排除 milestone: 它的条件为真只表示"今天发过达标了", 不表示 task 在态内。
-        # 不排的话午夜会给它强发一次进入边沿 —— 那条边沿映射到达标槽, 于是每天
-        # 00:00 多播一条达标通知, 还标成 ENTERED、绕过许可闸 (§5.3)。
+        # 只挑 session: 它的条件为真才等于"此刻在会话中", 强补一对进出才有意义。
+        # milestone 的条件为真是"今天发过达标了", exit 的是"该退出了", 都不表示在
+        # 态内 —— 强发进入边沿会分别多播一条达标通知、在 task 已关闭时多执行一次
+        # 退出动作, 而这条路径不经许可闸 (§5.3)。
         affected: list[Rule] = [
             r for r in self._rules.values()
             if r.task_id == task_id
-            and not _is_milestone(r)
+            and r.resolved_direction is RuleDirection.SESSION
             and r.id in self._state
             and self._state[r.id].last_rule_state
         ]
