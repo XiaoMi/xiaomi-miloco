@@ -652,3 +652,69 @@ def test_set_actions_clearing_a_static_slot_writes_empty_list(service):
     service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_actions=None))
 
     assert service.get_full_view("t1").actions.on_enter_actions == []
+
+
+# ── 配达标动作要先有 duration record + 阈值 ──────────────────────────────
+
+
+def _service_with_rule_stub(record_state):
+    """带一个只回答"有没有阈值"的 rule service 替身。"""
+    from unittest.mock import MagicMock
+
+    from miloco.rule.service import RuleService
+    from miloco.task.service import TaskService
+
+    record_svc = MagicMock()
+    record_svc.detect_record_kind = MagicMock(
+        return_value="duration" if record_state is not None else None
+    )
+    record_svc.read_duration_target_state = MagicMock(return_value=record_state)
+    rule_svc = RuleService.__new__(RuleService)
+    rule_svc._task_record_service = record_svc
+    rule_svc.reconfigure_task = MagicMock()
+    return TaskService(rule_repo=RuleRepo(), rule_service=rule_svc)
+
+
+def test_set_actions_rejects_target_desc_without_a_record(real_db):
+    """配了达标通知却没有 record —— 永远不会响, 且从配置上看不出缺什么。"""
+    from miloco.middleware.exceptions import ValidationException
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub(None)
+    _mk_task(service)
+    with pytest.raises(ValidationException, match="无活跃 record"):
+        service.set_boundary_actions(
+            "t1", TaskActionsUpdateRequest(on_target_desc="达标推送")
+        )
+
+
+def test_set_actions_rejects_target_desc_without_a_threshold(real_db):
+    from miloco.middleware.exceptions import ValidationException
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((None, 0))
+    _mk_task(service)
+    with pytest.raises(ValidationException, match="target_minutes"):
+        service.set_boundary_actions(
+            "t1", TaskActionsUpdateRequest(on_target_desc="达标推送")
+        )
+
+
+def test_set_actions_allows_target_desc_when_the_record_is_ready(real_db):
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+    assert service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_target_desc="达标推送")
+    )
+
+
+def test_set_actions_does_not_check_the_record_for_other_slots(service):
+    """只有达标那个槽有这个前置 —— 顺手校验会让改进入动作也被 record 卡住。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    _mk_task(service)
+    assert service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_desc="进")
+    )

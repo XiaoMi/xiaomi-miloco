@@ -4864,9 +4864,13 @@ class TestTaskRuleSetLegality:
     def test_exit_only_has_no_entry_path(self):
         assert "进路径" in _directions_error(RuleDirection.EXIT)
 
-    def test_milestone_only_has_no_entry_path(self):
-        """只挂 milestone 的 task 永远在 off，达标边沿到了也会被丢弃。"""
-        assert "进路径" in _directions_error(RuleDirection.MILESTONE)
+    def test_a_lone_milestone_rule_is_not_judged(self):
+        """只挂达标规则不判非法 —— 它是派生物, 而且是装配的必经中间态。
+
+        判非法的话每个配了达标通知的 task 都会经过它, 免责条款一放行, 这道闸对
+        它们就永久失效 (spec §9「不能只有 milestone rule」因此不可执行)。
+        """
+        assert _directions_error(RuleDirection.MILESTONE) is None
 
     def test_exit_plus_milestone_has_no_entry_path(self):
         """两条都不构成进路径，凑一起也还是进不去。"""

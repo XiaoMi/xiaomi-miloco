@@ -335,10 +335,13 @@ class TaskStateMachine:
         self._states[signal.task_id] = TaskRuntimeState.OFF
         self._maybe_dispatch(signal.task_id, ActionSlot.ON_EXIT, signal.payload)
 
-        # §5.2「退出后不立即重进」不需要在这里做任何事: 退出路径不清边沿基线,
-        # 进入条件此刻仍为真则基线也仍是真、产不出新边沿; 已为假则下次变真是一次
-        # 真实的新进入。强行置真会让条件层对外说谎, 而边沿 diff 读的是同一个值 ——
-        # rule 会被当成还在态内, 从此再也进不来。
+        # 这里不动条件层的值。改写它会让 ② 层对外说谎, 而 ③ 层的边沿 diff 读的
+        # 是同一个值 —— rule 会被当成还在态内, 退出一次之后就再也进不来。
+        #
+        # §5.2「退出后不立即重进」因此**本次不实现**: 纯边沿驱动的进入 rule 靠 diff
+        # 天然不重进 (条件仍为真就没有翻转), 但配了 duration_seconds 的进入 rule
+        # 走的是周期重新累积那条路、不看 diff, 条件恒真时仍会自动重进。被删掉的基线
+        # 重置对后者同样无效 (它只挪值、不动窗口), 所以那是个已知缺口, 不是回归。
         return self._done(TransitionOutcome.EXITED, signal)
 
     def _other_exit_side_holds(

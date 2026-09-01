@@ -411,6 +411,48 @@ class TestMilestoneReconcile:
 
         assert not repo.delete.called
         assert not repo.create.called
+    def test_reconfigure_puts_the_new_rule_into_this_round_topology(
+        self, monkeypatch
+    ):
+        """重算必须排在读拓扑之前 —— 晚一步的话代建的那条进不了这次的拓扑。
+
+        断言喂给状态机的拓扑里有它。只断言"建了没有"的话, 把重算挪到函数末尾照样绿。
+        """
+        import miloco.database.task_repo as task_repo_module
+        from miloco.task.state_machine import TaskStateMachine
+
+        svc, repo = _rule_service("duration", (60, 0))
+
+        built: list = []
+
+        def remember(rule):
+            rule.id = "new-milestone-id"
+            built.append(rule)
+            return rule.id
+
+        repo.create = MagicMock(side_effect=remember)
+        # reconcile 建完之后, 读拓扑那次要能看到它
+        repo.list_by_task = MagicMock(side_effect=lambda _t: list(built))
+
+        actions = {"on_target_desc": "达标了"}
+        monkeypatch.setattr(
+            task_repo_module,
+            "TaskRepo",
+            lambda: MagicMock(get_boundary_actions=MagicMock(return_value=actions)),
+        )
+
+        seen: list[dict] = []
+        sm = TaskStateMachine(
+            is_condition_satisfied=lambda _r: None,
+            dispatch_action=lambda *_a: None,
+        )
+        monkeypatch.setattr(sm, "reconfigure", lambda t, d: seen.append(dict(d)))
+        svc._runner.attach_state_machine(sm)
+
+        svc.reconfigure_task(TASK_ID)
+
+        assert seen, "状态机没收到拓扑"
+        assert list(seen[-1].values()) == [RuleDirection.MILESTONE.value]
 
 
 class TestLegacyTargetRecordValidation:
@@ -433,10 +475,56 @@ class TestLegacyTargetRecordValidation:
         svc, _ = _rule_service("duration", (None, 0))
         with pytest.raises(ValidationException, match="target_minutes"):
             svc._validate_target_record(_legacy_rule())
+class TestMilestoneIsNotUserConfiguration:
+    """代建的达标规则不能被当成用户建的 rule 看待。"""
 
-    def test_reconfigure_recomputes_before_reading_the_topology(self):
-        """重新配置必须先重算 —— 晚一步的话代建的那条进不了这次的拓扑。"""
-        svc, repo = _rule_service("duration", (60, 0))
-        svc.reconfigure_task(TASK_ID)
+    def test_it_does_not_block_rule_side_action_passthrough(self):
+        """它算 sibling 的话, 配了达标通知的 task 从此改不动作 —— 改了只写 rule
+        行、不写 task 列, 而 fire 读的是 task 列。"""
+        session_rule = _legacy_rule("r-session")
+        session_rule.on_enter_desc = "开始计时"
+        svc, repo = _rule_service("duration", (60, 0), rules=[_make_rule()])
+        written: dict = {}
 
-        assert repo.create.called
+        import miloco.database.task_repo as task_repo_module
+
+        class _Repo:
+            def set_boundary_actions(self, task_id, **slots):
+                written.update(slots)
+                return True
+
+        original = task_repo_module.TaskRepo
+        task_repo_module.TaskRepo = _Repo
+        try:
+            svc.sync_rule_actions_to_task(session_rule)
+        finally:
+            task_repo_module.TaskRepo = original
+
+        assert written.get("on_enter_desc") == "开始计时"
+
+    def test_it_does_not_count_toward_the_task_rule_set(self):
+        """只挂它时不判非法, 否则免责条款会把进路径那道闸永久放行。"""
+        from miloco.rule.service import _task_rule_set_error
+
+        assert _task_rule_set_error([RuleDirection.MILESTONE]) is None
+        assert (
+            _task_rule_set_error([RuleDirection.MILESTONE, RuleDirection.SESSION])
+            is None
+        )
+
+
+class TestClientSuppliedIdCannotSkipSiblings:
+    def test_create_does_not_exclude_a_sibling_by_the_posted_id(self):
+        """repo 建行时另生 uuid, 拿请求里的 id 去排除等于让调用方指定忽略哪条。"""
+        from miloco.middleware.exceptions import ValidationException
+        from miloco.rule.schema import RuleDirection as D
+
+        existing = _legacy_rule("r-session")
+        existing.direction = D.SESSION
+        svc, _ = _rule_service(None, None, rules=[existing])
+
+        incoming = _legacy_rule("r-session", on_target_desc=None)
+        incoming.direction = D.ENTER
+
+        with pytest.raises(ValidationException, match="独占"):
+            svc._validate_task_rule_set(incoming)

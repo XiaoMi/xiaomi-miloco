@@ -104,25 +104,27 @@ def _task_rule_set_error(directions: list[RuleDirection]) -> str | None:
 
     校验对象是集合不是单条 rule —— 这两条约束都只有把同一 task 的 rule 放到一起
     看才成立。
+
+    **达标规则不算数**: 它是服务端按 task 的达标配置维护的派生物, 不是用户建的
+    规则。算进来的话"只挂一条达标规则"会被判成"没有进路径", 而每个配了达标通知的
+    task 装配途中都会经过这个状态 —— 免责条款一放行, 这道闸对它们就永久失效了。
     """
+    directions = [d for d in directions if d is not RuleDirection.MILESTONE]
     if not directions:
         # 装配是分步的, task 可以暂时一条 rule 都没有。
         return None
 
-    state_changing = [d for d in directions if d is not RuleDirection.MILESTONE]
-    if RuleDirection.SESSION in state_changing and len(state_changing) > 1:
+    if RuleDirection.SESSION in directions and len(directions) > 1:
         return (
             "direction=session 的规则必须独占该 task: 与 enter / exit / 另一条 "
             "session 混挂会让 task 永久卡住 (spec §19.7)。"
-            "milestone 不改状态, 不在此列。"
         )
 
     entry_directions = (RuleDirection.ENTER, RuleDirection.SESSION)
     if not any(d in entry_directions for d in directions):
         return (
-            "task 名下没有进路径: 只有 exit / milestone 的 task 永远进不了 on, "
-            "名下的动作一条都不会执行。至少要有一条 direction=enter 或 session "
-            "的规则。"
+            "task 名下没有进路径: 只有 exit 规则的 task 永远进不了 on, 名下的动作"
+            "一条都不会执行。至少要有一条 direction=enter 或 session 的规则。"
         )
     return None
 
@@ -388,34 +390,46 @@ class RuleService:
         """这次变更有没有让 task 的 rule 集合变非法 (spec §9)。
 
         已经非法的放行, 只拦这次引入的: 存量迁移和删 rule 都可能留下非法的 task,
-        一律拦住会把「改回合法」和「先停用它」这两条自救路一起堵死。丢失 rule 的
-        那一侧 (删掉、改挂到别的 task) 同理不拦, 由重新配置路径兜住 (§19.5)。
+        一律拦住会把「改回合法」和「先停用它」这两条自救路一起堵死。
 
         停用的 rule 照样计入: ``enabled`` 是用户意图 (§19.9), 停用一条进方向的
         规则是正常操作, 不是配置非法。
         """
-        others = [
-            r.resolved_direction
-            for r in self._repo.list_by_task(rule.task_id)
-            if r.id != rule.id
-        ]
-        before = list(others)
+        if rule.resolved_direction is RuleDirection.MILESTONE:
+            return
+
+        others = list(self._repo.list_by_task(rule.task_id))
+        if previous is not None:
+            # 排除只在改一条已有 rule 时做。create 路径上 ``rule.id`` 是客户端传的,
+            # 而 repo 建行时另生 uuid —— 拿它去排除等于让请求方指定"忽略哪条兄弟"。
+            others = [r for r in others if r.id != rule.id]
+
+        sibling_directions = [r.resolved_direction for r in others]
+        after = [*sibling_directions, rule.resolved_direction]
+        before = list(sibling_directions)
         if previous is not None and previous.task_id == rule.task_id:
             before.append(previous.resolved_direction)
 
-        error = _task_rule_set_error([*others, rule.resolved_direction])
+        error = _task_rule_set_error(after)
         if error and _task_rule_set_error(before) is None:
             raise ValidationException(error)
 
     def _validate_target_record(self, rule: Rule) -> None:
-        """达标要求被引用的 task 有 duration record + target_minutes。
-
-        没有阈值的达标通知永远不会触发，建成 active 等于留一个用户发现不了的失效项。
-        报错按当前 record 状态分三种 case，每种附可执行的 CLI 修复命令。
-        """
+        """用户在 rule 上填 ``on_target_desc`` 那条旧路径的校验。"""
         task_id = self._target_record_task_id(rule)
         if not task_id:
             return
+        self.require_duration_target(task_id)
+
+    def require_duration_target(self, task_id: str) -> None:
+        """配达标动作要求这个 task 有 duration record + target_minutes。
+
+        没有阈值的达标通知永远不会触发，配成功等于留一个用户发现不了的失效项。
+        报错按当前 record 状态分三种 case，每种附可执行的 CLI 修复命令。
+
+        两条写达标动作的路径都要走: rule 上的旧 flag 和 ``task set-actions``。
+        只挡一条的话另一条就成了绕过它的口子。
+        """
         kind = self._task_record_service.detect_record_kind(task_id)
         if kind is None:
             raise ValidationException(
@@ -753,7 +767,7 @@ class RuleService:
 
         success = self._repo.delete(rule_id)
         if success:
-            # 顺序要紧: 先 reconfigure。DB 行已删, 拓扑因此为空、会触发 on_exit,
+            # 顺序要紧: 先 reconfigure。DB 行已删, 拓扑失去这条出路径、会触发 on_exit,
             # 而 runner 内存里那条 rule 还在, 动作有 rule 可归属 (日志与冷却按
             # rule 记)。反过来先 remove_rule, 那次 on_exit 会因为"名下已无 rule"
             # 被跳过 —— 而这正是 §19.5 要解的那个卡死场景。
@@ -797,7 +811,15 @@ class RuleService:
         """
         from miloco.database.task_repo import TaskRepo
 
-        siblings = [r for r in self._repo.list_by_task(rule.task_id) if r.id != rule.id]
+        # 代建的达标规则不算 —— 它是派生物, 用户根本看不到它。算进来的话凡是配了
+        # 达标通知的 task 都会走进下面那条跳过分支, 之后每一次改动作都只写 rule 行、
+        # 不写 task 列, 而 fire 读的正是 task 列: CLI 返回成功、rule get 显示新值、
+        # 实际行为不变。
+        siblings = [
+            r
+            for r in self._repo.list_by_task(rule.task_id)
+            if r.id != rule.id and r.resolved_direction is not RuleDirection.MILESTONE
+        ]
         if siblings:
             logger.warning(
                 "task %s 名下有 %d 条其它 rule, 不把 rule %s 的动作透传到 task 列; "
@@ -848,9 +870,10 @@ class RuleService:
         return state is not None and state[0] is not None
 
     def _build_milestone_rule(self, task_id: str) -> Rule:
-        """代建的那条 rule 长什么样 —— 与 v2→v3 迁移补建的形态保持一致。
+        """代建的那条 rule 长什么样。
 
-        不带阈值: 阈值每次去 record 上现读, 存副本会在用户改目标后分叉。
+        不带阈值: 阈值每次去 record 上现读, 存副本会在用户改目标后分叉。迁移补建
+        的那条在 spec 里多写了一份阈值, 求值不看它, 两者行为相同。
         """
         return Rule(
             name=f"[{task_id}] 累计达标",
@@ -904,7 +927,8 @@ class RuleService:
             logger.info("达标规则 %s 不再需要, 删除 (task=%s)", rule.id, task_id)
             self._repo.delete(rule.id)
             self._runner.remove_rule(rule.id)
-            self._log_repo.delete_by_rule_id(rule.id)
+            # 触发日志留着: 这条规则会随阈值增删反复消失重建, 跟着删等于用户改一次
+            # 目标就丢掉全部达标历史, 而那是查"到底发过没有"的唯一凭据。
 
         if not wanted or keep:
             return

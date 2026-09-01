@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from miloco.database.rule_repo import RuleRepo
 from miloco.database.task_repo import TaskNotFound, TaskRepo
+from miloco.middleware.exceptions import BusinessException
 from miloco.rule.schema import SCENE_IID, RuleDirection
 from miloco.task.schema import (
     BackendSyncResult,
@@ -100,6 +101,9 @@ class TaskService:
 
         写完必须重新配置: runner 手里的动作快照是内存副本, 不刷新的话改了不生效,
         而 CLI 已经返回成功 —— 正是"静默不生效"那种最难查的形态。
+
+        配达标动作要先有 duration record + 阈值: 达标规则是这三样齐备的派生物, 缺
+        任何一样都只是配了个永远不响的通知。
         """
         slots = {
             name: getattr(req, name)
@@ -108,6 +112,10 @@ class TaskService:
         }
         if not slots:
             return self.repo.get_description(task_id) is not None
+        if slots.get("on_target_actions") or slots.get("on_target_desc"):
+            if self._rule_service is None:
+                raise BusinessException("rule service 未就绪，无法校验达标配置")
+            self._rule_service.require_duration_target(task_id)
         if not self.repo.set_boundary_actions(task_id, **slots):
             return False
         if self._rule_service is not None:
@@ -144,6 +152,11 @@ class TaskService:
     def _to_full_view(self, raw: dict) -> TaskFullView:
         rule_briefs: list[RuleBrief] = []
         for rule in self.rule_repo.list_by_task(raw["task_id"]):
+            # 达标规则由服务端维护, 不给用户看 —— 与 GET /rules 同口径。前端把每条
+            # rule_brief 渲染成可编辑卡片、保存走 PATCH, 而 PATCH 达标规则会被拒,
+            # 露出去等于在住户界面上摆一张存不下去的卡片。
+            if rule.resolved_direction is RuleDirection.MILESTONE:
+                continue
             rule_briefs.append(
                 RuleBrief(
                     rule_id=rule.id,

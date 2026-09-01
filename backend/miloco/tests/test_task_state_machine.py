@@ -3,7 +3,7 @@
 
 """task 运行态状态机测试.
 
-覆盖 §5 的三种形态、§5.1 的稳态交叉判定、§5.2 的基线重置、§5.3 的 milestone
+覆盖 §5 的三种形态、§5.1 的稳态交叉判定、§5.2（本次不实现，见 state_machine 退出分支的注释）、§5.3 的 milestone
 路由、§19.4 的队列溢出、§19.5 的重新配置、§19.6 的动作失败不反噬。
 """
 
@@ -228,7 +228,7 @@ def test_false_steady_state_does_not_block_entry():
 # ── §5.2 基线重置 ─────────────────────────────────────────────────────
 
 
-def test_exit_resets_enter_side_baselines():
+def test_exit_flips_the_task_off():
     h = Harness()
     h.sm.register_task(
         "t1",

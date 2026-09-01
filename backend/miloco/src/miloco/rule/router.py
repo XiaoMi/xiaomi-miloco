@@ -85,7 +85,9 @@ async def get_all_rules(
     """
     logger.info(
         "Get all rules - User: %s, enabled_only: %s, include_milestone: %s",
-        current_user, enabled_only, include_milestone,
+        current_user,
+        enabled_only,
+        include_milestone,
     )
     rules = await manager.rule_service.get_all_rules(enabled_only)
     if not include_milestone:

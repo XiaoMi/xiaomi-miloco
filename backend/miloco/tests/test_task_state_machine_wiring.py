@@ -311,10 +311,11 @@ async def test_exit_leaves_the_condition_at_what_was_observed(monkeypatch):
 
 
 def test_exit_by_another_rule_leaves_the_enter_condition_untouched(monkeypatch):
-    """出边 rule 触发的退出不动进入侧的条件值 (§5.2)。
+    """出边 rule 触发的退出不动进入侧的条件值。
 
-    进入条件此刻仍为真, 基线也就仍是真 —— 下一周期无翻转、不重进, 「挥手白挥」
-    这个场景靠的就是这一点, 不需要额外置位。
+    只断言"没被改写"这一件事。别写成在验 §5.2 的「挥手白挥」—— 那个场景对纯边沿
+    驱动的 rule 靠 diff 天然成立, 对配了 duration_seconds 的 rule 则本就没实现,
+    两种情况这条用例都分不开。
     """
     enter_rule = _rule("r_enter", mode=RuleMode.EVENT)
     exit_rule = _rule("r_exit", mode=RuleMode.EVENT)
