@@ -920,6 +920,7 @@ class TestRuleServiceUpdate:
     @pytest.mark.asyncio
     async def test_update_rule_success(self, service, mock_rule_repo):
         rule = _make_static_rule(rule_id="r1")
+        mock_rule_repo.get_by_id.return_value = rule
         result = await service.update_rule(rule)
         assert result is True
         mock_rule_repo.update.assert_called_once()
@@ -932,7 +933,7 @@ class TestRuleServiceUpdate:
 
     @pytest.mark.asyncio
     async def test_update_rule_not_found(self, service, mock_rule_repo):
-        mock_rule_repo.exists.return_value = False
+        mock_rule_repo.get_by_id.return_value = None
         rule = _make_static_rule(rule_id="missing")
         with pytest.raises(ResourceNotFoundException):
             await service.update_rule(rule)
@@ -941,6 +942,7 @@ class TestRuleServiceUpdate:
     async def test_update_rule_name_conflict(self, service, mock_rule_repo):
         mock_rule_repo.exists_by_name.return_value = True
         rule = _make_static_rule(rule_id="r1", name="dup-name")
+        mock_rule_repo.get_by_id.return_value = rule
         with pytest.raises(ConflictException):
             await service.update_rule(rule)
 
@@ -1843,12 +1845,13 @@ class TestRuleServiceV3Validation:
             await service.patch_rule("r1", update)
 
     @pytest.mark.asyncio
-    async def test_update_with_compliant_query_succeeds(self, service):
+    async def test_update_with_compliant_query_succeeds(self, service, mock_rule_repo):
         """合规 query（进行时状态/可观测动作描述）不被 phrasing 校验误拦。"""
         rule = _make_static_rule(
             rule_id="r1",
             condition=_make_condition(query="用户正在做出喝水动作"),
         )
+        mock_rule_repo.get_by_id.return_value = rule
         assert await service.update_rule(rule) is True
 
 
@@ -4823,3 +4826,160 @@ class TestRecordMilestoneSessionBoundary:
         await r.drain()
 
         assert r.record_source._timers == {}
+
+
+# ============================================================
+# task 全貌校验：进路径 + session 独占（spec §9）
+# ============================================================
+
+
+def _directions_error(*directions):
+    from miloco.rule.service import _task_rule_set_error
+
+    return _task_rule_set_error(list(directions))
+
+
+class TestTaskRuleSetLegality:
+    """一个 task 的 rule 集合什么时候合法 —— 只看方向的组合。"""
+
+    def test_empty_task_is_legal(self):
+        """装配是分步的，task 可以暂时一条 rule 都没有。"""
+        assert _directions_error() is None
+
+    def test_enter_only_is_legal(self):
+        assert _directions_error(RuleDirection.ENTER) is None
+
+    def test_session_alone_is_legal(self):
+        assert _directions_error(RuleDirection.SESSION) is None
+
+    def test_enter_plus_exit_is_legal(self):
+        """非互反模式 —— 进出各一条是 spec 明列的合法形态，别判成非法。"""
+        assert _directions_error(RuleDirection.ENTER, RuleDirection.EXIT) is None
+
+    def test_session_with_milestone_is_legal(self):
+        """milestone 不改状态，不参与独占（spec §9 的明文例外）。"""
+        assert (
+            _directions_error(RuleDirection.SESSION, RuleDirection.MILESTONE) is None
+        )
+
+    def test_exit_only_has_no_entry_path(self):
+        assert "进路径" in _directions_error(RuleDirection.EXIT)
+
+    def test_milestone_only_has_no_entry_path(self):
+        """只挂 milestone 的 task 永远在 off，达标边沿到了也会被丢弃。"""
+        assert "进路径" in _directions_error(RuleDirection.MILESTONE)
+
+    def test_exit_plus_milestone_has_no_entry_path(self):
+        """两条都不构成进路径，凑一起也还是进不去。"""
+        assert (
+            "进路径"
+            in _directions_error(RuleDirection.EXIT, RuleDirection.MILESTONE)
+        )
+
+    def test_session_with_enter_is_rejected(self):
+        assert "独占" in _directions_error(
+            RuleDirection.SESSION, RuleDirection.ENTER
+        )
+
+    def test_session_with_exit_is_rejected(self):
+        assert "独占" in _directions_error(RuleDirection.SESSION, RuleDirection.EXIT)
+
+    def test_two_sessions_are_rejected(self):
+        assert "独占" in _directions_error(
+            RuleDirection.SESSION, RuleDirection.SESSION
+        )
+
+
+class TestTaskRuleSetWiring:
+    """三条写路径都跑这道校验，且只拦这次变更引入的非法。"""
+
+    @staticmethod
+    def _rule(rule_id, direction, task_id=TASK_ID, enabled=True):
+        return Rule(
+            id=rule_id,
+            name=_name(task_id, rule_id),
+            task_id=task_id,
+            mode=RuleMode.EVENT,
+            direction=direction,
+            lifecycle=RuleLifecycle.PERMANENT,
+            enabled=enabled,
+            condition=_make_condition(),
+            actions=[_make_action()],
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_rejects_a_task_without_an_entry_path(
+        self, service, mock_rule_repo
+    ):
+        mock_rule_repo.list_by_task.return_value = []
+        with pytest.raises(ValidationException, match="进路径"):
+            await service.create_rule(self._rule("r-exit", RuleDirection.EXIT))
+        mock_rule_repo.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_rejects_session_next_to_an_existing_rule(
+        self, service, mock_rule_repo
+    ):
+        mock_rule_repo.list_by_task.return_value = [
+            self._rule("r-enter", RuleDirection.ENTER)
+        ]
+        with pytest.raises(ValidationException, match="独占"):
+            await service.create_rule(self._rule("r-ses", RuleDirection.SESSION))
+
+    @pytest.mark.asyncio
+    async def test_create_counts_a_disabled_rule_as_an_entry_path(
+        self, service, mock_rule_repo
+    ):
+        """enabled 是用户意图（§19.9），停用一条进方向的规则不该让配置变非法。"""
+        mock_rule_repo.list_by_task.return_value = [
+            self._rule("r-enter", RuleDirection.ENTER, enabled=False)
+        ]
+        assert await service.create_rule(self._rule("r-exit", RuleDirection.EXIT))
+
+    @pytest.mark.asyncio
+    async def test_update_rejects_a_direction_change_that_removes_the_entry_path(
+        self, service, mock_rule_repo
+    ):
+        previous = self._rule("r1", RuleDirection.ENTER)
+        mock_rule_repo.get_by_id.return_value = previous
+        mock_rule_repo.list_by_task.return_value = [previous]
+        with pytest.raises(ValidationException, match="进路径"):
+            await service.update_rule(self._rule("r1", RuleDirection.EXIT))
+        mock_rule_repo.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_patch_rejects_a_direction_change_that_removes_the_entry_path(
+        self, service, mock_rule_repo
+    ):
+        previous = self._rule("r1", RuleDirection.ENTER)
+        mock_rule_repo.get_by_id.return_value = previous
+        mock_rule_repo.list_by_task.return_value = [previous]
+        with pytest.raises(ValidationException, match="进路径"):
+            await service.patch_rule("r1", RuleUpdate(direction=RuleDirection.EXIT))
+        mock_rule_repo.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_moving_a_rule_into_a_session_task_is_rejected(
+        self, service, mock_rule_repo
+    ):
+        """改挂过来的那条不算目标 task 的「变更前」。
+
+        算进去的话「变更前」也带着这条、也非法，这次真撞上的独占就被当成存量放行。
+        """
+        previous = self._rule("r1", RuleDirection.ENTER, task_id="task-other")
+        mock_rule_repo.get_by_id.return_value = previous
+        mock_rule_repo.list_by_task.return_value = [
+            self._rule("r-ses", RuleDirection.SESSION)
+        ]
+        with pytest.raises(ValidationException, match="独占"):
+            await service.update_rule(self._rule("r1", RuleDirection.ENTER))
+
+    @pytest.mark.asyncio
+    async def test_an_already_illegal_task_can_still_be_patched(
+        self, service, mock_rule_repo
+    ):
+        """拦住已经非法的等于把「改回合法」和「先停用它」两条自救路一起堵死。"""
+        previous = self._rule("r1", RuleDirection.EXIT)
+        mock_rule_repo.get_by_id.return_value = previous
+        mock_rule_repo.list_by_task.return_value = [previous]
+        assert await service.patch_rule("r1", RuleUpdate(enabled=False))

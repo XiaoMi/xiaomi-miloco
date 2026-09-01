@@ -142,6 +142,34 @@ def _validate_milestone_rule(rule: Rule) -> None:
         )
 
 
+def _task_rule_set_error(directions: list[RuleDirection]) -> str | None:
+    """task 名下 rule 集合的合法性 (spec §9)。合法返 None, 非法返错误文案。
+
+    校验对象是集合不是单条 rule —— 这两条约束都只有把同一 task 的 rule 放到一起
+    看才成立。
+    """
+    if not directions:
+        # 装配是分步的, task 可以暂时一条 rule 都没有。
+        return None
+
+    state_changing = [d for d in directions if d is not RuleDirection.MILESTONE]
+    if RuleDirection.SESSION in state_changing and len(state_changing) > 1:
+        return (
+            "direction=session 的规则必须独占该 task: 与 enter / exit / 另一条 "
+            "session 混挂会让 task 永久卡住 (spec §19.7)。"
+            "milestone 不改状态, 不在此列。"
+        )
+
+    entry_directions = (RuleDirection.ENTER, RuleDirection.SESSION)
+    if not any(d in entry_directions for d in directions):
+        return (
+            "task 名下没有进路径: 只有 exit / milestone 的 task 永远进不了 on, "
+            "名下的动作一条都不会执行。至少要有一条 direction=enter 或 session "
+            "的规则。"
+        )
+    return None
+
+
 def _validate_rule_consistency(rule: Rule) -> None:
     """Apply V3 validation matrix to a fully-formed Rule.
 
@@ -403,6 +431,29 @@ class RuleService:
             return (items[0].spec or {}).get("task_id") if items else None
         return rule.task_id if rule.on_target_desc else None
 
+    def _validate_task_rule_set(self, rule: Rule, previous: Rule | None = None) -> None:
+        """这次变更有没有让 task 的 rule 集合变非法 (spec §9)。
+
+        已经非法的放行, 只拦这次引入的: 存量迁移和删 rule 都可能留下非法的 task,
+        一律拦住会把「改回合法」和「先停用它」这两条自救路一起堵死。丢失 rule 的
+        那一侧 (删掉、改挂到别的 task) 同理不拦, 由重新配置路径兜住 (§19.5)。
+
+        停用的 rule 照样计入: ``enabled`` 是用户意图 (§19.9), 停用一条进方向的
+        规则是正常操作, 不是配置非法。
+        """
+        others = [
+            r.resolved_direction
+            for r in self._repo.list_by_task(rule.task_id)
+            if r.id != rule.id
+        ]
+        before = list(others)
+        if previous is not None and previous.task_id == rule.task_id:
+            before.append(previous.resolved_direction)
+
+        error = _task_rule_set_error([*others, rule.resolved_direction])
+        if error and _task_rule_set_error(before) is None:
+            raise ValidationException(error)
+
     def _require_target_action(self, rule: Rule) -> None:
         """达标规则要求 task 已配达标动作 (spec §9)。
 
@@ -557,6 +608,7 @@ class RuleService:
         await self._validate_perceive_devices_of(rule)
         _validate_rule_consistency(rule)
         self._validate_target_record(rule)
+        self._validate_task_rule_set(rule)
         await self._validate_scene_ids(rule)
 
         rule_id = self._repo.create(rule)
@@ -614,7 +666,8 @@ class RuleService:
         path skipped consistency checks)."""
         if not rule.id:
             raise ValidationException("Rule ID is required")
-        if not self._repo.exists(rule.id):
+        previous = self._repo.get_by_id(rule.id)
+        if previous is None:
             raise ResourceNotFoundException(f"Rule '{rule.id}' not found")
         if self._repo.exists_by_name(rule.name, rule.id):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
@@ -624,6 +677,7 @@ class RuleService:
         await self._validate_perceive_devices_of(rule)
         _validate_rule_consistency(rule)
         self._validate_target_record(rule)
+        self._validate_task_rule_set(rule, previous)
         await self._validate_scene_ids(rule)
 
         success = self._repo.update(rule)
@@ -652,6 +706,9 @@ class RuleService:
         existing = self._repo.get_by_id(rule_id)
         if not existing:
             raise ResourceNotFoundException(f"Rule '{rule_id}' not found")
+
+        # 下面是就地合并, 合并完就读不到变更前的方向与归属了。
+        previous = existing.model_copy(deep=True)
 
         fields = update.model_fields_set
 
@@ -741,6 +798,7 @@ class RuleService:
 
         _validate_rule_consistency(existing)
         self._validate_target_record(existing)
+        self._validate_task_rule_set(existing, previous)
         # 与上面 perceive_device_ids 同口径:只校验这次 PATCH 真的动了的东西。
         # 无条件跑的话,场景被删 / 家庭被关之后连 `rule disable`(它本身就是一次
         # PATCH)都会 400 —— 规则坏掉的那一刻正好把「先关掉它」这条路堵死。
