@@ -10,9 +10,16 @@ rule 产边沿, task 消费。本模块只做三件事: 聚合名下 rule 的信
 rules-design.md §5 / §15 / §19.4~§19.6。三条硬约束:
 
 1. **不做慢操作** —— 不 await 设备控制、agent 回调、DB 写入。动作一律经
-   ``dispatch_action`` 交出去异步跑。这是队列不积压的根本保证, 容量只是兜底。
+   ``dispatch_action`` 交出去异步跑。
 2. **动作失败不反噬状态** —— ``runtime_state`` 反映感知到的现实, 不反映动作成败。
-3. **per-task 串行** —— 每个 task 一条消费链, 幂等判断与状态写入之间不会插进别的信号。
+3. **单次判定原子** —— ``handle`` 全程同步, 幂等判断与状态写入之间不会被别的协程
+   插进来。
+
+**阶段 A 未接线的部分**: ``submit`` / ``start`` / ``_consume`` / ``shutdown`` /
+``manual_inject`` 目前生产无调用方 —— 唯一入口是 rule 确认层的
+``handle(dispatch=False)`` 同步直调。所以队列、per-task 消费链、重新配置期丢弃
+这三样现在都不在路径上; 约束 3 由"handle 同步 + 每条边沿只调一次"承担, 而不是由
+消费链承担。要么接线(状态机改为代为派发), 要么删掉, 别长期留在中间态。
 """
 
 from __future__ import annotations
@@ -26,8 +33,8 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
-# per-task 信号队列深度。状态机只做内存判断 + 派发, 正常绝不会积压;
-# 积压到这个数本身就是异常信号, 溢出必须可观测而不是静默丢。
+# per-task 信号队列深度。溢出归异常类、必须可观测而不是静默丢。
+# 注意: 队列目前不在生产路径上, 见模块 docstring。
 SIGNAL_QUEUE_DEPTH = 8
 
 
@@ -197,7 +204,9 @@ class TaskStateMachine:
         self._queues: dict[str, deque[TaskSignal]] = {}
         self._wakeups: dict[str, asyncio.Event] = {}
         self._consumers: dict[str, asyncio.Task] = {}
-        # 重新配置期间到达的信号直接丢 —— 它们对应的是改动前的配置 (§19.5)
+        # 重新配置期间到达的信号直接丢 —— 它们对应的是改动前的配置 (§19.5)。
+        # ``reconfigure`` 全程无 await, 同一个事件循环里不可能有信号在它执行期间
+        # 到达, 所以这道闸现在拦不到任何东西; 它是接线之后才生效的约束。
         self._reconfiguring: set[str] = set()
 
     # ── 查询 ──────────────────────────────────────────────────────
@@ -464,6 +473,11 @@ class TaskStateMachine:
         成立, ``None`` 还没喂过数据(新加进来的 rule 就是这种)。只认 ``True``:
         全是 ``None`` 时无从确认还撑着, 宁可多发一次退出动作也不要静默卡在 on;
         事件型没有会话条件, 同样落到退出, 与改动前一致。
+
+        **已知缺口**: enter + exit 型 task 也没有会话条件, 于是改任何配置(哪怕只
+        是调防抖参数)都会被判成"没撑着"而退出。这类 task"该不该留在 on"要看的是
+        "出口条件全都不成立", 与本函数的"有没有会话条件成立"不是同一个逻辑形式。
+        既有行为, 保守方向(多发一次退出而不是卡在 on), 单独立项。
         """
         return any(
             self._is_condition_satisfied(rule_id) is True
@@ -476,6 +490,9 @@ class TaskStateMachine:
         """调试入口: 直接对 task 注入进/出信号。
 
         不走 rule 边沿, 也不动条件层的值 —— 它不代表"感知到条件不再满足"。
+
+        **目前没有 router / CLI 通向它**, 所以"运行态卡住了怎么手动掰回来"这个能力
+        实际不存在。接出去是独立的一步(要定 admin 接口形态)。
         """
         if task_id not in self._topologies:
             return TransitionOutcome.UNKNOWN_RULE

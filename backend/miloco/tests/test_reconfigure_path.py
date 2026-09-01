@@ -151,8 +151,13 @@ async def test_reconfigure_unregisters_task_that_lost_its_rules(env):
 
 
 @pytest.mark.asyncio
-async def test_delete_one_of_two_exit_paths_keeps_session(env):
-    """还剩出路径 → 不跑 on_exit, 但按 §7 一律回 off。"""
+async def test_delete_one_of_two_exit_paths_keeps_the_remaining_topology(env):
+    """删掉三条中的一条 exit, 剩下的两条要如实进新拓扑。
+
+    原来这条断言的是 ``dispatched == []`` 并说"还剩出路径所以不跑 on_exit" ——
+    但用例从没把 task 推进 on, ``reconfigure`` 在 was_on 处就短路了, 断言恒绿。
+    改成断言交给状态机的那份拓扑, 不调 reconfigure 就会红。
+    """
     service, runner, ids, dispatched = _build(
         _ACTIONS,
         [_rule("[t1] a", mode=RuleMode.EVENT), _rule("[t1] x", mode=RuleMode.EVENT)],
@@ -177,8 +182,16 @@ async def test_delete_one_of_two_exit_paths_keeps_session(env):
 
     await service.delete_rule(third)
 
-    assert dispatched == []
     assert runner.state_machine.owns("t1") is True
+    topology = runner.state_machine._topologies["t1"]
+    assert topology.directions == {
+        ids[0]: RuleDirection.ENTER,
+        ids[1]: RuleDirection.EXIT,
+    }
+    assert topology.enter_side_rule_ids == {ids[0]}
+    assert topology.exit_side_rule_ids == {ids[1]}
+    # enter + exit 没有 session 条件撑着, 所以 task 不在 on 时也不该被派动作
+    assert dispatched == []
 
 
 # ── 新建 / 改 rule 也走这条 ───────────────────────────────────────────
