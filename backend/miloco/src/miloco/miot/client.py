@@ -118,6 +118,14 @@ class MiotProxy:
 
         self._miot_client: MIoTClient = None  # type: ignore
 
+        # token 刷新失败退避状态:失败计数 + 下次重试时间戳(monotonic 语义用 wall-clock,
+        # 与 _check_and_refresh_token 的 current_time 一致)。失败不清空 oauth_info——
+        # 清空会把 is_authenticated 置 False,摄像头 discover 返回空,sync_devices 误判
+        # 设备下线并断开全部流,感知整条链路停摆(见 2026-09-01 10:40 故障)。
+        self._token_refresh_failures: int = 0
+        self._token_refresh_next_retry_ts: int = 0
+        self._last_refresh_error: str = ""
+
         _settings = get_settings()
         self._frame_interval: int = _settings.camera.frame_interval
         self._max_cache_images: int = _settings.camera.max_cache_images
@@ -1273,10 +1281,15 @@ class MiotProxy:
             await self.refresh_miot_info()
             return oauth_info
         except Exception as e:
-            self._oauth_info = None
+            # 刷新失败**保留**旧 oauth_info(不清空内存态):清空会让
+            # is_authenticated=False → 摄像头 discover 返回 {} → sync_devices 把
+            # 已连接设备全部当"下线"断开 → 感知停摆。保留旧 token 让 LAN 直连 /
+            # 本地缓存继续工作,由 _check_and_refresh_token 按指数退避持续重试。
+            self._last_refresh_error = str(e)
             logger.error(
                 "Failed to refresh Xiaomi home token info: %s", e, exc_info=True
             )
+            return None
 
     async def _start_token_refresh_task(self):
         """
@@ -1284,8 +1297,10 @@ class MiotProxy:
         """
         while True:
             try:
-                await asyncio.sleep(300)  # Check every 5 minutes
+                # 先检查再 sleep:启动瞬间就纠正过期/临期 token,不把首查推迟 5 分钟
+                # (进程刚起时 token 可能已过期,拖 5 分钟等于用失效 token 空转感知)。
                 await self._check_and_refresh_token()
+                await asyncio.sleep(300)  # Check every 5 minutes
             except Exception as e:
                 logger.error("Scheduled token refresh task exception: %s", e)
                 await asyncio.sleep(60)  # Wait 1 minute after error before continuing
@@ -1631,16 +1646,45 @@ class MiotProxy:
         expires_ts = self._oauth_info.expires_ts
 
         # Refresh token if it expires within 30 minutes
-        if expires_ts - current_time <= 1800:  # 1800 seconds = 30 minutes
-            logger.info(
-                "Token is about to expire, starting refresh. Current time: %s, Expiration time: %s",
-                current_time,
-                expires_ts,
+        if expires_ts - current_time > 1800:  # 1800 seconds = 30 minutes
+            # token 健康:重置失败退避状态
+            self._token_refresh_failures = 0
+            self._token_refresh_next_retry_ts = 0
+            return
+
+        # 上一次刷新失败后的退避窗口内:不重复尝试(避免每 5 分钟轰一次云端)
+        if current_time < self._token_refresh_next_retry_ts:
+            return
+
+        logger.info(
+            "Token is about to expire, starting refresh. Current time: %s, Expiration time: %s",
+            current_time,
+            expires_ts,
+        )
+        result = await self.refresh_xiaomi_home_token_info()
+        if result:
+            self._token_refresh_failures = 0
+            self._token_refresh_next_retry_ts = 0
+            logger.info("Token refresh completed successfully")
+            return
+
+        # 刷新失败:指数退避重试(5min→10min→20min→40min→60min 封顶),失败不清空
+        # oauth_info、不停感知——只有"invalid refresh token"才需要人工重新绑定。
+        self._token_refresh_failures += 1
+        backoff_s = min(300 * (2 ** (self._token_refresh_failures - 1)), 3600)
+        self._token_refresh_next_retry_ts = current_time + backoff_s
+        err_text = getattr(self, "_last_refresh_error", "") or ""
+        if "invalid refresh token" in err_text or "96009" in err_text:
+            logger.error(
+                "Token refresh failed: refresh token 已失效(96009 invalid refresh token) —— "
+                "通常是同一米家账号被其它实例/设备刷新过(米家 refresh token 一次性轮换,"
+                "后刷新者使先刷新者的旧 token 作废),或账号已在别处重新登录。"
+                "需要重新绑定: miloco-cli account bind。期间感知降级运行,不再自动断开摄像头。"
             )
-            result = await self.refresh_xiaomi_home_token_info()
-            if result:
-                logger.info("Token refresh completed successfully")
-            else:
-                logger.error(
-                    "Token refresh failed, re-login required: miloco-cli account bind"
-                )
+        else:
+            logger.error(
+                "Token refresh failed (attempt %d), retrying in %ds. "
+                "re-login required only if this persists: miloco-cli account bind",
+                self._token_refresh_failures,
+                backoff_s,
+            )

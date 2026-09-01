@@ -129,7 +129,13 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
         if not self._miot_proxy.is_authenticated:
-            return {}
+            # 未认证(米家 token 失效/刷新失败)≠ 设备下线:抛异常走 sync_devices 的
+            # except 路径(记录后 return,不连接新设备、**不断开已连接设备**)——否则
+            # 返回 {} 会让 sync 把已连接摄像头全部当"下线"断开,感知整条链路停摆
+            # (2026-09-01 token 刷新失败故障的根因)。
+            raise PermissionError(
+                "miot not authenticated, camera list unavailable"
+            )
         return self._filter_cameras_from_all(
             all_devices if all_devices else await self._miot_proxy.get_cameras(),
             online_only=online_only,
