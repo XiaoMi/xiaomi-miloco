@@ -1271,8 +1271,8 @@ class TestRecurringNeverCompleted:
     """recurring task 的 status 永远保持 active，达 target 不翻 completed。
 
     recurring 的语义是循环（每天/每周/每月重置），没有"完成"终点。
-    本周期内"已达标，不重复通知" 由 rule engine `_target_fired` 运行时
-    状态承担，跨周期 rollover 清零；不污染 DB status 字段。
+    本周期内"已达标，不重复通知" 由达标条件项自身的值承担（已经是真就产不出新
+    边沿），跨周期 rollover 把它翻假；不污染 DB status 字段。
     """
 
     def test_progress_recurring_keeps_active_when_target_reached(

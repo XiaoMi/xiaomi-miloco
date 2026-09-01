@@ -185,7 +185,7 @@ def test_rollover_restores_injection(real_db):
 
 # ============================================================
 # recurring + 当期达标 → 等价 completed 视作 satisfied
-# event mode 没有 _target_fired 兜底，靠 perception filter 在装载侧切断。
+# enter 型规则靠这道下发闸在装载侧切断。
 # ============================================================
 
 
