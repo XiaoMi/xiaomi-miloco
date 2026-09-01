@@ -349,7 +349,7 @@ class RuleRunner:
     def task_owns_actions(self, task_id: str) -> bool:
         return task_id in self._task_actions
 
-    # ---- 状态机的两个注入点 (§15 / §5.2) ----
+    # ---- 状态机的注入点 (§15) ----
 
     def is_condition_satisfied(self, rule_id: str) -> bool | None:
         """该 rule 的条件现在是不是真。``None`` = 未就绪。
@@ -361,19 +361,6 @@ class RuleRunner:
         if state is None or not state.sources:
             return None
         return state.last_rule_state
-
-    def reset_edge_baseline(self, rule_id: str) -> None:
-        """把边沿基线置为「已满足」(§5.2)。
-
-        要求条件先变假、再变真才算新一次进入。不清窗口、不动 timer —— 那是
-        ``_reset_runtime_state`` 的事, 这里只挪基线。
-        """
-        state = self._state.get(rule_id)
-        if state is None:
-            return
-        state.last_rule_state = True
-        for src in state.sources.values():
-            src.last_bool = True
 
     # ---- Legacy field views (test / rule_tester compatibility) ----
     #

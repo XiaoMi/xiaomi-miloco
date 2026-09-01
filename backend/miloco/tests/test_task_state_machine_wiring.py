@@ -11,10 +11,12 @@ Rule、不建 task 动作, 全部命中回退分支 (expand-contract 阶段 A �
 - 接管判据: 有 task 动作才接管, 没有则逐字走旧路径
 - 动作取数: task 优先; task 接管后某方向留空不回退到 rule
 - 许可闸: 四个 fire 点各自被状态机吞掉时的行为
-- 两个注入点: is_condition_satisfied 的三态、reset_edge_baseline 的语义
+- 注入点: is_condition_satisfied 的三态
 """
 
 from __future__ import annotations
+
+import asyncio
 
 import pytest
 from miloco.rule.runner import RuleRunner
@@ -59,7 +61,6 @@ def _runner(rules, monkeypatch):
 def _attach(runner, task_id, rules, actions):
     sm = TaskStateMachine(
         is_condition_satisfied=runner.is_condition_satisfied,
-        reset_edge_baseline=runner.reset_edge_baseline,
         dispatch_action=lambda *_a: None,
     )
     runner.attach_state_machine(sm)
@@ -73,6 +74,11 @@ def _attach(runner, task_id, rules, actions):
 
 
 _TASK_DESC = {"on_enter_desc": "task 侧进入播报"}
+
+
+async def _never_dispatch(*_a, **_kw):
+    """动作层替身 —— 本文件测的是状态迁移, 不是动作是否发出去。"""
+    return True
 
 
 # ── 接管判据 ──────────────────────────────────────────────────────────
@@ -246,61 +252,85 @@ def test_condition_satisfied_reflects_last_rule_state(monkeypatch):
     assert runner.is_condition_satisfied("r1") is True
 
 
-# ── 注入点: reset_edge_baseline ───────────────────────────────────────
+# ── 对称模式: 退出之后必须还能再进来 ──────────────────────────────────
 
 
-def test_reset_edge_baseline_marks_everything_true(monkeypatch):
-    """置为"已满足": 要求条件先变假再变真才算新一次进入 (§5.2)。"""
-    r = _rule()
-    runner = _runner([r], monkeypatch)
-    runner._ensure_source("r1", "cam1")
-    runner._ensure_source("r1", "cam2")
+@pytest.mark.asyncio
+async def test_session_task_can_re_enter_after_exiting(monkeypatch):
+    """对称模式退出一次之后, 条件再次成立要能重新进入。
 
-    runner.reset_edge_baseline("r1")
+    这是会话型 task 的核心循环 —— 断了的话每台设备一天只工作一次, 且从规则本身
+    看不出任何异常。
+    """
+    rule = _rule("r-ses", mode=RuleMode.STATE, exit_debounce_seconds=1)
+    runner = _runner([rule], monkeypatch)
+    sm = _attach(runner, "t1", [rule], {"on_enter_desc": "进", "on_exit_desc": "出"})
+    runner._execute_dynamic = _never_dispatch  # ty:ignore[invalid-assignment]
 
-    assert runner._state["r1"].last_rule_state is True
-    assert all(s.last_bool for s in runner._state["r1"].sources.values())
+    async def feed(value, ticks=3):
+        for _ in range(ticks):
+            await runner.update_state("r-ses", "cam1", value, "")
+        await asyncio.sleep(0.05)
 
+    await feed(True)
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
 
-def test_reset_edge_baseline_keeps_window_and_timer(monkeypatch):
-    """只挪基线 —— 清窗口 / 撤 timer 是 _reset_runtime_state 的事。"""
-    from collections import deque
+    await feed(False)
+    await asyncio.sleep(1.3)
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
 
-    r = _rule()
-    runner = _runner([r], monkeypatch)
-    st = runner._ensure_state("r1")
-    st.duration_window = deque([1, 1], maxlen=2)
-    st.state_duration_fired = True
-
-    runner.reset_edge_baseline("r1")
-
-    assert st.duration_window is not None
-    assert st.state_duration_fired is True
-
-
-def test_reset_edge_baseline_on_unknown_rule_is_noop(monkeypatch):
-    runner = _runner([], monkeypatch)
-    runner.reset_edge_baseline("nope")
+    # 人走后摄像头继续报假, 然后人回来
+    await feed(False)
+    await feed(True)
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
 
 
-# ── 非互反: 退出后基线重置的完整链路 ──────────────────────────────────
+@pytest.mark.asyncio
+async def test_exit_leaves_the_condition_at_what_was_observed(monkeypatch):
+    """退出不改条件层的值。
+
+    改了的话 ②层对外说的和实际观测到的对不上, 而 runner 自己的边沿 diff 也读
+    这个值 —— 它会以为 rule 还在态内, 把下一次变假当成又一次退出。
+    """
+    rule = _rule("r-ses", mode=RuleMode.STATE, exit_debounce_seconds=1)
+    runner = _runner([rule], monkeypatch)
+    sm = _attach(runner, "t1", [rule], {"on_enter_desc": "进", "on_exit_desc": "出"})
+    runner._execute_dynamic = _never_dispatch  # ty:ignore[invalid-assignment]
+
+    for _ in range(3):
+        await runner.update_state("r-ses", "cam1", True, "")
+    for _ in range(3):
+        await runner.update_state("r-ses", "cam1", False, "")
+    await asyncio.sleep(1.3)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert runner.is_condition_satisfied("r-ses") is False
 
 
-def test_exit_resets_enter_rule_baseline_end_to_end(monkeypatch):
-    """退出时状态机回调 runner 的 reset_edge_baseline, 进入 rule 的基线被置真。"""
+# ── 非互反: 退出后不立即重进 ──────────────────────────────────────────
+
+
+def test_exit_by_another_rule_leaves_the_enter_condition_untouched(monkeypatch):
+    """出边 rule 触发的退出不动进入侧的条件值 (§5.2)。
+
+    进入条件此刻仍为真, 基线也就仍是真 —— 下一周期无翻转、不重进, 「挥手白挥」
+    这个场景靠的就是这一点, 不需要额外置位。
+    """
     enter_rule = _rule("r_enter", mode=RuleMode.EVENT)
     exit_rule = _rule("r_exit", mode=RuleMode.EVENT)
     exit_rule.direction = RuleDirection.EXIT
     runner = _runner([enter_rule, exit_rule], monkeypatch)
-    _attach(runner, "t1", [enter_rule, exit_rule], _TASK_DESC)
-    runner._ensure_source("r_enter", "cam1")
+    sm = _attach(runner, "t1", [enter_rule, exit_rule], _TASK_DESC)
 
-    runner._state_machine_allows(enter_rule, RuleEvent.ENTERED)
-    assert runner._state["r_enter"].last_rule_state is False
+    runner._ensure_source("r_enter", "cam1").last_bool = True
+    runner._ensure_state("r_enter").last_rule_state = True
+    assert runner._state_machine_allows(enter_rule, RuleEvent.ENTERED)
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
 
-    runner._state_machine_allows(exit_rule, RuleEvent.ENTERED)
-
-    assert runner._state["r_enter"].last_rule_state is True
+    assert runner._state_machine_allows(exit_rule, RuleEvent.ENTERED)
+    # 退出真的发生了才谈得上"退出没动条件值"
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert runner.is_condition_satisfied("r_enter") is True
 
 
 def test_entry_blocked_when_exit_condition_true_end_to_end(monkeypatch):

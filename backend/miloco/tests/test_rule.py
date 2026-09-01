@@ -4630,7 +4630,6 @@ class TestRecordMilestoneSessionBoundary:
         )
         sm = TaskStateMachine(
             is_condition_satisfied=r.is_condition_satisfied,
-            reset_edge_baseline=r.reset_edge_baseline,
             dispatch_action=lambda *_a: None,
         )
         r.attach_state_machine(sm)

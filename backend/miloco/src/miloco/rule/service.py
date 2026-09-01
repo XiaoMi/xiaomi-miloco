@@ -355,7 +355,6 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
     tracker = DecisionTracker()
     state_machine = TaskStateMachine(
         is_condition_satisfied=rule_runner.is_condition_satisfied,
-        reset_edge_baseline=rule_runner.reset_edge_baseline,
         # 只有状态机自己发起动作时才会走到这里 (重新配置时强制 on_exit、手动
         # 注入)。边沿驱动的那条路由 runner 传 dispatch=False, 动作走它自己的
         # fire 路径。

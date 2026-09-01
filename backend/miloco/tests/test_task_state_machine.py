@@ -33,12 +33,10 @@ class Harness:
         # 默认 False 而非 None: 用 .get 的 None 兜底会让每个未显式登记的 rule 都
         # 处在"未就绪"态, 任何与 None 有关的改动都波及全部用例, 变异校验分不出锅。
         self.satisfied = satisfied or {}
-        self.baseline_resets: list[str] = []
         self.dispatched: list[tuple[str, ActionSlot]] = []
         self.tracked: list[tuple[TransitionOutcome, TaskSignal]] = []
         self.sm = TaskStateMachine(
             is_condition_satisfied=lambda rid: self.satisfied.get(rid, False),
-            reset_edge_baseline=self.baseline_resets.append,
             dispatch_action=lambda t, s, _p=None: self.dispatched.append((t, s)),
             track=lambda o, s: self.tracked.append((o, s)),
         )
@@ -239,17 +237,7 @@ def test_exit_resets_enter_side_baselines():
     h.sm.handle(_entered(rule_id="a"))
     h.sm.handle(_entered(rule_id="x", slot=ActionSlot.ON_EXIT))
 
-    # 相等而非包含: 出边 x 不能在里面 —— 重置出边会让下一次退出被吞掉
-    assert sorted(h.baseline_resets) == ["a", "b"]
-
-
-def test_noop_exit_does_not_reset_baseline():
-    """本来就在 off, 没发生转换, 不该动基线。"""
-    h = Harness()
-    h.sm.register_task("t1", {"s": RuleDirection.SESSION})
-    h.sm.handle(_exited(rule_id="s"))
-
-    assert h.baseline_resets == []
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
 
 
 # ── §5.3 milestone ────────────────────────────────────────────────────
@@ -285,7 +273,6 @@ def test_milestone_does_not_change_state_or_reset_baseline():
     h.sm.handle(_entered(rule_id="m", slot=ActionSlot.ON_TARGET))
 
     assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
-    assert h.baseline_resets == []
 
 
 # ── §19.4 队列 ────────────────────────────────────────────────────────
@@ -436,10 +423,8 @@ def test_reconfigure_drops_queued_signals():
 
 def test_dispatch_failure_does_not_roll_back_state():
     """回滚会让下一帧重新触发, 形成无限重试。"""
-    resets: list[str] = []
     sm = TaskStateMachine(
         is_condition_satisfied=lambda _: None,
-        reset_edge_baseline=resets.append,
         dispatch_action=lambda t, s, _p=None: (_ for _ in ()).throw(
             RuntimeError("boom")
         ),
@@ -462,7 +447,6 @@ def test_manual_inject_does_not_reset_baseline():
     h.sm.manual_inject("t1", ActionSlot.ON_ENTER)
     h.sm.manual_inject("t1", ActionSlot.ON_EXIT)
 
-    assert h.baseline_resets == []
     assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
 
 

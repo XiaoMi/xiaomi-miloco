@@ -153,11 +153,10 @@ def slot_for_edge(direction: str, kind: SignalKind) -> ActionSlot | None:
 class TaskStateMachine:
     """per-task 串行消费信号, 维护 runtime_state, 派发边界动作。
 
-    四个注入点让本模块不依赖 rule / 动作层, 可独立测试:
+    注入点让本模块不依赖 rule / 动作层, 可独立测试:
 
     - ``is_condition_satisfied(rule_id) -> bool | None``: 该 rule 的条件现在是不是真。
       ``None`` = 未就绪 (未 seed / 设备离线 / 脉冲型无稳态)。
-    - ``reset_edge_baseline(rule_id)``: 把该 rule 的边沿基线置为"已满足" (§5.2)。
     - ``dispatch_action(task_id, slot, payload)``: 交出去异步跑, **必须立即返回**。
       ``payload`` 是 submit 时带的上下文, 状态机原样转交。
     - ``track(outcome, signal)``: 跟踪一次结论, 必须是同步内存操作 (§18.3)。
@@ -168,13 +167,11 @@ class TaskStateMachine:
         self,
         *,
         is_condition_satisfied: Callable[[str], bool | None],
-        reset_edge_baseline: Callable[[str], None],
         dispatch_action: Callable[[str, ActionSlot, object | None], None],
         track: Callable[[TransitionOutcome, TaskSignal], None] | None = None,
         on_forget: Callable[[str], None] | None = None,
     ) -> None:
         self._is_condition_satisfied = is_condition_satisfied
-        self._reset_edge_baseline = reset_edge_baseline
         self._dispatch_action = dispatch_action
         self._track = track or (lambda outcome, signal: None)
         self._on_forget = on_forget or (lambda task_id: None)
@@ -295,7 +292,7 @@ class TaskStateMachine:
         return self._handle_exit(signal, topology)
 
     def _handle_milestone(self, signal: TaskSignal) -> TransitionOutcome:
-        """不改状态、不查稳态、不重置基线 —— 只确认 task 在 ``on`` 然后派动作 (§5.3)。"""
+        """不改状态、不查对侧稳态 —— 只确认 task 在 ``on`` 然后派动作 (§5.3)。"""
         if self.runtime_state(signal.task_id) is not TaskRuntimeState.ON:
             # milestone 的语义是"这个 task 进行期间发生了什么"; task 没在进行,
             # 里程碑无处附着。
@@ -338,10 +335,10 @@ class TaskStateMachine:
         self._states[signal.task_id] = TaskRuntimeState.OFF
         self._maybe_dispatch(signal.task_id, ActionSlot.ON_EXIT, signal.payload)
 
-        # §5.2 基线重置: 要求进入条件先变假、再变真, 才算新一次进入。
-        # 不引入第三个状态、不引入冷却时长。
-        for rule_id in topology.enter_side_rule_ids:
-            self._reset_edge_baseline(rule_id)
+        # §5.2「退出后不立即重进」不需要在这里做任何事: 退出路径不清边沿基线,
+        # 进入条件此刻仍为真则基线也仍是真、产不出新边沿; 已为假则下次变真是一次
+        # 真实的新进入。强行置真会让条件层对外说谎, 而边沿 diff 读的是同一个值 ——
+        # rule 会被当成还在态内, 从此再也进不来。
         return self._done(TransitionOutcome.EXITED, signal)
 
     def _other_exit_side_holds(
@@ -441,7 +438,7 @@ class TaskStateMachine:
     def manual_inject(self, task_id: str, slot: ActionSlot) -> TransitionOutcome:
         """调试入口: 直接对 task 注入进/出信号。
 
-        不走 rule 边沿, **也不重置基线** —— 它不代表"感知到条件不再满足"。
+        不走 rule 边沿, 也不动条件层的值 —— 它不代表"感知到条件不再满足"。
         """
         if task_id not in self._topologies:
             return TransitionOutcome.UNKNOWN_RULE
