@@ -57,6 +57,11 @@ interface MiotStatus {
   user_info?: { uid: string; nickname: string; icon?: string };
   /** 最多投喂数(后端 MAX_ENABLED_CAMERAS)，随状态下发。 */
   max_enabled_cameras?: number;
+  /** 授权健康度。与 is_bound 正交：令牌续期被云端拒绝、但 access_token 还没
+   *  到期时 is_bound 仍是 true，只看它会漏报。老后端不返回此字段。 */
+  auth_state?: "ok" | "degraded";
+  auth_degraded_since?: number | null;
+  auth_error_code?: number | null;
 }
 
 // 太短 / 全标点 / 数字 ID / 全是零宽字符 的 nickname 不算可读名字
@@ -210,6 +215,10 @@ export async function realHomeStatus(): Promise<HomeStatus> {
       accountName: cleanAccountName(miot?.data.user_info?.nickname),
       userIcon: miot?.data.user_info?.icon,
       userUid: miot?.data.user_info?.uid,
+      // 请求整个失败时 miot 为 null——此时不该报「授权异常」，那是网络问题不是
+      // 授权问题。只有后端明确说 degraded 才算。老后端没有这个字段，同样按 ok。
+      authDegraded: miot?.data.auth_state === "degraded",
+      authDegradedSince: miot?.data.auth_degraded_since ?? undefined,
       devicesCount: home?.data.devices.length ?? 0,
       roomsCount: realAreas.length,
     },

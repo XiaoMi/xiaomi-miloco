@@ -848,6 +848,30 @@ class TestAssessBackend:
         assert results[1].status == Status.WARN
         assert "account login" in results[1].fix_hint
 
+    def test_auth_degraded_fails_with_fix_hint(self):
+        """授权被云端拒绝时算体检不通过——这是需要住户动手才能解的。
+
+        绑定关系还在（account_bound=True），只看它会显示「已绑定」的 PASS，
+        住户从 doctor 里看不出授权其实已经失效。
+        """
+        results = assess_backend(
+            _bs(auth_degraded=True, auth_degraded_since=1_700_000_000)
+        )
+        account = next(r for r in results if r.name == "小米账号授权")
+        assert account.status == Status.FAIL
+        assert account.section == "miloco"
+        assert "miloco-cli account bind" in account.fix_hint
+        # 说清影响范围，别让住户以为感知也停了
+        assert "感知" in account.message
+
+    def test_auth_ok_keeps_pass(self):
+        results = assess_backend(_bs())
+        assert not any(r.name == "小米账号授权" for r in results), (
+            "授权正常时不该出现降级检查项"
+        )
+        account = next(r for r in results if r.name == "小米账号绑定")
+        assert account.status == Status.PASS
+
     def test_bound_no_home(self):
         results = assess_backend(_bs(home_enabled=False, home_id=None,
                                      home_name=None, cameras=[]))

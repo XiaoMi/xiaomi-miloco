@@ -35,6 +35,11 @@ from pydantic_core import to_jsonable_python
 
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
+from miloco.miot.auth_state import (
+    RETRY_BACKOFF_SECONDS,
+    MiotAuthHealth,
+    is_permanent_auth_error,
+)
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import (
     is_home_allowed,
@@ -100,6 +105,7 @@ class MiotProxy:
     ):
         self._kv_repo = kv_repo
         self.init_miot_info_dict()
+        self._auth_health: MiotAuthHealth = self._load_auth_health()
         self._camera_img_managers: dict[str, CameraVisionHandler] = {}
         self._token_refresh_task: asyncio.Task | None = None
         # Serialize refresh_devices: multiple entries (MQTT reconnect,
@@ -1211,6 +1217,32 @@ class MiotProxy:
             logger.error("Failed to get Xiaomi home token info, %s", e)
             raise e
 
+    @property
+    def auth_health(self) -> MiotAuthHealth:
+        """米家授权健康度快照（只读）。"""
+        return self._auth_health
+
+    def _load_auth_health(self) -> MiotAuthHealth:
+        raw = self._kv_repo.get(AuthConfigKeys.MIOT_AUTH_STATE_KEY)
+        if not raw:
+            return MiotAuthHealth()
+        try:
+            return MiotAuthHealth.model_validate_json(raw)
+        except Exception as e:
+            # 形状变了/内容坏了不该拖垮启动，按「健康」起步：下一次刷新会重新定性
+            logger.warning("Invalid stored auth health, falling back to ok: %s", e)
+            return MiotAuthHealth()
+
+    def _set_auth_health(self, health: MiotAuthHealth) -> None:
+        self._auth_health = health
+        try:
+            self._kv_repo.set(
+                AuthConfigKeys.MIOT_AUTH_STATE_KEY, health.model_dump_json()
+            )
+        except Exception as e:
+            # 落库失败只影响重启后的首屏判断，不该让刷新流程本身失败
+            logger.warning("Failed to persist auth health: %s", e)
+
     def reset_miot_token_info(self, miot_token_info: MIoTOauthInfo):
         """
         Reset persistent Mi Home token information
@@ -1225,22 +1257,55 @@ class MiotProxy:
         )
 
     async def refresh_xiaomi_home_token_info(self) -> MIoTOauthInfo | None:
+        """刷新访问令牌。
+
+        失败时**不再清空** ``self._oauth_info``。清空会让 ``is_authenticated``
+        转 False，而它同时是感知侧相机发现的闸门（``camera_adapter`` 拿到空集
+        后会把已连接的相机全部断开），等于让一次令牌续期失败连带打掉整个感知
+        链路。凭据在不在、凭据还能不能用是两件事，后者记在 ``_auth_health``。
+        """
+        if not self._oauth_info:
+            logger.warning("Skip token refresh: no oauth_info on file")
+            return None
         try:
-            if not self._oauth_info:
-                raise ValueError("No oauth_info found")
             oauth_info = await self._miot_client.refresh_access_token_async(
                 refresh_token=self._oauth_info.refresh_token
             )
             logger.info("Successfully refreshed Xiaomi home token info")
             self.reset_miot_token_info(oauth_info)
+            self._set_auth_health(self._auth_health.mark_success())
             await asyncio.sleep(3)
             await self.refresh_miot_info()
             return oauth_info
         except Exception as e:
-            self._oauth_info = None
-            logger.error(
-                "Failed to refresh Xiaomi home token info: %s", e, exc_info=True
+            code = getattr(getattr(e, "code", None), "value", None)
+            permanent = is_permanent_auth_error(code)
+            before = self._auth_health.state
+            self._set_auth_health(
+                self._auth_health.mark_failure(
+                    permanent=permanent, code=code, message=str(e)
+                )
             )
+            after = self._auth_health.state
+            if after is not before:
+                # 只在状态迁移时打 ERROR，避免每 5 分钟刷一条把日志淹掉
+                logger.error(
+                    "Mi Home authorization rejected by cloud (code=%s): %s. "
+                    "Device control will keep dispatching but is no longer "
+                    "guaranteed; perception is unaffected. "
+                    "Fix: rebind in the web console, or run "
+                    "`miloco-cli account bind`.",
+                    code,
+                    e,
+                )
+            else:
+                logger.warning(
+                    "Token refresh failed (%s, attempt %d): %s",
+                    "permanent" if permanent else "transient",
+                    self._auth_health.consecutive_failures,
+                    e,
+                )
+            return None
 
     async def _start_token_refresh_task(self):
         """
@@ -1585,8 +1650,12 @@ class MiotProxy:
             return {}
 
     async def _check_and_refresh_token(self):
-        """
-        Check if token is about to expire, refresh if needed
+        """检查令牌是否临近过期，需要则刷新。
+
+        瞬时故障（超时 / 连接失败 / 5xx / 响应体不合法）会按 ``RETRY_BACKOFF_SECONDS``
+        在本轮内退避重试；只有云端明确拒绝凭据才会立刻停手并置为降级态。过去这里
+        没有任何重试，而失败又会把 ``_oauth_info`` 清空导致下一轮直接 return，
+        实际重试次数是 0——一次网络抖动就等于本进程内永久放弃。
         """
         if not self._oauth_info:
             return
@@ -1595,16 +1664,31 @@ class MiotProxy:
         expires_ts = self._oauth_info.expires_ts
 
         # Refresh token if it expires within 30 minutes
-        if expires_ts - current_time <= 1800:  # 1800 seconds = 30 minutes
-            logger.info(
-                "Token is about to expire, starting refresh. Current time: %s, Expiration time: %s",
-                current_time,
-                expires_ts,
-            )
-            result = await self.refresh_xiaomi_home_token_info()
-            if result:
+        if expires_ts - current_time > 1800:  # 1800 seconds = 30 minutes
+            return
+
+        logger.info(
+            "Token is about to expire, starting refresh. Current time: %s, Expiration time: %s",
+            current_time,
+            expires_ts,
+        )
+        for attempt, backoff in enumerate((*RETRY_BACKOFF_SECONDS, None)):
+            if await self.refresh_xiaomi_home_token_info():
                 logger.info("Token refresh completed successfully")
-            else:
-                logger.error(
-                    "Token refresh failed, re-login required: miloco-cli account bind"
-                )
+                return
+            if self._auth_health.is_degraded:
+                # 云端明确拒绝了凭据，重试无用——留给用户重新授权
+                return
+            if backoff is None:
+                break
+            logger.info(
+                "Token refresh attempt %d failed transiently, retrying in %ds",
+                attempt + 1,
+                backoff,
+            )
+            await asyncio.sleep(backoff)
+        logger.warning(
+            "Token refresh still failing after %d attempts; keeping existing "
+            "credentials and retrying on the next cycle",
+            len(RETRY_BACKOFF_SECONDS) + 1,
+        )

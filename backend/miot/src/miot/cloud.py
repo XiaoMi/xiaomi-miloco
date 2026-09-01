@@ -177,6 +177,16 @@ class MIoTOAuth2Client:
 
         res_str = await http_res.text()
         res_obj = json.loads(res_str)
+        # 凭据被明确拒绝时,小米返回的是 {"error":96009,"error_description":...}
+        # 这种形状——没有 `code` 字段,会落进下面的通用分支被当成 CODE_UNKNOWN,
+        # 于是「凭据真失效」和「响应偶发不合法」在调用方眼里完全一样。这里先把
+        # 它单独识别出来并带上专属错误码,调用方才能区分「重试无用」与「可重试」。
+        if isinstance(res_obj, dict) and res_obj.get("error") is not None:
+            raise MIoTOAuth2Error(
+                f"oauth/get_token rejected, error={res_obj.get('error')}, "
+                f"description={res_obj.get('error_description')}",
+                MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN,
+            )
         if (
             not res_obj
             or res_obj.get("code", None) != 0

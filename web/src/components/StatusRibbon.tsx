@@ -180,23 +180,40 @@ export function StatusRibbon({
     />
   );
 
-  // ── Item 2：米家连接 ─────────────────────────
+  // ── Item 2：米家连接 3 态 ─────────────────────
+  // bound && !authDegraded → 绿，已连
+  // bound && authDegraded  → 红，授权已失效（感知照跑，只有设备控制不保证）
+  // !bound                 → 黄，未连
+  // authDegraded 与 bound 正交：令牌续期被云端拒绝、但 access_token 还没到期时
+  // bound 仍是 true，只看 bound 会在授权其实已经失效时显示「一切正常」。
   const miotItem = status.miot.bound ? (
-    <StatusItem
-      tone="ok"
-      label={
-        <>
-          {t("hero.miotConnected")}
-          {status.miot.accountName ? ` · ${status.miot.accountName}` : ""}
-        </>
-      }
-      meta={
-        <span className="num">
-          {t("hero.miotDevicesCount", { n: status.miot.devicesCount })}
-        </span>
-      }
-      onClick={onJumpDevices}
-    />
+    status.miot.authDegraded ? (
+      <StatusItem
+        tone="danger"
+        label={
+          <span title={t("hero.miotAuthDegradedHint")}>
+            {t("hero.miotAuthDegraded")}
+          </span>
+        }
+        cta={{ text: t("account.rebind"), onClick: onConnectMiot }}
+      />
+    ) : (
+      <StatusItem
+        tone="ok"
+        label={
+          <>
+            {t("hero.miotConnected")}
+            {status.miot.accountName ? ` · ${status.miot.accountName}` : ""}
+          </>
+        }
+        meta={
+          <span className="num">
+            {t("hero.miotDevicesCount", { n: status.miot.devicesCount })}
+          </span>
+        }
+        onClick={onJumpDevices}
+      />
+    )
   ) : (
     <StatusItem
       tone="warn"

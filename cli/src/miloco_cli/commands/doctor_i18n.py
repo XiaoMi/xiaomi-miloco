@@ -199,6 +199,9 @@ _ZH: dict[str, str] = {
     "account.unbound.fix": "miloco-cli account login",
     "account.bound.name": "小米账号绑定",
     "account.bound.message": "已绑定 Xiaomi 账号 (uid: {uid})",
+    "account.degraded.name": "小米账号授权",
+    "account.degraded.message": "授权已被云端拒绝（uid: {uid}，自 {since} 起）——感知、录像、规则仍在正常跑，受影响的只有设备控制下发",
+    "account.degraded.fix": "重新授权：web 上点状态条的「重新绑定」，或运行 miloco-cli account bind",
     "home.none.name": "家庭配置",
     "home.none.message": "账号下无启用的家庭",
     "home.none.fix": (
@@ -464,6 +467,9 @@ _EN: dict[str, str] = {
     "account.unbound.fix": "miloco-cli account login",
     "account.bound.name": "Xiaomi account binding",
     "account.bound.message": "Xiaomi account bound (uid: {uid})",
+    "account.degraded.name": "Xiaomi account authorization",
+    "account.degraded.message": "Authorization rejected by the cloud (uid: {uid}, since {since}) - perception, recording and rules keep running; only device control is affected",
+    "account.degraded.fix": "Re-authorize: click Rebind on the status ribbon in the web console, or run miloco-cli account bind",
     "home.none.name": "Home configuration",
     "home.none.message": "No active home under this account",
     "home.none.fix": (

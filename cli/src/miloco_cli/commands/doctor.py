@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Literal
@@ -140,6 +141,12 @@ class BackendState:
     home_name: str | None
     cameras: list[CameraSummary] = field(default_factory=list)
     version_data: dict | None = None
+    #: 米家授权已被云端拒绝，需要住户重新授权。与 account_bound 正交——令牌续期
+    #: 失败但 access_token 还没到期时 account_bound 仍是 True。老后端不返回该
+    #: 字段，取不到按 False（不误报）。
+    auth_degraded: bool = False
+    #: 进入降级态的时刻（秒级 epoch），用于在 message 里说明「自 X 时起」
+    auth_degraded_since: int | None = None
 
 
 @dataclass(frozen=True)
@@ -988,6 +995,8 @@ def probe_backend() -> BackendState:
             status_data = status_body.get("data") or {}
             is_bound = bool(status_data.get("is_bound"))
             uid = (status_data.get("user_info") or {}).get("uid")
+            auth_degraded = status_data.get("auth_state") == "degraded"
+            auth_degraded_since = status_data.get("auth_degraded_since")
 
             version_data = _fetch_backend_version(client)
 
@@ -1017,6 +1026,8 @@ def probe_backend() -> BackendState:
                     home_enabled=False, home_id=None, home_name=None,
                     cameras=[],
                     version_data=version_data,
+                    auth_degraded=auth_degraded,
+                    auth_degraded_since=auth_degraded_since,
                 )
 
             r_cams = client.get("/api/miot/camera_list")
@@ -1043,6 +1054,8 @@ def probe_backend() -> BackendState:
                 home_id=enabled_home.get("home_id"),
                 home_name=enabled_home.get("home_name"),
                 cameras=cameras,
+                auth_degraded=auth_degraded,
+                auth_degraded_since=auth_degraded_since,
                 version_data=version_data,
             )
     except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as e:
@@ -1091,6 +1104,16 @@ def _build_version_result(
     )
 
 
+def _format_epoch(ts: int | None) -> str:
+    """秒级 epoch → 本地时间字符串；拿不到时返回占位而不是空字符串。"""
+    if not ts:
+        return "-"
+    try:
+        return datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return "-"
+
+
 def assess_backend(state: BackendState, t: Translator = _ZH_T) -> list[CheckResult]:
     results: list[CheckResult] = []
     if not state.reachable:
@@ -1133,12 +1156,24 @@ def assess_backend(state: BackendState, t: Translator = _ZH_T) -> list[CheckResu
         ))
         return results
 
-    results.append(CheckResult(
-        section="miloco",
-        name=t("account.bound.name"),
-        status=Status.PASS,
-        message=t("account.bound.message", uid=state.account_uid or "unknown"),
-    ))
+    if state.auth_degraded:
+        # 授权已被云端拒绝：绑定关系还在（account_bound=True），但设备控制不再
+        # 保证成功。算 FAIL 让 doctor 退出码为 1——这是需要住户动手才能解的。
+        since = _format_epoch(state.auth_degraded_since)
+        results.append(CheckResult(
+            section="miloco",
+            name=t("account.degraded.name"),
+            status=Status.FAIL,
+            message=t("account.degraded.message", uid=state.account_uid or "unknown", since=since),
+            fix_hint=t("account.degraded.fix"),
+        ))
+    else:
+        results.append(CheckResult(
+            section="miloco",
+            name=t("account.bound.name"),
+            status=Status.PASS,
+            message=t("account.bound.message", uid=state.account_uid or "unknown"),
+        ))
 
     if not state.home_enabled:
         results.append(CheckResult(
