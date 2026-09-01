@@ -585,3 +585,45 @@ def test_signal_carries_the_slot_computed_by_confirmation_layer(env, monkeypatch
     runner._state_machine_allows(r, RuleEvent.ENTERED)
 
     assert [s.slot for s in seen] == [ActionSlot.ON_EXIT]
+
+
+# ── 动作透传按"槽"判争用, 不按"有没有兄弟" ──────────────────────────────
+
+
+def test_write_through_passes_when_siblings_hold_other_slots(env):
+    """非互反 task: enter 写 on_enter、exit 写 on_exit, 两条互不相干, 都要写进去。
+
+    按"有没有兄弟"一律跳过的话, 用 rule 侧 flag 建非互反 task 时退出动作会静默
+    丢失 —— CLI 每条都返回成功, 只有服务端日志里一行 warning。
+    """
+    enter_rule = _rule("[t1] 进", mode=RuleMode.EVENT, direction=RuleDirection.ENTER)
+    enter_rule.on_enter_desc = None
+    enter_rule.action_descriptions = ["进入时播报"]
+    exit_rule = _rule("[t1] 出", mode=RuleMode.EVENT, direction=RuleDirection.EXIT)
+    exit_rule.on_enter_desc = None
+    exit_rule.action_descriptions = ["退出时播报"]
+
+    service, _runner, ids, _ = _build(None, [enter_rule, exit_rule])
+    for rule_id in ids:
+        service.sync_rule_actions_to_task(RuleRepo().get_by_id(rule_id))
+
+    actions = TaskRepo().get_boundary_actions("t1")
+    assert actions["on_enter_desc"] == "1. 进入时播报"
+    assert actions["on_exit_desc"] == "1. 退出时播报"
+
+
+def test_write_through_still_skips_when_siblings_hold_the_same_slot(env, caplog):
+    """两条 enter 都管 on_enter —— 从一条单向覆盖会把另一条的动作冲掉, 仍要跳过。"""
+    first = _rule("[t1] 进A", mode=RuleMode.EVENT, direction=RuleDirection.ENTER)
+    first.on_enter_desc = None
+    first.action_descriptions = ["A"]
+    second = _rule("[t1] 进B", mode=RuleMode.EVENT, direction=RuleDirection.ENTER)
+    second.on_enter_desc = None
+    second.action_descriptions = ["B"]
+
+    service, _runner, ids, _ = _build(None, [first, second])
+    with caplog.at_level("WARNING"):
+        service.sync_rule_actions_to_task(RuleRepo().get_by_id(ids[1]))
+
+    assert TaskRepo().get_boundary_actions("t1")["on_enter_desc"] is None
+    assert any("也管着" in r.message for r in caplog.records)

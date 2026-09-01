@@ -786,23 +786,30 @@ class RuleService:
         # 达标通知的 task 都会走进下面那条跳过分支, 之后每一次改动作都只写 rule 行、
         # 不写 task 列, 而 fire 读的正是 task 列: CLI 返回成功、rule get 显示新值、
         # 实际行为不变。
-        siblings = [
-            r
-            for r in self._repo.list_by_task(rule.task_id)
-            if r.id != rule.id and r.resolved_direction is not RuleDirection.MILESTONE
-        ]
-        if siblings:
-            logger.warning(
-                "task %s 名下有 %d 条其它 rule, 不把 rule %s 的动作透传到 task 列; "
-                "请改用 task 侧的动作入口",
-                rule.task_id,
-                len(siblings),
-                rule.id,
-            )
-            return
-
         slots = _rule_action_slots(rule)
         if not slots:
+            return
+
+        # 只有争同一个槽才跳过。不同方向的 rule 各写各的槽 —— enter 写 on_enter、
+        # exit 写 on_exit, 本来就不冲突; 一律按"有没有兄弟"跳过的话, 非互反 task
+        # (enter + exit) 用 rule 侧 flag 建, 第二条起的动作全部静默丢失。
+        contended = sorted(
+            set(slots)
+            & {
+                name
+                for r in self._repo.list_by_task(rule.task_id)
+                if r.id != rule.id
+                for name in _rule_action_slots(r)
+            }
+        )
+        if contended:
+            logger.warning(
+                "task %s 名下有别的 rule 也管着 %s, 不把 rule %s 的动作透传到 "
+                "task 列; 请改用 task 侧的动作入口",
+                rule.task_id,
+                contended,
+                rule.id,
+            )
             return
         # rule 写入已经成功并且是主要效果, 不能被 task 侧同步的失败带崩。但也不能
         # 静默 —— 同步没成功就意味着"动作只读"那个坑还在, 必须留下明显的线索。
