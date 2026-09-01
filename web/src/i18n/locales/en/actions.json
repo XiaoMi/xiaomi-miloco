@@ -9,6 +9,8 @@
     "typeCallAction": "Call action",
     "typeSceneTrigger": "Trigger scene",
     "typeUnknown": "Unknown action",
-    "limitHint": "Showing the latest 500 actions only"
+    "limitHint": "Showing the latest 500 actions only",
+    "authDegraded": "During auth outage",
+    "authDegradedHint": "Mi Home authorization was already rejected by the cloud when this command was dispatched. It was still sent, but execution is not guaranteed - a success badge here may not mean the device acted."
   }
 }

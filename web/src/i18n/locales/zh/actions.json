@@ -9,6 +9,8 @@
     "typeCallAction": "执行动作",
     "typeSceneTrigger": "触发场景",
     "typeUnknown": "未知动作",
-    "limitHint": "动作仅显示最近 500 条"
+    "limitHint": "动作仅显示最近 500 条",
+    "authDegraded": "授权失效期间",
+    "authDegradedHint": "下发这条指令时米家授权已被云端拒绝。指令照常发出，但是否真的执行不保证——即便显示成功，也可能并未生效。"
   }
 }

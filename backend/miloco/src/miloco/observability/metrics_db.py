@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _TRACES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -149,7 +149,8 @@ CREATE TABLE IF NOT EXISTS action_ledger (
   trace_id      TEXT,
   source        TEXT,
   source_id     TEXT,
-  home_id       TEXT
+  home_id       TEXT,
+  auth_state    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_ledger_ts ON action_ledger(timestamp);
 CREATE INDEX IF NOT EXISTS idx_action_ledger_source_ts ON action_ledger(source, timestamp);
@@ -281,9 +282,23 @@ def _migrate_v4_action_home(conn: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_v5_action_auth_state(conn: sqlite3.Connection) -> None:
+    """v4 → v5:给 action_ledger 补下发时的米家授权状态列 auth_state(幂等)。
+
+    授权被云端拒绝后设备控制仍会照常下发(感知不该为授权问题停摆),但成功与否
+    不再有保证。只看 success/result_code 无法区分「设备真的没响应」与「当时授权
+    已失效」——事后排查「那晚灯到底开没开」会卡在这里。老行为 NULL,表示写入时
+    还没有这个维度,查询侧不得据此推断当时授权正常。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    if "auth_state" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN auth_state TEXT")
+
+
 # 步进迁移注册表:{target_version: fn}。fn 只做 additive DDL,须幂等。
 _MIGRATIONS = {
     2: _migrate_v2_action_ledger,
     3: _migrate_v3_action_source,
     4: _migrate_v4_action_home,
+    5: _migrate_v5_action_auth_state,
 }

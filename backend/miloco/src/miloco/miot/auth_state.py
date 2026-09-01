@@ -10,8 +10,9 @@
 `_oauth_info` 回归它字面的含义（凭据在不在），感知不再被授权问题牵连。
 
 判据只认「云端明确拒绝」：超时、连接失败、5xx、响应体不合法都算瞬时故障，
-退避重试、不改状态；只有 401 与 `error=96009` 这类明确的凭据拒绝才置为
-`DEGRADED`。任何一次刷新成功都会立刻回到 `OK`。
+退避重试、不改状态；只有 401、以及 OAuth 响应体带 `error` 字段（如 96009
+invalid refresh token）这类明确的凭据拒绝才置为 `DEGRADED`。任何一次刷新
+成功、或用户重新授权成功，都会立刻回到 `OK`。
 """
 
 from __future__ import annotations
@@ -20,6 +21,17 @@ import time
 from enum import Enum
 
 from pydantic import BaseModel, Field
+
+
+#: 瞬时故障的退避序列（秒）。定时任务本身每 300s 转一圈，这里控制的是
+#: 「同一轮里失败后多久再试」，上限刻意小于一圈，避免两套节奏互相错开。
+RETRY_BACKOFF_SECONDS: tuple[int, ...] = (5, 20, 60)
+
+#: 同一状态内重复失败的日志间隔（秒）。状态**迁移**那条 ERROR 不受限频——
+#: 它每次故障只出现一次，正是排障要找的那条。受限的是之后每轮重试都会产生的
+#: 同义 WARNING：降级后定时任务仍每 300s 试一次，不限频就是每小时 12 条、
+#: 每天近 300 条无新信息的重复行。
+FAILURE_LOG_INTERVAL_SECONDS: int = 1800
 
 
 class MiotAuthState(str, Enum):
@@ -54,6 +66,9 @@ class MiotAuthHealth(BaseModel):
     last_success_ts: int | None = None
     #: 最近一次尝试刷新的时刻（无论成败），用于判断定时任务是否还活着
     last_attempt_ts: int | None = None
+    #: 最近一次为「同状态内重复失败」打过日志的时刻，供限频判断。落库是有意的：
+    #: 否则每次重启都会立刻再打一条，反而在崩溃自愈频繁时刷得更凶。
+    last_failure_log_ts: int | None = None
 
     @property
     def is_degraded(self) -> bool:
@@ -72,29 +87,40 @@ class MiotAuthHealth(BaseModel):
             last_attempt_ts=now,
         )
 
-    def mark_failure(self, *, permanent: bool, code: int | None, message: str) -> "MiotAuthHealth":
+    def mark_failure(
+        self, *, permanent: bool, code: int | None, message: str
+    ) -> tuple["MiotAuthHealth", bool]:
         """刷新失败。
 
         ``permanent=False``（瞬时故障）只累计失败次数，**不改变 state**——这正是
         「网络抖一下不该点亮告警」这条要求的落点。
+
+        Returns:
+            (新状态, 本次是否应当打日志)。状态迁移必打；同状态内的重复失败按
+            ``FAILURE_LOG_INTERVAL_SECONDS`` 限频，避免每轮重试刷一条同义行。
         """
         now = int(time.time())
         degraded = permanent or self.is_degraded
-        return MiotAuthHealth(
-            state=MiotAuthState.DEGRADED if degraded else MiotAuthState.OK,
-            # 已经是 DEGRADED 时保留最初进入的时刻，便于展示「自 X 时起」
-            since_ts=(self.since_ts or now) if degraded else None,
-            error_code=code,
-            error_message=message,
-            consecutive_failures=self.consecutive_failures + 1,
-            last_success_ts=self.last_success_ts,
-            last_attempt_ts=now,
+        transitioned = degraded is not self.is_degraded
+        due = (
+            self.last_failure_log_ts is None
+            or now - self.last_failure_log_ts >= FAILURE_LOG_INTERVAL_SECONDS
         )
-
-
-#: 瞬时故障的退避序列（秒）。定时任务本身每 300s 转一圈，这里控制的是
-#: 「同一轮里失败后多久再试」，上限刻意小于一圈，避免两套节奏互相错开。
-RETRY_BACKOFF_SECONDS: tuple[int, ...] = (5, 20, 60)
+        should_log = transitioned or due
+        return (
+            MiotAuthHealth(
+                state=MiotAuthState.DEGRADED if degraded else MiotAuthState.OK,
+                # 已经是 DEGRADED 时保留最初进入的时刻，便于展示「自 X 时起」
+                since_ts=(self.since_ts or now) if degraded else None,
+                error_code=code,
+                error_message=message,
+                consecutive_failures=self.consecutive_failures + 1,
+                last_success_ts=self.last_success_ts,
+                last_attempt_ts=now,
+                last_failure_log_ts=now if should_log else self.last_failure_log_ts,
+            ),
+            should_log,
+        )
 
 
 def is_permanent_auth_error(code: int | None) -> bool:

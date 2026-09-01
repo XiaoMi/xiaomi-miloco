@@ -147,6 +147,10 @@ class ActionLedgerRecord:
     source: str | None = None    # v3: cli | rule
     source_id: str | None = None  # v3: rule 写 rule_id,cli 留空
     home_id: str | None = None   # v4: 设备所属家庭,写入时从 device cache 解析,失败留 NULL
+    # v5: 下发当时的米家授权状态(ok | degraded)。授权被云端拒绝后控制仍会照常
+    # 下发,但成功与否不再有保证——只看 success/result_code 分不清「设备真的没
+    # 响应」与「当时授权已失效」。老行为 NULL,表示写入时还没有这个维度。
+    auth_state: str | None = None
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -166,6 +170,7 @@ class ActionLedgerRecord:
             "source": self.source,
             "source_id": self.source_id,
             "home_id": self.home_id,
+            "auth_state": self.auth_state,
         }
 
 
