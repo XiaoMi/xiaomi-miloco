@@ -36,6 +36,7 @@ from miloco.rule.record_source import (
     RECORD_SOURCE_TYPE,
     SUPPORTED_KIND,
     SUPPORTED_OP,
+    record_ref_of,
 )
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
@@ -324,6 +325,42 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
         owned,
         len(rules_by_task),
     )
+    _seed_reached_targets(rule_runner)
+
+
+def _seed_reached_targets(rule_runner: RuleRunner) -> None:
+    """启动时把"今天已经达标"的条件直接置真, 不产边沿 (§7)。
+
+    防重复的载体是条件项的值, 而它只在内存、重启从假起 —— 不 seed 的话每次重启都
+    会把当天的达标重发一遍 (真机确认过一天发五次)。
+
+    误判的是"达标了但还没发出去"那一小段窗口: 达标那一刻进程崩, 或 timer 到点时
+    task 不在 session 而退出兜底也没赶上。它比重启窄得多, 而重启本身是常态 (升级、
+    崩溃、supervisord 重拉)。
+    """
+    record_service = rule_runner._task_record_service
+    if record_service is None:
+        return
+    for rule in rule_runner.get_all_rules():
+        ref = record_ref_of(rule)
+        if ref is None:
+            continue
+        try:
+            state = record_service.read_duration_target_state(ref.task_id)
+        except Exception:
+            logger.exception("启动时读 task %s 的累计失败, 不 seed", ref.task_id)
+            continue
+        if state is None:
+            continue
+        target, accumulated = state
+        if target is None or accumulated < target:
+            continue
+        rule_runner.seed_reached_target(ref.rule_id)
+        logger.info(
+            "RECORD_TARGET_SEEDED: rule=%s task=%s 启动时已达标 "
+            "(accumulated_min=%s target_min=%s), 按已通知处理",
+            ref.rule_id, ref.task_id, accumulated, target,
+        )
 
 
 class RuleService:

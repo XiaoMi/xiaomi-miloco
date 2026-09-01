@@ -247,14 +247,13 @@ async def test_the_record_source_rearms_from_the_current_accumulated(db):
 
 
 @pytest.mark.asyncio
-async def test_restart_re_sends_a_target_notification_already_sent_today(db):
-    """**已知缺陷，与 §7 的进入动作同源**：今天已经发过的达标通知，重启后会再发。
+async def test_restart_does_not_re_send_a_target_reached_before_it(db):
+    """启动时读到「今天已经达标」→ 按已通知处理，只建基线不产边沿。
 
-    防重复靠的是条件项自身的边沿，而条件的值和 last_rule_state 一样只在内存 ——
-    重启后从假起，重新算出「够了」就是一次新的假→真。
+    防重复靠的是条件项自身的边沿，而条件的值只在内存、重启从假起——不 seed 的话
+    每次重启都会把当天的达标重发一遍（真机确认过一天发五次）。
 
-    旧实现的 target_fired 内存标记同样如此，所以这不是本次引入的回归；钉在这里是
-    为了它被修掉（seed 语义）时有测试跟着红。
+    误判的是「达标了但还没发出去」那一小段窗口，比重启本身窄得多，而重启是常态。
     """
     boot1 = _Boot(accumulated=60)
     await boot1.service.create_rule(_session_rule(on_target_desc="达标推送"))
@@ -267,5 +266,28 @@ async def test_restart_re_sends_a_target_notification_already_sent_today(db):
         "miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)
     ) as mock:
         await _feed(boot2.runner, rule_id, True)
+
+    assert ("[piano] 累计达标", "TARGET_FIRED") not in _events(mock)
+    # 进入动作照发 —— seed 只管达标那一条, 不该顺手把 session 也压掉
+    assert ("[piano] 练琴计时", "ENTERED") in _events(mock)
+
+
+@pytest.mark.asyncio
+async def test_restart_still_sends_a_target_reached_after_it(db):
+    """启动时还没达标 → 之后达标照发。别把 seed 做成"这一天再也不发"。"""
+    boot1 = _Boot(accumulated=0)
+    await boot1.service.create_rule(_session_rule(on_target_desc="达标推送"))
+
+    boot2 = _Boot(accumulated=0)
+    rule_id = next(
+        r.id for r in boot2.repo.get_all() if r.resolved_direction.value == "session"
+    )
+    with patch(
+        "miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)
+    ) as mock:
+        await _feed(boot2.runner, rule_id, True)
+        boot2.accumulated = 60
+        await boot2.runner.record_source.settle(TASK_ID)
+        await asyncio.sleep(0.1)
 
     assert ("[piano] 累计达标", "TARGET_FIRED") in _events(mock)

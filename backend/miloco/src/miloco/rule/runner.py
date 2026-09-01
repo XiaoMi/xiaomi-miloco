@@ -314,6 +314,16 @@ class RuleRunner:
             if ref is not None:
                 yield ref
 
+    def seed_reached_target(self, rule_id: str) -> None:
+        """把达标条件直接置真, 不走 diff、不产边沿 (§7 重启重建)。
+
+        与已删除的"退出时重置基线"不是一回事: 那个在条件为假时强行置真, 是说谎;
+        这个只在启动时确实读到"今天已经达标"才用, 说的是真话, 只是不当成一次跃迁。
+        """
+        state = self._ensure_state(rule_id)
+        self._ensure_source(rule_id, RECORD_SOURCE_DID).last_bool = True
+        state.last_rule_state = True
+
     async def _feed_record(
         self, rule_id: str, value: bool, metadata: dict | None = None
     ) -> None:
