@@ -108,7 +108,8 @@ class TaskFullView(BaseModel):
     last_decision: dict | None = None
     rule_briefs: list[RuleBrief] = Field(default_factory=list)
     cron_refs: list[CronRef] = Field(default_factory=list)
-    # 只在单 task 视图里填 —— 列表路径不查这六列, 避免每行一次额外查询。
+    # 多条 rule 的 task 动作只存在这里 —— rule 侧的动作 flag 按设计不透传(从一条
+    # rule 单向覆盖会冲掉另一条), 所以那种 task 的 rule_briefs.actions_desc 是空的。
     actions: TaskBoundaryActions | None = None
 
 

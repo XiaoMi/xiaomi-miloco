@@ -42,6 +42,18 @@ def _load_actions(raw: str | None) -> list[dict[str, Any]]:
     return parsed if isinstance(parsed, list) else []
 
 
+def _boundary_actions_of(row: Any) -> dict[str, Any]:
+    """把一行 task 的六个动作列拼成动作槽。行里必须已经 SELECT 过这几列。"""
+    return {
+        "on_enter_actions": _load_actions(row["on_enter_actions"]),
+        "on_enter_desc": row["on_enter_desc"],
+        "on_exit_actions": _load_actions(row["on_exit_actions"]),
+        "on_exit_desc": row["on_exit_desc"],
+        "on_target_actions": _load_actions(row["on_target_actions"]),
+        "on_target_desc": row["on_target_desc"],
+    }
+
+
 class TaskRepo:
     def __init__(self):
         self.db = get_db_connector()
@@ -126,7 +138,9 @@ class TaskRepo:
         """所有 task 的聚合视图 (service 层接管 rule_briefs JOIN)."""
         with self.db.get_connection() as conn:
             tasks = conn.execute(
-                "SELECT task_id, description, status, paused_at, created_at, lifecycle "
+                "SELECT task_id, description, status, paused_at, created_at, "
+                "lifecycle, on_enter_actions, on_enter_desc, on_exit_actions, "
+                "on_exit_desc, on_target_actions, on_target_desc "
                 "FROM task ORDER BY created_at DESC"
             ).fetchall()
             all_crons = conn.execute(
@@ -146,12 +160,16 @@ class TaskRepo:
                     "paused_at": ms_to_iso_local(t["paused_at"]),
                     "created_at": ms_to_iso_local(t["created_at"]),
                     "lifecycle": t["lifecycle"],
+                    # 动作槽跟基础字段同一行, 一起 SELECT 不产生额外查询。多条 rule
+                    # 的 task 动作只存在这里 —— 列表不带的话住户界面显示成"无动作"。
+                    "actions": _boundary_actions_of(t),
                     "cron_refs": crons_by_task.get(t["task_id"], []),
                 }
                 for t in tasks
             ]
 
     # ── 边界动作 (expand-contract 阶段 A 新增列) ──────────────────
+
 
     def get_boundary_actions(self, task_id: str) -> dict[str, Any] | None:
         """读 task 的三个动作槽 + lifecycle。task 不存在返回 None。
@@ -168,15 +186,7 @@ class TaskRepo:
             ).fetchone()
         if row is None:
             return None
-        return {
-            "lifecycle": row["lifecycle"],
-            "on_enter_actions": _load_actions(row["on_enter_actions"]),
-            "on_enter_desc": row["on_enter_desc"],
-            "on_exit_actions": _load_actions(row["on_exit_actions"]),
-            "on_exit_desc": row["on_exit_desc"],
-            "on_target_actions": _load_actions(row["on_target_actions"]),
-            "on_target_desc": row["on_target_desc"],
-        }
+        return {"lifecycle": row["lifecycle"], **_boundary_actions_of(row)}
 
     def set_boundary_actions(self, task_id: str, **slots: Any) -> bool:
         """写动作槽。只更新传进来的键, 未传的不动。

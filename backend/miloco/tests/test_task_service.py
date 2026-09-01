@@ -718,3 +718,23 @@ def test_set_actions_does_not_check_the_record_for_other_slots(service):
     assert service.set_boundary_actions(
         "t1", TaskActionsUpdateRequest(on_enter_desc="进")
     )
+
+
+def test_list_summary_carries_task_boundary_actions(service, real_db):
+    """列表路径也要带 task 级动作。
+
+    多条 rule 的 task 动作只存在 task 行上, rule_briefs 的 actions_desc 是空的 ——
+    列表不带 actions 的话住户界面把配好推送的 task 显示成「无动作」。
+    """
+    from miloco.database.task_repo import TaskRepo
+
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    TaskRepo().set_boundary_actions(
+        "t1", on_enter_desc="进来推一条", on_exit_desc="出去推一条"
+    )
+
+    view = next(v for v in service.list_summary("day") if v.task_id == "t1")
+
+    assert view.actions is not None
+    assert view.actions.on_enter_desc == "进来推一条"
+    assert view.actions.on_exit_desc == "出去推一条"

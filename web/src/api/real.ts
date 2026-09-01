@@ -2045,11 +2045,21 @@ interface BackendTaskSummary {
   status: "active" | "paused";
   paused_at?: string | null;
   created_at: string;
+  runtime_state?: "off" | "on";
   rule_briefs?: {
     rule_id: string;
     query: string;
+    direction?: "enter" | "exit" | "session";
     actions_desc?: string[];
   }[];
+  actions?: {
+    on_enter_actions?: unknown[];
+    on_enter_desc?: string | null;
+    on_exit_actions?: unknown[];
+    on_exit_desc?: string | null;
+    on_target_actions?: unknown[];
+    on_target_desc?: string | null;
+  } | null;
   record: {
     kind: "progress" | "duration" | "event";
     completed: boolean;
@@ -2069,11 +2079,23 @@ export async function realListTasks(): Promise<Task[]> {
     status: t.status,
     pausedAt: t.paused_at ?? null,
     createdAt: t.created_at,
+    runtimeState: t.runtime_state ?? "off",
     ruleBriefs: (t.rule_briefs ?? []).map((b) => ({
       ruleId: b.rule_id,
       query: b.query,
+      direction: b.direction ?? "enter",
       actionsDesc: b.actions_desc ?? [],
     })),
+    actions: t.actions
+      ? {
+          onEnterDesc: t.actions.on_enter_desc ?? null,
+          onExitDesc: t.actions.on_exit_desc ?? null,
+          onTargetDesc: t.actions.on_target_desc ?? null,
+          onEnterActionCount: (t.actions.on_enter_actions ?? []).length,
+          onExitActionCount: (t.actions.on_exit_actions ?? []).length,
+          onTargetActionCount: (t.actions.on_target_actions ?? []).length,
+        }
+      : null,
     record: t.record
       ? {
           kind: t.record.kind,

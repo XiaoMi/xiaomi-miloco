@@ -27,7 +27,13 @@ import {
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
-import type { Task, TaskRecordSummary, TaskRuleBrief } from "@/lib/types";
+import type {
+  Task,
+  TaskBoundaryActions,
+  TaskRecordSummary,
+  TaskRuleBrief,
+  TaskRuleDirection,
+} from "@/lib/types";
 import { AgentPromptDialog } from "./AgentPromptDialog";
 import { toast } from "./Toast";
 
@@ -76,6 +82,43 @@ function splitActions(actionsDesc: string[]): string[] {
     .flatMap((a) => a.split(/[；;]/))
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+const DIRECTION_LABEL_KEY: Record<TaskRuleDirection, string> = {
+  enter: "tasks.directionEnter",
+  exit: "tasks.directionExit",
+  session: "tasks.directionSession",
+};
+
+// task 的动作槽 → 展示用的行。三个槽里 *_desc（交给 Agent）和 *_actions（设备直控）
+// 二者取其一，都空的槽不出现。
+function slotRows(
+  actions: TaskBoundaryActions,
+  t: TFn,
+): { key: string; label: string; text: string }[] {
+  const slots = [
+    [
+      "enter",
+      "tasks.slotEnter",
+      actions.onEnterDesc,
+      actions.onEnterActionCount,
+    ],
+    ["exit", "tasks.slotExit", actions.onExitDesc, actions.onExitActionCount],
+    [
+      "target",
+      "tasks.slotTarget",
+      actions.onTargetDesc,
+      actions.onTargetActionCount,
+    ],
+  ] as const;
+  return slots.flatMap(([key, labelKey, desc, count]) => {
+    const text = desc?.trim()
+      ? desc.trim()
+      : count > 0
+        ? t("tasks.slotDeviceActions", { count })
+        : "";
+    return text ? [{ key, label: t(labelKey), text }] : [];
+  });
 }
 
 // 轻量开关——on=品牌色 / off=中性边框色，无障碍 role="switch"。
@@ -269,8 +312,15 @@ function RuleBriefCard({
   return (
     <div className="rounded-xl bg-bg-primary border border-border overflow-hidden">
       <div className="px-3.5 py-3 border-b border-border">
-        <div className="text-caption text-text-tertiary mb-1.5">
-          {t("tasks.triggerCondition")}
+        <div className="flex items-center gap-2 mb-1.5">
+          {/* 方向标签：一个 task 可以挂多条规则，进出各走各的路，不带这个就分不出
+              哪条把任务推进去、哪条推出来。 */}
+          <span className="text-caption px-1.5 py-0.5 rounded bg-bg-secondary text-text-secondary shrink-0">
+            {t(DIRECTION_LABEL_KEY[rule.direction])}
+          </span>
+          <div className="text-caption text-text-tertiary">
+            {t("tasks.triggerCondition")}
+          </div>
         </div>
         {editing ? (
           <>
@@ -295,11 +345,13 @@ function RuleBriefCard({
           </div>
         )}
       </div>
-      <div className="px-3.5 py-3">
-        <div className="text-caption text-text-tertiary mb-1.5">
-          {t("tasks.ruleActions")}
-        </div>
-        {actions.length > 0 ? (
+      {/* 动作只在 rule 自己带的时候显示。多条规则的 task 动作按设计不落在 rule 上,
+          由上方独立的动作块统一展示 —— 这里再写一句「无动作」是错的。 */}
+      {actions.length > 0 && (
+        <div className="px-3.5 py-3">
+          <div className="text-caption text-text-tertiary mb-1.5">
+            {t("tasks.ruleActions")}
+          </div>
           <ul className="space-y-1.5">
             {actions.map((a, i) => (
               <li
@@ -311,12 +363,40 @@ function RuleBriefCard({
               </li>
             ))}
           </ul>
-        ) : (
-          <div className="text-caption text-text-tertiary">
-            {t("tasks.ruleActionsEmpty")}
-          </div>
-        )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// task 级动作：三个槽属于 task 而不属于任何单条规则, 所以独立成块放在规则列表上方。
+function TaskActionsBlock({
+  actions,
+  t,
+}: {
+  actions: TaskBoundaryActions;
+  t: TFn;
+}) {
+  const rows = slotRows(actions, t);
+  if (rows.length === 0) {
+    return (
+      <div className="text-caption text-text-tertiary">
+        {t("tasks.ruleActionsEmpty")}
       </div>
+    );
+  }
+  return (
+    <div className="rounded-xl bg-bg-primary border border-border divide-y divide-border">
+      {rows.map((row) => (
+        <div key={row.key} className="flex gap-3 px-3.5 py-2.5">
+          <span className="text-caption text-text-tertiary shrink-0 w-8 mt-[3px]">
+            {row.label}
+          </span>
+          <span className="text-body text-text-secondary leading-relaxed break-words">
+            {row.text}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -503,6 +583,12 @@ function TaskDetailSheet({
                 placeholder={t("tasks.descPlaceholder")}
                 className="w-full resize-none rounded-lg bg-bg-primary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary"
               />
+            </Section>
+          )}
+
+          {task.actions && (
+            <Section title={t("tasks.taskActionsTitle")}>
+              <TaskActionsBlock actions={task.actions} t={t} />
             </Section>
           )}
 
