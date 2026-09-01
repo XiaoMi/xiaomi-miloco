@@ -792,6 +792,24 @@ class RuleService:
         """
         self._runner.remove_rule(rule_id)
 
+    def forget_task(self, task_id: str) -> None:
+        """task 被删 —— 清掉所有 per-task 的内存态。
+
+        rule 维度走 ``remove_rule_from_runner``, 它清不到按 task_id 存的那些:
+        状态机拓扑、运行态、判定跟踪、动作快照、停用标记。record timer 不在这里撤
+        —— 它按 rule_id 存, 逐条清 rule 时已经撤掉了。
+
+        ``task_id`` 是用户自己起的名字, 删掉再用同名重建是正常操作 —— 不清的话新
+        task 会继承上一条的运行态(建第一条 rule 时派一次没来由的 on_exit)和停用
+        标记(有效启用恒假, 一条 rule 都不触发, 直到重启)。
+        """
+        sm = self._runner.state_machine
+        if sm is not None and sm.owns(task_id):
+            # unregister_task 内含 on_forget → 判定跟踪一并清
+            sm.unregister_task(task_id)
+        self._runner.set_task_actions(task_id, None)
+        self._runner.set_task_paused(task_id, False)
+
     @property
     def decision_tracker(self):
         """给 task 层读判定摘要用。没接管时为 None。"""

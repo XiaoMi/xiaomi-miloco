@@ -387,6 +387,11 @@ class TaskService:
                     logger.warning(
                         "remove_rule_from_runner failed for rid=%s: %s", rid, e
                     )
+            # task 维度的内存态与 rule 维度是两份, 清 rule 不连带清 task
+            try:
+                self._rule_service.forget_task(task_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("forget_task failed for task=%s: %s", task_id, e)
 
         # cron 联动: internal 调 runner.remove_job 清 in-memory job; external
         # 产 agent_pending 让 skill 处理 openclaw 侧。跟 router.delete_cron 对称。

@@ -13,6 +13,7 @@ on_exit 永不执行。
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 
 import pytest
@@ -627,3 +628,113 @@ def test_write_through_still_skips_when_siblings_hold_the_same_slot(env, caplog)
 
     assert TaskRepo().get_boundary_actions("t1")["on_enter_desc"] is None
     assert any("也管着" in r.message for r in caplog.records)
+
+
+# ── task 被删: task 维度的内存态 ─────────────────────────────────────
+
+
+def _task_service(rule_service):
+    from miloco.task.service import TaskService
+
+    return TaskService(RuleRepo(), rule_service)
+
+
+@pytest.mark.asyncio
+async def test_delete_task_forgets_the_task_dimension_state(env):
+    """删 task 要连 task 维度的内存态一起清。
+
+    清 rule 只清 RuleRunner._rules; 拓扑 / 运行态 / 判定跟踪 / 动作快照是按
+    task_id 存的另一份, 不清就是一条随删除次数单调增长的泄漏。
+    """
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    sm = runner.state_machine
+    runner._state_machine_allows(RuleRepo().get_by_id(ids[0]), RuleEvent.ENTERED)
+    assert sm.owns("t1") is True
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert runner.task_owns_actions("t1") is True
+    assert runner.tracker.last_decision("t1") is not None
+
+    _task_service(service).delete_task("t1")
+
+    assert sm.owns("t1") is False
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert runner.task_owns_actions("t1") is False
+    assert runner.tracker.last_decision("t1") is None
+
+
+@pytest.mark.asyncio
+async def test_rebuilding_a_deleted_task_id_does_not_fire_a_stray_on_exit(env):
+    """同名重建不该先收到一条退出动作。
+
+    上一条 task 的运行态留着的话, 新 task 建第一条 rule 时 reconfigure 看到
+    was_on=True 而新 rule 还没喂过数据, 判定"没条件撑着"→ 派一次 on_exit。用户
+    刚建好, 什么都没发生, 先收到一条退出通知。
+    """
+    service, runner, ids, dispatched = _build(_ACTIONS, [_rule("[t1] s")])
+    runner._state_machine_allows(RuleRepo().get_by_id(ids[0]), RuleEvent.ENTERED)
+    assert runner.state_machine.runtime_state("t1") is TaskRuntimeState.ON
+
+    _task_service(service).delete_task("t1")
+    dispatched.clear()
+
+    TaskRepo().create_task("t1", "d2")
+    TaskRepo().set_boundary_actions("t1", **_ACTIONS)
+    new_id = RuleRepo().create(_rule("[t1] s2"))
+    runner.add_rule(RuleRepo().get_by_id(new_id))
+    service.reconfigure_task("t1")
+
+    assert dispatched == []
+    assert runner.state_machine.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+@pytest.mark.asyncio
+async def test_rebuilding_a_disabled_then_deleted_task_id_is_effectively_enabled(env):
+    """先停用再删再同名重建, 新 task 必须真的生效。
+
+    停用标记是内存里的派生量, 删 task 不清的话「有效启用」恒假 —— 新 task 的
+    rule 一条都不参与判定, 而 CLI 报成功、rule get 显示 enabled、task get 显示
+    active。改动前 task 停用是写 rule.enabled 到库里, 删表就一起没了。
+    """
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    service.apply_task_status("t1", active=False)
+    assert runner.is_task_paused("t1") is True
+
+    _task_service(service).delete_task("t1")
+
+    assert runner.is_task_paused("t1") is False
+
+    TaskRepo().create_task("t1", "d2")
+    new_id = RuleRepo().create(_rule("[t1] s2"))
+    runner.add_rule(RuleRepo().get_by_id(new_id))
+
+    assert [r.id for r in runner.get_enabled_rules()] == [new_id]
+
+
+@pytest.mark.asyncio
+async def test_delete_task_cancels_the_pending_target_timer(env, monkeypatch):
+    """删 task 之后不能留下未到点的达标 timer。
+
+    timer 是 asyncio task, 不看 rule 还在不在 —— 不撤的话到点仍会给一条已经不存在
+    的 rule 喂一次达标。撤它的是逐条清 rule 那一步(timer 按 rule_id 存), 本条盯的
+    是删 task 这条路径最终把它撤掉了。
+    """
+    service, runner, _ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    # 用生产代码建那条代建 rule, 不手搓形状
+    ms = service._build_milestone_rule("t1")
+    ms.id = RuleRepo().create(ms)
+    runner.add_rule(RuleRepo().get_by_id(ms.id))
+    # 还差 10 分钟 —— 排 timer 而不是立刻喂
+    monkeypatch.setattr(
+        type(runner._task_record_service),
+        "read_duration_target_state",
+        lambda _self, _tid: (60, 50),
+    )
+
+    runner.record_source.arm("t1")
+    for _ in range(4):
+        await asyncio.sleep(0)
+    assert runner.record_source._timers, "前提没成立: timer 没排上, 这条测不到东西"
+
+    _task_service(service).delete_task("t1")
+
+    assert runner.record_source._timers == {}
