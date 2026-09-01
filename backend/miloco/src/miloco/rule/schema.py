@@ -26,7 +26,7 @@ from collections.abc import Iterable
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RuleMode(str, Enum):
@@ -53,6 +53,15 @@ class RuleDirection(str, Enum):
 _MODE_TO_DIRECTION: dict[str, RuleDirection] = {
     RuleMode.EVENT.value: RuleDirection.ENTER,
     RuleMode.STATE.value: RuleDirection.SESSION,
+}
+
+# 反向: direction 是权威, mode 跟着它推。exit / milestone 在 mode 里没有对应项,
+# 存一个自洽的占位值。
+_DIRECTION_TO_MODE: dict[RuleDirection, RuleMode] = {
+    RuleDirection.ENTER: RuleMode.EVENT,
+    RuleDirection.EXIT: RuleMode.EVENT,
+    RuleDirection.SESSION: RuleMode.STATE,
+    RuleDirection.MILESTONE: RuleMode.EVENT,
 }
 
 class RuleLifecycle(str, Enum):
@@ -360,6 +369,25 @@ class Rule(BaseModel):
         if self.direction is not None:
             return self.direction
         return _MODE_TO_DIRECTION.get(self.mode.value, RuleDirection.ENTER)
+
+    @model_validator(mode="after")
+    def _direction_decides_mode(self) -> "Rule":
+        """``direction`` 给了就由它定 ``mode``, 不一致直接拒。
+
+        阶段 A 期间 ``mode`` 还是存储字段, 但迁移与旧库回退都按它读。两者打架会让
+        rule 半边生效, 而现象离根因很远。CLI 自己保证自洽, API 是另一个入口 ——
+        拦在模型层两条路都覆盖。
+        """
+        if self.direction is None:
+            return self
+        expected = _DIRECTION_TO_MODE[self.direction]
+        if "mode" in self.model_fields_set and self.mode is not expected:
+            raise ValueError(
+                f"direction={self.direction.value} 对应 mode={expected.value}, "
+                f"收到 mode={self.mode.value}"
+            )
+        self.mode = expected
+        return self
 
 
 class RuleConditionUpdate(BaseModel):

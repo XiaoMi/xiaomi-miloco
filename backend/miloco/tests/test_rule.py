@@ -41,6 +41,7 @@ from miloco.rule.schema import (
 )
 from miloco.rule.service import RuleService
 from miloco.task.state_machine import TaskRuntimeState
+from pydantic import ValidationError
 
 # ---- Helpers ----
 
@@ -513,6 +514,61 @@ class TestRuleSchema:
         update = RuleUpdate(name="new-name", enabled=False)
         assert update.name == "new-name"
         assert update.enabled is False
+
+
+class TestDirectionDecidesMode:
+    """direction 给了就由它定 mode。
+
+    mode 在阶段 A 还是存储字段, 迁移和旧库回退都按它读; 两者打架会让 rule 半边
+    生效 —— 比如 session 配 event, task 进得去但退出边沿被 EXITED 分支直接吃掉。
+    """
+
+    @staticmethod
+    def _rule(**kw):
+        return Rule(
+            id="r1",
+            name="n",
+            task_id="t1",
+            condition=_make_condition(),
+            **kw,
+        )
+
+    def test_session_coerces_mode_to_state(self):
+        rule = self._rule(
+            direction=RuleDirection.SESSION, on_enter_actions=[_make_action()]
+        )
+        assert rule.mode is RuleMode.STATE
+
+    def test_exit_coerces_mode_to_event(self):
+        rule = self._rule(direction=RuleDirection.EXIT, actions=[_make_action()])
+        assert rule.mode is RuleMode.EVENT
+
+    def test_milestone_coerces_mode_to_event(self):
+        rule = self._rule(direction=RuleDirection.MILESTONE, actions=[_make_action()])
+        assert rule.mode is RuleMode.EVENT
+
+    def test_explicit_mismatch_is_rejected(self):
+        with pytest.raises(ValidationError, match="direction=session 对应 mode=state"):
+            self._rule(
+                direction=RuleDirection.SESSION,
+                mode=RuleMode.EVENT,
+                on_enter_actions=[_make_action()],
+            )
+
+    def test_matching_explicit_mode_is_accepted(self):
+        rule = self._rule(
+            direction=RuleDirection.SESSION,
+            mode=RuleMode.STATE,
+            on_enter_actions=[_make_action()],
+        )
+        assert rule.mode is RuleMode.STATE
+
+    def test_no_direction_leaves_mode_alone(self):
+        """存量数据 direction 为 NULL, mode 仍是唯一信源, 不能被改写。"""
+        rule = self._rule(mode=RuleMode.STATE, on_enter_actions=[_make_action()])
+        assert rule.direction is None
+        assert rule.mode is RuleMode.STATE
+        assert rule.resolved_direction is RuleDirection.SESSION
 
 
 class TestRuleLogSchema:
@@ -4898,16 +4954,19 @@ class TestTaskRuleSetWiring:
 
     @staticmethod
     def _rule(rule_id, direction, task_id=TASK_ID, enabled=True):
+        # 动作字段跟着 direction 走: 单方向的 rule 填 actions, session 填 on_enter_*
+        # —— 与 _rule_action_slots 同一套口径, 混填会被一致性校验先拦掉。
+        session = direction is RuleDirection.SESSION
         return Rule(
             id=rule_id,
             name=_name(task_id, rule_id),
             task_id=task_id,
-            mode=RuleMode.EVENT,
             direction=direction,
             lifecycle=RuleLifecycle.PERMANENT,
             enabled=enabled,
             condition=_make_condition(),
-            actions=[_make_action()],
+            actions=[] if session else [_make_action()],
+            on_enter_actions=[_make_action()] if session else [],
         )
 
     @pytest.mark.asyncio

@@ -172,6 +172,23 @@ def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
 
+def _is_enter_rule(rule: dict) -> bool:
+    """下发闸的方向判据。
+
+    dict 来自 ``Rule.model_dump()``, ``direction`` 可能是 None（未迁移的库 / 内存
+    直接构造的 Rule）, 回退到 ``mode`` 与 ``Rule.resolved_direction`` 同源。不能直
+    接判 ``mode == "event"``: exit 型 rule 存的 mode 就是 event, 会被一起剔掉。
+    """
+    # 局部 import: 本模块不在顶层引 rule.schema（循环依赖），与文件里别处一致。
+    from miloco.rule.schema import RuleDirection, RuleMode
+
+    raw = rule.get("direction")
+    if raw:
+        return getattr(raw, "value", raw) == RuleDirection.ENTER.value
+    mode = rule.get("mode") or RuleMode.EVENT.value
+    return getattr(mode, "value", mode) == RuleMode.EVENT.value
+
+
 def _filter_completed_event_rules(
     rules: list[dict],
 ) -> tuple[list[dict], list[str]]:
@@ -183,15 +200,15 @@ def _filter_completed_event_rules(
     - progress recurring + current >= target（如每日 N 杯水当天喝够后静默）
     - duration recurring + accumulated >= target_minutes * 60
 
-    state mode 不过滤（剔除会让 ENTERED→EXITED 翻转、取消 on_exit 设备动作；
-    state 路径的周期达标静默靠达标条件项自身的边沿）。
-    无 record 的 event rule 保留（维持现状）。
+    只剔 enter 型。session 剔了会让 ENTERED→EXITED 翻转、取消 on_exit 设备动作;
+    exit 剔了会让 task 收不到退出边沿、永久卡在 on; milestone 的条件来自 record
+    源, 本来就不走摄像头。无 record 的 rule 保留（维持现状）。
 
     返回 (kept_rules, skipped_task_ids)。skipped_task_ids 按 task 去重后排序，
     供调用方做去重打印。
     """
     event_task_ids = {
-        r["task_id"] for r in rules if r.get("mode") == "event" and r.get("task_id")
+        r["task_id"] for r in rules if _is_enter_rule(r) and r.get("task_id")
     }
     if not event_task_ids:
         return rules, []
@@ -210,7 +227,7 @@ def _filter_completed_event_rules(
     skipped: set[str] = set()
     for r in rules:
         tid = r.get("task_id")
-        if r.get("mode") == "event" and satisfaction_map.get(tid):
+        if _is_enter_rule(r) and satisfaction_map.get(tid):
             skipped.add(tid)
             continue
         kept.append(r)

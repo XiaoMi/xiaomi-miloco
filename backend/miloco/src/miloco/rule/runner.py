@@ -50,11 +50,11 @@ from miloco.rule.schema import (
     Rule,
     RuleAction,
     RuleActionExecuteResult,
+    RuleDirection,
     RuleEvent,
     RuleExecuteResult,
     RuleLog,
     RuleLogKind,
-    RuleMode,
     RuleTriggerCallback,
     TriggerOutcome,
     parse_device_iid,
@@ -811,13 +811,13 @@ class RuleRunner:
           ``duration_seconds * ratio`` 就触发（如 30min * 0.8 → 24min 触发）。
         - 分母固定用 maxlen 而非 ``len(win)``：保留 ratio 间歇容忍语义，
           窗口满后允许部分漏检。
-        - STATE mode 且已 fire on_enter（``state.state_duration_fired`` 置位）
+        - session 型且已 fire on_enter（``state.state_duration_fired`` 置位）
           → 直接 return：STILL_IN 期间不重复 fire，等 _debounced_exit 真完成时
-          清标记重新累积。EVENT mode 不用本拦截，fire 后清窗口走"周期 fire"
+          清标记重新累积。单方向的 rule 不用本拦截，fire 后清窗口走"周期 fire"
           by-design。
         """
         state = self._ensure_state(rule.id)
-        if rule.mode == RuleMode.STATE and state.state_duration_fired:
+        if rule.resolved_direction is RuleDirection.SESSION and state.state_duration_fired:
             return TriggerOutcome.STILL_IN
 
         round_id = int(time.time() / self._sample_interval)
@@ -885,12 +885,14 @@ class RuleRunner:
                 # 白丢一次累积。
                 return TriggerOutcome.STILL_IN
 
-            if rule.mode == RuleMode.EVENT:
-                # EVENT：清窗口 → 下次 update_state 重新累积（by-design 周期 fire）
+            if rule.resolved_direction is not RuleDirection.SESSION:
+                # 单方向：清窗口 → 下次 update_state 重新累积（by-design 周期 fire）。
+                # state_duration_fired 只由 _debounced_exit 清, 而单方向的 rule 走
+                # 不到那条路 —— 标记了就永久拦死。
                 state.duration_window = None
                 state.last_duration_round = None
             else:
-                # STATE：标记 fired 拦截 STILL_IN 重复 fire；窗口留着无害
+                # session：标记 fired 拦截 STILL_IN 重复 fire；窗口留着无害
                 # （fired 拦截了，后续 evaluate 不会用），_debounced_exit 真完成时一并清
                 state.state_duration_fired = True
             sources = self._sources_currently_true(rule.id) or [source_did]
@@ -1016,10 +1018,12 @@ class RuleRunner:
             return TriggerOutcome.FIRED
 
         # EXITED
-        if rule.mode == RuleMode.EVENT:
-            return TriggerOutcome.NOT_FIRED  # event mode does not handle exits
+        if rule.resolved_direction is not RuleDirection.SESSION:
+            # 只有 session 的退出边沿有意义: enter / exit / milestone 都是单方向,
+            # slot_for_edge 对它们的 EXITED 返 None, 走下去也选不到槽。
+            return TriggerOutcome.NOT_FIRED
 
-        # STATE + duration 但未 fire on_enter：进入态从未被确认 → 当这次 EXITED
+        # session + duration 但未 fire on_enter：进入态从未被确认 → 当这次 EXITED
         # 没发生过。不 fire on_exit（没配对的 ENTERED），不启动 debounce，也不清
         # 窗口——窗口靠后续 evaluate 持续 append 0 自然演化，符合 duration_ratio
         # 的间歇容忍设计（用户中途短暂离开仍允许后续凑齐）。
@@ -1474,25 +1478,24 @@ class RuleRunner:
 
     def _select_slot(self, rule: Rule, event: RuleEvent) -> Slot:
         """Return ``("static", actions)`` / ``("dynamic", prompt_text)`` for the
-        slot matching (mode, event), or ``None`` when the slot is empty.
+        slot matching (direction, event), or ``None`` when the slot is empty.
 
-        Dispatch kind is inferred from field presence: event mode looks at
-        ``actions`` vs ``action_descriptions``; state mode looks at
-        ``on_*_actions`` vs ``on_*_desc`` per direction. Validation enforces
-        these as mutually exclusive.
+        Dispatch kind is inferred from field presence: 单方向的 rule 看
+        ``actions`` vs ``action_descriptions``; session 看 ``on_*_actions`` vs
+        ``on_*_desc``。Validation enforces these as mutually exclusive.
         """
         task_slot = self._select_task_slot(rule, event)
         if task_slot is not _NO_TASK_ACTIONS:
             return task_slot
 
-        # 达标槽在 mode 分支之前判: milestone rule 的 mode 是 event (mode 表达不了
-        # milestone), 落进下面的 event 分支就只认 ENTERED, 达标永远选不到槽。
+        # 达标槽在方向分支之前判: milestone 走下面的单方向分支就只认 ENTERED,
+        # 达标永远选不到槽。
         if event == RuleEvent.TARGET_FIRED:
             if rule.on_target_desc:
                 return ("dynamic", rule.on_target_desc)
             return None
 
-        if rule.mode == RuleMode.EVENT:
+        if rule.resolved_direction is not RuleDirection.SESSION:
             if event != RuleEvent.ENTERED:
                 return None
             if rule.actions:
@@ -1504,7 +1507,7 @@ class RuleRunner:
             )
             return ("dynamic", joined)
 
-        # state mode
+        # session
         if event == RuleEvent.ENTERED:
             if rule.on_enter_actions:
                 return ("static", rule.on_enter_actions)
