@@ -93,3 +93,6 @@ eval/sampled_*.json
 
 # opengrep / semgrep 本地扫描产物（含全量命中片段与绝对路径），只在本地看，不入库。
 .opengrep-out/
+
+# 本地运维脚本,含内网主机/凭据,严禁提交
+scripts/miloco-log.sh
