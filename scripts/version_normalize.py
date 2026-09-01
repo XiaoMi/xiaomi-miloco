@@ -52,8 +52,11 @@ def to_pep440(raw: str) -> str:
 # 注：semver 无 post 概念，post/dev 一并落到 prerelease 段（'-' 引导、'.' 分隔），故该 dev 版
 # 在 semver 里排序 < 正式版；本项目 npm 包（web 不发布、openclaw 走本地 tgz 装）不依赖 npm 版本
 # 排序，可接受。仅用于本地 dev；发布走 to_npm（raw CalVer 原样）。
+# rel 段允许 1~3 段（PEP440 release 段是 \d+(\.\d+)*；git 历史重写/无 tag 时 setuptools_scm
+# 退化 base 形如 0.0.post1.devN+g<hash>，rel 只有两段）——转 semver 时不足三段补零，
+# 避免 npm 报 Invalid version。
 _PEP_FULL = re.compile(
-    r"^(?P<rel>\d+\.\d+\.\d+)"
+    r"^(?P<rel>\d+(?:\.\d+){0,2})"
     r"(?P<pre>(?:a|b|rc)\d+)?"
     r"(?P<post>\.post\d+)?"
     r"(?P<dev>\.dev\d+)?"
@@ -72,7 +75,11 @@ def pep440_to_semver(pep: str) -> str:
         ids.append(m.group("post")[1:])  # 去掉前导 '.'
     if m.group("dev"):
         ids.append(m.group("dev")[1:])
-    sem = m.group("rel")
+    # semver 要求三段 X.Y.Z：PEP440 rel 不足三段（如无 tag 退化的 0.0.post1…）补零。
+    rel_parts = m.group("rel").split(".")
+    while len(rel_parts) < 3:
+        rel_parts.append("0")
+    sem = ".".join(rel_parts)
     if ids:
         sem += "-" + ".".join(ids)
     if m.group("local"):
