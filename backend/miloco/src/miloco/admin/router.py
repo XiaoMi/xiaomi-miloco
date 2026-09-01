@@ -30,6 +30,7 @@ from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
 from miloco.perception.engine.omni import probe as _probe
+from miloco.rule.schema import RuleDirection
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
 from miloco.utils.paths import miloco_home
@@ -62,7 +63,13 @@ async def get_system_status(current_user: str = Depends(verify_token)):
     try:
         rule_service = manager.rule_service
         total_rules = rule_service._repo.count_all()
-        enabled_rules = len(await rule_service.get_effectively_enabled_rules())
+        # 与 GET /rules 同口径: 代建的达标规则用户看不见, 计进来会让这个数字比
+        # rule list 数出来的多, 而差额无从解释。
+        enabled_rules = sum(
+            1
+            for r in await rule_service.get_effectively_enabled_rules()
+            if r.resolved_direction is not RuleDirection.MILESTONE
+        )
         sqlite_ok = True
     except Exception:
         total_rules = 0

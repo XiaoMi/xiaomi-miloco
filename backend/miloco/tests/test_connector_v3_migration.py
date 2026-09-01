@@ -459,6 +459,52 @@ def test_multi_rule_conflicting_actions_pauses_and_keeps_actions(v2_db):
     conn.close()
 
 
+def test_differing_target_desc_counts_as_conflict(v2_db):
+    """进出动作相同、达标文案不同 → 算冲突, 不能静默取第一条。
+
+    指纹不含达标文案的话两条指纹相等, 按 created_at 取第一条写进 task, 第二条既不
+    生效也不进迁移报告 —— 用户无从知道自己配的那句被丢了。
+    """
+    _seed(
+        v2_db,
+        lambda c: (
+            _add_task(c, "t1"),
+            _add_duration_record(c, "t1", 60),
+            _add_rule(c, "r1", "t1", on_target_desc="推一条"),
+            _add_rule(c, "r2", "t1", on_target_desc="推另一条"),
+        ),
+    )
+    _migrate(v2_db)
+
+    conn = _raw(v2_db)
+    task = conn.execute("SELECT * FROM task WHERE task_id='t1'").fetchone()
+    assert task["status"] == "paused"
+    assert task["on_target_desc"] is None
+    rules = {r["id"]: r for r in conn.execute("SELECT * FROM rule WHERE task_id='t1'")}
+    assert rules["r1"]["on_target_desc"] == "推一条"
+    assert rules["r2"]["on_target_desc"] == "推另一条"
+    conn.close()
+
+
+def test_same_target_desc_is_not_conflict(v2_db):
+    """达标文案相同就不是冲突 —— 上面那条不能靠"一有达标文案就判冲突"通过。"""
+    _seed(
+        v2_db,
+        lambda c: (
+            _add_task(c, "t1"),
+            _add_duration_record(c, "t1", 60),
+            _add_rule(c, "r1", "t1", on_target_desc="推一条"),
+            _add_rule(c, "r2", "t1", on_target_desc="推一条"),
+        ),
+    )
+    _migrate(v2_db)
+
+    conn = _raw(v2_db)
+    task = conn.execute("SELECT * FROM task WHERE task_id='t1'").fetchone()
+    assert task["on_target_desc"] == "推一条"
+    conn.close()
+
+
 def test_event_and_state_with_equivalent_actions_are_not_conflict(v2_db):
     """指纹比的是转换后的 task 四元组, 不是原始列。
 

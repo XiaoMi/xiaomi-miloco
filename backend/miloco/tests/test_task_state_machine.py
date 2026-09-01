@@ -493,6 +493,32 @@ def test_dispatch_failure_does_not_roll_back_state():
 # ── 手动触发 ──────────────────────────────────────────────────────────
 
 
+def test_manual_inject_leaves_an_event_task_off():
+    """事件型 task 注入进入信号后运行态仍是 off。
+
+    无条件置 on 的话它永久停在 on(没有出路径, 收不到退信号), 而达标只看运行态 ——
+    本该恒不触发的达标从此开始触发。
+    """
+    h = Harness(satisfied={"a": True})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER})
+
+    outcome = h.sm.manual_inject("t1", ActionSlot.ON_ENTER)
+
+    assert outcome is TransitionOutcome.ENTERED
+    assert h.dispatched == [("t1", ActionSlot.ON_ENTER)]
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+def test_manual_inject_turns_a_session_task_on():
+    """会话型仍要置 on —— 上面那条不能靠"注入从不改状态"通过。"""
+    h = Harness(satisfied={"s": False})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION})
+
+    h.sm.manual_inject("t1", ActionSlot.ON_ENTER)
+
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+
+
 def test_manual_inject_does_not_reset_baseline():
     """调试入口不代表"感知到条件不再满足", 不重置基线 (§5)。"""
     h = Harness()

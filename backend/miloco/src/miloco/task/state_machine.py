@@ -480,7 +480,10 @@ class TaskStateMachine:
         if task_id not in self._topologies:
             return TransitionOutcome.UNKNOWN_RULE
         if slot is ActionSlot.ON_ENTER:
-            self._states[task_id] = TaskRuntimeState.ON
+            if self._topologies[task_id].is_session_type:
+                # 事件型没有出路径, 运行态恒 off 且永远收不到退信号。无条件置 on
+                # 会让它永久停在 on, 连带把达标的"不在会话中"闸放开。
+                self._states[task_id] = TaskRuntimeState.ON
             self._dispatch_action(task_id, ActionSlot.ON_ENTER, None)
             return TransitionOutcome.ENTERED
         if slot is ActionSlot.ON_EXIT:

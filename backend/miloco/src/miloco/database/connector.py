@@ -1363,10 +1363,16 @@ def _rule_to_task_actions(
 def _rule_action_fingerprint(row: sqlite3.Row) -> str:
     """一 task 多 rule 时判断"动作是否完全一致"的比较键。
 
-    比转换后的 task 边界动作四元组, 不比原始列: event 与 state 两种旧形态落到
-    task 上是同一组字段, 只比原始列会把等价的两条判成不一致。
+    比转换后的 task 边界动作, 不比原始列: event 与 state 两种旧形态落到 task 上
+    是同一组字段, 只比原始列会把等价的两条判成不一致。
+
+    含 ``on_target_desc``: 它也是要上移到 task 的一个槽。不含的话, 两条 rule 的
+    进出动作相同而达标文案不同时指纹相等、按 created_at 静默取第一条, 第二条既不
+    生效也不进迁移报告 —— 而报告的存在意义就是让用户知道哪些配置要自己处置。
     """
-    return json.dumps(_rule_to_task_actions(row), ensure_ascii=False)
+    return json.dumps(
+        (*_rule_to_task_actions(row), row["on_target_desc"]), ensure_ascii=False
+    )
 
 
 def _active_target_minutes(cursor: sqlite3.Cursor, task_id: str) -> int | None:
@@ -1509,7 +1515,8 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
         for task_id, task_rules in by_task.items():
             first = task_rules[0]
 
-            if len({_rule_action_fingerprint(r) for r in task_rules}) > 1:
+            is_conflict = len({_rule_action_fingerprint(r) for r in task_rules}) > 1
+            if is_conflict:
                 conflict_tasks.append(task_id)
                 logger.warning(
                     "v2→v3 task %s 名下 %d 条 rule 动作不一致, 不写 task 动作列; "
@@ -1539,6 +1546,11 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
                     sorted(others),
                 )
                 counts["lifecycle_conflict_ignored"] += 1
+
+            if is_conflict:
+                # 达标文案也是要上移的动作槽之一, 与上面那几个同一个口径: 动作不一致
+                # 就一律不写 task 列, 原样留在 rule 上等用户处置。
+                continue
 
             on_target = next(
                 (r["on_target_desc"] for r in task_rules if r["on_target_desc"]),
@@ -1687,9 +1699,11 @@ def _log_v3_report(
             "",
             "  下列 task 迁移后的规则组合不合法, 已置 paused:",
             *(f"    - {t}" for t in illegal_tasks),
-            "  原因: 一个 task 挂了多条 mode=state 的 rule, 迁移后是多条 session,",
-            "        而 session 必须独占该 task —— 混挂会让它永久卡在 on。",
-            "  处置: 只保留一条, 多余的删掉或改挂到新 task, 然后重新启用。",
+            "  原因: 迁移后有一条 session 规则与别的规则挂在同一个 task 上",
+            "        (mode=state 迁成 session、mode=event 迁成 enter)。session 必须",
+            "        独占该 task —— 混挂会让它永久卡在 on。",
+            "  处置: 只保留那条 session, 别的删掉或改挂到新 task, 然后重新启用。",
+            "  每个 task 的准确原因见日志里对应的 warning 行。",
         ]
     report = "\n".join(lines)
     logger.warning(report)
