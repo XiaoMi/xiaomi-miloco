@@ -47,6 +47,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# macOS 休眠/App Nap 后 mono(不累计)与墙钟(已跳前)偏移的突变阈值(ms)。
+# 正常运行时两者偏移稳定(<<1s);休眠恢复后突变可达分钟级。超过阈值即视为
+# 时钟基准损坏,重置 epoch_delta + 清空流缓冲,从最新帧重新开始。
+_CLOCK_DRIFT_RESET_MS: int = 5000
+
 
 def _monotonic_ms() -> int:
     """Monotonic wall-clock time in milliseconds."""
@@ -480,17 +485,34 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         wall_ms is the actual system monotonic time (immune to stream clock
         drift).  epoch_delta (unix - mono) is locked on first call and used
         to derive unix_ms for display.
+
+        **macOS 休眠防护**:``time.monotonic()``(mach_absolute_time)在系统休眠/
+        App Nap 期间**不累计**,而墙钟 ``time.time()`` 唤醒后已跳前——两者偏移
+        (epoch_delta)在唤醒后突变,导致窗口时间戳永久滞后(实测 89s),下游 stale
+        门控无限丢弃、感知空转。检测到偏移突变(>5s)时重置时钟基准并清空积压
+        窗口,从最新帧重新开始(与断流重连的语义一致:旧数据不处理)。
         """
         wall_ms = _monotonic_ms()
+        unix_ms = _unix_ms()
+        if state.epoch_delta is not None:
+            drift_ms = (unix_ms - wall_ms) - state.epoch_delta
+            if abs(drift_ms) > _CLOCK_DRIFT_RESET_MS:
+                logger.warning(
+                    "Clock drift detected for %s: epoch_delta=%dms drift=%dms "
+                    "> %dms — resetting clock baseline & clearing stream buffer "
+                    "(macOS sleep/App Nap?)",
+                    state.did, state.epoch_delta, drift_ms, _CLOCK_DRIFT_RESET_MS,
+                )
+                state.epoch_delta = None
+                state.sync_buffer.clear()
         if state.epoch_delta is None:
-            state.epoch_delta = _unix_ms() - wall_ms
+            state.epoch_delta = unix_ms - wall_ms
             logger.debug(
                 "Clock calibrated for %s: epoch_delta=%d ms",
                 state.did,
                 state.epoch_delta,
             )
-        unix_ms = wall_ms + state.epoch_delta
-        return wall_ms, unix_ms
+        return wall_ms, wall_ms + state.epoch_delta
 
     @staticmethod
     def _compute_decode_latency(
