@@ -463,7 +463,10 @@ def test_event_and_state_with_equivalent_actions_are_not_conflict(v2_db):
     """指纹比的是转换后的 task 四元组, 不是原始列。
 
     一条 event rule 的 actions 与一条 state rule 的 on_enter_actions 落到 task
-    上是同一组值, 按原始列比会误判成冲突、把好端端的 task 打成 paused。
+    上是同一组值, 按原始列比会误判成冲突、把动作留在 rule 列上不搬。
+
+    判据用"动作搬没搬过去"而不是 task 状态: 这个组合迁移后是 enter + session,
+    会被 §19.7 的独占校验另行置 paused, 拿状态当判据的话两件事分不开。
     """
     actions = json.dumps([{"did": "d1", "iid": "prop.2.1", "value": True}])
     _seed(
@@ -472,6 +475,52 @@ def test_event_and_state_with_equivalent_actions_are_not_conflict(v2_db):
             _add_task(c, "t1"),
             _add_rule(c, "r1", "t1", mode="event", actions=actions),
             _add_rule(c, "r2", "t1", mode="state", on_enter_actions=actions),
+        ),
+    )
+    _migrate(v2_db)
+
+    conn = _raw(v2_db)
+    moved = conn.execute(
+        "SELECT on_enter_actions FROM task WHERE task_id='t1'"
+    ).fetchone()[0]
+    assert json.loads(moved) == json.loads(actions)
+    conn.close()
+
+
+def test_two_state_rules_on_one_task_are_paused(v2_db):
+    """迁移后两条 session 挂同一 task —— §19.7 的永久卡死, 必须置 paused。
+
+    留成 active 等于把一个进得去出不来的 task 交给用户, 而他看不出哪里不对。
+    """
+    _seed(
+        v2_db,
+        lambda c: (
+            _add_task(c, "t1"),
+            _add_rule(c, "r1", "t1", mode="state", on_enter_desc="开灯"),
+            _add_rule(c, "r2", "t1", mode="state", on_enter_desc="开灯"),
+        ),
+    )
+    _migrate(v2_db)
+
+    conn = _raw(v2_db)
+    assert (
+        conn.execute("SELECT status FROM task WHERE task_id='t1'").fetchone()[0]
+        == "paused"
+    )
+    assert [
+        r["enabled"]
+        for r in conn.execute("SELECT enabled FROM rule WHERE task_id='t1'").fetchall()
+    ] == [0, 0]
+    conn.close()
+
+
+def test_a_single_state_rule_task_stays_active(v2_db):
+    """对照: 一条 session 独占是合法形态, 别顺手把正常 task 也打成 paused。"""
+    _seed(
+        v2_db,
+        lambda c: (
+            _add_task(c, "t1"),
+            _add_rule(c, "r1", "t1", mode="state", on_enter_desc="开灯"),
         ),
     )
     _migrate(v2_db)

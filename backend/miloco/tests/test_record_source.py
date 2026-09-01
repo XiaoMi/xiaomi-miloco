@@ -504,11 +504,11 @@ class TestMilestoneIsNotUserConfiguration:
 
     def test_it_does_not_count_toward_the_task_rule_set(self):
         """只挂它时不判非法, 否则免责条款会把进路径那道闸永久放行。"""
-        from miloco.rule.service import _task_rule_set_error
+        from miloco.rule.schema import task_rule_set_error
 
-        assert _task_rule_set_error([RuleDirection.MILESTONE]) is None
+        assert task_rule_set_error([RuleDirection.MILESTONE]) is None
         assert (
-            _task_rule_set_error([RuleDirection.MILESTONE, RuleDirection.SESSION])
+            task_rule_set_error([RuleDirection.MILESTONE, RuleDirection.SESSION])
             is None
         )
 

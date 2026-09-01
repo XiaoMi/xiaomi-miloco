@@ -17,6 +17,7 @@ from typing import Any
 
 from miloco.config import get_settings
 from miloco.rule.record_source import MILESTONE_SENTINEL_DID
+from miloco.rule.schema import RuleDirection, task_rule_set_error
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1591,8 +1592,30 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
                 [r["id"] for r in misaligned],
             )
 
+        # ── (g') 迁移后校验: 变非法的 task 置 paused ─────────────────
+        # 存量表达不了 exit / milestone, 所以只可能撞上"session 必须独占"这一条
+        # (一 task 挂两条 mode=state → 两条 session, §19.7 的永久卡死)。判据与建
+        # rule 时同一份, 复制一份判据早晚会分叉。
+        illegal_tasks: list[str] = []
+        rows_by_task: dict[str, list[str]] = {}
+        for row in cursor.execute("SELECT task_id, direction FROM rule").fetchall():
+            rows_by_task.setdefault(row["task_id"], []).append(row["direction"])
+        for task_id, directions in rows_by_task.items():
+            if task_id in conflict_tasks or task_id in on_target_broken_tasks:
+                continue
+            try:
+                parsed = [RuleDirection(d) for d in directions if d]
+            except ValueError:
+                continue
+            reason = task_rule_set_error(parsed)
+            if reason:
+                illegal_tasks.append(task_id)
+                logger.warning(
+                    "v2→v3 task %s 迁移后不合法, 置 paused: %s", task_id, reason
+                )
+
         # ── (g) 置 paused ───────────────────────────────────────────
-        for task_id in conflict_tasks + on_target_broken_tasks:
+        for task_id in conflict_tasks + on_target_broken_tasks + illegal_tasks:
             cursor.execute(
                 "UPDATE task SET status='paused', paused_at=? WHERE task_id=?",
                 (now, task_id),
@@ -1619,7 +1642,11 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
         raise
 
     _log_v3_report(
-        counts, conflict_tasks, on_target_broken_tasks, len(terminate_when_rules)
+        counts,
+        conflict_tasks,
+        on_target_broken_tasks,
+        illegal_tasks,
+        len(terminate_when_rules),
     )
 
 
@@ -1627,6 +1654,7 @@ def _log_v3_report(
     counts: dict[str, int],
     conflict_tasks: list[str],
     on_target_broken_tasks: list[str],
+    illegal_tasks: list[str],
     terminate_when_count: int,
 ) -> None:
     """迁移报告。日志 + stdout 双出 —— 只写日志用户装完不会去翻。"""
@@ -1653,6 +1681,15 @@ def _log_v3_report(
             *(f"    - {t}" for t in on_target_broken_tasks),
             "  处置: 补 task record init --kind duration --content 的 target_minutes",
             "        后重新启用。",
+        ]
+    if illegal_tasks:
+        lines += [
+            "",
+            "  下列 task 迁移后的规则组合不合法, 已置 paused:",
+            *(f"    - {t}" for t in illegal_tasks),
+            "  原因: 一个 task 挂了多条 mode=state 的 rule, 迁移后是多条 session,",
+            "        而 session 必须独占该 task —— 混挂会让它永久卡在 on。",
+            "  处置: 只保留一条, 多余的删掉或改挂到新 task, 然后重新启用。",
         ]
     report = "\n".join(lines)
     logger.warning(report)

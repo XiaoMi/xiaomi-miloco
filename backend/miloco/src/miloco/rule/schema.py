@@ -232,6 +232,36 @@ class RuleConditionDNF(BaseModel):
     any_of: list[list[ConditionItem]] = Field(default_factory=list)
 
 
+def task_rule_set_error(directions: list[RuleDirection]) -> str | None:
+    """task 名下 rule 集合的合法性 (spec §9)。合法返 None, 非法返错误文案。
+
+    校验对象是集合不是单条 rule —— 这两条约束都只有把同一 task 的 rule 放到一起
+    看才成立。
+
+    **达标规则不算数**: 它是服务端按 task 的达标配置维护的派生物, 不是用户建的
+    规则。算进来的话"只挂一条达标规则"会被判成"没有进路径", 而每个配了达标通知的
+    task 装配途中都会经过这个状态 —— 免责条款一放行, 这道闸对它们就永久失效了。
+    """
+    directions = [d for d in directions if d is not RuleDirection.MILESTONE]
+    if not directions:
+        # 装配是分步的, task 可以暂时一条 rule 都没有。
+        return None
+
+    if RuleDirection.SESSION in directions and len(directions) > 1:
+        return (
+            "direction=session 的规则必须独占该 task: 与 enter / exit / 另一条 "
+            "session 混挂会让 task 永久卡住 (spec §19.7)。"
+        )
+
+    entry_directions = (RuleDirection.ENTER, RuleDirection.SESSION)
+    if not any(d in entry_directions for d in directions):
+        return (
+            "task 名下没有进路径: 只有 exit 规则的 task 永远进不了 on, 名下的动作"
+            "一条都不会执行。至少要有一条 direction=enter 或 session 的规则。"
+        )
+    return None
+
+
 class Rule(BaseModel):
     """Rule data model (V3)."""
 

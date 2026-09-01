@@ -4833,9 +4833,9 @@ class TestRecordMilestoneSessionBoundary:
 
 
 def _directions_error(*directions):
-    from miloco.rule.service import _task_rule_set_error
+    from miloco.rule.schema import task_rule_set_error
 
-    return _task_rule_set_error(list(directions))
+    return task_rule_set_error(list(directions))
 
 
 class TestTaskRuleSetLegality:
