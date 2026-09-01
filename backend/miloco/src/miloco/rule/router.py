@@ -53,7 +53,7 @@ async def create_rule(rule: Rule, current_user: str = Depends(verify_token)):
     """Create a new rule.
 
     Response data includes V3 fields needed by miloco-cli stdout:
-    rule_id / name / task_id / mode / lifecycle.
+    rule_id / name / task_id / direction / mode / lifecycle.
     """
     logger.info("Create rule - User: %s, Name: %s", current_user, rule.name)
     rule_id = await manager.rule_service.create_rule(rule)
@@ -64,6 +64,9 @@ async def create_rule(rule: Rule, current_user: str = Depends(verify_token)):
             "rule_id": rule_id,
             "name": rule.name,
             "task_id": rule.task_id,
+            # direction 是权威语义, mode 只是它在阶段 A 的存储投影。只回 mode 的话
+            # `--direction exit` 建出来的规则回显成 event, 看着像没生效。
+            "direction": rule.resolved_direction.value,
             "mode": rule.mode.value,
             "lifecycle": rule.lifecycle.value,
         },
@@ -72,7 +75,9 @@ async def create_rule(rule: Rule, current_user: str = Depends(verify_token)):
 
 @router.get("", summary="Get All Rules", response_model=NormalResponse)
 async def get_all_rules(
-    enabled_only: bool = Query(False, description="Only return enabled rules"),
+    enabled_only: bool = Query(
+        False, description="Only return effectively enabled rules (task not paused)"
+    ),
     include_milestone: bool = Query(
         False, description="Include server-managed milestone rules"
     ),
@@ -89,7 +94,13 @@ async def get_all_rules(
         enabled_only,
         include_milestone,
     )
-    rules = await manager.rule_service.get_all_rules(enabled_only)
+    # 「启用」是派生量: 用户意图 AND task 未停用。直接读 enabled 列会把停用 task
+    # 名下的规则报成启用, 用户排查"规则为什么不触发"时正好被这个答案带偏。
+    rules = (
+        await manager.rule_service.get_effectively_enabled_rules()
+        if enabled_only
+        else await manager.rule_service.get_all_rules(False)
+    )
     if not include_milestone:
         rules = [
             r for r in rules if r.resolved_direction is not RuleDirection.MILESTONE

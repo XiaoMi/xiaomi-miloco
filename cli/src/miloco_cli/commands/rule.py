@@ -47,7 +47,9 @@ def rule_group():
 
 
 @rule_group.command("list")
-@click.option("--enabled-only", is_flag=True, help="仅显示已启用的规则")
+@click.option(
+    "--enabled-only", is_flag=True, help="仅显示生效中的规则（task 停用的不算）"
+)
 @click.option(
     "--show-milestone", "show_milestone", is_flag=True,
     help="连服务端维护的达标规则一起显示（默认不显示）",
