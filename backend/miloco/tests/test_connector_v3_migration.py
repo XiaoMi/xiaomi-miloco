@@ -12,7 +12,7 @@
 - 一 task 多 rule: 动作一致 → 正常搬; 不一致 → 置 paused 且动作不丢
 - on_target_desc → 补建 milestone rule; 查不到 target_minutes → 置 paused
 - 非 session 的 exit_debounce 非默认值重置
-- rule.enabled 与 task.status 不一致 → 按 task.status 修正
+- rule.enabled: 旧 bug 关掉的恢复成 1, 用户手工关掉的不动
 - 幂等: 已是 v3 的库不重复跑
 """
 
@@ -432,9 +432,11 @@ def test_multi_rule_same_actions_merges(v2_db):
 
 
 def test_multi_rule_conflicting_actions_pauses_and_keeps_actions(v2_db):
-    """动作不一致 → task 置 paused, 名下 rule 全关, 但动作原样留在 rule 列上。
+    """动作不一致 → task 置 paused, 动作原样留在 rule 列上, enabled 不动。
 
     "动作不丢" 是阶段 A 相对一刀切迁移的核心收益, 必须断言原列还在。
+    enabled 保持 1: 置 paused 已经让派生量为假, 再写 0 会让用户处置完重新启用后
+    这批规则永远起不来。
     """
     a1 = json.dumps([{"did": "d1", "iid": "prop.2.1", "value": True}])
     a2 = json.dumps([{"did": "d2", "iid": "prop.3.1", "value": False}])
@@ -455,7 +457,7 @@ def test_multi_rule_conflicting_actions_pauses_and_keeps_actions(v2_db):
     rules = {r["id"]: r for r in conn.execute("SELECT * FROM rule WHERE task_id='t1'")}
     assert json.loads(rules["r1"]["actions"]) == json.loads(a1)
     assert json.loads(rules["r2"]["actions"]) == json.loads(a2)
-    assert rules["r1"]["enabled"] == 0 and rules["r2"]["enabled"] == 0
+    assert rules["r1"]["enabled"] == 1 and rules["r2"]["enabled"] == 1
     conn.close()
 
 
@@ -553,10 +555,11 @@ def test_two_state_rules_on_one_task_are_paused(v2_db):
         conn.execute("SELECT status FROM task WHERE task_id='t1'").fetchone()[0]
         == "paused"
     )
+    # 置 paused 就够了 —— 再写 enabled=0, 用户按报告处置完重新启用也起不来。
     assert [
         r["enabled"]
         for r in conn.execute("SELECT enabled FROM rule WHERE task_id='t1'").fetchall()
-    ] == [0, 0]
+    ] == [1, 1]
     conn.close()
 
 
@@ -696,27 +699,34 @@ def test_non_session_exit_debounce_is_reset(v2_db):
     conn.close()
 
 
-def test_rule_enabled_realigned_to_task_status(v2_db):
-    """存量脏数据 (§19.9 的现状 bug 产物) 按 task.status 强制修正。"""
+def test_paused_task_rules_are_restored_and_user_intent_is_kept(v2_db):
+    """旧 bug 关掉的恢复成 1; active task 下用户手工关掉的那条不许被打开。
+
+    恢复: 旧代码停用 task 会把名下 rule 一律写 0, 而新代码重新启用 task 不回写
+    enabled —— 不恢复就永久失效, 而界面上看不出。
+    不打开: 反方向对齐等于让用户主动停掉的自动化在升级后自己开回来、下指令。
+    """
     _seed(
         v2_db,
         lambda c: (
             _add_task(c, "t_paused", status="paused"),
-            _add_rule(c, "r_on", "t_paused", enabled=1),
+            _add_rule(c, "r_bug_off", "t_paused", enabled=0),
             _add_task(c, "t_active", status="active"),
-            _add_rule(c, "r_off", "t_active", enabled=0),
+            _add_rule(c, "r_user_off", "t_active", enabled=0),
+            _add_task(c, "t_active2", status="active"),
+            _add_rule(c, "r_on", "t_active2", enabled=1),
         ),
     )
     _migrate(v2_db)
 
     conn = _raw(v2_db)
-    assert conn.execute("SELECT enabled FROM rule WHERE id='r_on'").fetchone()[0] == 0
-    assert conn.execute("SELECT enabled FROM rule WHERE id='r_off'").fetchone()[0] == 1
+    got = {r["id"]: r["enabled"] for r in conn.execute("SELECT id, enabled FROM rule")}
+    assert got == {"r_bug_off": 1, "r_user_off": 0, "r_on": 1}
     conn.close()
 
 
-def test_null_enabled_is_realigned_too(v2_db):
-    """enabled 列可空; NULL != 0 在 SQLite 求值为 NULL, 不 COALESCE 就静默漏修。"""
+def test_null_enabled_is_restored_too(v2_db):
+    """enabled 列默认 1, 存成 NULL 是缺值不是用户关过, 而读侧把 NULL 当假。"""
     _seed(
         v2_db,
         lambda c: (

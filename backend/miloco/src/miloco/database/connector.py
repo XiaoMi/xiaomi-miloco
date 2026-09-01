@@ -249,10 +249,11 @@ class SQLiteConnector:
                         conn.commit()
                         logger.info("All required tables already exist")
 
-                    # PRAGMA user_version 步进迁移: v1 老库跑一次 _migrate_v1_to_v2
-                    # 到 v2, 未来 v3 时补 {3: _migrate_v2_to_v3}。函数内部
-                    # 单事务原子 (业务 DML + PRAGMA user_version 同 COMMIT),
-                    # 抛异常 → backend fail-fast, 运维介入。
+                    # PRAGMA user_version 步进迁移: 逐级跑 _SCHEMA_MIGRATIONS 里
+                    # 登记的函数直到 _DB_SCHEMA_VERSION。函数内部单事务原子
+                    # (业务 DML + PRAGMA user_version 同 COMMIT), 抛异常 →
+                    # backend fail-fast, 运维介入。退代码版本时 range 为空,
+                    # 不反向重跑。
                     current_version = cursor.execute(
                         "PRAGMA user_version"
                     ).fetchone()[0]
@@ -1458,7 +1459,7 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
         "rule_direction_set": 0,
         "rule_exit_debounce_reset": 0,
         "milestone_rule_created": 0,
-        "rule_enabled_corrected": 0,
+        "rule_enabled_restored": 0,
         "lifecycle_conflict_ignored": 0,
     }
     conflict_tasks: list[str] = []
@@ -1576,32 +1577,36 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
             _create_milestone_rule(cursor, task_id, target_minutes, now)
             counts["milestone_rule_created"] += 1
 
-        # ── (f) rule.enabled 对齐 task.status ───────────────────────
-        # 存量脏数据来自 §19.9 描述的现状 bug (task 启停覆写 rule.enabled)。
-        # 必须在 (g) 之前: 顺序反了会把 (g) 刚关掉的 rule 重新打开。
-        # COALESCE: enabled 列可空, NULL != 0 在 SQLite 里求值为 NULL 而非真,
-        # 不兜底则 NULL 行永远匹配不上、静默漏修。
-        misaligned = cursor.execute("""
-            SELECT r.id FROM rule r JOIN task t ON t.task_id = r.task_id
-             WHERE COALESCE(r.enabled, 0) != (t.status = 'active')
-        """).fetchall()
-        if misaligned:
-            cursor.execute("""
-                UPDATE rule SET enabled = (
-                    SELECT t.status = 'active' FROM task t
-                     WHERE t.task_id = rule.task_id
-                )
-                 WHERE EXISTS(
-                     SELECT 1 FROM task t
-                      WHERE t.task_id = rule.task_id
-                        AND COALESCE(rule.enabled, 0) != (t.status = 'active')
-                 )
-            """)
-            counts["rule_enabled_corrected"] = len(misaligned)
+        # ── (f) 恢复被旧 bug 连带关掉的 rule.enabled ─────────────────
+        # §19.9 之后 enabled 是纯用户意图, 不再镜像 task.status。旧代码停用 task 时
+        # 把名下 rule 一律写 0, 不恢复就永久失效 —— 新代码重新启用 task 不回写
+        # enabled, task 显示 active、规则卡照常列出, 但再也不下发不触发。
+        # 反方向不做: 把 active task 下用户手工关掉的那条打开, 等于让他主动停掉的
+        # 自动化自己开回来、立刻对设备下指令。必须排在 (g) 之前, 否则会把 (g) 刚置
+        # paused 的 task 下那些用户关掉的 rule 一起打开。
+        # NULL 另兜: 列默认 1, 存成 NULL 是缺值不是用户关过, 而读侧把它当假。
+        restored = [
+            row["id"]
+            for row in cursor.execute("""
+                SELECT id FROM rule
+                 WHERE enabled IS NULL
+                    OR (enabled = 0 AND EXISTS(
+                            SELECT 1 FROM task t
+                             WHERE t.task_id = rule.task_id
+                               AND t.status = 'paused'
+                        ))
+            """).fetchall()
+        ]
+        if restored:
+            # 按 id 逐条改而不是重贴一遍 WHERE —— 两份判据早晚分叉, 报告里的条数
+            # 就会和实际改的行数对不上。
+            cursor.executemany(
+                "UPDATE rule SET enabled = 1 WHERE id = ?",
+                [(rule_id,) for rule_id in restored],
+            )
+            counts["rule_enabled_restored"] = len(restored)
             logger.warning(
-                "v2→v3 corrected %d rule.enabled to match task.status: %s",
-                len(misaligned),
-                [r["id"] for r in misaligned],
+                "v2→v3 restored %d rule.enabled=1: %s", len(restored), restored
             )
 
         # ── (g') 迁移后校验: 变非法的 task 置 paused ─────────────────
@@ -1627,12 +1632,13 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
                 )
 
         # ── (g) 置 paused ───────────────────────────────────────────
+        # 只置 task.status。生效判据里 task 停用这一半已经为假, 再写 rule.enabled=0
+        # 会在用户处置完重新启用后让这批规则永远起不来 (理由同 (f))。
         for task_id in conflict_tasks + on_target_broken_tasks + illegal_tasks:
             cursor.execute(
                 "UPDATE task SET status='paused', paused_at=? WHERE task_id=?",
                 (now, task_id),
             )
-            cursor.execute("UPDATE rule SET enabled=0 WHERE task_id=?", (task_id,))
 
         # terminate_when 只扫不动: 让用户知道这批失去了名义能力
         terminate_when_rules = cursor.execute(

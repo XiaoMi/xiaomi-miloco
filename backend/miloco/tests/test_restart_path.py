@@ -291,3 +291,31 @@ async def test_restart_still_sends_a_target_reached_after_it(db):
         await asyncio.sleep(0.1)
 
     assert ("[piano] 累计达标", "TARGET_FIRED") in _events(mock)
+
+
+@pytest.mark.asyncio
+async def test_a_paused_task_does_not_fire_after_restart(db):
+    """task 停用是「有效启用」派生量的一半, 重启后必须从 task.status 重新 seed。
+
+    §19.9 之后停用 task 不再回写 rule.enabled, 所以 enabled 那一半恒为真 ——
+    这个 seed 是唯一还拦得住的地方, 丢了就是停用的 task 照样对设备下指令。
+    v2→v3 迁移也依赖它: 迁移把不合法的 task 置 paused 但不动 enabled。
+    """
+    boot1 = _Boot()
+    rule_id = await boot1.service.create_rule(_session_rule())
+
+    conn = sqlite3.connect(str(db))
+    conn.execute("UPDATE task SET status='paused' WHERE task_id=?", (TASK_ID,))
+    conn.commit()
+    conn.close()
+
+    boot2 = _Boot()
+    assert boot2.runner.is_task_paused(TASK_ID) is True
+    assert rule_id not in [r.id for r in boot2.runner.get_enabled_rules()]
+
+    with patch(
+        "miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)
+    ) as mock:
+        await _feed(boot2.runner, rule_id, True)
+
+    assert _events(mock) == []
