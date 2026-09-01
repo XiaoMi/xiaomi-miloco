@@ -168,7 +168,9 @@ def test_entry_blocked_when_exit_condition_already_true():
 def test_exit_held_when_another_source_still_true():
     """OR 的退出条件是「全部都不成立」。
 
-    少这一步就成了「任一条断开就整个退出」, 另一条还撑着也没用 —— 那不是 OR。
+    两条 session 挂同一 task 会被 task 全貌校验拒(session 必须独占), 所以本例钉
+    的是状态机自己的契约, 不是能配出来的场景 —— 合法配置下"别的会话条件"这个集合
+    恒为空, 这道闸不会触发。见 ``_other_session_holds`` 的注释。
     """
     h = Harness(satisfied={"s1": False, "s2": False})
     h.sm.register_task("t1", {"s1": RuleDirection.SESSION, "s2": RuleDirection.SESSION})
@@ -181,6 +183,57 @@ def test_exit_held_when_another_source_still_true():
     assert outcome is TransitionOutcome.STILL_HELD
     assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
     assert h.dispatched == []
+
+
+def test_two_exit_rules_both_true_can_still_exit():
+    """两条 exit 同时成立时, 任一条的边沿都要能把 task 退出去。
+
+    exit 型的"条件成立"是"该退出了"。拿它当"还撑着"极性正好反 —— 两条会互相判
+    STILL_HELD, 谁也出不去, 而「一条 enter + 两条 exit」是合法配置。
+    """
+    h = Harness(satisfied={"a": True, "x1": True, "x2": True})
+    h.sm.register_task(
+        "t1",
+        {
+            "a": RuleDirection.ENTER,
+            "x1": RuleDirection.EXIT,
+            "x2": RuleDirection.EXIT,
+        },
+    )
+    # 进入时出口条件必须为假, 否则被 §5.1 拦住 —— 那是另一条闸。
+    h.satisfied["x1"] = False
+    h.satisfied["x2"] = False
+    assert h.sm.handle(_entered(rule_id="a")) is TransitionOutcome.ENTERED
+    h.dispatched.clear()
+
+    # 用户离开时顺手关灯: 两个退出条件同一拍变真。
+    h.satisfied["x1"] = True
+    h.satisfied["x2"] = True
+    outcome = h.sm.handle(_exited(rule_id="x1"))
+
+    assert outcome is TransitionOutcome.EXITED
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
+
+
+def test_reconfigure_does_not_let_a_true_exit_condition_keep_the_task_on():
+    """重新配置时, exit 条件为真不表示"还撑着"。
+
+    把它算成撑着的话, 一个 enter + exit 的 task 在退出条件成立期间改配置会被判定
+    "保持 on", 而现实是该关的 —— 从此卡住。
+    """
+    h = Harness(satisfied={"a": False, "x": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
+    h.sm.handle(_entered(rule_id="a"))
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+    # 进去之后退出条件才成立 —— 进入那一刻为真会被 §5.1 拦掉, 到不了这里。
+    h.satisfied["x"] = True
+    h.dispatched.clear()
+
+    h.sm.reconfigure("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
+
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
 
 
 def test_exit_proceeds_when_nothing_else_holds():

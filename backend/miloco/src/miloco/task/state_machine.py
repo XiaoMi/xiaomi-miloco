@@ -103,11 +103,25 @@ class TaskTopology:
 
     @property
     def exit_side_rule_ids(self) -> set[str]:
-        """能把 task 推回 ``off`` 的 rule。"""
+        """能把 task 推回 ``off`` 的 rule —— 用来判「有没有出路径」。"""
         return {
             rid
             for rid, d in self.directions.items()
             if d in (RuleDirection.EXIT, RuleDirection.SESSION)
+        }
+
+    @property
+    def holding_rule_ids(self) -> set[str]:
+        """条件成立 == 会话还在 的 rule。
+
+        只有 session 满足这个等价。``exit`` 型的"条件成立"是"该退出了"(见
+        ``slot_for_edge``), 拿它当"还撑着"极性正好反 —— 两条 exit 同时成立时会
+        互相判 STILL_HELD, task 永久卡在 on, 而这个配置是合法的。
+        """
+        return {
+            rid
+            for rid, d in self.directions.items()
+            if d is RuleDirection.SESSION
         }
 
     @property
@@ -312,7 +326,7 @@ class TaskStateMachine:
             # 幂等: 多条路径同时进只执行一次边界动作。
             return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
-        if self._other_exit_side_holds(signal, topology):
+        if self._exit_condition_already_true(signal, topology):
             # §5.1: 进入时退出条件已为真 → 拒绝进入。让错误表现从"开了永远不关"
             # 变成"从来不开" —— 后者用户当场能发现。
             return self._done(TransitionOutcome.BLOCKED_BY_EXIT_CONDITION, signal)
@@ -327,7 +341,7 @@ class TaskStateMachine:
         if self.runtime_state(signal.task_id) is not TaskRuntimeState.ON:
             return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
-        if self._other_exit_side_holds(signal, topology):
+        if self._other_session_holds(signal, topology):
             # OR 的退出条件是「全部都不成立」。少了这一步就成了「任一条断开就整个
             # 退出」, 另一条还撑着也没用 —— 那不是 OR。
             return self._done(TransitionOutcome.STILL_HELD, signal)
@@ -344,25 +358,45 @@ class TaskStateMachine:
         # 重置对后者同样无效 (它只挪值、不动窗口), 所以那是个已知缺口, 不是回归。
         return self._done(TransitionOutcome.EXITED, signal)
 
-    def _other_exit_side_holds(
+    def _exit_condition_already_true(
         self, signal: TaskSignal, topology: TaskTopology
     ) -> bool:
-        """除信号自己那条以外, 出口侧还有没有条件此刻为真。
+        """进入之前: 出口侧有没有哪条的条件此刻已经为真 (§5.1)。
 
-        进入和退出用的是同一个查询, 只是结论相反: 进入时"有真"意味着出口已经
-        开着、别进 (§5.1, 让错误从"开了永远不关"变成"从来不开"); 退出时"有真"
-        意味着还有条件撑着、别出。
+        问的是整个出口侧 —— exit 与 session 的条件为真都表示"现在不该在态内",
+        带着这个进去要么立刻矛盾、要么开了不关。
 
         排除信号自己那条 rule: 对称模式下进出是同一条 session rule, 不排除的话
-        它会拿自己的条件挡住自己, 永远进不去也出不来。
+        它会拿自己的条件挡住自己, 永远进不去。
 
         只有明确为 ``True`` 才拦。``None`` 是未就绪或脉冲型无稳态 —— 拿"不知道"
-        当"成立"会把正常的进出全挡掉。
+        当"成立"会把正常的进入全挡掉。
         """
-        for rule_id in topology.exit_side_rule_ids - {signal.rule_id}:
-            if self._is_condition_satisfied(rule_id) is True:
-                return True
-        return False
+        return self._any_condition_true(
+            topology.exit_side_rule_ids - {signal.rule_id}
+        )
+
+    def _other_session_holds(
+        self, signal: TaskSignal, topology: TaskTopology
+    ) -> bool:
+        """退出之前: 除自己以外还有没有会话条件撑着。
+
+        与进入侧不是同一个集合。这里问的必须是 ``holding_rule_ids``: exit 型的
+        "条件成立"是"该退出了", 拿它当"还撑着"极性正好反 —— 两条 exit 同时成立
+        时会互相判 STILL_HELD, 谁也出不去。
+
+        **合法配置下这个集合恒为空**: session 必须独占 task (§19.7), 所以要么名下
+        没有 session, 要么那条 session 就是发信号的自己、被排掉。闸留着是因为它表达
+        的是"会话还在就别退"这条契约, 换 AND / 多会话模型时才用得上。
+        """
+        return self._any_condition_true(
+            topology.holding_rule_ids - {signal.rule_id}
+        )
+
+    def _any_condition_true(self, rule_ids: set[str]) -> bool:
+        return any(
+            self._is_condition_satisfied(rid) is True for rid in rule_ids
+        )
 
     def _maybe_dispatch(
         self, task_id: str, slot: ActionSlot, payload: object | None
@@ -424,16 +458,16 @@ class TaskStateMachine:
             queue.clear()
 
     def _exit_side_still_holds(self, topology: TaskTopology) -> bool:
-        """出口侧还有条件成立 → 该保持 ``on``。
+        """还有会话条件成立 → 该保持 ``on``。
 
         ``_is_condition_satisfied`` 是三值: ``True`` 成立, ``False`` 观测到不
         成立, ``None`` 还没喂过数据(新加进来的 rule 就是这种)。只认 ``True``:
         全是 ``None`` 时无从确认还撑着, 宁可多发一次退出动作也不要静默卡在 on;
-        事件型的出口侧集合为空, 同样落到退出, 与改动前一致。
+        事件型没有会话条件, 同样落到退出, 与改动前一致。
         """
         return any(
             self._is_condition_satisfied(rule_id) is True
-            for rule_id in topology.exit_side_rule_ids
+            for rule_id in topology.holding_rule_ids
         )
 
     # ── 手动触发 (debug, §5) ──────────────────────────────────────
