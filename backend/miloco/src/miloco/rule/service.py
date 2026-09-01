@@ -40,7 +40,10 @@ from miloco.rule.record_source import (
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
     SCENE_IID,
+    ConditionItem,
     Rule,
+    RuleCondition,
+    RuleConditionDNF,
     RuleDirection,
     RuleExecuteResult,
     RuleLifecycle,
@@ -96,52 +99,6 @@ def _validate_lifecycle(rule: Rule) -> None:
         raise ValidationException("lifecycle=temporary requires terminate_when")
 
 
-def _validate_milestone_rule(rule: Rule) -> None:
-    """direction=milestone 的形态 (spec §9)。
-
-    单独一支是因为下面的矩阵按 ``mode`` 分，而 mode 表达不了 milestone —— milestone
-    rule 的 mode 只是个占位值。
-    """
-    if (
-        rule.on_enter_actions
-        or rule.on_enter_desc
-        or rule.on_exit_actions
-        or rule.on_exit_desc
-    ):
-        raise ValidationException(
-            "direction=milestone 只有达标一个方向，不能配 on_enter_* / on_exit_*"
-        )
-    if rule.actions or rule.action_descriptions:
-        raise ValidationException(
-            "direction=milestone 的动作走 task 的 on_target 槽，"
-            "不配 actions / action_descriptions"
-        )
-
-    # 那一列由服务端定, 不信客户端传的: 填成真设备 did 会让 milestone rule 被感知
-    # 认领, "累计达标"当成一句视觉 query 进摄像头 prompt。
-    rule.condition.perceive_device_ids = [MILESTONE_SENTINEL_DID]
-
-    dnf = rule.condition_dnf
-    items = [item for conj in (dnf.any_of if dnf else []) for item in conj]
-    if len(items) != 1 or items[0].source_type != RECORD_SOURCE_TYPE:
-        raise ValidationException(
-            "direction=milestone 本次只接受恰好一条 record 条件项，"
-            f"当前 {len(items)} 条"
-        )
-    spec = items[0].spec or {}
-    if not spec.get("task_id"):
-        raise ValidationException("record 条件项必须写 task_id（引用哪个 task 的累计）")
-    if spec.get("kind") != SUPPORTED_KIND:
-        raise ValidationException(
-            f"record 条件项本次只支持 kind={SUPPORTED_KIND!r}，"
-            f"当前 {spec.get('kind')!r}"
-        )
-    if spec.get("op") != SUPPORTED_OP:
-        raise ValidationException(
-            f"record 条件项本次只支持 op={SUPPORTED_OP!r}，当前 {spec.get('op')!r}"
-        )
-
-
 def _task_rule_set_error(directions: list[RuleDirection]) -> str | None:
     """task 名下 rule 集合的合法性 (spec §9)。合法返 None, 非法返错误文案。
 
@@ -179,10 +136,11 @@ def _validate_rule_consistency(rule: Rule) -> None:
     _validate_query_phrasing(rule.condition.query)
 
     if rule.resolved_direction is RuleDirection.MILESTONE:
-        # 动作槽已校验为空, 所以下面第 4 节的 action 闸门对它是空转, 不用再走。
-        _validate_milestone_rule(rule)
-        _validate_lifecycle(rule)
-        return
+        raise ValidationException(
+            "达标规则由服务端按 task 的达标动作 + duration record 自动维护, "
+            "不接受手工创建。配达标通知: "
+            'miloco-cli task set-actions <task_id> --on-target-desc "..."'
+        )
 
     # ---- 2. mode matrix（执行路径由 actions / action_descriptions 哪个非空决定）----
     if rule.mode == RuleMode.EVENT:
@@ -421,13 +379,9 @@ class RuleService:
     def _target_record_task_id(self, rule: Rule) -> str | None:
         """这条 rule 的达标看哪个 task 的 record —— 看不出达标就返 None。
 
-        milestone rule 读条件项里引用的 task（spec §9 允许引用别的 task）；存量的
-        rule 侧 ``on_target_desc`` 看自己所属的 task。
+        代建的达标规则不走本校验（它是派生物, 建的时候三样已经齐备）, 所以这里
+        只管用户在 rule 上填 ``on_target_desc`` 这条旧路径。
         """
-        if rule.resolved_direction is RuleDirection.MILESTONE:
-            dnf = rule.condition_dnf
-            items = [item for conj in (dnf.any_of if dnf else []) for item in conj]
-            return (items[0].spec or {}).get("task_id") if items else None
         return rule.task_id if rule.on_target_desc else None
 
     def _validate_task_rule_set(self, rule: Rule, previous: Rule | None = None) -> None:
@@ -453,25 +407,6 @@ class RuleService:
         if error and _task_rule_set_error(before) is None:
             raise ValidationException(error)
 
-    def _require_target_action(self, rule: Rule) -> None:
-        """达标规则要求 task 已配达标动作 (spec §9)。
-
-        没配的话边沿照样被消耗、动作槽是空的 —— 用户看到规则建成功、然后什么都
-        不发生, 且从规则本身看不出缺什么。
-        """
-        if rule.resolved_direction is not RuleDirection.MILESTONE:
-            return
-        actions = self._task_repo.get_full_view(rule.task_id) or {}
-        slots = actions.get("actions") or {}
-        if slots.get("on_target_actions") or slots.get("on_target_desc"):
-            return
-        if rule.on_target_desc:
-            return
-        raise ValidationException(
-            f"达标规则要求 task {rule.task_id!r} 先配达标动作。修复："
-            f'miloco-cli task set-actions {rule.task_id} --on-target-desc "..."'
-        )
-
     def _validate_target_record(self, rule: Rule) -> None:
         """达标要求被引用的 task 有 duration record + target_minutes。
 
@@ -481,7 +416,6 @@ class RuleService:
         task_id = self._target_record_task_id(rule)
         if not task_id:
             return
-        self._require_target_action(rule)
         kind = self._task_record_service.detect_record_kind(task_id)
         if kind is None:
             raise ValidationException(
@@ -522,9 +456,6 @@ class RuleService:
         return valid + sorted(physical - set(valid))
 
     async def _validate_perceive_devices_of(self, rule: Rule) -> None:
-        """milestone rule 的那一列是占位, 不是真设备 —— 按真设备校验会直接拒掉。"""
-        if rule.resolved_direction is RuleDirection.MILESTONE:
-            return
         await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
 
     async def _validate_perceive_device_ids(self, dids: list[str]) -> None:
@@ -604,8 +535,8 @@ class RuleService:
 
         self._fill_default_duration_ratio(rule)
 
-        await self._validate_perceive_devices_of(rule)
         _validate_rule_consistency(rule)
+        await self._validate_perceive_devices_of(rule)
         self._validate_target_record(rule)
         self._validate_task_rule_set(rule)
         await self._validate_scene_ids(rule)
@@ -673,8 +604,8 @@ class RuleService:
 
         self._fill_default_duration_ratio(rule)
 
-        await self._validate_perceive_devices_of(rule)
         _validate_rule_consistency(rule)
+        await self._validate_perceive_devices_of(rule)
         self._validate_target_record(rule)
         self._validate_task_rule_set(rule, previous)
         await self._validate_scene_ids(rule)
@@ -898,6 +829,104 @@ class RuleService:
                 "task %s 没有对应行, rule %s 的动作没同步过去", rule.task_id, rule.id
             )
 
+    # ---- 达标规则是派生物, 不是用户建的东西 (spec §6.4 / §9) ----
+
+    def _milestone_is_wanted(self, task_id: str) -> bool | None:
+        """这个 task 该不该有达标规则。``None`` = 读不出来, 调用方按"别动"处理。
+
+        判据三样齐备: task 配了达标动作、有活跃 duration record、record 上有阈值。
+        """
+        try:
+            view = self._task_repo.get_full_view(task_id) or {}
+            slots = view.get("actions") or {}
+            if not (slots.get("on_target_actions") or slots.get("on_target_desc")):
+                return False
+            state = self._task_record_service.read_duration_target_state(task_id)
+        except Exception:
+            logger.exception("读 task %s 的达标配置失败, 这次不动达标规则", task_id)
+            return None
+        return state is not None and state[0] is not None
+
+    def _build_milestone_rule(self, task_id: str) -> Rule:
+        """代建的那条 rule 长什么样 —— 与 v2→v3 迁移补建的形态保持一致。
+
+        不带阈值: 阈值每次去 record 上现读, 存副本会在用户改目标后分叉。
+        """
+        return Rule(
+            name=f"[{task_id}] 累计达标",
+            task_id=task_id,
+            # mode 是 NOT NULL 且表达不了 milestone, 存一个自洽的占位值。
+            mode=RuleMode.EVENT,
+            direction=RuleDirection.MILESTONE,
+            lifecycle=RuleLifecycle.PERMANENT,
+            condition=RuleCondition(
+                perceive_device_ids=[MILESTONE_SENTINEL_DID],
+                query=f"[milestone] task {task_id} 累计达标",
+            ),
+            condition_dnf=RuleConditionDNF(
+                any_of=[[
+                    ConditionItem(
+                        source_type=RECORD_SOURCE_TYPE,
+                        spec={
+                            "task_id": task_id,
+                            "kind": SUPPORTED_KIND,
+                            "op": SUPPORTED_OP,
+                        },
+                    )
+                ]]
+            ),
+        )
+
+    def reconcile_milestone_rule(self, task_id: str) -> None:
+        """让代建的达标规则跟上"该不该有"。
+
+        做成派生量而不是让用户维护成对关系, 是因为装配分步进行 —— 先配动作还是
+        先建 record, 中间态必然有一半不成立。派生量没有中间态可言, 齐备的那一刻
+        就有了。
+
+        不走 ``create_rule`` / ``delete_rule``: 那两条会再调一次重新配置, 而本函数
+        正是被它调用的。
+        """
+        wanted = self._milestone_is_wanted(task_id)
+        if wanted is None:
+            return
+
+        existing = [
+            r
+            for r in self._repo.list_by_task(task_id)
+            if r.resolved_direction is RuleDirection.MILESTONE
+        ]
+        # 齐备时留一条, 多出来的连同"不该有"的一起清掉。
+        keep = existing[:1] if wanted else []
+        for rule in existing[len(keep):]:
+            if not rule.id:
+                continue
+            logger.info("达标规则 %s 不再需要, 删除 (task=%s)", rule.id, task_id)
+            self._repo.delete(rule.id)
+            self._runner.remove_rule(rule.id)
+            self._log_repo.delete_by_rule_id(rule.id)
+
+        if not wanted or keep:
+            return
+
+        rule = self._build_milestone_rule(task_id)
+        if self._repo.exists_by_name(rule.name):
+            logger.warning(
+                "task %s 的达标规则重名, 不代建; 改掉同名规则后会自动补上", task_id
+            )
+            return
+        rule_id = self._repo.create(rule)
+        if not rule_id:
+            logger.warning("task %s 的达标规则代建失败", task_id)
+            return
+        rule.id = rule_id
+        self._runner.add_rule(rule)
+        logger.info("代建达标规则 %s (task=%s)", rule_id, task_id)
+
+    def notify_record_changed(self, task_id: str) -> None:
+        """record 的 kind / 阈值变了 —— 达标规则该不该有可能跟着变。"""
+        self.reconfigure_task(task_id)
+
     def reconfigure_task(self, task_id: str) -> None:
         """rule 增删改、rule 单独启停、task 重新 enable 统一走这条。
 
@@ -908,6 +937,9 @@ class RuleService:
         没接管该 task (没有边界动作 / 名下已无 rule) → 撤销登记, 回到旧路径。
         不 reconfigure 而是 unregister: 前者会把没接管的 task 登记进去。
         """
+        # 必须排在读拓扑之前: 代建 / 删掉的那条也要算进这次的拓扑。
+        self.reconcile_milestone_rule(task_id)
+
         sm = self._runner.state_machine
         if sm is None:
             return

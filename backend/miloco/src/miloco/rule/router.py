@@ -13,7 +13,13 @@ from fastapi import APIRouter, Depends, Query
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.middleware.exceptions import BusinessException
-from miloco.rule.schema import Rule, RuleLogKind, RuleTriggerRequest, RuleUpdate
+from miloco.rule.schema import (
+    Rule,
+    RuleDirection,
+    RuleLogKind,
+    RuleTriggerRequest,
+    RuleUpdate,
+)
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.time_utils import parse_iso_ms, since_to_ms
 
@@ -67,13 +73,25 @@ async def create_rule(rule: Rule, current_user: str = Depends(verify_token)):
 @router.get("", summary="Get All Rules", response_model=NormalResponse)
 async def get_all_rules(
     enabled_only: bool = Query(False, description="Only return enabled rules"),
+    include_milestone: bool = Query(
+        False, description="Include server-managed milestone rules"
+    ),
     current_user: str = Depends(verify_token),
 ):
-    """Get all rules"""
+    """Get all rules.
+
+    达标规则默认不给: 它是服务端按 task 的达标动作 + duration record 维护的派生物,
+    不是用户建的东西。混在列表里会让人以为自己多建了一条规则、进而去删它。
+    """
     logger.info(
-        "Get all rules - User: %s, enabled_only: %s", current_user, enabled_only
+        "Get all rules - User: %s, enabled_only: %s, include_milestone: %s",
+        current_user, enabled_only, include_milestone,
     )
     rules = await manager.rule_service.get_all_rules(enabled_only)
+    if not include_milestone:
+        rules = [
+            r for r in rules if r.resolved_direction is not RuleDirection.MILESTONE
+        ]
     return NormalResponse(
         code=0,
         message=f"Retrieved {len(rules)} rules",

@@ -2500,80 +2500,25 @@ def test_rule_create_scene_action_string_cooldown_no_traceback(runner):
     assert result.exit_code == 0
 
 
-def test_rule_create_milestone_builds_record_condition(runner):
-    """达标规则的形态：direction=milestone + 一条 record 条件项。"""
-    with patch("miloco_cli.client.api_post") as mock:
-        mock.return_value = {"code": 0, "data": {"rule_id": "r-ms"}}
-        result = runner.invoke(
-            cli,
-            [
-                "rule", "create-milestone",
-                "--task-id", "watch_tv",
-                "--name", "[watch_tv] 累计达标",
-            ],
-        )
-    assert result.exit_code == 0
-    body = mock.call_args[0][1]
-    assert body["direction"] == "milestone"
-    item = body["condition_dnf"]["any_of"][0][0]
-    assert item["source_type"] == "record"
-    assert item["spec"] == {"task_id": "watch_tv", "kind": "duration", "op": ">="}
+def test_rule_list_hides_milestone_rules_by_default(runner):
+    """达标规则是服务端维护的派生物，混在列表里会让人以为自己多建了一条。"""
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {"code": 0, "data": []}
+        runner.invoke(cli, ["rule", "list"])
+    params = mock.call_args[0][1]
+    assert params is None or "include_milestone" not in params
 
 
-def test_rule_create_milestone_does_not_send_a_threshold(runner):
-    """阈值读 record 上的 target_minutes 当前值。条件项里存一份就会分叉。"""
-    with patch("miloco_cli.client.api_post") as mock:
-        mock.return_value = {"code": 0, "data": {"rule_id": "r-ms"}}
-        result = runner.invoke(
-            cli,
-            [
-                "rule", "create-milestone",
-                "--task-id", "watch_tv",
-                "--name", "[watch_tv] 累计达标",
-            ],
-        )
-    assert result.exit_code == 0
-    item = mock.call_args[0][1]["condition_dnf"]["any_of"][0][0]
-    assert "value" not in item["spec"]
+def test_rule_list_show_milestone_asks_for_them(runner):
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {"code": 0, "data": []}
+        runner.invoke(cli, ["rule", "list", "--show-milestone"])
+    assert mock.call_args[0][1]["include_milestone"] == "true"
 
 
-def test_rule_create_milestone_target_task_defaults_to_task_id(runner):
-    with patch("miloco_cli.client.api_post") as mock:
-        mock.return_value = {"code": 0, "data": {"rule_id": "r-ms"}}
-        runner.invoke(
-            cli,
-            ["rule", "create-milestone", "--task-id", "watch_tv", "--name", "n"],
-        )
-    body = mock.call_args[0][1]
-    assert body["condition_dnf"]["any_of"][0][0]["spec"]["task_id"] == "watch_tv"
-
-
-def test_rule_create_milestone_target_task_can_point_at_another_task(runner):
-    """跨 task 引用：动作挂 --task-id，累计看 --target-task（spec §6.4）。"""
-    with patch("miloco_cli.client.api_post") as mock:
-        mock.return_value = {"code": 0, "data": {"rule_id": "r-ms"}}
-        runner.invoke(
-            cli,
-            [
-                "rule", "create-milestone",
-                "--task-id", "watch_tv",
-                "--name", "n",
-                "--target-task", "phone_time",
-            ],
-        )
-    body = mock.call_args[0][1]
-    assert body["task_id"] == "watch_tv"
-    assert body["condition_dnf"]["any_of"][0][0]["spec"]["task_id"] == "phone_time"
-
-
-def test_rule_create_milestone_carries_no_rule_side_actions(runner):
-    """动作在 task 的达标槽上 —— rule 上带一份就有两个执行入口。"""
-    with patch("miloco_cli.client.api_post") as mock:
-        mock.return_value = {"code": 0, "data": {"rule_id": "r-ms"}}
-        runner.invoke(
-            cli,
-            ["rule", "create-milestone", "--task-id", "t", "--name", "n"],
-        )
-    body = mock.call_args[0][1]
-    assert body["actions"] == []
-    assert body["action_descriptions"] == []
+def test_rule_create_milestone_command_is_gone(runner):
+    """只留代建一条产出路径 —— 两条就要回答「哪条说了算」。"""
+    result = runner.invoke(
+        cli, ["rule", "create-milestone", "--task-id", "t", "--name", "n"]
+    )
+    assert result.exit_code != 0

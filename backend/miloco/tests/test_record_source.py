@@ -262,141 +262,181 @@ class TestRollOver:
         src.disarm(TASK_ID)
 
 
-# ---- 建 milestone rule 的校验 (spec §9) ----
+# ---- 达标规则是派生物 (spec §6.4 / §9) ----
 
 
-class TestMilestoneRuleValidation:
-    @staticmethod
-    def _validate(rule):
-        from miloco.rule.service import _validate_milestone_rule
+def _legacy_rule(rule_id="rule-legacy", task_id=TASK_ID, on_target_desc="达标了"):
+    """用户在 rule 上填 on_target_desc 的旧路径 —— skill 现在还走这条。"""
+    rule = Rule(
+        id=rule_id,
+        name=f"[{task_id}] 计时",
+        task_id=task_id,
+        mode=RuleMode.STATE,
+        condition=RuleCondition(perceive_device_ids=["cam-001"], query="有人在弹琴"),
+    )
+    rule.on_target_desc = on_target_desc
+    return rule
 
-        return _validate_milestone_rule(rule)
 
-    def test_valid_milestone_rule_passes(self):
-        self._validate(_make_rule())
+def _rule_service(record_kind, duration_state, task_view=None, rules=None):
+    from unittest.mock import AsyncMock
 
-    def test_normalizes_the_sentinel_did(self):
-        """那一列由服务端定 —— 客户端填成真设备 did 会让它被感知认领。"""
-        from miloco.rule.record_source import MILESTONE_SENTINEL_DID
+    from miloco.rule.runner import RuleRunner
+    from miloco.rule.service import RuleService
 
-        rule = _make_rule()
-        rule.condition.perceive_device_ids = ["cam-001"]
-        self._validate(rule)
-        assert rule.condition.perceive_device_ids == [MILESTONE_SENTINEL_DID]
+    record_svc = MagicMock()
+    record_svc.detect_record_kind = MagicMock(return_value=record_kind)
+    record_svc.read_duration_target_state = MagicMock(return_value=duration_state)
+    runner = RuleRunner(
+        rules=[], miot_proxy=AsyncMock(), rule_log_repo=MagicMock(),
+        task_record_service=record_svc,
+    )
+    task_repo = MagicMock()
+    task_repo.get_full_view = MagicMock(
+        return_value=task_view
+        if task_view is not None
+        else {"actions": {"on_target_desc": "达标了"}}
+    )
+    rule_repo = MagicMock()
+    rule_repo.list_by_task = MagicMock(return_value=list(rules or []))
+    rule_repo.exists_by_name = MagicMock(return_value=False)
+    rule_repo.create = MagicMock(return_value="new-milestone-id")
+    rule_repo.delete = MagicMock(return_value=True)
+    svc = RuleService(
+        rule_repo, MagicMock(), runner, AsyncMock(),
+        task_repo=task_repo, task_record_service=record_svc,
+    )
+    return svc, rule_repo
 
-    def test_rejects_session_action_slots(self):
+
+class TestManualMilestoneIsRejected:
+    def test_creating_a_milestone_rule_by_hand_is_rejected(self):
+        """它是派生物 —— 两条产出路径就要回答"哪条说了算"。"""
         from miloco.middleware.exceptions import ValidationException
+        from miloco.rule.service import _validate_rule_consistency
 
-        rule = _make_rule()
-        rule.on_enter_desc = "进入时播报"
-        with pytest.raises(ValidationException, match="只有达标一个方向"):
-            self._validate(rule)
-
-    def test_rejects_rule_side_actions(self):
-        """动作走 task 的达标槽 —— rule 上再放一份就有两个执行入口。"""
-        from miloco.middleware.exceptions import ValidationException
-
-        rule = _make_rule()
-        rule.action_descriptions = ["推送通知"]
-        with pytest.raises(ValidationException, match="on_target 槽"):
-            self._validate(rule)
-
-    def test_rejects_omni_condition_item(self):
-        from miloco.middleware.exceptions import ValidationException
-
-        with pytest.raises(ValidationException, match="record 条件项"):
-            self._validate(_make_rule(source_type="omni"))
-
-    def test_rejects_unsupported_kind(self):
-        from miloco.middleware.exceptions import ValidationException
-
-        rule = _make_rule(spec={"task_id": TASK_ID, "kind": "progress", "op": ">="})
-        with pytest.raises(ValidationException, match="kind"):
-            self._validate(rule)
-
-    def test_rejects_unsupported_op(self):
-        from miloco.middleware.exceptions import ValidationException
-
-        rule = _make_rule(spec={"task_id": TASK_ID, "kind": "duration", "op": ">"})
-        with pytest.raises(ValidationException, match="op"):
-            self._validate(rule)
-
-    def test_rejects_missing_task_id(self):
-        from miloco.middleware.exceptions import ValidationException
-
-        rule = _make_rule(spec={"kind": "duration", "op": ">="})
-        with pytest.raises(ValidationException, match="task_id"):
-            self._validate(rule)
-
-    def test_milestone_query_passes_phrasing_check(self):
-        """CLI 生成的那句 query 不能被措辞校验拦下, 否则整条命令建不出来。"""
-        from miloco.rule.service import _validate_query_phrasing
-
-        _validate_query_phrasing(f"[milestone] task {TASK_ID} 累计达标")
+        with pytest.raises(ValidationException, match="自动维护"):
+            _validate_rule_consistency(_make_rule())
 
 
-class TestTargetRecordReference:
-    """达标看哪个 task 的 record —— milestone 读条件项, 存量读自己所属 task。"""
+class TestMilestoneReconcile:
+    """三样齐备就该有一条, 任一缺失就该没有。"""
 
-    @staticmethod
-    def _service(record_kind, duration_state, task_view=None):
-        from unittest.mock import AsyncMock
+    def test_creates_when_everything_is_in_place(self):
+        svc, repo = _rule_service("duration", (60, 0))
+        svc.reconcile_milestone_rule(TASK_ID)
 
-        from miloco.rule.runner import RuleRunner
-        from miloco.rule.service import RuleService
+        assert repo.create.called
+        created = repo.create.call_args[0][0]
+        assert created.resolved_direction is RuleDirection.MILESTONE
+        assert created.task_id == TASK_ID
 
-        svc_mock = MagicMock()
-        svc_mock.detect_record_kind = MagicMock(return_value=record_kind)
-        svc_mock.read_duration_target_state = MagicMock(return_value=duration_state)
-        runner = RuleRunner(
-            rules=[], miot_proxy=AsyncMock(), rule_log_repo=MagicMock(),
-            task_record_service=svc_mock,
+    def test_created_rule_carries_a_record_condition_item(self):
+        """没有 record 条件项的话 record 源认不出它, timer 永远不排。"""
+        svc, repo = _rule_service("duration", (60, 0))
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        item = repo.create.call_args[0][0].condition_dnf.any_of[0][0]
+        assert item.source_type == "record"
+        assert item.spec["task_id"] == TASK_ID
+        # 阈值现读, 不存副本 —— 存了用户改目标后两份就分叉
+        assert "value" not in item.spec
+
+    def test_does_not_create_without_a_target_action(self):
+        svc, repo = _rule_service("duration", (60, 0), task_view={"actions": {}})
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        assert not repo.create.called
+
+    def test_does_not_create_without_a_threshold(self):
+        svc, repo = _rule_service("duration", (None, 0))
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        assert not repo.create.called
+
+    def test_does_not_create_without_a_duration_record(self):
+        svc, repo = _rule_service(None, None)
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        assert not repo.create.called
+
+    def test_is_idempotent_when_one_already_exists(self):
+        svc, repo = _rule_service("duration", (60, 0), rules=[_make_rule()])
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        assert not repo.create.called
+        assert not repo.delete.called
+
+    def test_deletes_when_the_target_action_is_cleared(self):
+        svc, repo = _rule_service(
+            "duration", (60, 0), task_view={"actions": {}}, rules=[_make_rule()]
         )
-        task_repo = MagicMock()
-        task_repo.get_full_view = MagicMock(
-            return_value=task_view
-            if task_view is not None
-            else {"actions": {"on_target_desc": "达标了"}}
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        repo.delete.assert_called_once_with("rule-ms")
+
+    def test_deletes_when_the_threshold_is_cleared(self):
+        svc, repo = _rule_service("duration", (None, 0), rules=[_make_rule()])
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        repo.delete.assert_called_once_with("rule-ms")
+
+    def test_keeps_one_and_drops_the_duplicates(self):
+        svc, repo = _rule_service(
+            "duration", (60, 0),
+            rules=[_make_rule("ms-1"), _make_rule("ms-2"), _make_rule("ms-3")],
         )
-        return RuleService(
-            MagicMock(), MagicMock(), runner, AsyncMock(),
-            task_repo=task_repo, task_record_service=svc_mock,
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        assert not repo.create.called
+        assert [c[0][0] for c in repo.delete.call_args_list] == ["ms-2", "ms-3"]
+
+    def test_leaves_other_rules_alone(self):
+        """只管达标那条 —— 误删会话规则会让整个 task 停摆。"""
+        svc, repo = _rule_service(
+            "duration", (60, 0), task_view={"actions": {}},
+            rules=[_legacy_rule("r-session")],
         )
+        svc.reconcile_milestone_rule(TASK_ID)
 
-    def test_milestone_reads_the_referenced_task(self):
-        """跨 task 引用时必须看被引用那个, 看 rule 自己挂的 task 就查错了行。"""
-        svc = self._service("duration", (60, 0))
-        rule = _make_rule(task_id="other_task")
-        rule.task_id = "host_task"
+        assert not repo.delete.called
 
-        assert svc._target_record_task_id(rule) == "other_task"
+    def test_does_nothing_when_the_record_read_fails(self):
+        """读不出来时按"别动"处理 —— 当成"不该有"会在一次抖动里删掉真规则。"""
+        svc, repo = _rule_service("duration", (60, 0), rules=[_make_rule()])
+        svc._task_record_service.read_duration_target_state = MagicMock(
+            side_effect=RuntimeError("db down")
+        )
+        svc.reconcile_milestone_rule(TASK_ID)
 
-    def test_non_milestone_without_target_desc_is_skipped(self):
-        svc = self._service(None, None)
-        rule = _make_rule(source_type="omni")
-        rule.direction = None
-        rule.on_target_desc = None
+        assert not repo.delete.called
+        assert not repo.create.called
 
-        assert svc._target_record_task_id(rule) is None
 
-    def test_rejects_when_referenced_task_has_no_record(self):
+class TestLegacyTargetRecordValidation:
+    """用户在 rule 上填 on_target_desc 那条旧路径的校验。"""
+
+    def test_rule_without_target_desc_is_skipped(self):
+        svc, _ = _rule_service(None, None)
+        assert svc._target_record_task_id(_legacy_rule(on_target_desc=None)) is None
+
+    def test_rejects_when_the_task_has_no_record(self):
         from miloco.middleware.exceptions import ValidationException
 
-        svc = self._service(None, None)
+        svc, _ = _rule_service(None, None)
         with pytest.raises(ValidationException, match="无活跃 record"):
-            svc._validate_target_record(_make_rule())
+            svc._validate_target_record(_legacy_rule())
 
     def test_rejects_when_target_minutes_is_unset(self):
         from miloco.middleware.exceptions import ValidationException
 
-        svc = self._service("duration", (None, 0))
+        svc, _ = _rule_service("duration", (None, 0))
         with pytest.raises(ValidationException, match="target_minutes"):
-            svc._validate_target_record(_make_rule())
+            svc._validate_target_record(_legacy_rule())
 
-    def test_rejects_when_task_has_no_target_action(self):
-        """建得出来但永远不发的配置：边沿被消耗、动作槽是空的 (spec §9)。"""
-        from miloco.middleware.exceptions import ValidationException
+    def test_reconfigure_recomputes_before_reading_the_topology(self):
+        """重新配置必须先重算 —— 晚一步的话代建的那条进不了这次的拓扑。"""
+        svc, repo = _rule_service("duration", (60, 0))
+        svc.reconfigure_task(TASK_ID)
 
-        svc = self._service("duration", (60, 0), task_view={"actions": {}})
-        with pytest.raises(ValidationException, match="先配达标动作"):
-            svc._validate_target_record(_make_rule())
+        assert repo.create.called

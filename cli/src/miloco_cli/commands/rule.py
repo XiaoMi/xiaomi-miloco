@@ -48,14 +48,24 @@ def rule_group():
 
 @rule_group.command("list")
 @click.option("--enabled-only", is_flag=True, help="仅显示已启用的规则")
+@click.option(
+    "--show-milestone", "show_milestone", is_flag=True,
+    help="连服务端维护的达标规则一起显示（默认不显示）",
+)
 @click.option("--pretty", is_flag=True)
-def rule_list(enabled_only, pretty):
-    """列出所有规则。"""
+def rule_list(enabled_only, show_milestone, pretty):
+    """列出所有规则。
+
+    达标规则默认不显示：它由服务端按 task 的达标动作 + duration record 自动维护，
+    不是手工建的。
+    """
     from miloco_cli.client import api_get
 
     params = {}
     if enabled_only:
         params["enabled_only"] = "true"
+    if show_milestone:
+        params["include_milestone"] = "true"
     data = api_get(API_PREFIX, params or None)
     print_result(data, pretty)
 
@@ -330,70 +340,6 @@ def rule_create(
 
     data = api_post(API_PREFIX, payload)
     print_result(data, pretty)
-
-
-# ---------------------------------------------------------------------------
-# create-milestone
-# ---------------------------------------------------------------------------
-
-# 达标不看摄像头、动作也不在 rule 上，所以单开一条命令而不是给 create 加第四种
-# 分支 —— 那会让 --source / --condition / 六个动作 flag 全变成"对这种方向无效"。
-MILESTONE_SENTINEL_DID = "__milestone_no_camera__"
-
-
-@rule_group.command("create-milestone")
-@click.option("--name", required=True, help="规则展示名（自由文本）")
-@click.option(
-    "--task-id", "task_id", required=True,
-    help="达标动作挂在哪个 task 上（读它的 on_target 槽）",
-)
-@click.option(
-    "--target-task", "target_task", default=None,
-    help="看哪个 task 的累计。缺省 = --task-id（跨 task 引用见 spec §6.4）",
-)
-@click.option("--pretty", is_flag=True)
-def rule_create_milestone(name, task_id, target_task, pretty):
-    """创建累计达标规则：被引用 task 的累计时长跨过 target_minutes 时触发一次。
-
-    阈值取 duration record 上的 target_minutes 当前值，不在这条命令里填 ——
-    存两份会在用户改目标后分叉。动作填在 task 的达标槽：
-    ``miloco-cli task set-actions <task_id> --on-target-desc "..."``。
-    """
-    from miloco_cli.client import api_post
-
-    referenced = target_task or task_id
-    payload = {
-        "name": name,
-        "task_id": task_id,
-        # mode 是 NOT NULL 且表达不了 milestone，存一个自洽的占位值。
-        "mode": _DIRECTION_TO_MODE["milestone"],
-        "direction": "milestone",
-        "lifecycle": "permanent",
-        "condition": {
-            "perceive_device_ids": [MILESTONE_SENTINEL_DID],
-            "query": f"[milestone] task {referenced} 累计达标",
-        },
-        "condition_dnf": {
-            "any_of": [[{
-                "source_type": "record",
-                "spec": {
-                    "task_id": referenced,
-                    "kind": "duration",
-                    "op": ">=",
-                },
-                "negate": False,
-            }]],
-        },
-        "actions": [],
-        "action_descriptions": [],
-    }
-    data = api_post(API_PREFIX, payload)
-    print_result(data, pretty)
-
-
-# ---------------------------------------------------------------------------
-# update (partial)
-# ---------------------------------------------------------------------------
 
 
 @rule_group.command("update")
@@ -813,7 +759,6 @@ _DIRECTION_TO_MODE = {
     "enter": "event",
     "exit": "event",
     "session": "state",
-    "milestone": "event",
 }
 _MODE_TO_DIRECTION = {"event": "enter", "state": "session"}
 
