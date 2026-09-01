@@ -481,10 +481,9 @@ def test_enter_rule_writes_only_the_enter_slot(env):
     """
     from miloco.rule.service import _rule_action_slots
 
-    assert set(_rule_action_slots(_single_edge_rule(RuleDirection.ENTER))) == {
-        "on_enter_actions",
-        "on_enter_desc",
-    }
+    slots = _rule_action_slots(_single_edge_rule(RuleDirection.ENTER))
+    # 管辖的那个槽两列一起给 —— 空着的那列也要写, 否则残留值会继续赢
+    assert slots == {"on_enter_actions": [], "on_enter_desc": "1. 做事"}
 
 
 def test_exit_rule_writes_the_exit_slot(env):
@@ -495,18 +494,24 @@ def test_exit_rule_writes_the_exit_slot(env):
     assert slots == {"on_exit_actions": [], "on_exit_desc": "1. 该退了"}
 
 
-def test_session_rule_writes_both_edges_and_target(env):
+def test_session_rule_skips_the_slots_it_left_empty(env):
+    """整个槽都空的不出现在返回里 —— 空不等于"用户要清空"。
+
+    达标文案的正规配法是 task set-actions, rule 行上恒空。无条件透传的话, 改一次
+    会话规则的触发条件就会把 task 上那份清成 None, 连带把代建的达标规则也删掉。
+    on_target 只给 desc 一列: rule 侧压根没有 on_target_actions 字段, 不管辖它。
+    """
     from miloco.rule.service import _rule_action_slots
 
     slots = _rule_action_slots(_rule("[t1] s", on_target_desc="达标"))
-    assert set(slots) == {
-        "on_enter_actions",
-        "on_enter_desc",
-        "on_exit_actions",
-        "on_exit_desc",
-        "on_target_desc",
+    assert slots == {
+        "on_enter_actions": [],
+        "on_enter_desc": "rule 侧",
+        "on_target_desc": "达标",
     }
-    assert slots["on_target_desc"] == "达标"
+
+    only_enter = _rule_action_slots(_rule("[t1] s2"))
+    assert set(only_enter) == {"on_enter_actions", "on_enter_desc"}
 
 
 def test_milestone_rule_does_not_touch_task_slots(env):
@@ -624,6 +629,43 @@ def test_write_through_passes_when_siblings_hold_other_slots(env):
     actions = TaskRepo().get_boundary_actions("t1")
     assert actions["on_enter_desc"] == "1. 进入时播报"
     assert actions["on_exit_desc"] == "1. 退出时播报"
+
+
+def test_write_through_keeps_task_side_slots_the_rule_left_empty(env):
+    """rule 上为空的槽不透传 —— 空不等于"用户要清空"。
+
+    达标文案的正规配法是 task set-actions, 只写 task 列、rule 行恒空。无条件透传
+    等于每改一次这条会话规则就把 task 上那份清成 None, reconcile 接着把代建的达标
+    规则一起删掉 —— 用户只改了一句触发条件, 达标提醒整体消失。
+    """
+    session_rule = _rule("[t1] s", mode=RuleMode.STATE, direction=RuleDirection.SESSION)
+    service, _runner, ids, _ = _build({"on_target_desc": "该休息啦"}, [session_rule])
+
+    service.sync_rule_actions_to_task(RuleRepo().get_by_id(ids[0]))
+
+    actions = TaskRepo().get_boundary_actions("t1")
+    assert actions["on_target_desc"] == "该休息啦"
+    # 规则自己填了的那个槽照旧透传, 不是整体停写
+    assert actions["on_enter_desc"] == "rule 侧"
+
+
+def test_write_through_replaces_the_whole_slot_not_just_the_filled_column(env):
+    """一个槽的两列一起写。
+
+    只写填了的那一列的话, 用户把动作从设备直控改成 Agent 文案时, task 上残留的直控
+    列会继续赢 (选槽时静态优先), CLI 返回成功而行为没变。
+    """
+    rule = _rule("[t1] 进", mode=RuleMode.EVENT, direction=RuleDirection.ENTER)
+    rule.on_enter_desc = None
+    rule.action_descriptions = ["改成让 Agent 播报"]
+    stale_static = [{"did": "d1", "iid": "prop.2.1", "value": True}]
+    service, _runner, ids, _ = _build({"on_enter_actions": stale_static}, [rule])
+
+    service.sync_rule_actions_to_task(RuleRepo().get_by_id(ids[0]))
+
+    actions = TaskRepo().get_boundary_actions("t1")
+    assert actions["on_enter_actions"] == []
+    assert actions["on_enter_desc"] == "1. 改成让 Agent 播报"
 
 
 def test_write_through_still_skips_when_siblings_hold_the_same_slot(env, caplog):
@@ -751,3 +793,51 @@ async def test_delete_task_cancels_the_pending_target_timer(env, monkeypatch):
     _task_service(service).delete_task("t1")
 
     assert runner.record_source._timers == {}
+
+
+# ── PATCH 只透传本次动过的槽 ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_patching_the_condition_leaves_every_action_slot_alone(env, monkeypatch):
+    """只改触发条件, 一个动作槽都不许碰。
+
+    task 侧覆盖过的槽会被 rule 上的旧值顶回去（这里 on_enter）; rule 上恒空的槽会
+    被清成 None（这里 on_target, 它的正规配法是 task set-actions）, reconcile 接着
+    把代建的达标规则一起删掉 —— 用户只改了一句话, 达标提醒整体消失, HTTP 返回 200。
+    """
+    from miloco.rule.schema import RuleConditionUpdate, RuleUpdate
+
+    service, _runner, ids, _ = _build(
+        {**_ACTIONS, "on_target_desc": "该休息啦"}, [_rule("[t1] s")]
+    )
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+
+    await service.patch_rule(
+        ids[0], RuleUpdate(condition=RuleConditionUpdate(query="换个说法"))
+    )
+
+    actions = TaskRepo().get_boundary_actions("t1")
+    assert actions["on_enter_desc"] == "task 侧"
+    assert actions["on_target_desc"] == "该休息啦"
+
+
+@pytest.mark.asyncio
+async def test_clearing_a_rule_side_desc_clears_the_task_column(env, monkeypatch):
+    """显式清空必须透传下去。
+
+    按"槽是空的就不写"处理的话, CLI 报成功、rule get 显示已清空, 而 fire 读的
+    task 列还是旧文案 —— 静默不生效, 正是透传本身要防的那种。
+    """
+    from miloco.rule.schema import RuleUpdate
+
+    session_rule = _rule("[t1] s")
+    session_rule.on_exit_desc = "结束时播报"
+    service, _runner, ids, _ = _build({"on_enter_desc": "task 侧"}, [session_rule])
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+
+    await service.patch_rule(ids[0], RuleUpdate(on_enter_desc=None))
+
+    assert TaskRepo().get_boundary_actions("t1")["on_enter_desc"] is None

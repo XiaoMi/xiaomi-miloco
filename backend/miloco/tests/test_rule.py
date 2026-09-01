@@ -1027,6 +1027,72 @@ class TestRuleServicePatch:
         assert updated_rule.enabled is False
 
     @pytest.mark.asyncio
+    async def test_patch_direction_also_writes_mode(self, service, mock_rule_repo):
+        """两列必须一起动 —— 只改一个会写出读不回来的行。
+
+        Rule 没开 validate_assignment, 逐字段赋值不重跑构造期校验; 写出
+        mode/direction 打架的行之后, 下次构造 Rule 抛 ValidationError, 它是
+        ValueError 子类, 正好落进各读取口的 except: 规则从所有列表里消失。
+        """
+        existing = _make_static_rule(rule_id="r1")
+        mock_rule_repo.get_by_id.return_value = existing
+
+        # 方向和动作形态一起改 —— 单方向与会话两边的动作字段本来就不通用
+        await service.patch_rule(
+            "r1",
+            RuleUpdate(
+                direction=RuleDirection.SESSION,
+                actions=[],
+                on_enter_actions=[_make_action()],
+            ),
+        )
+
+        updated = mock_rule_repo.update.call_args[0][0]
+        assert updated.direction is RuleDirection.SESSION
+        assert updated.mode is RuleMode.STATE
+        # 真正的判据: 这一行还能不能被读回来 (与 _dict_to_rule 同样两列都显式传)
+        Rule(**updated.model_dump())
+
+    @pytest.mark.asyncio
+    async def test_patch_mode_only_also_writes_direction(self, service, mock_rule_repo):
+        """老客户端只发 mode。mode 是有损投影, event 一律回到 enter。"""
+        existing = _make_static_rule(rule_id="r1")
+        existing.direction = RuleDirection.EXIT
+        mock_rule_repo.get_by_id.return_value = existing
+
+        await service.patch_rule("r1", RuleUpdate(mode=RuleMode.EVENT))
+
+        updated = mock_rule_repo.update.call_args[0][0]
+        assert updated.direction is RuleDirection.ENTER
+        assert updated.mode is RuleMode.EVENT
+
+    @pytest.mark.asyncio
+    async def test_patch_conflicting_mode_and_direction_is_rejected(
+        self, service, mock_rule_repo
+    ):
+        mock_rule_repo.get_by_id.return_value = _make_static_rule(rule_id="r1")
+        with pytest.raises(ValidationException, match="direction=exit 对应 mode=event"):
+            await service.patch_rule(
+                "r1",
+                RuleUpdate(mode=RuleMode.STATE, direction=RuleDirection.EXIT),
+            )
+        mock_rule_repo.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_patch_enter_to_session_is_rejected_not_written(
+        self, service, mock_rule_repo
+    ):
+        """enter → session 真的不合法(动作字段两边形态不同), 要当场拒。
+
+        修之前 mode 留在 event, 一致性校验按 event 矩阵放行, 于是写出一行读不回来
+        的数据而 HTTP 返回 200。
+        """
+        mock_rule_repo.get_by_id.return_value = _make_static_rule(rule_id="r1")
+        with pytest.raises(ValidationException, match="must not set actions"):
+            await service.patch_rule("r1", RuleUpdate(direction=RuleDirection.SESSION))
+        mock_rule_repo.update.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_patch_not_found(self, service, mock_rule_repo):
         mock_rule_repo.get_by_id.return_value = None
         with pytest.raises(ResourceNotFoundException):

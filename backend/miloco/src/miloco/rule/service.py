@@ -40,6 +40,8 @@ from miloco.rule.record_source import (
 )
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
+    _DIRECTION_TO_MODE,
+    _MODE_TO_DIRECTION,
     SCENE_IID,
     ConditionItem,
     Rule,
@@ -231,42 +233,66 @@ async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
     )
 
 
-def _rule_action_slots(rule: Rule) -> dict[str, Any]:
-    """rule 的动作字段 → 它**管辖**的那些 task 槽。与 v2→v3 迁移同一套口径。
+def _rule_action_slots(
+    rule: Rule, changed_fields: set[str] | None = None
+) -> dict[str, Any]:
+    """rule 的动作字段 → 它**管辖**的那些 task 槽, 按槽整体给。
 
-    只返回管辖的槽。不管辖的不出现在返回里, 调用方才不会把 ``task set-actions``
-    写进去的槽覆盖成空 —— 一条 enter 型 rule 没有理由清掉 task 的达标动作。
+    管辖的单位是槽 (on_enter / on_exit / on_target) 而不是单个列。一个槽有"设备
+    直控"和"交给 Agent"两列且互斥, 所以只要管辖这个槽就把两列一起写 —— 只写填了
+    的那一列的话, 用户把动作从直控改成 Agent 文案时, task 上残留的直控列会继续赢
+    (选槽时静态优先), 这次改动静默失效。
+
+    ``changed_fields`` 是本次 PATCH 显式动过的 rule 字段名。给了就只透传被动过的
+    槽 —— 别的槽 rule 上为空不等于用户要清空: 新模型里动作的正规配法是只写 task 列、
+    rule 行一直空着, 无条件透传等于改一次触发条件就把 task 上那份清成 None, 还连带
+    把代建的达标规则 reconcile 掉。反过来, 只要这个槽真被动过就照写, 哪怕新值是空
+    —— 否则 ``rule update --clear on_enter_desc`` 会 CLI 报成功而 task 照旧执行。
+    不给 (create / 整体替换) 则只透传自己填了值的槽, 那两条路上没有"清空"可言。
 
     单方向的 rule (enter / exit) 只有一个边沿, 动作就填在 ``actions`` /
     ``action_descriptions`` 上, 不区分进出; 方向决定它落 on_enter 还是 on_exit。
     多条 agent 回调描述合成一条时的编号规则必须与 runner 的选槽逻辑逐字一致。
     """
     direction = rule.resolved_direction
-    if direction is RuleDirection.SESSION:
-        return {
-            "on_enter_actions": [
-                a.model_dump(mode="json") for a in rule.on_enter_actions
-            ],
-            "on_enter_desc": rule.on_enter_desc,
-            "on_exit_actions": [
-                a.model_dump(mode="json") for a in rule.on_exit_actions
-            ],
-            "on_exit_desc": rule.on_exit_desc,
-            "on_target_desc": rule.on_target_desc,
-        }
     if direction is RuleDirection.MILESTONE:
-        # 达标动作在 task 列上, milestone rule 自己的动作字段恒空 —— 透传只会把
-        # task 上那份清掉。
+        # 达标动作在 task 列上, milestone rule 自己的动作字段恒空。
         return {}
-    prefix = "on_exit" if direction is RuleDirection.EXIT else "on_enter"
-    joined = (
-        "\n".join(f"{i + 1}. {d}" for i, d in enumerate(rule.action_descriptions))
-        or None
-    )
-    return {
-        f"{prefix}_actions": [a.model_dump(mode="json") for a in rule.actions],
-        f"{prefix}_desc": joined,
-    }
+    if direction is RuleDirection.SESSION:
+        # actions 为 None = rule 侧表达不了这一列, 别写它; 为 [] = 表达得了但是空的。
+        owned: tuple[tuple[str, list[Any] | None, str | None, set[str]], ...] = (
+            (
+                "on_enter",
+                rule.on_enter_actions,
+                rule.on_enter_desc,
+                {"on_enter_actions", "on_enter_desc"},
+            ),
+            (
+                "on_exit",
+                rule.on_exit_actions,
+                rule.on_exit_desc,
+                {"on_exit_actions", "on_exit_desc"},
+            ),
+            ("on_target", None, rule.on_target_desc, {"on_target_desc"}),
+        )
+    else:
+        prefix = "on_exit" if direction is RuleDirection.EXIT else "on_enter"
+        joined = "\n".join(
+            f"{i + 1}. {d}" for i, d in enumerate(rule.action_descriptions)
+        )
+        owned = ((prefix, rule.actions, joined, {"actions", "action_descriptions"}),)
+
+    slots: dict[str, Any] = {}
+    for name, actions, desc, source_fields in owned:
+        if changed_fields is None:
+            if not (actions or desc):
+                continue
+        elif not changed_fields & source_fields:
+            continue
+        if actions is not None:
+            slots[f"{name}_actions"] = [a.model_dump(mode="json") for a in actions]
+        slots[f"{name}_desc"] = desc or None
+    return slots
 
 
 def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> None:
@@ -672,11 +698,23 @@ class RuleService:
         if "task_id" in fields and update.task_id is not None:
             existing.task_id = update.task_id
 
-        if "mode" in fields and update.mode is not None:
-            existing.mode = update.mode
-
-        if "direction" in fields and update.direction is not None:
-            existing.direction = update.direction
+        # mode 与 direction 是同一个语义的两种存储形态, 必须一起定。Rule 没开
+        # validate_assignment, 逐字段赋值不会重跑构造期那条一致性校验 —— 只改一个
+        # 就写出互相矛盾的行, 下次从库里构造 Rule 时校验器抛 ValidationError, 它是
+        # ValueError 子类, 正好落进各读取口的 except: 规则从所有列表里消失。
+        if {"mode", "direction"} & fields:
+            new_direction = update.direction
+            if new_direction is None and update.mode is not None:
+                new_direction = _MODE_TO_DIRECTION[update.mode.value]
+            if new_direction is not None:
+                expected_mode = _DIRECTION_TO_MODE[new_direction]
+                if update.mode is not None and update.mode is not expected_mode:
+                    raise ValidationException(
+                        f"direction={new_direction.value} 对应 "
+                        f"mode={expected_mode.value}, 收到 mode={update.mode.value}"
+                    )
+                existing.direction = new_direction
+                existing.mode = expected_mode
 
         if "lifecycle" in fields and update.lifecycle is not None:
             existing.lifecycle = update.lifecycle
@@ -760,7 +798,8 @@ class RuleService:
         success = self._repo.update(existing)
         if success:
             self._runner.add_rule(existing)
-            self.sync_rule_actions_to_task(existing)
+            # 带上这次动过的字段: 只透传被动过的槽, 别的槽保留 task 侧那份
+            self.sync_rule_actions_to_task(existing, fields)
             self.reconfigure_task(existing.task_id)
         return success
 
@@ -822,13 +861,18 @@ class RuleService:
 
     # ---- 重新配置路径 (§19.5) ----
 
-    def sync_rule_actions_to_task(self, rule: Rule) -> None:
+    def sync_rule_actions_to_task(
+        self, rule: Rule, changed_fields: set[str] | None = None
+    ) -> None:
         """把 rule 上的动作写进它所属 task 的边界动作列。
 
         §10.3 阶段 A 说「CLI 加新 flag，旧 flag 仍可用」——**旧 flag 仍可用意味着
         它的写入必须落到新位置**。读侧的双路回退只解决了「读哪一份」, 写侧不透传
         的话, 迁移后用现有 CLI 改动作会静默不生效: rule 列改了、fire 读的是 task
         列的旧值, 而 CLI 返回成功、``rule get`` 也显示新值。
+
+        ``changed_fields`` 传 PATCH 显式动过的字段名, 决定透传哪几个槽 (见
+        ``_rule_action_slots``)。不传按"只写自己填了值的槽"处理。
 
         一 task 多 rule 且动作不一致时跳过并告警 —— 口径与迁移一致 (§10.1): 从
         一条 rule 单向覆盖会把另一条的动作悄悄冲掉。
@@ -841,7 +885,7 @@ class RuleService:
         # 达标通知的 task 都会走进下面那条跳过分支, 之后每一次改动作都只写 rule 行、
         # 不写 task 列, 而 fire 读的正是 task 列: CLI 返回成功、rule get 显示新值、
         # 实际行为不变。
-        slots = _rule_action_slots(rule)
+        slots = _rule_action_slots(rule, changed_fields)
         if not slots:
             return
 
