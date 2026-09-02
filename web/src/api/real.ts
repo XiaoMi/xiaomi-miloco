@@ -62,7 +62,6 @@ interface MiotStatus {
    *  到期时 is_bound 仍是 true，只看它会漏报。老后端不返回此字段。 */
   auth_state?: "ok" | "degraded";
   auth_degraded_since?: number | null;
-  auth_error_code?: number | null;
 }
 
 // 太短 / 全标点 / 数字 ID / 全是零宽字符 的 nickname 不算可读名字

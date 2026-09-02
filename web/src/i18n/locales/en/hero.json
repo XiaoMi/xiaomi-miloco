@@ -73,6 +73,7 @@
     "miotNotConnected": "Xiaomi Home not connected",
     "miotCtaConnect": "Connect now",
     "miotAuthDegraded": "Mi Home authorization expired · device control not guaranteed",
-    "miotAuthDegradedHint": "Perception, recording and rules keep running. Only outgoing actions like switching lights or running scenes are affected; they are recorded as executed during an authorization outage. Click Rebind to re-authorize."
+    "miotAuthDegradedHint": "Perception, recording and rules keep running. Only outgoing actions like switching lights or running scenes are affected; they are recorded as executed during an authorization outage. Click Rebind to re-authorize.",
+    "miotAuthDegradedSince": "Perception, recording and rules keep running. Only outgoing actions like switching lights or running scenes are affected; they are recorded as executed during an authorization outage. Click Rebind to re-authorize. Invalid since {{since}}."
   }
 }

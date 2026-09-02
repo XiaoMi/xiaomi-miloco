@@ -468,6 +468,8 @@ class MIoTClient:
         self._oauth_info = await self._oauth_client.get_access_token_async(code=code)
         # 授权码已被消费，先落盘再做副作用——理由同 refresh_access_token_async。
         self.__persist_oauth_info(persist, "authorize")
+        # 取身份前必须先把新令牌推进 HTTP 客户端——那一步是真实的 HTTP 请求。
+        self.__apply_token_to_http_header()
         await self.get_user_info_async()
         self.__persist_oauth_info(persist, "authorize:user_info")
         # 重新授权可能换了账号:账号级主题 user/{uid}/g_op/* 只在重建时发出,
@@ -503,6 +505,8 @@ class MIoTClient:
             oauth_info.user_info = self._oauth_info.user_info
         self._oauth_info = oauth_info
         self.__persist_oauth_info(persist, "refresh")
+        # 同上：下面可能要取身份，先把新令牌推进去。
+        self.__apply_token_to_http_header()
 
         if oauth_info.user_info is None:
             # 首次刷新时没有可继承的 user_info，补拉一次；拿到后再存一遍，
@@ -528,6 +532,26 @@ class MIoTClient:
         except Exception as e:  # noqa: BLE001 - 落盘失败不应中断刷新
             _LOGGER.error("persist oauth info failed at %s: %s", stage, e)
 
+    def __apply_token_to_http_header(self) -> None:
+        """把新令牌推进 HTTP 客户端。
+
+        纯内存赋值，不发请求、不进原生库，因此**必须**排在 get_user_info_async
+        之前：取账号身份本身是一次 HTTP 请求，而它读的正是这里写入的令牌。排在
+        后面的话，首次授权时那里还是空串（客户端构造时传的就是空），uid 换取会
+        撞上「access token is empty」的硬校验，把一次已经成功、授权码已被消费的
+        授权报成失败；换账号重绑时更隐蔽——它会拿回**旧账号**的 uid，让「是否同
+        一账号」的判定恒真，于是该清的接入范围配置永远不清。
+
+        同时也是 __apply_access_token_async 的第一步，重复调用无副作用。
+        """
+        token = self._oauth_info.access_token if self._oauth_info else None
+        if not token:
+            return
+        try:
+            self._http_client.update_http_header(access_token=token)
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.error("update http header failed: %s", e)
+
     async def __apply_access_token_async(self, *, rebuild_mips: bool = False) -> None:
         """把新的 access_token 推给各个下游持有者。
 
@@ -544,10 +568,7 @@ class MIoTClient:
         token = self._oauth_info.access_token if self._oauth_info else None
         if not token:
             return
-        try:
-            self._http_client.update_http_header(access_token=token)
-        except Exception as e:  # noqa: BLE001
-            _LOGGER.error("update http header failed: %s", e)
+        self.__apply_token_to_http_header()
         # 与本文件既有写法一致地判空——这里原先没判，而 _camera_client 确实
         # 会被置 None，是刷新链路上最容易踩的一颗雷。
         if self._camera_client is not None:

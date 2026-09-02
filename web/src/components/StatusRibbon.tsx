@@ -10,6 +10,7 @@
 
 import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { relativeTime } from "@/lib/relativeTime";
 import type { HomeStatus } from "@/lib/types";
 
 type Tone = "ok" | "info" | "warn" | "danger" | "brand";
@@ -191,7 +192,17 @@ export function StatusRibbon({
       <StatusItem
         tone="danger"
         label={
-          <span title={t("hero.miotAuthDegradedHint")}>
+          <span
+            title={
+              // 有起点就说明「自 X 时起」——失效是永久状态，住户想知道是从
+              // 什么时候开始的（命令行体检也报这个时间，两处口径一致）。
+              status.miot.authDegradedSince
+                ? t("hero.miotAuthDegradedSince", {
+                    since: relativeTime(status.miot.authDegradedSince * 1000),
+                  })
+                : t("hero.miotAuthDegradedHint")
+            }
+          >
             {t("hero.miotAuthDegraded")}
           </span>
         }
