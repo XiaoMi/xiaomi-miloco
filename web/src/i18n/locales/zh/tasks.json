@@ -36,7 +36,6 @@
     "rulesTitle": "驱动规则",
     "triggerCondition": "触发条件",
     "ruleActions": "执行动作",
-    "ruleActionsEmpty": "无动作",
     "taskActionsTitle": "执行动作",
     "slotEnter": "进入",
     "slotExit": "退出",

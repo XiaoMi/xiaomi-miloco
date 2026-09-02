@@ -798,7 +798,7 @@ export interface Task {
   runtimeState: "off" | "on";
   // 多条规则的 task 动作只在这里 —— 规则侧的动作 flag 按设计不透传，
   // 那种 task 的 ruleBriefs.actionsDesc 是空的。
-  actions: TaskBoundaryActions | null;
+  actions: TaskBoundaryActions;
 }
 
 // ── 升级检测 / 一键升级（对齐 backend /api/admin/upgrade/*、/version） ──

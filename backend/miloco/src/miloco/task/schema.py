@@ -110,7 +110,7 @@ class TaskFullView(BaseModel):
     cron_refs: list[CronRef] = Field(default_factory=list)
     # 多条 rule 的 task 动作只存在这里 —— rule 侧的动作 flag 按设计不透传(从一条
     # rule 单向覆盖会冲掉另一条), 所以那种 task 的 rule_briefs.actions_desc 是空的。
-    actions: TaskBoundaryActions | None = None
+    actions: TaskBoundaryActions
 
 
 class PendingOp(BaseModel):

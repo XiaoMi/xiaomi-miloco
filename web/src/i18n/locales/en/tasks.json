@@ -36,7 +36,6 @@
     "rulesTitle": "Driving rules",
     "triggerCondition": "Trigger",
     "ruleActions": "Actions",
-    "ruleActionsEmpty": "No actions",
     "taskActionsTitle": "Actions",
     "slotEnter": "On enter",
     "slotExit": "On exit",

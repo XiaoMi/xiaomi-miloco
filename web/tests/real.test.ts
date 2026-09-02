@@ -687,6 +687,14 @@ describe("realListTasks — summary 契约", () => {
 
     expect(task.runtimeState).toBe("off");
     expect(task.ruleBriefs[0].direction).toBe("enter");
-    expect(task.actions).toBeNull();
+    // 归一成"六个槽全空"而不是 null —— 调用方据此隐藏整个动作分区
+    expect(task.actions).toEqual({
+      onEnterDesc: null,
+      onExitDesc: null,
+      onTargetDesc: null,
+      onEnterActionCount: 0,
+      onExitActionCount: 0,
+      onTargetActionCount: 0,
+    });
   });
 });

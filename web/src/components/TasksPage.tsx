@@ -370,21 +370,12 @@ function RuleBriefCard({
 }
 
 // task 级动作：三个槽属于 task 而不属于任何单条规则, 所以独立成块放在规则列表上方。
+// 一个槽都没配时整个分区不渲染, 判断在调用处 —— 这里不再有空态分支
 function TaskActionsBlock({
-  actions,
-  t,
+  rows,
 }: {
-  actions: TaskBoundaryActions;
-  t: TFn;
+  rows: { key: string; label: string; text: string }[];
 }) {
-  const rows = slotRows(actions, t);
-  if (rows.length === 0) {
-    return (
-      <div className="text-caption text-text-tertiary">
-        {t("tasks.ruleActionsEmpty")}
-      </div>
-    );
-  }
   return (
     <div className="rounded-xl bg-bg-primary border border-border divide-y divide-border">
       {rows.map((row) => (
@@ -439,6 +430,7 @@ function TaskDetailSheet({
   });
 
   const paused = task.status === "paused";
+  const taskActionRows = slotRows(task.actions, t);
   const ruleDraft = (r: TaskRuleBrief) => ruleDrafts[r.ruleId] ?? r.query;
 
   // 一次保存整屉改动：描述 → PATCH /api/tasks/{id}；每条触发条件 → PATCH /api/rules/{id}
@@ -604,9 +596,9 @@ function TaskDetailSheet({
             </Section>
           )}
 
-          {task.actions && (
+          {taskActionRows.length > 0 && (
             <Section title={t("tasks.taskActionsTitle")}>
-              <TaskActionsBlock actions={task.actions} t={t} />
+              <TaskActionsBlock rows={taskActionRows} />
             </Section>
           )}
 

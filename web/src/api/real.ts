@@ -2086,16 +2086,16 @@ export async function realListTasks(): Promise<Task[]> {
       direction: b.direction ?? "enter",
       actionsDesc: b.actions_desc ?? [],
     })),
-    actions: t.actions
-      ? {
-          onEnterDesc: t.actions.on_enter_desc ?? null,
-          onExitDesc: t.actions.on_exit_desc ?? null,
-          onTargetDesc: t.actions.on_target_desc ?? null,
-          onEnterActionCount: (t.actions.on_enter_actions ?? []).length,
-          onExitActionCount: (t.actions.on_exit_actions ?? []).length,
-          onTargetActionCount: (t.actions.on_target_actions ?? []).length,
-        }
-      : null,
+    // 六个槽恒有。后端漏传时归一成"全空"而不是 null —— 调用方据此决定整个分区
+    // 渲不渲染, 留一个可空类型只会换来一句永真的判断
+    actions: {
+      onEnterDesc: t.actions?.on_enter_desc ?? null,
+      onExitDesc: t.actions?.on_exit_desc ?? null,
+      onTargetDesc: t.actions?.on_target_desc ?? null,
+      onEnterActionCount: (t.actions?.on_enter_actions ?? []).length,
+      onExitActionCount: (t.actions?.on_exit_actions ?? []).length,
+      onTargetActionCount: (t.actions?.on_target_actions ?? []).length,
+    },
     record: t.record
       ? {
           kind: t.record.kind,

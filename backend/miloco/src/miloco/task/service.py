@@ -187,9 +187,9 @@ class TaskService:
             last_decision=self._last_decision(raw["task_id"]),
             rule_briefs=rule_briefs,
             cron_refs=[CronRef(**c) for c in raw["cron_refs"]],
-            actions=(
-                TaskBoundaryActions(**raw["actions"]) if raw.get("actions") else None
-            ),
+            # 六个槽跟基础字段同一行取出来, 恒有 —— 之前写成可选的, 前端那句
+            # if (task.actions) 就成了永真判断, 拿不到"这个 task 没配动作"这件事。
+            actions=TaskBoundaryActions(**raw["actions"]),
         )
 
     def _runtime_state(self, task_id: str) -> str:
