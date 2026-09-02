@@ -292,13 +292,6 @@ class TestRuleRepoQuery:
         assert len(enabled) == 1
         assert enabled[0].name == _name("on")
 
-    def test_count_all_and_enabled(self, rule_repo):
-        rule_repo.create(_make_static_rule(name=_name("1"), enabled=True))
-        rule_repo.create(_make_static_rule(name=_name("2"), enabled=True))
-        rule_repo.create(_make_static_rule(name=_name("3"), enabled=False))
-        assert rule_repo.count_all() == 3
-        assert rule_repo.count_enabled() == 2
-
 
 # ============================================================
 # RuleRepo: 写操作（update / delete）

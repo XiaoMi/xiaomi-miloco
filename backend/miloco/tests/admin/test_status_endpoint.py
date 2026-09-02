@@ -32,7 +32,7 @@ def client():
 def test_enabled_rules_uses_effective_enablement(client, monkeypatch):
     """两个口径给出不同的数, 断言取的是有效启用那个。"""
     rule_service = MagicMock()
-    rule_service._repo.get_all = MagicMock(return_value=[_rule(), _rule(), _rule()])
+    rule_service.get_all_rules = AsyncMock(return_value=[_rule(), _rule(), _rule()])
     rule_service.get_effectively_enabled_rules = AsyncMock(return_value=[_rule()])
 
     manager = MagicMock()
@@ -49,7 +49,7 @@ def test_enabled_rules_uses_effective_enablement(client, monkeypatch):
 def test_enabled_rules_excludes_the_auto_built_milestone_rule(client, monkeypatch):
     """代建的达标规则不计入 —— 与 GET /rules 的默认口径一致。"""
     rule_service = MagicMock()
-    rule_service._repo.get_all = MagicMock(
+    rule_service.get_all_rules = AsyncMock(
         return_value=[
             _rule(RuleDirection.ENTER),
             _rule(RuleDirection.EXIT),
@@ -79,7 +79,7 @@ def test_total_rules_excludes_it_too(client, monkeypatch):
     了" —— 而那条规则用户在任何界面都找不到, 正是排它想消灭的那种无从解释的差额。
     """
     rule_service = MagicMock()
-    rule_service._repo.get_all = MagicMock(
+    rule_service.get_all_rules = AsyncMock(
         return_value=[_rule(RuleDirection.ENTER), _rule(RuleDirection.MILESTONE)]
     )
     rule_service.get_effectively_enabled_rules = AsyncMock(

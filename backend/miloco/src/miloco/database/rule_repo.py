@@ -349,26 +349,6 @@ class RuleRepo:
             logger.error("Error checking rule name: name=%s, error=%s", name, e)
             return False
 
-    def count_all(self) -> int:
-        """Get total rule count"""
-        try:
-            sql = "SELECT COUNT(*) as count FROM rule"
-            results = self.db_connector.execute_query(sql)
-            return results[0]["count"] if results else 0
-        except (ValueError, TypeError, KeyError, AttributeError) as e:
-            logger.error("Error counting rules: error=%s", e)
-            return 0
-
-    def count_enabled(self) -> int:
-        """Get enabled rule count"""
-        try:
-            sql = "SELECT COUNT(*) as count FROM rule WHERE enabled = 1"
-            results = self.db_connector.execute_query(sql)
-            return results[0]["count"] if results else 0
-        except (ValueError, TypeError, KeyError, AttributeError) as e:
-            logger.error("Error counting enabled rules: error=%s", e)
-            return 0
-
     def list_by_task(self, task_id: str) -> list[Rule]:
         """List all rules under a task (v2: rule.task_id 是权威归属源).
 

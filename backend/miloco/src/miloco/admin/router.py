@@ -68,7 +68,7 @@ async def get_system_status(current_user: str = Depends(verify_token)):
         # 何界面都找不到。
         total_rules = sum(
             1
-            for r in rule_service._repo.get_all()
+            for r in await rule_service.get_all_rules()
             if r.resolved_direction is not RuleDirection.MILESTONE
         )
         enabled_rules = sum(
