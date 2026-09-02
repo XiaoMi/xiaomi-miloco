@@ -135,10 +135,6 @@ def _validate_rule_consistency(rule: Rule) -> None:
             raise ValidationException(
                 "event mode: actions and action_descriptions are mutually exclusive"
             )
-        if not rule.actions and not rule.action_descriptions:
-            raise ValidationException(
-                "event mode requires one of actions / action_descriptions"
-            )
     else:  # state mode -- 每个方向独立按字段非空选择执行路径
         if rule.actions or rule.action_descriptions:
             raise ValidationException(
@@ -454,6 +450,33 @@ class RuleService:
         if error and task_rule_set_error(before, has_target) is None:
             raise ValidationException(error)
 
+    def _validate_action_reachable(self, rule: Rule) -> None:
+        """enter rule 必须有动作可落 —— 自己带的, 或 task on_enter 槽里已有的。
+
+        动作已归 task, rule 侧必填是 v2 遗留: 多条 enter 共用一份动作时, 第二条起
+        只能写一段被 ``sync_rule_actions_to_task`` 丢弃的文案。exit 不查 —— 无动作
+        的 exit 只推状态, 是让 task 可重入的正常配置。
+        """
+        if rule.resolved_direction is not RuleDirection.ENTER:
+            return
+        if rule.actions or rule.action_descriptions:
+            return
+        try:
+            slots = (self._task_repo.get_full_view(rule.task_id) or {}).get(
+                "actions"
+            ) or {}
+        except Exception as e:  # noqa: BLE001
+            # 读不出来时放行等于让哑规则建成, 与达标那道闸的默认方向相反。
+            raise BusinessException(
+                f"读 task {rule.task_id} 的动作配置失败, 无法确认 enter 规则有动作可落"
+            ) from e
+        if not (slots.get("on_enter_actions") or slots.get("on_enter_desc")):
+            raise ValidationException(
+                "direction=enter 的规则没有动作可落: 自己带 --action / "
+                "--action-desc, 或先配 task 的进入动作: "
+                'miloco-cli task set-actions <task_id> --on-enter-desc "..."'
+            )
+
     def _task_has_target_action(self, task_id: str) -> bool:
         """task 配没配达标动作。读不出来按"没配"处理 —— 这道闸不该把 rule 写入带崩。"""
         try:
@@ -462,6 +485,25 @@ class RuleService:
             logger.warning("读 task %s 的达标配置失败, 这次按未配达标处理", task_id)
             return False
         return bool(slots.get("on_target_actions") or slots.get("on_target_desc"))
+
+    def require_enter_rules_have_own_action(self, task_id: str) -> None:
+        """清空 task 的进入动作前先确认名下没有靠它的 enter 规则。
+
+        判据与建 rule 时同一份 (``_validate_action_reachable``): 抽走这一份动作,
+        那些不带动作的 enter 规则会照常判条件、照常推状态, 只是什么都不做。
+        """
+        naked = [
+            r.id
+            for r in self._repo.list_by_task(task_id)
+            if r.resolved_direction is RuleDirection.ENTER
+            and not (r.actions or r.action_descriptions)
+        ]
+        if naked:
+            raise ValidationException(
+                f"task {task_id} 名下有不带动作的 enter 规则 ({', '.join(naked)}), "
+                "清空进入动作会让它们什么都不做。先给这些规则装上自己的动作, "
+                "或把它们删掉"
+            )
 
     def require_exit_path_for_target(self, task_id: str) -> None:
         """配达标动作前先确认 task 有出路径。判据与建 rule 时同一份。
@@ -610,6 +652,7 @@ class RuleService:
         await self._validate_perceive_devices_of(rule)
         self._validate_target_record(rule)
         self._validate_task_rule_set(rule)
+        self._validate_action_reachable(rule)
         await self._validate_scene_ids(rule)
 
         rule_id = self._repo.create(rule)
@@ -684,6 +727,7 @@ class RuleService:
         await self._validate_perceive_devices_of(rule)
         self._validate_target_record(rule)
         self._validate_task_rule_set(rule, previous)
+        self._validate_action_reachable(rule)
         await self._validate_scene_ids(rule)
 
         success = self._repo.update(rule)
@@ -828,6 +872,7 @@ class RuleService:
         _validate_rule_consistency(existing)
         self._validate_target_record(existing)
         self._validate_task_rule_set(existing, previous)
+        self._validate_action_reachable(existing)
         # 与上面 perceive_device_ids 同口径:只校验这次 PATCH 真的动了的东西。
         # 无条件跑的话,场景被删 / 家庭被关之后连 `rule disable`(它本身就是一次
         # PATCH)都会 400 —— 规则坏掉的那一刻正好把「先关掉它」这条路堵死。
@@ -984,8 +1029,8 @@ class RuleService:
         ``changed_fields`` 传 PATCH 显式动过的字段名, 决定透传哪几个槽 (见
         ``_rule_action_slots``)。不传按"只写自己填了值的槽"处理。
 
-        一 task 多 rule 且动作不一致时跳过并告警 —— 口径与迁移一致 (§10.1): 从
-        一条 rule 单向覆盖会把另一条的动作悄悄冲掉。
+        多条 rule 争同一个槽时跳过并告警 —— 从一条 rule 单向覆盖会把另一条的动作
+        悄悄冲掉。不同方向的 rule 各写各的槽, 不算争。
 
         阶段 B 动作 flag 落到 task 上之后这个函数整体删除。
         """

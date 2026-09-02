@@ -638,10 +638,11 @@ def test_full_view_exposes_rule_direction(service):
     assert [b.direction for b in view.rule_briefs] == ["exit"]
 
 
-def test_set_actions_clearing_a_static_slot_writes_empty_list(service):
+def test_set_actions_clearing_a_static_slot_writes_empty_list(real_db):
     """``*_actions`` 三列是 NOT NULL —— 清空它们只能写空列表, 写 null 会直接崩。"""
     from miloco.task.schema import TaskActionsUpdateRequest
 
+    service = _service_with_rule_stub(None)
     _mk_task(service)
     service.set_boundary_actions(
         "t1",
@@ -654,6 +655,49 @@ def test_set_actions_clearing_a_static_slot_writes_empty_list(service):
     service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_actions=None))
 
     assert service.get_full_view("t1").actions.on_enter_actions == []
+
+
+def _mk_enter_rule(task_id="t1", name=None, with_action=True):
+    rule = Rule(
+        name=name or f"[{task_id}] 进",
+        task_id=task_id,
+        mode=RuleMode.EVENT,
+        lifecycle=RuleLifecycle.PERMANENT,
+        condition=RuleCondition(perceive_device_ids=["cam1"], query="有人"),
+        action_descriptions=["开灯"] if with_action else [],
+    )
+    rule.direction = RuleDirection.ENTER
+    RuleRepo().create(rule)
+
+
+def test_set_actions_rejects_clearing_enter_action_needed_by_a_rule(real_db):
+    """不带动作的 enter 规则靠的就是这一份 —— 抽走它规则会照跑但什么都不做。"""
+    from miloco.middleware.exceptions import ValidationException
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub(None)
+    _mk_task(service)
+    service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc="开灯"))
+    _mk_enter_rule(with_action=False)
+
+    with pytest.raises(ValidationException, match="不带动作的 enter 规则"):
+        service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc=None))
+
+    assert service.get_full_view("t1").actions.on_enter_desc == "开灯"
+
+
+def test_set_actions_allows_clearing_enter_action_when_rules_carry_their_own(real_db):
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub(None)
+    _mk_task(service)
+    service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc="开灯"))
+    _mk_enter_rule(with_action=True)
+
+    assert service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_desc=None)
+    )
+    assert service.get_full_view("t1").actions.on_enter_desc is None
 
 
 # ── 配达标动作要先有 duration record + 阈值 ──────────────────────────────

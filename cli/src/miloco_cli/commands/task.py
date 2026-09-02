@@ -172,7 +172,10 @@ _ACTION_SLOTS = (
     "clear_slots",
     multiple=True,
     type=click.Choice(_ACTION_SLOTS),
-    help="清空指定槽（可重复）。与同名赋值 flag 互斥",
+    help=(
+        "清空指定槽（可重复）。与同名赋值 flag 互斥；"
+        "名下有不带动作的 enter 规则时清 on_enter 会被拒"
+    ),
 )
 @click.option("--pretty", is_flag=True)
 def task_set_actions(
@@ -189,8 +192,8 @@ def task_set_actions(
     """改 task 的边界动作（进入 / 退出 / 达标）。
 
     只有传了的槽会被改，其余保持原样；清空某个槽用 --clear。
-    一个 task 下有多条 rule 时，rule 侧的动作 flag 不会透传到 task
-    （从一条 rule 单向覆盖会冲掉另一条的动作），只能从这里改。
+    多条 rule 争同一个槽时（同方向 ≥2 条），rule 侧的动作 flag 不透传到 task，
+    只能从这里改；不同方向的 rule 各写各的槽，仍可从 rule 侧装。
     """
     from miloco_cli.client import api_patch
     from miloco_cli.commands.rule import _parse_actions

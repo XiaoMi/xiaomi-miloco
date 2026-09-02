@@ -873,12 +873,61 @@ class TestRuleServiceCreate:
             await service.create_rule(rule)
 
     @pytest.mark.asyncio
-    async def test_create_event_without_any_action_raises(self, service):
+    async def test_create_enter_without_action_raises_when_task_slot_empty(
+        self, service
+    ):
         rule = _make_static_rule(rule_id="", actions=[])
         with pytest.raises(
             ValidationException,
-            match=r"event mode requires one of actions / action_descriptions",
+            match=r"direction=enter 的规则没有动作可落",
         ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_create_enter_without_action_ok_when_task_slot_filled(
+        self, service, mock_task_repo
+    ):
+        """多条 enter 共用 task 上那一份动作 —— 第二条起本来就不该带自己的动作。"""
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_enter_desc": "开灯"}
+        }
+        rule = _make_static_rule(rule_id="", actions=[])
+        assert await service.create_rule(rule) == "new-rule-id"
+
+    @pytest.mark.asyncio
+    async def test_create_enter_reads_enter_slot_not_exit_slot(
+        self, service, mock_task_repo
+    ):
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_exit_desc": "关灯"}
+        }
+        rule = _make_static_rule(rule_id="", actions=[])
+        with pytest.raises(
+            ValidationException,
+            match=r"direction=enter 的规则没有动作可落",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_create_exit_without_action_ok(self, service, mock_rule_repo):
+        """不带动作的 exit 只推状态, 是让 task 可重入的正常配置。"""
+        mock_rule_repo.list_by_task.return_value = [_make_static_rule()]
+        rule = Rule(
+            id="",
+            name=_name(TASK_ID, "exit"),
+            task_id=TASK_ID,
+            direction=RuleDirection.EXIT,
+            condition=_make_condition(),
+        )
+        assert await service.create_rule(rule) == "new-rule-id"
+
+    @pytest.mark.asyncio
+    async def test_create_enter_rejects_when_task_view_unreadable(
+        self, service, mock_task_repo
+    ):
+        mock_task_repo.get_full_view.side_effect = RuntimeError("db gone")
+        rule = _make_static_rule(rule_id="", actions=[])
+        with pytest.raises(BusinessException, match=r"无法确认 enter 规则有动作可落"):
             await service.create_rule(rule)
 
     @pytest.mark.asyncio

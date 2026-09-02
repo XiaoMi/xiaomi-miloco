@@ -96,8 +96,8 @@ class TaskService:
     def set_boundary_actions(self, task_id: str, req: TaskActionsUpdateRequest) -> bool:
         """写 task 的边界动作槽 —— 多 rule 的 task 唯一能改动作的路径。
 
-        rule 侧的动作 flag 在一 task 多 rule 时不透传 (从一条 rule 单向覆盖会冲掉
-        另一条的动作), 所以那种 task 只能从这里改。
+        rule 侧的动作 flag 在多条 rule 争同一个槽时不透传 (从一条 rule 单向覆盖会
+        冲掉另一条的动作), 那种 task 只能从这里改。
 
         写完必须重新配置: runner 手里的动作快照是内存副本, 不刷新的话改了不生效,
         而 CLI 已经返回成功 —— 正是"静默不生效"那种最难查的形态。
@@ -127,6 +127,13 @@ class TaskService:
                 raise BusinessException("rule service 未就绪，无法校验达标配置")
             self._rule_service.require_duration_target(task_id)
             self._rule_service.require_exit_path_for_target(task_id)
+        clearing_enter = "on_enter_actions" in slots and not (
+            slots.get("on_enter_actions") or slots.get("on_enter_desc")
+        )
+        if clearing_enter:
+            if self._rule_service is None:
+                raise BusinessException("rule service 未就绪，无法校验进入动作")
+            self._rule_service.require_enter_rules_have_own_action(task_id)
         if not self.repo.set_boundary_actions(task_id, **slots):
             return False
         if self._rule_service is not None:
