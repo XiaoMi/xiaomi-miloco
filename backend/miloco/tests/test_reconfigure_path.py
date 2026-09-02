@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from miloco.database.rule_repo import RuleLogRepo, RuleRepo
@@ -63,7 +64,15 @@ def _rule(name, task_id="t1", mode=RuleMode.STATE, direction=None, on_target_des
     return r
 
 
-def _build(task_actions=None, rules=()):
+def _duration_record(target, accumulated):
+    svc = MagicMock()
+    svc.detect_record_kind = MagicMock(return_value="duration")
+    svc.state = (target, accumulated)
+    svc.read_duration_target_state = MagicMock(side_effect=lambda _t: svc.state)
+    return svc
+
+
+def _build(task_actions=None, rules=(), record=None):
     task_repo = TaskRepo()
     task_repo.create_task("t1", "d")
     if task_actions:
@@ -75,9 +84,12 @@ def _build(task_actions=None, rules=()):
         rules=rule_repo.get_all(enabled_only=False),
         miot_proxy=None,
         rule_log_repo=RuleLogRepo(),
+        task_record_service=record,
     )
     attach_task_state_machine(runner, rule_repo)
-    service = RuleService(rule_repo, RuleLogRepo(), runner, None)
+    service = RuleService(
+        rule_repo, RuleLogRepo(), runner, None, task_record_service=record
+    )
     dispatched: list[tuple[str, ActionSlot]] = []
     runner.state_machine._dispatch_action = lambda t, s, _p: dispatched.append((t, s))
     return service, runner, ids, dispatched
@@ -895,3 +907,85 @@ async def test_direction_change_keeps_a_slot_a_sibling_still_owns(env, monkeypat
     await service.patch_rule(ids[0], RuleUpdate(direction=RuleDirection.ENTER))
 
     assert TaskRepo().get_boundary_actions("t1")["on_exit_desc"] == "两条都管着"
+
+
+# ── 会话进行中才配上达标 ───────────────────────────────────────────────
+
+
+async def _settle_arm(src):
+    """等 arm 起的后台协程真的跑完 —— sleep(0) 会让「没排 timer」在等得不够和
+    代码正确两种情况下给同样的绿。"""
+    while src._arming:
+        await asyncio.gather(*list(src._arming), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_milestone_built_mid_session_gets_a_timer(env):
+    """task 已经在 on 时才配上达标动作 —— 定时器要当场排出来。
+
+    排 timer 只挂在「进入会话」那个边沿上, 而装配是分步的: 三样齐备的那一刻可能
+    落在会话开始之后, 那时进入边沿早过去了。不补排这一天的达标只能靠退出兜底或
+    跨零点补发, 而这条通知的全部意义是到点提醒。
+    """
+    record = _duration_record(target=120, accumulated=30)
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")], record=record)
+    with patch("miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)):
+        for _ in range(3):
+            await runner.update_state(ids[0], "cam1", True, "")
+        await asyncio.sleep(0.1)
+    assert runner.state_machine.runtime_state("t1") is TaskRuntimeState.ON
+    await _settle_arm(runner.record_source)
+    assert not runner.record_source._timers
+
+    TaskRepo().set_boundary_actions("t1", on_target_desc="提醒休息")
+    service.reconfigure_task("t1")
+    await _settle_arm(runner.record_source)
+
+    assert runner.state_machine.runtime_state("t1") is TaskRuntimeState.ON
+    milestone = next(
+        r
+        for r in RuleRepo().list_by_task("t1")
+        if r.resolved_direction is RuleDirection.MILESTONE
+    )
+    assert milestone.id in runner.record_source._timers
+
+
+@pytest.mark.asyncio
+async def test_threshold_changed_mid_session_reschedules_the_timer(env):
+    """会话进行中改阈值 —— 定时器按新阈值重排。
+
+    旧 timer 留着的话它按旧阈值到点, 当天的达标要么早发要么晚发。断言等待时长而
+    不是"排了几个": 按旧阈值重排同样是一个 timer, 只看个数分不开对错。
+    """
+    record = _duration_record(target=120, accumulated=30)
+    service, runner, ids, _ = _build(
+        {**_ACTIONS, "on_target_desc": "提醒休息"}, [_rule("[t1] s")], record=record
+    )
+    service.reconfigure_task("t1")
+    await _settle_arm(runner.record_source)
+
+    source_type = type(runner.record_source)
+    delays: list[float] = []
+    original = source_type._feed_after
+
+    async def spy(self, ref, delay, target_at_arm):
+        delays.append(delay)  # 只记, 不真睡
+
+    source_type._feed_after = spy
+    try:
+        with patch(
+            "miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)
+        ):
+            for _ in range(3):
+                await runner.update_state(ids[0], "cam1", True, "")
+            await asyncio.sleep(0.1)
+        await _settle_arm(runner.record_source)
+
+        record.state = (45, 30)
+        service.notify_record_changed("t1")
+        await _settle_arm(runner.record_source)
+    finally:
+        source_type._feed_after = original
+
+    assert runner.state_machine.runtime_state("t1") is TaskRuntimeState.ON
+    assert delays == [(120 - 30) * 60, (45 - 30) * 60]

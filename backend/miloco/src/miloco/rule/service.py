@@ -1011,7 +1011,7 @@ class RuleService:
         """代建的那条 rule 长什么样。
 
         不带阈值: 阈值每次去 record 上现读, 存副本会在用户改目标后分叉。迁移补建
-        的那条在 spec 里多写了一份阈值, 求值不看它, 两者行为相同。
+        的那条形状与这里一致。
         """
         return Rule(
             name=f"[{task_id}] 累计达标",
@@ -1106,7 +1106,7 @@ class RuleService:
         if sm is None:
             return
 
-        from miloco.task.state_machine import derive_directions
+        from miloco.task.state_machine import TaskRuntimeState, derive_directions
 
         self._runner.set_task_actions(
             task_id, self._task_repo.get_boundary_actions(task_id)
@@ -1126,6 +1126,12 @@ class RuleService:
             task_id,
             derive_directions((r.id, r.resolved_direction.value) for r in rules),
         )
+        # 排 timer 只挂在「进入会话」那个边沿上, 而装配是分步的 —— 三样齐备的那
+        # 一刻可能落在会话开始之后, 那时进入边沿早过去了, 这一天的达标就只能靠
+        # 退出兜底或跨零点补发, 而这条通知的全部意义是到点提醒。已经在态内就补
+        # 排一次: arm 自带撤旧, 等于按当前累计重排, 阈值改了也一并跟上。
+        if sm.runtime_state(task_id) is TaskRuntimeState.ON:
+            self._runner.record_source.arm(task_id)
 
     def apply_task_status(self, task_id: str, active: bool) -> None:
         """task 启停 → 刷新派生的「有效启用」并走重新配置路径。
