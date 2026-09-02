@@ -1098,6 +1098,27 @@ class TestRuleServicePatch:
         mock_rule_repo.update.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_patch_clearing_a_contended_slot_is_not_blocked(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """兄弟 rule 也管着这个槽时透传整体跳过 —— 预演必须跟着跳过, 不然会 400
+        掉一次根本不会造成哑规则的改动, 而错误文案给的两条出路都答不上原因。
+        """
+        target = _make_dynamic_rule(rule_id="r1")
+        sibling = _make_dynamic_rule(
+            rule_id="r2", name=_name(TASK_ID, "sibling"), descriptions=["开台灯"]
+        )
+        mock_rule_repo.get_by_id.return_value = target
+        mock_rule_repo.list_by_task.return_value = [target, sibling]
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_enter_desc": "1. 开台灯"}
+        }
+
+        assert (
+            await service.patch_rule("r1", RuleUpdate(action_descriptions=[])) is True
+        )
+
+    @pytest.mark.asyncio
     async def test_patch_session_to_enter_cannot_pass_on_the_slot_it_vacates(
         self, service, mock_rule_repo, mock_task_repo
     ):

@@ -482,7 +482,8 @@ class RuleService:
                 f"读 task {rule.task_id} 的动作配置失败, 无法确认 enter 规则有动作可落"
             ) from e
 
-        # 把这次写入对槽的影响叠上去, 分支与下面真正执行的那段一一对应。
+        # 把这次写入对槽的影响叠上去, 三条支路与下面真正执行的那段一一对应:
+        # 无槽可写 / 兄弟 rule 争同一个槽而整体跳过 / 正常写入。
         moved_home = previous is not None and (
             previous.resolved_direction is not rule.resolved_direction
             or previous.task_id != rule.task_id
@@ -490,9 +491,11 @@ class RuleService:
         if moved_home:
             for name in self._slots_cleared_by(previous):
                 slots[name] = [] if name.endswith("_actions") else None
-            slots.update(_rule_action_slots(rule))
+            pending = _rule_action_slots(rule)
         else:
-            slots.update(_rule_action_slots(rule, changed_fields))
+            pending = _rule_action_slots(rule, changed_fields)
+        if pending and not self._slots_contended_by_siblings(rule, set(pending)):
+            slots.update(pending)
 
         if not (slots.get("on_enter_actions") or slots.get("on_enter_desc")):
             raise ValidationException(
@@ -1052,6 +1055,22 @@ class RuleService:
             for name in _rule_action_slots(r)
         }
 
+    def _slots_contended_by_siblings(self, rule: Rule, slots: set[str]) -> list[str]:
+        """slots 里有哪些槽兄弟 rule 也管着 —— 争用的那些透传会整体跳过。
+
+        与 ``_slots_cleared_by`` 同一个理由: 预演写后视图的校验和真正执行透传的
+        那段必须问同一份判据, 否则校验会拦下一次根本不会发生的写入。
+        """
+        return sorted(
+            slots
+            & {
+                name
+                for r in self._repo.list_by_task(rule.task_id)
+                if r.id != rule.id
+                for name in _rule_action_slots(r)
+            }
+        )
+
     def _clear_task_slots(self, rule: Rule) -> None:
         """把 rule 之前管辖的槽清空。只在它不再管辖那些槽时调 (换方向 / 改挂 task)。"""
         stale = self._slots_cleared_by(rule)
@@ -1091,15 +1110,7 @@ class RuleService:
         # 只有争同一个槽才跳过。不同方向的 rule 各写各的槽 —— enter 写 on_enter、
         # exit 写 on_exit, 本来就不冲突; 一律按"有没有兄弟"跳过的话, 非互反 task
         # (enter + exit) 用 rule 侧 flag 建, 第二条起的动作全部静默丢失。
-        contended = sorted(
-            set(slots)
-            & {
-                name
-                for r in self._repo.list_by_task(rule.task_id)
-                if r.id != rule.id
-                for name in _rule_action_slots(r)
-            }
-        )
+        contended = self._slots_contended_by_siblings(rule, set(slots))
         if contended:
             logger.warning(
                 "task %s 名下有别的 rule 也管着 %s, 不把 rule %s 的动作透传到 "

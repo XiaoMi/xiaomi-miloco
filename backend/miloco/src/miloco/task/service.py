@@ -195,7 +195,9 @@ class TaskService:
             paused_at=raw["paused_at"],
             created_at=raw["created_at"],
             lifecycle=raw.get("lifecycle") or "permanent",
-            expires_at=raw.get("expires_at"),
+            # 用 [] 不用 .get(): 少 SELECT 一列时立刻 KeyError, 而 .get() 会把
+            # "这一列没查"静默变成"这个 task 没到期时刻", 列表接口整片回 null。
+            expires_at=raw["expires_at"],
             runtime_state=self._runtime_state(raw["task_id"]),
             last_decision=self._last_decision(raw["task_id"]),
             rule_briefs=rule_briefs,

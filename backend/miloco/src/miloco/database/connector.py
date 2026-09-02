@@ -1260,6 +1260,10 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
 
 # v3 新增列。SQLite 的 ALTER TABLE ADD COLUMN 就地生效、不重建表, 老代码读旧列
 # 完全不受影响 —— 这是 expand-contract 阶段 A 的全部依据。删列在阶段 B 单独做。
+# 往这里追加列的前提是 v3 尚未发布 —— 线上没有 v3 的库, 加的列一定随首次
+# v2→v3 迁移落地。版本号已经是 3 的库 (开发机 / 验证机) 拿不到新列: 步进循环
+# range(4, 4) 是空的, 形状兜底那条路也按标志列认它是 3。那种库要手工 ALTER 或
+# 重建。v3 发出去之后再加列必须开 v4。
 _V3_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("lifecycle", "TEXT NOT NULL DEFAULT 'permanent'"),
     ("expires_at", "INTEGER"),

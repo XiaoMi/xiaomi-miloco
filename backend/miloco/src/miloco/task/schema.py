@@ -38,6 +38,26 @@ class TaskCreateRequest(BaseModel):
         None, description="到期时刻 ISO8601（带时区偏移），仅 lifecycle=temporary"
     )
 
+    @field_validator("expires_at")
+    @classmethod
+    def _expiry_must_parse(cls, v: str | None) -> str | None:
+        """在这里试解析一次 —— 入库前那步用的是 ``iso_to_ms``, 它抛裸 ValueError,
+        router 不捕, 一路冒到全局兜底变成 500。写命令的是 agent, 500 里没有任何
+        能让它自己纠正的信息。用同一个解析器保证两边口径一致。
+        """
+        if v is None:
+            return v
+        from miloco.utils.time_utils import iso_to_ms
+
+        try:
+            iso_to_ms(v)
+        except ValueError as e:
+            raise ValueError(
+                f"expires_at 不是合法的 ISO8601 时刻: {v!r} "
+                "(用 miloco-cli time-compute 产出的带偏移 ISO)"
+            ) from e
+        return v
+
     @model_validator(mode="after")
     def _expiry_needs_temporary(self):
         """到期时刻只在限时任务上有意义。permanent 带它是自相矛盾的配置,

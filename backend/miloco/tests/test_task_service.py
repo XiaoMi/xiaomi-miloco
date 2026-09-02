@@ -145,7 +145,14 @@ def test_create_task_stores_temporary_lifecycle(service):
 
 
 def test_create_task_stores_expiry_as_iso_roundtrip(service):
-    """入库是 ms、出口是 ISO —— 存原样字符串的话与 record 那份对不上。"""
+    """入库是 ms、出口是同一时刻的 ISO —— 存原样字符串的话与 record 那份对不上。
+
+    断绝对时刻而不是字符串: 出口走 ``ms_to_iso_local``, 偏移后缀跟着部署时区走,
+    写死 ``+08:00`` 会让这条测试在 UTC 的 CI 上红而本机绿。带不带偏移单独断 ——
+    那部分是对外契约 (前端 ``new Date(value)`` 靠它), 与环境时区无关。
+    """
+    from datetime import datetime
+
     service.create_task(
         TaskCreateRequest(
             task_id="t1",
@@ -154,7 +161,11 @@ def test_create_task_stores_expiry_as_iso_roundtrip(service):
             expires_at="2026-06-10T23:59:59+08:00",
         )
     )
-    assert service.get_full_view("t1").expires_at == "2026-06-10T23:59:59+08:00"
+    got = service.get_full_view("t1").expires_at
+    assert datetime.fromisoformat(got) == datetime.fromisoformat(
+        "2026-06-10T23:59:59+08:00"
+    )
+    assert datetime.fromisoformat(got).tzinfo is not None
 
 
 def test_create_task_stores_expiry_as_integer_ms(real_db):
@@ -194,6 +205,35 @@ def test_create_task_without_expiry_reads_back_none(service):
         TaskCreateRequest(task_id="t1", description="d", lifecycle="temporary")
     )
     assert service.get_full_view("t1").expires_at is None
+
+
+def test_create_task_rejects_unparseable_expiry():
+    """非法 ISO 要在入参层被拒。
+
+    入库前那步用 ``iso_to_ms``, 它抛裸 ValueError、router 不捕, 一路冒到全局兜底
+    变成 500 —— 写命令的是 agent, 500 里没有能让它自己纠正的信息。
+    """
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    with _pytest.raises(ValidationError, match="不是合法的 ISO8601"):
+        TaskCreateRequest(
+            task_id="t1",
+            description="d",
+            lifecycle="temporary",
+            expires_at="明天下午三点",
+        )
+
+
+def test_create_task_accepts_zulu_expiry():
+    """Z 后缀与 iso_to_ms 同口径, 别把合法值拦了。"""
+    req = TaskCreateRequest(
+        task_id="t1",
+        description="d",
+        lifecycle="temporary",
+        expires_at="2026-06-10T15:59:59Z",
+    )
+    assert req.expires_at == "2026-06-10T15:59:59Z"
 
 
 def test_create_task_rejects_expiry_on_permanent():
@@ -631,6 +671,37 @@ def test_state_action_desc_keeps_payload_out():
 
 def _mk_task(service, task_id="t1"):
     service.create_task(TaskCreateRequest(task_id=task_id, description="d"))
+
+
+def test_list_all_carries_the_expiry_too(real_db):
+    """列表接口也要带到期时刻。
+
+    ``GET /tasks`` 与 ``GET /tasks/summary`` 都走 ``list_all``, 那条 SELECT 漏一列
+    的话每个 task 都回 null —— 库里有值、详情页看得到、列表页看不到。
+    断 repo 的原始 dict: service 层拿 ``raw["expires_at"]``, 漏列在那里是 KeyError,
+    但那只在有 task 时才走到, 形状本身要在这里钉住。
+    """
+    from datetime import datetime
+
+    from miloco.database.task_repo import TaskRepo
+    from miloco.task.service import TaskService
+
+    service = TaskService(rule_repo=RuleRepo())
+    service.create_task(
+        TaskCreateRequest(
+            task_id="t1",
+            description="d",
+            lifecycle="temporary",
+            expires_at="2026-06-10T23:59:59+08:00",
+        )
+    )
+    rows = TaskRepo().list_all()
+    assert len(rows) == 1
+    assert "expires_at" in rows[0]
+    assert datetime.fromisoformat(rows[0]["expires_at"]) == datetime.fromisoformat(
+        "2026-06-10T23:59:59+08:00"
+    )
+    assert service.list_summary("day")[0].expires_at is not None
 
 
 def test_full_view_exposes_every_action_slot(service):

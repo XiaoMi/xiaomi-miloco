@@ -146,8 +146,8 @@ class TaskRepo:
         with self.db.get_connection() as conn:
             tasks = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at, "
-                "lifecycle, on_enter_actions, on_enter_desc, on_exit_actions, "
-                "on_exit_desc, on_target_actions, on_target_desc "
+                "lifecycle, expires_at, on_enter_actions, on_enter_desc, "
+                "on_exit_actions, on_exit_desc, on_target_actions, on_target_desc "
                 "FROM task ORDER BY created_at DESC"
             ).fetchall()
             all_crons = conn.execute(
@@ -167,6 +167,7 @@ class TaskRepo:
                     "paused_at": ms_to_iso_local(t["paused_at"]),
                     "created_at": ms_to_iso_local(t["created_at"]),
                     "lifecycle": t["lifecycle"],
+                    "expires_at": ms_to_iso_local(t["expires_at"]),
                     # 动作槽跟基础字段同一行, 一起 SELECT 不产生额外查询。多条 rule
                     # 的 task 动作只存在这里 —— 列表不带的话住户界面显示成"无动作"。
                     "actions": _boundary_actions_of(t),
