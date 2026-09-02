@@ -164,13 +164,13 @@ class TestArm:
 class TestTimerFire:
     async def test_fires_when_accumulated_catches_up(self):
         src, fed, _ = _make_source((60, 60))
-        await src._feed_after(RecordRef("rule-ms", TASK_ID), 0, target_at_arm=60)
+        await src._feed_after(RecordRef("rule-ms", TASK_ID), 0, target_at_arm=60, this_round=0)
         assert [(r, v) for r, v, _ in fed] == [("rule-ms", True)]
 
     async def test_rearms_when_accumulated_fell_short(self):
         """睡的这段时间 session 断过 / 目标被调高 —— 重排，别把这天的达标丢掉。"""
         src, fed, _ = _make_source((60, 30))
-        await src._feed_after(RecordRef("rule-ms", TASK_ID), 0, target_at_arm=60)
+        await src._feed_after(RecordRef("rule-ms", TASK_ID), 0, target_at_arm=60, this_round=0)
         assert fed == []
         assert "rule-ms" in src._timers
         src.disarm(TASK_ID)
@@ -178,7 +178,7 @@ class TestTimerFire:
     async def test_reads_current_target_at_fire_not_the_one_from_arm(self):
         """到点重算，不信 arm 时那笔账 —— 中间可能改过目标。"""
         src, fed, _ = _make_source((30, 40))
-        await src._feed_after(RecordRef("rule-ms", TASK_ID), 0, target_at_arm=120)
+        await src._feed_after(RecordRef("rule-ms", TASK_ID), 0, target_at_arm=120, this_round=0)
         assert [(r, v) for r, v, _ in fed] == [("rule-ms", True)]
         assert fed[0][2]["target_minutes"] == 30
 
@@ -302,8 +302,11 @@ def _rule_service(record_kind, duration_state, task_view=None, rules=None):
     rule_repo.exists_by_name = MagicMock(return_value=False)
     rule_repo.create = MagicMock(return_value="new-milestone-id")
     rule_repo.delete = MagicMock(return_value=True)
+    log_repo = MagicMock()
+    # 默认"今天还没通知过" —— 代建之后是否补 seed 由这个数字决定
+    log_repo.count_by_rule_name = MagicMock(return_value=0)
     svc = RuleService(
-        rule_repo, MagicMock(), runner, AsyncMock(),
+        rule_repo, log_repo, runner, AsyncMock(),
         task_repo=task_repo, task_record_service=record_svc,
     )
     return svc, rule_repo
@@ -511,3 +514,48 @@ class TestClientSuppliedIdCannotSkipSiblings:
 
         with pytest.raises(ValidationException, match="独占"):
             svc._validate_task_rule_set(incoming)
+
+
+class TestDisarmRace:
+    """出 session 之后不该再有东西给这个 task 排 timer 或喂值。
+
+    arm 把读账放后台, 而 disarm 只撤 _timers —— 中间落出的 timer 活过 disarm,
+    到点在 off 态喂真把条件锁死, 当天后面真的达标就产不出边沿了。
+    """
+
+    @pytest.mark.asyncio
+    async def test_disarm_kills_an_arm_that_has_not_run_yet(self):
+        src, fed, _svc = _make_source((120, 30))
+
+        src.arm(TASK_ID)  # 后台协程还没跑起来
+        src.disarm(TASK_ID)  # 此刻 _timers 是空的, 撤不到任何东西
+        await _settle_arm(src)
+
+        assert src._timers == {}
+        assert fed == []
+
+    @pytest.mark.asyncio
+    async def test_disarm_kills_an_arm_that_would_have_fed_at_once(self):
+        """已经超阈值那条路不排 timer、直接喂真, 撤 timer 拦不住它。"""
+        src, fed, _svc = _make_source((60, 90))
+
+        src.arm(TASK_ID)
+        src.disarm(TASK_ID)
+        await _settle_arm(src)
+
+        assert fed == []
+
+    @pytest.mark.asyncio
+    async def test_a_timer_that_woke_up_after_disarm_does_not_feed(self):
+        """摘出 _timers 之后 disarm 就撤不到它了。
+
+        cancel 撞上"刚好醒来"时不一定生效, 那一步只剩轮次这道闸。
+        """
+        src, fed, _svc = _make_source((60, 90))
+        src.disarm(TASK_ID)
+
+        await src._feed_after(
+            RecordRef("rule-ms", TASK_ID), 0, target_at_arm=60, this_round=0
+        )
+
+        assert fed == []

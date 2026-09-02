@@ -110,6 +110,11 @@ class RecordSource:
         self._timers: dict[str, asyncio.Task] = {}
         # 后台 arm 协程。强引用住, 否则 GC 可能在 await 中途回收掉。
         self._arming: set[asyncio.Task] = set()
+        # 每个 task 现在是第几轮武装。出 session / 跨日归零时加一, 让上一轮起的
+        # 后台协程全部作废 —— 撤 timer 撤不掉它们: arm 把读账放后台, 中间落出的
+        # timer 活过 disarm, 到点在 off 态喂真把条件锁死, 当天后面真的达标就产不
+        # 出边沿了。
+        self._arm_round: dict[str, int] = {}
 
     # ── 生命周期入口 ────────────────────────────────────────────
 
@@ -118,8 +123,9 @@ class RecordSource:
 
         DB 读放后台，因为调用方在感知热路径上。就地读会把每个判定周期都拖进 IO。
         """
+        this_round = self._arm_round.setdefault(task_id, 0)
         for ref in self._refs_of_task(task_id):
-            handle = asyncio.create_task(self._arm_one(ref))
+            handle = asyncio.create_task(self._arm_one(ref, this_round))
             self._arming.add(handle)
             handle.add_done_callback(self._arming.discard)
 
@@ -152,12 +158,27 @@ class RecordSource:
         """
         self._cancel(rule_id)
 
+    def forget_task(self, task_id: str) -> None:
+        """task 被删：清掉按 task_id 存的那份轮次计数。
+
+        留着不会算错 (轮次只比相等), 但它是一条随删除次数单调增长的残留。
+        """
+        self._arm_round.pop(task_id, None)
+
+    def _abandon_round(self, task_id: str) -> None:
+        """让这个 task 上一轮武装起的后台协程全部作废。"""
+        self._arm_round[task_id] = self._arm_round.get(task_id, 0) + 1
+
+    def _round_is_over(self, ref: RecordRef, this_round: int) -> bool:
+        return self._arm_round.get(ref.task_id, 0) != this_round
+
     def disarm(self, task_id: str) -> None:
         """task 出 session / 被停用：撤掉未到点的 timer。
 
         timer 是 asyncio task，不受 rule 停用的入口早返影响 —— 不撤的话到点仍会
         喂一次 True。
         """
+        self._abandon_round(task_id)
         for ref in self._refs_of_task(task_id):
             self._cancel(ref.rule_id)
 
@@ -167,6 +188,7 @@ class RecordSource:
         这一步是第二天能重新通知的全部机制。少了它条件停在真，第二天达标不产生
         新边沿，通知永久消失。
         """
+        self._abandon_round(task_id)
         for ref in self._refs_of_task(task_id):
             self._cancel(ref.rule_id)
             await self._feed_safely(ref.rule_id, False)
@@ -193,7 +215,10 @@ class RecordSource:
 
     # ── 内部 ────────────────────────────────────────────────────
 
-    async def _arm_one(self, ref: RecordRef) -> None:
+    async def _arm_one(self, ref: RecordRef, this_round: int) -> None:
+        if self._round_is_over(ref, this_round):
+            # 起这个协程的那次 arm 已经被 disarm / 归零作废了。
+            return
         self._cancel(ref.rule_id)
         state = self._read(ref.task_id)
         if state is None:
@@ -210,7 +235,7 @@ class RecordSource:
             return
         remaining_seconds = (target - accumulated) * 60
         handle = asyncio.create_task(
-            self._feed_after(ref, remaining_seconds, target)
+            self._feed_after(ref, remaining_seconds, target, this_round)
         )
         self._timers[ref.rule_id] = handle
         logger.info(
@@ -220,13 +245,16 @@ class RecordSource:
         )
 
     async def _feed_after(
-        self, ref: RecordRef, delay: float, target_at_arm: int
+        self, ref: RecordRef, delay: float, target_at_arm: int, this_round: int
     ) -> None:
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
             return
         self._timers.pop(ref.rule_id, None)
+        if self._round_is_over(ref, this_round):
+            # 摘出 _timers 之后 disarm 就撤不到它了, 轮次是这一步唯一的闸。
+            return
         # 到点重算, 不信 arm 时那笔账: 中间可能停过表 (session 断过) 或改过目标。
         state = self._read(ref.task_id)
         if state is None:
@@ -242,7 +270,7 @@ class RecordSource:
                 "(arm 时目标 %s)",
                 ref.rule_id, accumulated, target, target_at_arm,
             )
-            await self._arm_one(ref)
+            await self._arm_one(ref, this_round)
             return
         await self._feed_safely(
             ref.rule_id, True, _reached_metadata(target, accumulated)
