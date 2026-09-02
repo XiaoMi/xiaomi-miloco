@@ -131,14 +131,7 @@ class TaskRepo:
                 "created_at": ms_to_iso_local(task_row["created_at"]),
                 "lifecycle": task_row["lifecycle"],
                 "expires_at": ms_to_iso_local(task_row["expires_at"]),
-                "actions": {
-                    "on_enter_actions": _load_actions(task_row["on_enter_actions"]),
-                    "on_enter_desc": task_row["on_enter_desc"],
-                    "on_exit_actions": _load_actions(task_row["on_exit_actions"]),
-                    "on_exit_desc": task_row["on_exit_desc"],
-                    "on_target_actions": _load_actions(task_row["on_target_actions"]),
-                    "on_target_desc": task_row["on_target_desc"],
-                },
+                "actions": _boundary_actions_of(task_row),
                 "cron_refs": [
                     {
                         "ref": c["cron_id"],

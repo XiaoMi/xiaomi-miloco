@@ -633,6 +633,28 @@ def _mk_task(service, task_id="t1"):
     service.create_task(TaskCreateRequest(task_id=task_id, description="d"))
 
 
+def test_full_view_exposes_every_action_slot(service):
+    """六个槽必须全出现在 repo 拼出来的 actions 里。
+
+    断的是 repo 的原始 dict 而不是 ``TaskFullView.actions``: 后者是 pydantic
+    模型, 缺的键会被字段默认值补齐, 拿它断形状分不开"repo 少拼了一个槽"和
+    "repo 拼全了"。
+    ``task get`` 与 ``task list`` 走同一个拼装函数, 所以不写"两边一致"那种
+    断言 —— 同一份实现的一致性测试永远绿。
+    """
+    from miloco.database.task_repo import TaskRepo
+
+    _mk_task(service)
+    assert set(TaskRepo().get_full_view("t1")["actions"]) == {
+        "on_enter_actions",
+        "on_enter_desc",
+        "on_exit_actions",
+        "on_exit_desc",
+        "on_target_actions",
+        "on_target_desc",
+    }
+
+
 def test_set_actions_only_touches_the_slots_that_were_sent(service):
     """partial 语义: 没传的槽保持原样。
 
