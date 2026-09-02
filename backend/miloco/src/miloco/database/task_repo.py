@@ -18,7 +18,7 @@ import sqlite3
 from typing import Any
 
 from miloco.database.connector import get_db_connector
-from miloco.utils.time_utils import ms_to_iso_local, now_ms
+from miloco.utils.time_utils import iso_to_ms, ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
 
@@ -58,15 +58,28 @@ class TaskRepo:
     def __init__(self):
         self.db = get_db_connector()
 
-    def create_task(self, task_id: str, description: str) -> None:
+    def create_task(
+        self,
+        task_id: str,
+        description: str,
+        lifecycle: str = "permanent",
+        expires_at: str | None = None,
+    ) -> None:
         """INSERT task 行 (占位)。rule / cron 关联挂载由后续 endpoint 完成。"""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "INSERT INTO task (task_id, description, status, created_at) "
-                    "VALUES (?, ?, 'active', ?)",
-                    (task_id, description, now_ms()),
+                    "INSERT INTO task "
+                    "(task_id, description, status, created_at, lifecycle, expires_at) "
+                    "VALUES (?, ?, 'active', ?, ?, ?)",
+                    (
+                        task_id,
+                        description,
+                        now_ms(),
+                        lifecycle,
+                        iso_to_ms(expires_at) if expires_at else None,
+                    ),
                 )
                 conn.commit()
                 logger.info("Task created (placeholder): task_id=%s", task_id)
@@ -99,8 +112,8 @@ class TaskRepo:
         with self.db.get_connection() as conn:
             task_row = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at, lifecycle, "
-                "on_enter_actions, on_enter_desc, on_exit_actions, on_exit_desc, "
-                "on_target_actions, on_target_desc "
+                "expires_at, on_enter_actions, on_enter_desc, on_exit_actions, "
+                "on_exit_desc, on_target_actions, on_target_desc "
                 "FROM task WHERE task_id=?",
                 (task_id,),
             ).fetchone()
@@ -117,6 +130,7 @@ class TaskRepo:
                 "paused_at": ms_to_iso_local(task_row["paused_at"]),
                 "created_at": ms_to_iso_local(task_row["created_at"]),
                 "lifecycle": task_row["lifecycle"],
+                "expires_at": ms_to_iso_local(task_row["expires_at"]),
                 "actions": {
                     "on_enter_actions": _load_actions(task_row["on_enter_actions"]),
                     "on_enter_desc": task_row["on_enter_desc"],

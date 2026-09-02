@@ -1079,6 +1079,62 @@ class TestRuleServicePatch:
         assert updated_rule.enabled is False
 
     @pytest.mark.asyncio
+    async def test_patch_clearing_own_action_cannot_pass_its_own_gate(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """清空动作这一改动不能拿"清空前的 task 槽"给自己放行。
+
+        动作是双写的, 而透传排在校验之后 —— 读写前的槽, 校验看到的正是自己马上
+        要清掉的那份值。`rule update <id> --clear action_descriptions` 就走这条路。
+        """
+        existing = _make_dynamic_rule(rule_id="r1")
+        mock_rule_repo.get_by_id.return_value = existing
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_enter_desc": "1. 开台灯"}
+        }
+
+        with pytest.raises(ValidationException, match="没有动作可落"):
+            await service.patch_rule("r1", RuleUpdate(action_descriptions=[]))
+        mock_rule_repo.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_patch_session_to_enter_cannot_pass_on_the_slot_it_vacates(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """换方向时 task 槽会被先清空 (_clear_task_slots), 校验必须把这一步算进去。"""
+        existing = Rule(
+            id="r1",
+            name=_name(TASK_ID, "session"),
+            task_id=TASK_ID,
+            direction=RuleDirection.SESSION,
+            condition=_make_condition(),
+            on_enter_desc="开台灯",
+        )
+        mock_rule_repo.get_by_id.return_value = existing
+        mock_rule_repo.list_by_task.return_value = [existing]
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_enter_desc": "开台灯"}
+        }
+
+        with pytest.raises(ValidationException, match="没有动作可落"):
+            await service.patch_rule(
+                "r1", RuleUpdate(direction=RuleDirection.ENTER, on_enter_desc=None)
+            )
+
+    @pytest.mark.asyncio
+    async def test_patch_keeps_passing_when_the_slot_survives(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """本次没动动作字段 → 透传不写 on_enter 槽 → 读现值放行, 别把正常改动拦了。"""
+        existing = _make_static_rule(rule_id="r1", actions=[])
+        mock_rule_repo.get_by_id.return_value = existing
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_enter_desc": "开台灯"}
+        }
+
+        assert await service.patch_rule("r1", RuleUpdate(enabled=False)) is True
+
+    @pytest.mark.asyncio
     async def test_patch_direction_also_writes_mode(self, service, mock_rule_repo):
         """两列必须一起动 —— 只改一个会写出读不回来的行。
 

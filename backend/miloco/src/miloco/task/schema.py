@@ -11,7 +11,7 @@ v2 起 task_link 表已 DROP: rule 关联走 rule.task_id FK CASCADE, cron 关�
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 _TASK_ID_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
@@ -31,6 +31,20 @@ class TaskCreateRequest(BaseModel):
 
     task_id: str = Field(..., description="snake_case，[a-z0-9_]{1,32}")
     description: str = Field(..., max_length=200, description="≤200 字符")
+    lifecycle: Literal["permanent", "temporary"] = Field(
+        "permanent", description="长期常驻 / 限时有效"
+    )
+    expires_at: str | None = Field(
+        None, description="到期时刻 ISO8601（带时区偏移），仅 lifecycle=temporary"
+    )
+
+    @model_validator(mode="after")
+    def _expiry_needs_temporary(self):
+        """到期时刻只在限时任务上有意义。permanent 带它是自相矛盾的配置,
+        放行的话没人能判断该信哪一个。"""
+        if self.expires_at and self.lifecycle != "temporary":
+            raise ValueError("expires_at 只能配 lifecycle=temporary")
+        return self
 
     @field_validator("task_id")
     @classmethod
@@ -103,6 +117,7 @@ class TaskFullView(BaseModel):
     # 只读: 模式此刻开着还是关着。内存派生, 不落库 —— 重启一律从 off 起 (§4.2)
     runtime_state: Literal["off", "on"] = "off"
     lifecycle: Literal["permanent", "temporary"] = "permanent"
+    expires_at: str | None = None
     # 最后一次判定的结论摘要, 回答「我的规则现在为什么不触发」(§18.5)。
     # None = 该 task 还没被状态机接管, 或接管后一次判定都没发生过。
     last_decision: dict | None = None

@@ -205,6 +205,10 @@ Rule/Schedule/Record 是子组件存在性（Y/N）；Lifecycle 是 task 整体�
 - 语气词（一声/一下/就行）
 - 活动名（看书/做饭/洗澡）
 
+判出 temporary 时装 `task create --lifecycle temporary`（permanent 是默认值，不传）；temporary 另按 §CLI 命令表 装到期销毁 cron。
+
+temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性时刻）→ 同一个 ISO 一并传 `task create --expires-at`，与销毁 cron 的 `--at-iso`、record 的 `expires_at` 取同一个值。信号 3 达标完成没有时刻，不传。
+
 ---
 
 # 第二层 · 按取值展开子维度
@@ -614,7 +618,7 @@ session + duration record 三 desc 分工：
 
 | 维度 | CLI |
 |---|---|
-| 创建 task | `miloco-cli task create --task-id <id> --description "<描述>"` |
+| 创建 task | `miloco-cli task create --task-id <id> --description "<描述>"`（permanent 是默认值不传；temporary 加 `--lifecycle temporary`，到期时刻确定再加 `--expires-at <ISO>`）|
 | Rule=Y | `miloco-cli rule create --task-id <id> <rule-flags>` |
 | Schedule=Y | `miloco-cli cron add --task-id <id> --kind cron --name "[<id>] <描述>" --cron-expr "<expr>" --tz "<家庭时区>" --message "<业务意图>"`（backend 强制 `dispatch_owner=internal`，经 `cron.task_id` FK 直接绑 task，无需 link；cron 类必带 tz，见 §Schedule.时区） |
 | Record=Y | `miloco-cli task record init <id> --kind <progress/duration/event> --content '<JSON>'` |
@@ -750,7 +754,7 @@ Rule?=N · Schedule?=Y(at) · Record?=N · Lifecycle=temporary
 
 ```bash
 AT_ISO=$(miloco-cli time-compute --anchor '{"kind":"tomorrow_at","time":"09:00:00"}')
-miloco-cli task create --task-id med_tomorrow_9am --description "明天 9 点提醒吃药"
+miloco-cli task create --task-id med_tomorrow_9am --description "明天 9 点提醒吃药" --lifecycle temporary --expires-at "$AT_ISO"
 miloco-cli cron add --task-id med_tomorrow_9am --kind at --at-iso "$AT_ISO" \
   --name "[med_tomorrow_9am] 吃药提醒" --message "提醒用户吃药"
 ```
@@ -769,7 +773,7 @@ Rule.direction=enter · Record.kind=progress · target=8 · window=day
 
 ```bash
 EXPIRES_AT=$(miloco-cli time-compute --anchor '{"kind":"end_of_day"}')
-miloco-cli task create --task-id drink_8_today --description "今天喝够 8 杯水"
+miloco-cli task create --task-id drink_8_today --description "今天喝够 8 杯水" --lifecycle temporary --expires-at "$EXPIRES_AT"
 
 miloco-cli rule create --task-id drink_8_today \
   --name "[drink_8_today] 喝水计数" \

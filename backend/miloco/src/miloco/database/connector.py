@@ -590,6 +590,7 @@ class SQLiteConnector:
                 paused_at   INTEGER,
                 created_at  INTEGER NOT NULL,
                 lifecycle   TEXT NOT NULL DEFAULT 'permanent',
+                expires_at  INTEGER,
                 on_enter_actions  TEXT NOT NULL DEFAULT '[]',
                 on_enter_desc     TEXT,
                 on_exit_actions   TEXT NOT NULL DEFAULT '[]',
@@ -1261,6 +1262,7 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
 # 完全不受影响 —— 这是 expand-contract 阶段 A 的全部依据。删列在阶段 B 单独做。
 _V3_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("lifecycle", "TEXT NOT NULL DEFAULT 'permanent'"),
+    ("expires_at", "INTEGER"),
     ("on_enter_actions", "TEXT NOT NULL DEFAULT '[]'"),
     ("on_enter_desc", "TEXT"),
     ("on_exit_actions", "TEXT NOT NULL DEFAULT '[]'"),

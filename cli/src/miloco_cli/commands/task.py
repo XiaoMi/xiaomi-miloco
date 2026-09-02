@@ -62,8 +62,22 @@ def task_group():
 @click.option(
     "--description", required=True, help="任务整体自然语言摘要 (≤200 字符)"
 )
+@click.option(
+    "--lifecycle",
+    "lifecycle",
+    type=click.Choice(["permanent", "temporary"]),
+    default="permanent",
+    show_default=True,
+    help="permanent 长期常驻；temporary 限时有效（到期销毁仍由 at cron 通知 Agent 执行）",
+)
+@click.option(
+    "--expires-at",
+    "expires_at",
+    default=None,
+    help="到期时刻 ISO8601（time-compute 直出），仅 --lifecycle temporary 可传",
+)
 @click.option("--pretty", is_flag=True)
-def task_create(task_id, description, pretty):
+def task_create(task_id, description, lifecycle, expires_at, pretty):
     """建 task 占位行 (v2)。
 
     rule / cron / record 关联挂载由后续命令完成:
@@ -74,7 +88,9 @@ def task_create(task_id, description, pretty):
     """
     from miloco_cli.client import api_post
 
-    body = {"task_id": task_id, "description": description}
+    body = {"task_id": task_id, "description": description, "lifecycle": lifecycle}
+    if expires_at:
+        body["expires_at"] = expires_at
     data = api_post(API_PREFIX, body)
     print_result(data, pretty)
 

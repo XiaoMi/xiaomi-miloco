@@ -131,6 +131,82 @@ def test_create_task_then_rule_auto_links(service):
     assert view.rule_briefs[0].query == "客厅有人"
 
 
+def test_create_task_defaults_to_permanent(service):
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    assert service.get_full_view("t1").lifecycle == "permanent"
+
+
+def test_create_task_stores_temporary_lifecycle(service):
+    """建行时不写这一列的话, 限时 task 在库里与长期 task 无从区分。"""
+    service.create_task(
+        TaskCreateRequest(task_id="t1", description="d", lifecycle="temporary")
+    )
+    assert service.get_full_view("t1").lifecycle == "temporary"
+
+
+def test_create_task_stores_expiry_as_iso_roundtrip(service):
+    """入库是 ms、出口是 ISO —— 存原样字符串的话与 record 那份对不上。"""
+    service.create_task(
+        TaskCreateRequest(
+            task_id="t1",
+            description="d",
+            lifecycle="temporary",
+            expires_at="2026-06-10T23:59:59+08:00",
+        )
+    )
+    assert service.get_full_view("t1").expires_at == "2026-06-10T23:59:59+08:00"
+
+
+def test_create_task_stores_expiry_as_integer_ms(real_db):
+    """库里必须是 ms 整数。
+
+    存原样 ISO 字符串一样能往返回来同一个 ISO（INTEGER 亲和性对转不成数字的值
+    原样存 TEXT），所以只断往返分不开对错 —— 而扫过期要 ``WHERE expires_at < ?``
+    做数值比较，存 TEXT 就是逐字符比。
+    """
+    import sqlite3
+
+    from miloco.task.service import TaskService
+
+    service = TaskService(rule_repo=RuleRepo())
+    service.create_task(
+        TaskCreateRequest(
+            task_id="t1",
+            description="d",
+            lifecycle="temporary",
+            expires_at="2026-06-10T23:59:59+08:00",
+        )
+    )
+    conn = sqlite3.connect(real_db)
+    try:
+        stored = conn.execute(
+            "SELECT expires_at FROM task WHERE task_id='t1'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert isinstance(stored, int)
+    # 2026-06-10T23:59:59+08:00 == 2026-06-10T15:59:59Z
+    assert stored == 1781107199000
+
+
+def test_create_task_without_expiry_reads_back_none(service):
+    service.create_task(
+        TaskCreateRequest(task_id="t1", description="d", lifecycle="temporary")
+    )
+    assert service.get_full_view("t1").expires_at is None
+
+
+def test_create_task_rejects_expiry_on_permanent():
+    """permanent 带到期时刻是自相矛盾的配置, 放行就没人知道该信哪一个。"""
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    with _pytest.raises(ValidationError, match="expires_at 只能配 lifecycle=temporary"):
+        TaskCreateRequest(
+            task_id="t1", description="d", expires_at="2026-06-10T23:59:59+08:00"
+        )
+
+
 def test_create_task_409_on_duplicate_id(service):
     service.create_task(TaskCreateRequest(task_id="t1", description="d"))
     with pytest.raises(TaskConflict):
@@ -680,13 +756,34 @@ def test_set_actions_rejects_clearing_enter_action_needed_by_a_rule(real_db):
     service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc="开灯"))
     _mk_enter_rule(with_action=False)
 
-    with pytest.raises(ValidationException, match="不带动作的 enter 规则"):
+    with pytest.raises(ValidationException, match="靠这份进入动作"):
         service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc=None))
 
     assert service.get_full_view("t1").actions.on_enter_desc == "开灯"
 
 
+def test_set_actions_rejects_clearing_enter_even_if_rules_carry_own_action(real_db):
+    """task 还剩别的槽 → 读侧仍按接管处理、不回退 rule 行, 所以"自带动作"也白搭。
+
+    这一条与下面那条的差别只在 task 有没有 on_exit_desc —— 判据看的是清完之后
+    读侧还能不能选到动作, 不是 rule 行上有没有值。
+    """
+    from miloco.middleware.exceptions import ValidationException
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub(None)
+    _mk_task(service)
+    service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_desc="开灯", on_exit_desc="关灯")
+    )
+    _mk_enter_rule(with_action=True)
+
+    with pytest.raises(ValidationException, match="靠这份进入动作"):
+        service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc=None))
+
+
 def test_set_actions_allows_clearing_enter_action_when_rules_carry_their_own(real_db):
+    """清完一个槽都不剩 → task 整体退回旧路径, rule 行上那份重新生效。"""
     from miloco.task.schema import TaskActionsUpdateRequest
 
     service = _service_with_rule_stub(None)
@@ -707,6 +804,7 @@ def _service_with_rule_stub(record_state):
     """带一个只回答"有没有阈值"的 rule service 替身。"""
     from unittest.mock import MagicMock
 
+    from miloco.database.task_repo import TaskRepo
     from miloco.rule.service import RuleService
     from miloco.task.service import TaskService
 
@@ -719,6 +817,8 @@ def _service_with_rule_stub(record_state):
     rule_svc._task_record_service = record_svc
     # 配达标动作还要查这个 task 有没有出路径, 那道闸读的是 rule 表
     rule_svc._repo = RuleRepo()
+    # 清进入动作那道闸要看清完之后 task 还剩哪些槽 (读侧是否仍被接管)
+    rule_svc._task_repo = TaskRepo()
     rule_svc.reconfigure_task = MagicMock()
     return TaskService(rule_repo=RuleRepo(), rule_service=rule_svc)
 

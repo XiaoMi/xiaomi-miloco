@@ -84,7 +84,12 @@ class TaskService:
 
     def create_task(self, req: TaskCreateRequest) -> None:
         """仅插 task 占位行; rule / cron 关联挂载由后续 endpoint 完成。"""
-        self.repo.create_task(task_id=req.task_id, description=req.description)
+        self.repo.create_task(
+            task_id=req.task_id,
+            description=req.description,
+            lifecycle=req.lifecycle,
+            expires_at=req.expires_at,
+        )
 
     def update_description(self, task_id: str, req: TaskUpdateRequest) -> bool:
         return self.repo.update_description(task_id, req.description)
@@ -190,6 +195,7 @@ class TaskService:
             paused_at=raw["paused_at"],
             created_at=raw["created_at"],
             lifecycle=raw.get("lifecycle") or "permanent",
+            expires_at=raw.get("expires_at"),
             runtime_state=self._runtime_state(raw["task_id"]),
             last_decision=self._last_decision(raw["task_id"]),
             rule_briefs=rule_briefs,
