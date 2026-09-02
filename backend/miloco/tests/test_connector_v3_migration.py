@@ -813,3 +813,65 @@ def test_migration_not_rerun_on_v3_db(v2_db):
         == 1
     )
     conn.close()
+
+
+def test_a_v2_db_whose_version_number_was_lost_still_migrates(v2_db):
+    """版本号丢了也要认出是 v2 —— sqlite3 .dump 恢复不保留 PRAGMA user_version。
+
+    光看"有没有 task_link"会把它判成当前基线: task_link 早在 v1→v2 就删了。钉死
+    之后 v2→v3 永远不跑, 版本号说是最新而新列一个都没有。
+    """
+    _seed(v2_db, lambda c: (
+        _add_task(c, "t1"),
+        _add_rule(c, "r1", "t1", mode="state", on_enter_desc="进来了"),
+        c.execute("PRAGMA user_version = 0"),
+    ))
+
+    _migrate(v2_db)
+
+    conn = _raw(v2_db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    rule_columns = {r["name"] for r in conn.execute("PRAGMA table_info(rule)")}
+    task_columns = {r["name"] for r in conn.execute("PRAGMA table_info(task)")}
+    assert "direction" in rule_columns
+    assert "on_target_actions" in task_columns
+    # 数据也要真迁: 只加列不搬值同样是半迁移状态
+    assert conn.execute("SELECT direction FROM rule WHERE id='r1'").fetchone()[0] == (
+        "session"
+    )
+    assert conn.execute(
+        "SELECT on_enter_desc FROM task WHERE task_id='t1'"
+    ).fetchone()[0] == "进来了"
+    conn.close()
+
+
+def test_a_v3_db_whose_version_number_was_lost_is_not_migrated_again(v2_db):
+    """已经是 v3 形态的库, 版本号丢了要认成 v3, 不能退回 v2 重跑一遍。
+
+    退回重跑会把 direction 按 mode 重算 —— 存量里 exit 型的 mode 是 event, 重算
+    等于把它打回 enter, 出路径静默消失。
+    """
+    _seed(v2_db, lambda c: (_add_task(c, "t1"),))
+    _migrate(v2_db)
+    conn = _raw(v2_db)
+    conn.execute(
+        "INSERT INTO rule (id, name, task_id, mode, direction, lifecycle, enabled, "
+        "condition, actions, action_descriptions, created_at, updated_at) "
+        "VALUES ('r_exit', 'r_exit', 't1', 'event', 'exit', 'permanent', 1, "
+        "'{\"perceive_device_ids\":[],\"query\":\"q\"}', '[]', '[\"走了\"]', 0, 0)"
+    )
+    conn.execute("PRAGMA user_version = 0")
+    conn.commit()
+    conn.close()
+
+    import miloco.database.connector as connector_module
+
+    connector_module.db_connector = None
+    _migrate(v2_db)
+
+    conn = _raw(v2_db)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute(
+        "SELECT direction FROM rule WHERE id='r_exit'"
+    ).fetchone()[0] == "exit"
+    conn.close()

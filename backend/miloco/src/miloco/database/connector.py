@@ -258,20 +258,18 @@ class SQLiteConnector:
                         "PRAGMA user_version"
                     ).fetchone()[0]
                     if current_version == 0:
-                        # v1 老库从没显式写过 PRAGMA user_version, 但 task_link
-                        # 表必然存在 (v1 schema 包含它); 反之若既没版本号也没
-                        # task_link, 说明是"partial 缺表兜底 / fresh 后手工干预"
-                        # 场景, 直接钉到当前基线, 不跑迁移。
-                        if "task_link" in existing_tables:
-                            current_version = 1
-                            conn.execute("PRAGMA user_version = 1")
-                            conn.commit()
-                        else:
-                            conn.execute(
-                                f"PRAGMA user_version = {_DB_SCHEMA_VERSION}"
-                            )
-                            conn.commit()
-                            current_version = _DB_SCHEMA_VERSION
+                        # 版本号缺失时只能按库的形状认。不能猜 —— 猜高了后面的
+                        # 迁移整段跳过, 版本号说是最新而列根本没补, 之后哪个请求
+                        # 先读到新列就在那儿炸。
+                        current_version = _detect_schema_version(conn)
+                        conn.execute(
+                            f"PRAGMA user_version = {current_version}"
+                        )
+                        conn.commit()
+                        logger.info(
+                            "user_version 缺失, 按库的形状判定为 v%d",
+                            current_version,
+                        )
                     for target in range(
                         current_version + 1, _DB_SCHEMA_VERSION + 1
                     ):
@@ -1284,6 +1282,27 @@ _DEFAULT_EXIT_DEBOUNCE_SECONDS = 60
 
 def _table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
     return {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+
+
+_SCHEMA_VERSION_MARKERS = (("rule", "direction"), ("task", "on_target_actions"))
+
+
+def _detect_schema_version(conn: sqlite3.Connection) -> int:
+    """没有 PRAGMA user_version 时, 按表与列的形状认版本。
+
+    老库从没显式写过它, 而 ``sqlite3 .dump`` 重建也不保留它 —— 一个 v2 库经 dump
+    恢复后版本号是 0 且 task_link 早被 v1→v2 删了, 光看"有没有 task_link"会把它
+    判成当前基线, v2→v3 从此不跑。所以标志按新版本真正加的那些列取。
+
+    认不出 v3 就退回 v2 让链跑一遍: 加列是幂等的, 少了的补上, 已有的跳过。
+    """
+    cursor = conn.cursor()
+    if _table_columns(cursor, "task_link"):
+        return 1
+    for table, marker in _SCHEMA_VERSION_MARKERS:
+        if marker not in _table_columns(cursor, table):
+            return 2
+    return _DB_SCHEMA_VERSION
 
 
 def _add_columns_if_missing(
