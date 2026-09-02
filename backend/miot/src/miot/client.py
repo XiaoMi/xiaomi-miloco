@@ -446,12 +446,19 @@ class MIoTClient:
         """
         return self._oauth_client.gen_auth_url(redirect_uri=redirect_uri)
 
-    async def get_access_token_async(self, code: str, state: str) -> MIoTOauthInfo:
+    async def get_access_token_async(
+        self,
+        code: str,
+        state: str,
+        persist: Optional[Callable[[MIoTOauthInfo], None]] = None,
+    ) -> MIoTOauthInfo:
         """Get access token by authorization code.
 
         Args:
             code (str): OAuth2 redirect code.
             state (str): Redirect state.
+            persist: 拿到令牌后**立即**调用，用于落盘。授权码同样是一次性的，
+                换取成功后若在落盘前失败，住户得从头再授权一遍。
 
         Returns:
             MIoTOauthInfo: MIoT OAuth2 Info.
@@ -459,45 +466,95 @@ class MIoTClient:
         if not await self._oauth_client.check_state_async(redirect_state=state):
             raise ValueError("state is invalid")
         self._oauth_info = await self._oauth_client.get_access_token_async(code=code)
-        self._http_client.update_http_header(access_token=self._oauth_info.access_token)
-        await self._camera_client.update_access_token_async(
-            access_token=self._oauth_info.access_token
-        )
+        # 授权码已被消费，先落盘再做副作用——理由同 refresh_access_token_async。
+        self.__persist_oauth_info(persist, "authorize")
         await self.get_user_info_async()
-        # First-time OAuth: build the mips_cloud client now that we have a
-        # token and the user uid (loaded by get_user_info_async above). A
-        # later token refresh path goes through refresh_access_token_async →
-        # update_access_token instead of a fresh setup.
-        await self._setup_mips_async()
+        self.__persist_oauth_info(persist, "authorize:user_info")
+        await self.__apply_access_token_async()
+        # First-time OAuth: mips_cloud 由 __apply_access_token_async 在
+        # _mips_cloud 尚未建立时负责 setup（需要 user uid，上面已拉到）。
         return self._oauth_info
 
-    async def refresh_access_token_async(self, refresh_token: str) -> MIoTOauthInfo:
+    async def refresh_access_token_async(
+        self,
+        refresh_token: str,
+        persist: Optional[Callable[[MIoTOauthInfo], None]] = None,
+    ) -> MIoTOauthInfo:
         """Refresh access token.
 
         Args:
             refresh_token (str): Refresh token.
+            persist: 拿到新令牌后**立即**调用，用于落盘。小米的 refresh_token 是
+                一次性的（官方文档：一个 Refresh Token 只能刷新一次 Access
+                Token），换取成功的那一刻旧令牌就已作废；若在落盘前进程死掉，
+                新令牌永久丢失、住户只能重新授权。传了这个回调，落盘就发生在
+                任何副作用之前。
 
         Returns:
             MIoTOauthInfo: MIoT OAuth2 Info.
         """
         oauth_info = await self._oauth_client.refresh_access_token_async(refresh_token)
+        # 这一行之后旧令牌在云端已经作废（refresh_token 是一次性的），新令牌只存在
+        # 于内存。**落盘必须先于任何副作用**——下面的相机调用会进原生库，段错误会
+        # 直接带走进程，连 except 都不会执行。
         if self._oauth_info:
             oauth_info.user_info = self._oauth_info.user_info
-            self._oauth_info = oauth_info
-        else:
-            self._oauth_info = oauth_info
+        self._oauth_info = oauth_info
+        self.__persist_oauth_info(persist, "refresh")
+
+        if oauth_info.user_info is None:
+            # 首次刷新时没有可继承的 user_info，补拉一次；拿到后再存一遍，
+            # 让库里那份也带上账号身份（同账号重绑判定要用它）。
             await self.get_user_info_async()
-        self._http_client.update_http_header(access_token=self._oauth_info.access_token)
-        await self._camera_client.update_access_token_async(
-            access_token=self._oauth_info.access_token
-        )
-        if self._mips_cloud is not None:
-            await self._mips_cloud.update_access_token(self._oauth_info.access_token)
-        else:
-            # mips_cloud not yet set up (e.g. fresh process restored oauth
-            # from KV cache and is doing its first refresh). Set up now.
-            await self._setup_mips_async()
+            self.__persist_oauth_info(persist, "refresh:user_info")
+
+        await self.__apply_access_token_async()
         return self._oauth_info
+
+    def __persist_oauth_info(
+        self, persist: Optional[Callable[[MIoTOauthInfo], None]], stage: str
+    ) -> None:
+        """把当前令牌交给调用方落盘。
+
+        落盘失败只记日志：令牌至少还在内存里，硬抛会让本次刷新整体失败，反而把
+        「已经拿到新令牌」这件事也一起丢掉。
+        """
+        if persist is None or self._oauth_info is None:
+            return
+        try:
+            persist(self._oauth_info)
+        except Exception as e:  # noqa: BLE001 - 落盘失败不应中断刷新
+            _LOGGER.error("persist oauth info failed at %s: %s", stage, e)
+
+    async def __apply_access_token_async(self) -> None:
+        """把新的 access_token 推给各个下游持有者。
+
+        每一项独立 try：任何一项失败都不该影响其余项，更不该冒泡成「刷新失败」
+        ——令牌此刻已经落盘，刷新在语义上已经成功了。
+        """
+        token = self._oauth_info.access_token if self._oauth_info else None
+        if not token:
+            return
+        try:
+            self._http_client.update_http_header(access_token=token)
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.error("update http header failed: %s", e)
+        # 与本文件既有写法一致地判空——这里原先没判，而 _camera_client 确实
+        # 会被置 None，是刷新链路上最容易踩的一颗雷。
+        if self._camera_client is not None:
+            try:
+                await self._camera_client.update_access_token_async(access_token=token)
+            except Exception as e:  # noqa: BLE001
+                _LOGGER.error("update camera access token failed: %s", e)
+        try:
+            if self._mips_cloud is not None:
+                await self._mips_cloud.update_access_token(token)
+            else:
+                # mips_cloud not yet set up (e.g. fresh process restored oauth
+                # from KV cache and is doing its first refresh). Set up now.
+                await self._setup_mips_async()
+        except Exception as e:  # noqa: BLE001
+            _LOGGER.error("update mips access token failed: %s", e)
 
     async def check_token_async(self) -> bool:
         """Get user information to check if the token is valid.

@@ -54,6 +54,48 @@ _LOGGER = logging.getLogger(__name__)
 TOKEN_EXPIRES_TS_RATIO = 0.7
 
 
+# 出错日志里需要脱敏的键。前三个是请求体里的一次性凭据，后两个在每一次
+# 业务请求的头部里——401 / 非 200 分支原样打印整份请求头，等于每报一次错就
+# 把 access_token 与 client secret 落一次盘。
+_SECRET_KEYS = frozenset(
+    {"refresh_token", "code", "access_token", "Authorization", "X-Client-Secret"}
+)
+
+
+def _mask(value: str) -> str:
+    """凭据只留前 8 位与长度。
+
+    留前 8 位是为了还能比对「两次失败发的是不是同一枚」——那是排障时真正需要
+    的信息；完整值再无别的用处，而日志一旦外发即是泄露。
+
+    先剥掉鉴权方案名再取前缀：``Authorization`` 的值形如 ``Bearer<token>``，
+    直接取前 8 位会整个落在方案名里，两枚不同的令牌脱敏成同一个字符串，比对
+    也就无从谈起。
+    """
+    body = value
+    for scheme in ("Bearer", "Basic"):
+        if body.startswith(scheme):
+            body = body[len(scheme) :].lstrip()
+            break
+    return f"{body[:8]}…<{len(body)}>"
+
+
+def _redact_map(data: Dict) -> Dict:
+    """按键名脱敏，返回可安全入日志的副本。"""
+    safe = {}
+    for k, v in (data or {}).items():
+        if k in _SECRET_KEYS and isinstance(v, str) and v:
+            safe[k] = _mask(v)
+        else:
+            safe[k] = v
+    return safe
+
+
+def _redact(data: Dict) -> str:
+    """请求体转成可入日志的字符串，凭据只留前 8 位。"""
+    return json.dumps(_redact_map(data))
+
+
 class MIoTOAuth2Client:
     """OAuth2 agent url, default: product env."""
 
@@ -160,7 +202,7 @@ class MIoTOAuth2Client:
         if http_res.status == 401:
             _LOGGER.error(
                 "unauthorized(401), oauth/get_token, %s -> %s",
-                data,
+                _redact(data),
                 await http_res.text(encoding="utf-8"),
             )
             raise MIoTOAuth2Error(
@@ -170,23 +212,30 @@ class MIoTOAuth2Client:
             _LOGGER.error(
                 "invalid http code %d, oauth/get_token, %s -> %s",
                 http_res.status,
-                data,
+                _redact(data),
                 await http_res.text(encoding="utf-8"),
             )
             raise MIoTOAuth2Error(f"invalid http status code, {http_res.status}")
 
         res_str = await http_res.text()
         res_obj = json.loads(res_str)
-        # 凭据被明确拒绝时,小米返回的是 {"error":96009,"error_description":...}
-        # 这种形状——没有 `code` 字段,会落进下面的通用分支被当成 CODE_UNKNOWN,
-        # 于是「凭据真失效」和「响应偶发不合法」在调用方眼里完全一样。这里先把
-        # 它单独识别出来并带上专属错误码,调用方才能区分「重试无用」与「可重试」。
-        if isinstance(res_obj, dict) and res_obj.get("error") is not None:
-            raise MIoTOAuth2Error(
-                f"oauth/get_token rejected, error={res_obj.get('error')}, "
-                f"description={res_obj.get('error_description')}",
-                MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN,
-            )
+        # 凭据被明确拒绝时的真实响应形状(实机抓到,勿凭想象改):
+        #   {"code":-6,
+        #    "message":"{\"error\":96009,\"error_description\":\"invalid refresh token\"}",
+        #    "result":{"error":96009,"error_description":"invalid refresh token",...}}
+        # 注意 error 在 **result 里**,顶层只有 code/message/result。只看顶层
+        # 会一路落进下面的通用分支被当成 CODE_UNKNOWN,于是「凭据真失效」和
+        # 「响应偶发不合法」在调用方眼里完全一样——那正是要区分开的两件事。
+        # 两个位置都查:顶层是为兼容可能的另一种形状,不做形状假设。
+        err_obj = res_obj if isinstance(res_obj, dict) else {}
+        result_obj = err_obj.get("result")
+        for holder in (err_obj, result_obj if isinstance(result_obj, dict) else {}):
+            if holder.get("error") is not None:
+                raise MIoTOAuth2Error(
+                    f"oauth/get_token rejected, error={holder.get('error')}, "
+                    f"description={holder.get('error_description')}",
+                    MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN,
+                )
         if (
             not res_obj
             or res_obj.get("code", None) != 0
@@ -199,7 +248,7 @@ class MIoTOAuth2Client:
             or not res_obj["result"]["refresh_token"]
         ):
             raise MIoTOAuth2Error(
-                f"invalid http response, {res_str}, {json.dumps(data)}"
+                f"invalid http response, {res_str}, {_redact(data)}"
             )
 
         return MIoTOauthInfo(
@@ -432,7 +481,7 @@ class MIoTHttpClient:
                 "mihome api post unauthorized(401), %s, %s, %s -> %s",
                 url_path,
                 data,
-                self.__api_request_headers,
+                _redact_map(self.__api_request_headers),
                 await http_res.text(encoding="utf-8"),
             )
             raise MIoTHttpError(
@@ -445,7 +494,7 @@ class MIoTHttpClient:
                 http_res.status,
                 url_path,
                 data,
-                self.__api_request_headers,
+                _redact_map(self.__api_request_headers),
                 await http_res.text(encoding="utf-8"),
             )
             raise MIoTHttpError(
