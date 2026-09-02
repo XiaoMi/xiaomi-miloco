@@ -14,7 +14,7 @@
   以及 aware 输入不受 env 影响绝对时刻。系统时区 fallback 依赖 stdlib,不测。
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -36,6 +36,16 @@ def runner():
 
 
 _NOW_2026_06_10 = "2026-06-10T14:30:00+08:00"  # Wednesday
+
+
+def _tz_differing_from_local() -> str:
+    """挑一个偏移与本机不同的时区 —— 两者同偏移时"按墙上钟算"看不出错。"""
+    now = datetime.now()
+    local_offset = now.astimezone().utcoffset()
+    for name in ("Asia/Shanghai", "America/Los_Angeles"):
+        if ZoneInfo(name).utcoffset(now) != local_offset:
+            return name
+    raise AssertionError("这两个时区不可能同偏移")
 
 
 def _iso_to_ms(iso: str) -> int:
@@ -256,6 +266,53 @@ class TestCli:
             ],
         )
         assert result.exit_code == 1
+
+    def test_cli_without_now_reads_the_machine_clock(self, runner):
+        """SKILL.md 里的调用不传 --now —— 默认值必须是真的当前时间。
+
+        写死一个基准时刻同样能让本命令 exit 0, 所以断言必须能把"读了时钟"和
+        "读了别的什么"分开: 拿 amount=0 的相对锚点回显现在, 与测试自己取的
+        时刻比。
+        """
+        before = datetime.now(ZoneInfo("Asia/Shanghai"))
+        result = runner.invoke(
+            cli,
+            ["time-compute", "--anchor", '{"kind":"add","amount":0,"unit":"minutes"}'],
+        )
+        assert result.exit_code == 0, result.output
+        got = datetime.fromisoformat(result.output.strip())
+        assert abs((got - before).total_seconds()) < 60
+
+    def test_cli_without_now_is_an_absolute_instant(self, runner, monkeypatch):
+        """默认值必须是带时区的绝对时刻。
+
+        裸 ``datetime.now()`` 出的是本机墙上钟, ``_parse_now`` 会把它当部署时区
+        的墙上钟解读 —— 偏移后缀照样对得上, 只有部署时区与本机不同时绝对时刻
+        才偏, 所以这里必须换个时区断绝对时刻。
+        """
+        monkeypatch.setenv("MILOCO_TIMEZONE", _tz_differing_from_local())
+        before = datetime.now(UTC)
+        result = runner.invoke(
+            cli,
+            ["time-compute", "--anchor", '{"kind":"add","amount":0,"unit":"minutes"}'],
+        )
+        assert result.exit_code == 0, result.output
+        got = datetime.fromisoformat(result.output.strip())
+        assert abs((got - before).total_seconds()) < 60
+
+    def test_cli_explicit_now_still_wins(self, runner):
+        result = runner.invoke(
+            cli,
+            [
+                "time-compute",
+                "--now",
+                _NOW_2026_06_10,
+                "--anchor",
+                '{"kind":"end_of_day"}',
+            ],
+        )
+        assert result.exit_code == 0
+        assert result.output.strip() == "2026-06-10T23:59:59+08:00"
 
     def test_cli_error_goes_to_stderr_not_stdout(self, runner):
         """错误消息走 stderr, stdout 干净, 便于 $(time-compute ...) 在管道里安全用。"""
