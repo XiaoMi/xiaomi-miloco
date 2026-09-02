@@ -608,12 +608,8 @@ def test_on_target_creates_milestone_rule(v2_db):
     dnf = json.loads(milestone["condition_dnf"])
     item = dnf["any_of"][0][0]
     assert item["source_type"] == "record"
-    assert item["spec"] == {
-        "task_id": "t1",
-        "kind": "duration",
-        "op": ">=",
-        "value": 60,
-    }
+    # 阈值不进条件项, 与运行时代建的那条同一种形状 (见 RecordRef 的 docstring)
+    assert item["spec"] == {"task_id": "t1", "kind": "duration", "op": ">="}
     conn.close()
 
 

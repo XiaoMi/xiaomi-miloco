@@ -1385,10 +1385,12 @@ def _active_target_minutes(cursor: sqlite3.Cursor, task_id: str) -> int | None:
     return row["target_minutes"] if row else None
 
 
-def _create_milestone_rule(
-    cursor: sqlite3.Cursor, task_id: str, target_minutes: int, now: int
-) -> None:
-    """给带 on_target_desc 的 task 补一条 direction=milestone 的 rule。"""
+def _create_milestone_rule(cursor: sqlite3.Cursor, task_id: str, now: int) -> None:
+    """给带 on_target_desc 的 task 补一条 direction=milestone 的 rule。
+
+    形状必须与 ``RuleService._build_milestone_rule`` 产出的一致 —— 阈值不进条件项,
+    求值时现去 record 上读。存副本会在用户改完目标后分叉, 见 ``RecordRef``。
+    """
     dnf = {
         "any_of": [
             [
@@ -1398,7 +1400,6 @@ def _create_milestone_rule(
                         "task_id": task_id,
                         "kind": "duration",
                         "op": ">=",
-                        "value": target_minutes,
                     },
                     "negate": False,
                 }
@@ -1579,7 +1580,7 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
                 "UPDATE task SET on_target_desc=? WHERE task_id=?",
                 (on_target, task_id),
             )
-            _create_milestone_rule(cursor, task_id, target_minutes, now)
+            _create_milestone_rule(cursor, task_id, now)
             counts["milestone_rule_created"] += 1
 
         # ── (f) 恢复被旧 bug 连带关掉的 rule.enabled ─────────────────
