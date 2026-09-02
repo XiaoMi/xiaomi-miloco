@@ -547,6 +547,24 @@ function TaskDetailSheet({
                 >
                   {paused ? t("tasks.statusPaused") : t("tasks.statusActive")}
                 </span>
+                {/* 停用时运行态恒 off, 那句标签没有信息量; 启用而"未进行"才是
+                    排查「规则怎么没反应」要看的那一眼 */}
+                {!paused && (
+                  <span
+                    className={`ml-2 inline-block text-caption px-1.5 py-0.5 rounded ${
+                      task.runtimeState === "on"
+                        ? "bg-brand-soft text-brand-primary"
+                        : "bg-bg-secondary text-text-secondary"
+                    }`}
+                    title={t("tasks.runtimeStateHint")}
+                  >
+                    {t(
+                      task.runtimeState === "on"
+                        ? "tasks.runtimeOn"
+                        : "tasks.runtimeOff",
+                    )}
+                  </span>
+                )}
                 {paused && task.pausedAt && (
                   <span className="ml-2 text-caption text-text-tertiary num">
                     {t("tasks.pausedAtLabel", {
