@@ -16,7 +16,11 @@ from contextlib import contextmanager
 from typing import Any
 
 from miloco.config import get_settings
-from miloco.rule.record_source import MILESTONE_SENTINEL_DID
+from miloco.rule.record_source import (
+    milestone_condition_dnf,
+    milestone_legacy_condition,
+    milestone_rule_name,
+)
 from miloco.rule.schema import RuleDirection, task_rule_set_error
 
 # Configure logging
@@ -1413,28 +1417,12 @@ def _active_target_minutes(cursor: sqlite3.Cursor, task_id: str) -> int | None:
 def _create_milestone_rule(cursor: sqlite3.Cursor, task_id: str, now: int) -> None:
     """给带 on_target_desc 的 task 补一条 direction=milestone 的 rule。
 
-    形状必须与 ``RuleService._build_milestone_rule`` 产出的一致 —— 阈值不进条件项,
-    求值时现去 record 上读。存副本会在用户改完目标后分叉, 见 ``RecordRef``。
+    形状与运行时代建共用同一份 (``milestone_condition_dnf`` 等), 不在这里抄 ——
+    本函数的执行时刻是未来某天的首次 v2→v3, 抄一份的话服务层改了形状不会有任何
+    测试红, 而升上来的老 task 会静默不响。
     """
-    dnf = {
-        "any_of": [
-            [
-                {
-                    "source_type": "record",
-                    "spec": {
-                        "task_id": task_id,
-                        "kind": "duration",
-                        "op": ">=",
-                    },
-                    "negate": False,
-                }
-            ]
-        ]
-    }
-    legacy_condition = {
-        "perceive_device_ids": [MILESTONE_SENTINEL_DID],
-        "query": f"[milestone] task {task_id} 累计达标",
-    }
+    dnf = milestone_condition_dnf(task_id)
+    legacy_condition = milestone_legacy_condition(task_id)
     cursor.execute(
         """
         INSERT INTO rule (
@@ -1444,7 +1432,7 @@ def _create_milestone_rule(cursor: sqlite3.Cursor, task_id: str, now: int) -> No
         """,
         (
             str(uuid.uuid4()),
-            f"[{task_id}] 累计达标",
+            milestone_rule_name(task_id),
             task_id,
             json.dumps(legacy_condition, ensure_ascii=False),
             json.dumps(dnf, ensure_ascii=False),

@@ -41,6 +41,45 @@ SUPPORTED_OP = ">="
 MILESTONE_SENTINEL_DID = "__milestone_no_camera__"
 
 
+def milestone_rule_name(task_id: str) -> str:
+    """代建达标规则的名字。也是判重名的键 (``exists_by_name``)。"""
+    return f"[{task_id}] 累计达标"
+
+
+def milestone_condition_dnf(task_id: str) -> dict:
+    """代建达标规则的条件项形状 —— 迁移与运行时代建共用这一份。
+
+    两处各写一份的话, 改了服务层那份不会有任何测试红 (各自的测试各断各自那份),
+    而迁移侧的执行时刻被推到未来某天的首次 v2→v3: 那时形状可能已经不一致, 从
+    v2 升上来的老 task 静默不响, 新建的正常。
+
+    阈值不进来: 每次去 record 上现读, 存副本会在用户改完目标后分叉 (见 RecordRef)。
+    """
+    return {
+        "any_of": [
+            [
+                {
+                    "source_type": RECORD_SOURCE_TYPE,
+                    "spec": {
+                        "task_id": task_id,
+                        "kind": SUPPORTED_KIND,
+                        "op": SUPPORTED_OP,
+                    },
+                    "negate": False,
+                }
+            ]
+        ]
+    }
+
+
+def milestone_legacy_condition(task_id: str) -> dict:
+    """旧 ``condition`` 列上那份。哨兵 did 的理由见 MILESTONE_SENTINEL_DID。"""
+    return {
+        "perceive_device_ids": [MILESTONE_SENTINEL_DID],
+        "query": f"[milestone] task {task_id} 累计达标",
+    }
+
+
 @dataclass(frozen=True)
 class RecordRef:
     """一条 record 条件项引用的 record。

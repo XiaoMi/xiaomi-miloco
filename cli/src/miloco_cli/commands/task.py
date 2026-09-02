@@ -74,7 +74,10 @@ def task_group():
     "--expires-at",
     "expires_at",
     default=None,
-    help="到期时刻 ISO8601（time-compute 直出），仅 --lifecycle temporary 可传",
+    help=(
+        "到期时刻 ISO8601（time-compute 直出）。只对 --lifecycle temporary 生效，"
+        "配 permanent 会被拒"
+    ),
 )
 @click.option("--pretty", is_flag=True)
 def task_create(task_id, description, lifecycle, expires_at, pretty):
@@ -87,6 +90,11 @@ def task_create(task_id, description, lifecycle, expires_at, pretty):
     - ``miloco-cli task record init X ...``       挂 record
     """
     from miloco_cli.client import api_post
+
+    # 本地先拦一道: 服务端同样会拒, 但那要等一个来回, 而写命令的是 agent ——
+    # 判据只有一条, 两份不会分叉。
+    if expires_at and lifecycle != "temporary":
+        _exit_error("--expires-at 只能配 --lifecycle temporary")
 
     body = {"task_id": task_id, "description": description, "lifecycle": lifecycle}
     if expires_at:

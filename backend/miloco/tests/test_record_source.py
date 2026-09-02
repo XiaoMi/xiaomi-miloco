@@ -31,8 +31,10 @@ TASK_ID = "watch_tv"
 def _make_rule(rule_id="rule-ms", source_type="record", spec=None, task_id=TASK_ID):
     item = ConditionItem(
         source_type=source_type,
+        # 不带 value: 阈值每次去 record 上现读, 存副本会在用户改目标后分叉。
+        # 带 value 的是旧形状, 要用就显式传 (见 TestMilestoneReconcile)。
         spec=spec if spec is not None else {
-            "task_id": task_id, "kind": "duration", "op": ">=", "value": 120,
+            "task_id": task_id, "kind": "duration", "op": ">=",
         },
     )
     return Rule(
@@ -364,11 +366,53 @@ class TestMilestoneReconcile:
         assert not repo.create.called
 
     def test_is_idempotent_when_one_already_exists(self):
+        """形状对得上就原样留着。
+
+        这条比"形状不对要重建"更要紧: 判据写松一点点, 每次 reconfigure 都会重建
+        一次, rule id 跟着变, 达标历史被切成碎片。
+        """
         svc, repo = _rule_service("duration", (60, 0), rules=[_make_rule()])
         svc.reconcile_milestone_rule(TASK_ID)
 
         assert not repo.create.called
         assert not repo.delete.called
+
+    def test_rebuilds_when_the_shape_is_stale(self):
+        """形状过期的那条要换掉。
+
+        只数个数的话它会被永久留着 —— 用户观察到的是"同样配了达标提醒, 新建的
+        task 会响、老的不响", 而那条 rule 对用户不可见 (默认不列出)。
+        这里用带 value 的旧形状: 阈值曾经进条件项, 后来改成现读。
+        """
+        stale = _make_rule(
+            spec={"task_id": TASK_ID, "kind": "duration", "op": ">=", "value": 120}
+        )
+        svc, repo = _rule_service("duration", (60, 0), rules=[stale])
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        repo.delete.assert_called_once_with("rule-ms")
+        assert repo.create.called
+        assert repo.create.call_args[0][0].condition_dnf.any_of[0][0].spec == {
+            "task_id": TASK_ID,
+            "kind": "duration",
+            "op": ">=",
+        }
+
+    def test_rebuilds_when_the_sentinel_did_is_wrong(self):
+        """哨兵 did 也算形状。
+
+        那一列填了真实 did 或留空, 只认它的旧代码会把"累计达标"当成一句视觉
+        query 塞进摄像头 prompt —— 见 MILESTONE_SENTINEL_DID。
+        """
+        wrong = _make_rule()
+        wrong.condition.perceive_device_ids = ["cam-001"]
+        svc, repo = _rule_service("duration", (60, 0), rules=[wrong])
+        svc.reconcile_milestone_rule(TASK_ID)
+
+        repo.delete.assert_called_once_with("rule-ms")
+        assert repo.create.call_args[0][0].condition.perceive_device_ids == [
+            "__milestone_no_camera__"
+        ]
 
     def test_deletes_when_the_target_action_is_cleared(self):
         svc, repo = _rule_service(

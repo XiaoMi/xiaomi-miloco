@@ -90,6 +90,26 @@ def test_create_sends_expiry_when_given(runner):
         assert body["expires_at"] == "2026-06-10T23:59:59+08:00"
 
 
+def test_create_rejects_expiry_on_permanent_locally(runner):
+    """本地就拦, 不发请求 —— 服务端也拒, 但那要等一个来回。"""
+    with patch("miloco_cli.client.api_post") as mock_post:
+        result = runner.invoke(
+            task_group,
+            [
+                "create",
+                "--task-id",
+                "t1",
+                "--description",
+                "d",
+                "--expires-at",
+                "2026-06-10T23:59:59+08:00",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "只能配 --lifecycle temporary" in result.output
+        mock_post.assert_not_called()
+
+
 def test_create_rejects_unknown_lifecycle(runner):
     result = runner.invoke(
         task_group,

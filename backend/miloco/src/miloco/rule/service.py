@@ -32,10 +32,9 @@ from miloco.middleware.exceptions import (
 from miloco.miot.client import MiotProxy
 from miloco.miot.filter import allowed_home_ids, filter_by_home
 from miloco.rule.record_source import (
-    MILESTONE_SENTINEL_DID,
-    RECORD_SOURCE_TYPE,
-    SUPPORTED_KIND,
-    SUPPORTED_OP,
+    milestone_condition_dnf,
+    milestone_legacy_condition,
+    milestone_rule_name,
     record_ref_of,
 )
 from miloco.rule.runner import RuleRunner
@@ -43,7 +42,6 @@ from miloco.rule.schema import (
     _DIRECTION_TO_MODE,
     _MODE_TO_DIRECTION,
     SCENE_IID,
-    ConditionItem,
     Rule,
     RuleCondition,
     RuleConditionDNF,
@@ -1159,32 +1157,33 @@ class RuleService:
     def _build_milestone_rule(self, task_id: str) -> Rule:
         """代建的那条 rule 长什么样。
 
-        不带阈值: 阈值每次去 record 上现读, 存副本会在用户改目标后分叉。迁移补建
-        的那条形状与这里一致。
+        不带阈值: 阈值每次去 record 上现读, 存副本会在用户改目标后分叉。名字与条件
+        都取自 ``record_source`` 里那份共用形状, 迁移补建走的是同一份。
         """
         return Rule(
-            name=f"[{task_id}] 累计达标",
+            name=milestone_rule_name(task_id),
             task_id=task_id,
             # mode 是 NOT NULL 且表达不了 milestone, 存一个自洽的占位值。
             mode=RuleMode.EVENT,
             direction=RuleDirection.MILESTONE,
             lifecycle=RuleLifecycle.PERMANENT,
-            condition=RuleCondition(
-                perceive_device_ids=[MILESTONE_SENTINEL_DID],
-                query=f"[milestone] task {task_id} 累计达标",
-            ),
-            condition_dnf=RuleConditionDNF(
-                any_of=[[
-                    ConditionItem(
-                        source_type=RECORD_SOURCE_TYPE,
-                        spec={
-                            "task_id": task_id,
-                            "kind": SUPPORTED_KIND,
-                            "op": SUPPORTED_OP,
-                        },
-                    )
-                ]]
-            ),
+            condition=RuleCondition(**milestone_legacy_condition(task_id)),
+            condition_dnf=RuleConditionDNF(**milestone_condition_dnf(task_id)),
+        )
+
+    def _milestone_shape_is_current(self, rule: Rule) -> bool:
+        """这条代建规则的形状还是当前这一版吗。
+
+        比的是求值真正读的那几样: 条件项 (``record_ref_of`` 只看 source_type 与
+        spec)、旧 condition 列上的哨兵 did (填别的会让这条 rule 被当成视觉 query
+        塞进摄像头 prompt)、名字 (判重名的键)。阈值不在里面 —— 它本来就不进形状。
+        """
+        want = self._build_milestone_rule(rule.task_id)
+        return (
+            rule.name == want.name
+            and rule.condition_dnf == want.condition_dnf
+            and rule.condition.perceive_device_ids
+            == want.condition.perceive_device_ids
         )
 
     def reconcile_milestone_rule(self, task_id: str) -> None:
@@ -1206,10 +1205,14 @@ class RuleService:
             for r in self._repo.list_by_task(task_id)
             if r.resolved_direction is RuleDirection.MILESTONE
         ]
-        # 齐备时留一条, 多出来的连同"不该有"的一起清掉。
-        keep = existing[:1] if wanted else []
-        for rule in existing[len(keep):]:
-            if not rule.id:
+        # 齐备时留一条形状还对得上的; 多出来的、形状过期的、"不该有"的一起清掉,
+        # 下面照当前形状重建。只数个数的话, 存量里形状漂移的那条会被永久留着 ——
+        # 用户观察到的是"同样配了达标提醒, 新建的 task 会响、老的不响"。
+        current = [r for r in existing if self._milestone_shape_is_current(r)]
+        keep = current[:1] if wanted else []
+        keep_ids = {r.id for r in keep}
+        for rule in existing:
+            if not rule.id or rule.id in keep_ids:
                 continue
             logger.info("达标规则 %s 不再需要, 删除 (task=%s)", rule.id, task_id)
             self._repo.delete(rule.id)
