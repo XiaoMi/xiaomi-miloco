@@ -992,50 +992,20 @@ def _mk_enter_rule(task_id="t1", name=None, with_action=True):
     RuleRepo().create(rule)
 
 
-def test_set_actions_rejects_clearing_enter_action_needed_by_a_rule(real_db):
-    """不带动作的 enter 规则靠的就是这一份 —— 抽走它规则会照跑但什么都不做。"""
-    from miloco.middleware.exceptions import ValidationException
+def test_set_actions_can_clear_the_enter_slot(real_db):
+    """清进入动作不再被拦。
+
+    拦过一版, 但那道闸只守得住这一个入口 —— 换方向、挪 task、给没接管的 task 补
+    任意一个别的槽, 都能造成同样的哑规则; 而拦住了也给不出出路 (兄弟自带动作在
+    task 已接管时同样选不到)。现在由 report_muted_enter_rules 在 reconfigure 时
+    按真实状态报出, 诊断用例见 test_reconfigure_path。
+    """
     from miloco.task.schema import TaskActionsUpdateRequest
 
     service = _service_with_rule_stub(None)
     _mk_task(service)
     service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc="开灯"))
     _mk_enter_rule(with_action=False)
-
-    with pytest.raises(ValidationException, match="靠这份进入动作"):
-        service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc=None))
-
-    assert service.get_full_view("t1").actions.on_enter_desc == "开灯"
-
-
-def test_set_actions_rejects_clearing_enter_even_if_rules_carry_own_action(real_db):
-    """task 还剩别的槽 → 读侧仍按接管处理、不回退 rule 行, 所以"自带动作"也白搭。
-
-    这一条与下面那条的差别只在 task 有没有 on_exit_desc —— 判据看的是清完之后
-    读侧还能不能选到动作, 不是 rule 行上有没有值。
-    """
-    from miloco.middleware.exceptions import ValidationException
-    from miloco.task.schema import TaskActionsUpdateRequest
-
-    service = _service_with_rule_stub(None)
-    _mk_task(service)
-    service.set_boundary_actions(
-        "t1", TaskActionsUpdateRequest(on_enter_desc="开灯", on_exit_desc="关灯")
-    )
-    _mk_enter_rule(with_action=True)
-
-    with pytest.raises(ValidationException, match="靠这份进入动作"):
-        service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc=None))
-
-
-def test_set_actions_allows_clearing_enter_action_when_rules_carry_their_own(real_db):
-    """清完一个槽都不剩 → task 整体退回旧路径, rule 行上那份重新生效。"""
-    from miloco.task.schema import TaskActionsUpdateRequest
-
-    service = _service_with_rule_stub(None)
-    _mk_task(service)
-    service.set_boundary_actions("t1", TaskActionsUpdateRequest(on_enter_desc="开灯"))
-    _mk_enter_rule(with_action=True)
 
     assert service.set_boundary_actions(
         "t1", TaskActionsUpdateRequest(on_enter_desc=None)

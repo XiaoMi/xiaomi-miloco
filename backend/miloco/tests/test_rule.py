@@ -1079,7 +1079,7 @@ class TestRuleServicePatch:
         assert updated_rule.enabled is False
 
     @pytest.mark.asyncio
-    async def test_patch_clearing_own_action_cannot_pass_its_own_gate(
+    async def test_patch_clearing_own_action_is_not_blocked(
         self, service, mock_rule_repo, mock_task_repo
     ):
         """清空动作这一改动不能拿"清空前的 task 槽"给自己放行。
@@ -1093,9 +1093,11 @@ class TestRuleServicePatch:
             "actions": {"on_enter_desc": "1. 开台灯"}
         }
 
-        with pytest.raises(ValidationException, match="没有动作可落"):
-            await service.patch_rule("r1", RuleUpdate(action_descriptions=[]))
-        mock_rule_repo.update.assert_not_called()
+        # 不再拦: 这类"改完会变哑"的状态由 report_muted_enter_rules 在
+        # reconfigure 时按真实状态报出 (见 test_reconfigure_path 里的诊断用例)。
+        assert (
+            await service.patch_rule("r1", RuleUpdate(action_descriptions=[])) is True
+        )
 
     @pytest.mark.asyncio
     async def test_patch_clearing_a_contended_slot_is_not_blocked(
@@ -1119,7 +1121,7 @@ class TestRuleServicePatch:
         )
 
     @pytest.mark.asyncio
-    async def test_patch_session_to_enter_cannot_pass_on_the_slot_it_vacates(
+    async def test_patch_session_to_enter_is_not_blocked(
         self, service, mock_rule_repo, mock_task_repo
     ):
         """换方向时 task 槽会被先清空 (_clear_task_slots), 校验必须把这一步算进去。"""
@@ -1137,13 +1139,15 @@ class TestRuleServicePatch:
             "actions": {"on_enter_desc": "开台灯"}
         }
 
-        with pytest.raises(ValidationException, match="没有动作可落"):
+        assert (
             await service.patch_rule(
                 "r1", RuleUpdate(direction=RuleDirection.ENTER, on_enter_desc=None)
             )
+            is True
+        )
 
     @pytest.mark.asyncio
-    async def test_patch_direction_change_cannot_strip_a_sibling(
+    async def test_patch_direction_change_is_not_blocked(
         self, service, mock_rule_repo, mock_task_repo
     ):
         """换方向的收尾清理不能把兄弟的动作抽走。
@@ -1163,9 +1167,10 @@ class TestRuleServicePatch:
             "actions": {"on_enter_desc": "1. 开灯"}
         }
 
-        with pytest.raises(ValidationException, match="靠这份进入动作"):
+        assert (
             await service.patch_rule("r1", RuleUpdate(direction=RuleDirection.EXIT))
-        mock_rule_repo.update.assert_not_called()
+            is True
+        )
 
     @pytest.mark.asyncio
     async def test_patch_direction_change_is_fine_without_naked_siblings(
@@ -1190,7 +1195,7 @@ class TestRuleServicePatch:
         )
 
     @pytest.mark.asyncio
-    async def test_patch_moving_out_checks_the_old_task_not_the_new_one(
+    async def test_patch_moving_out_is_not_blocked(
         self, service, mock_rule_repo, mock_task_repo
     ):
         """挪家时清的是旧家的槽, 所以要查旧家的兄弟。
@@ -1210,8 +1215,7 @@ class TestRuleServicePatch:
         }
         service._require_task_exists = lambda _tid: None
 
-        with pytest.raises(ValidationException, match="靠这份进入动作"):
-            await service.patch_rule("r1", RuleUpdate(task_id="new_task"))
+        assert await service.patch_rule("r1", RuleUpdate(task_id="new_task")) is True
 
     @pytest.mark.asyncio
     async def test_patch_moving_to_another_task_is_not_blocked(

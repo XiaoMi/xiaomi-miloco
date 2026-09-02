@@ -448,75 +448,43 @@ class RuleService:
         if error and task_rule_set_error(before, has_target) is None:
             raise ValidationException(error)
 
-    def _validate_action_reachable(
-        self,
-        rule: Rule,
-        changed_fields: set[str] | None = None,
-        previous: Rule | None = None,
-    ) -> None:
-        """enter rule 必须有动作可落 —— 自己带的, 或 task on_enter 槽里已有的。
+    def _validate_action_reachable(self, rule: Rule) -> None:
+        """新建 / 改完之后, 这条 enter rule 自己得有动作可落。
 
         动作已归 task, rule 侧必填是 v2 遗留: 多条 enter 共用一份动作时, 第二条起
         只能写一段被 ``sync_rule_actions_to_task`` 丢弃的文案。exit 不查 —— 无动作
         的 exit 只推状态, 是让 task 可重入的正常配置。
 
-        判的是**这次写入落地之后**的槽: 动作是双写的 (rule 行 + task 槽), 而透传
-        排在校验之后, 拿写前的槽去判会让「清空动作」这一类改动自己放行自己 ——
-        ``rule update <id> --clear action_descriptions`` 一条命令就能建出哑规则。
-        ``changed_fields`` / ``previous`` 与随后那几个 sync 分支收的是同一组参数。
+        只判**当前真实状态**, 不预演这次写入的后果。预演过的版本连着四轮出问题
+        (读写前视图 → 漏一条透传支路 → 支路里取数对象错 → 清空动作害到旁人), 根因
+        是校验在复刻透传的分支, 而复刻永远滞后于被复刻者。"配出来的规则会不会静默
+        不做事"改由 ``report_muted_enter_rules`` 在 ``reconfigure_task`` 里按真实的
+        写后状态诊断: 那里是所有写入路径的收敛点, 判据直接问读侧, 不需要枚举入口。
         """
-        moved_home = previous is not None and (
-            previous.resolved_direction is not rule.resolved_direction
-            or previous.task_id != rule.task_id
-        )
-        if moved_home:
-            # 换方向 / 挪家的收尾会清掉旧归属那边的槽。清的是 previous.task_id
-            # 的槽 (见 _clear_task_slots), 所以查的兄弟也在那个 task 里 —— 与
-            # 下面判"自己有没有动作可落"看的不是同一个 task。
-            # 这一问与本 rule 是什么方向无关, 必须排在方向那道 return 前面:
-            # enter 改 exit 正是它自己不再被查、而兄弟被抽走动作的那种。
-            self.assert_enter_rules_survive_clearing(
-                previous.task_id,
-                self._slots_cleared_by(previous),
-                exclude_rule_id=rule.id,
-            )
-
         if rule.resolved_direction is not RuleDirection.ENTER:
             return
         if rule.actions or rule.action_descriptions:
             return
         try:
-            slots = dict(
-                (self._task_repo.get_full_view(rule.task_id) or {}).get("actions")
-                or {}
-            )
+            slots = (self._task_repo.get_full_view(rule.task_id) or {}).get(
+                "actions"
+            ) or {}
         except Exception as e:  # noqa: BLE001
             # 读不出来时放行等于让哑规则建成, 与达标那道闸的默认方向相反。
             raise BusinessException(
                 f"读 task {rule.task_id} 的动作配置失败, 无法确认 enter 规则有动作可落"
             ) from e
 
-        # 把这次写入对槽的影响叠上去, 三条支路与下面真正执行的那段一一对应:
-        # 无槽可写 / 兄弟 rule 争同一个槽而整体跳过 / 正常写入。
-        if moved_home:
-            if previous.task_id == rule.task_id:
-                # 只有换方向那种才叠: 读出来的 slots 是 rule.task_id 的, 而
-                # _slots_cleared_by 查的是 previous.task_id —— 改挂 task 时那是
-                # 另一个 task 腾出的槽名, 叠上去会把一次合法的搬家判成"新家的
-                # 进入槽将被清空"。
-                for name in self._slots_cleared_by(previous):
-                    slots[name] = [] if name.endswith("_actions") else None
-            pending = _rule_action_slots(rule)
-        else:
-            pending = _rule_action_slots(rule, changed_fields)
-        if pending and not self._slots_contended_by_siblings(rule, set(pending)):
-            slots.update(pending)
-
         if not (slots.get("on_enter_actions") or slots.get("on_enter_desc")):
+            fix = (
+                f'miloco-cli task set-actions {rule.task_id} --on-enter-desc "..."'
+            )
+            if not any(slots.values()):
+                # 六个槽都空 = task 没被接管, 读侧会回退到 rule 行 —— 这时自带
+                # 动作是有效的出路。已接管的 task 不回退, 那条出路给了也走不通。
+                fix = "自己带 --action / --action-desc, 或 " + fix
             raise ValidationException(
-                "direction=enter 的规则没有动作可落: 自己带 --action / "
-                "--action-desc, 或先配 task 的进入动作: "
-                'miloco-cli task set-actions <task_id> --on-enter-desc "..."'
+                f"direction=enter 的规则没有动作可落。{fix}"
             )
 
     def _task_has_target_action(self, task_id: str) -> bool:
@@ -528,46 +496,60 @@ class RuleService:
             return False
         return bool(slots.get("on_target_actions") or slots.get("on_target_desc"))
 
-    def assert_enter_rules_survive_clearing(
-        self,
-        task_id: str,
-        slots_to_clear: set[str],
-        exclude_rule_id: str | None = None,
-    ) -> None:
-        """清掉这几个槽之后, task 名下的 enter 规则还能不能选到动作。
+    def report_muted_enter_rules(self, task_id: str) -> list[str]:
+        """哪些 enter 规则此刻选不到动作 —— 条件照判、状态照推, 就是不做事。
 
-        清空 task 动作槽的路径有两条 —— task 侧动作接口, 与 rule 换方向 / 改挂
-        task 时的收尾清理 (``_clear_task_slots``)。两条都调这里, 判据只有一份;
-        各自加一份的话, 静默的那条正好是 agent 更常走的。
-
-        task 一旦被接管, 读侧就不再回退到 rule 行 (见 ``runner._select_task_slot``)
-        —— 所以「rule 自己带了动作」并不等于清空 on_enter 之后它还做得成事。只有
-        该 task 的槽会被清得一个不剩 (整体退回旧路径) 时, rule 行上那份才重新生效。
+        判据不自己写: 直接问读侧那条选槽链路 (``runner._select_slot``, 它内部含
+        「task 没接管就回退 rule 行」那一步)。所以这里永远与真正执行时一致。
         """
-        if not ({"on_enter_actions", "on_enter_desc"} & slots_to_clear):
-            return
-        try:
-            slots = (self._task_repo.get_full_view(task_id) or {}).get("actions") or {}
-        except Exception as e:  # noqa: BLE001
-            raise BusinessException(
-                f"读 task {task_id} 的动作配置失败, 无法确认能否清空进入动作"
-            ) from e
-        still_owned = any(
-            v for k, v in slots.items() if k not in slots_to_clear
-        )
-        naked = [
-            r.id
-            for r in self._repo.list_by_task(task_id)
-            if r.id != exclude_rule_id
-            and r.resolved_direction is RuleDirection.ENTER
-            and (still_owned or not (r.actions or r.action_descriptions))
+        muted = [
+            rule.id
+            for rule in self._repo.list_by_task(task_id)
+            if rule.resolved_direction is RuleDirection.ENTER
+            and self._runner.selects_no_action_on_enter(rule)
         ]
-        if naked:
-            raise ValidationException(
-                f"task {task_id} 名下有 enter 规则 ({', '.join(naked)}) 靠这份进入动作, "
-                "清空会让它们什么都不做。先用 rule 侧动作 flag 给它们各自装上动作, "
-                "或把它们删掉"
+        return muted
+
+    def report_task_config_problems(self, task_id: str) -> list[str]:
+        """这个 task 此刻有哪些「配置合法但永不执行」的毛病。
+
+        做成收敛点诊断而不是写入闸: 这类不变式的破坏入口不止一条, 而闸只守得住
+        写它时看见的那个 ——
+
+        - 哑的 enter 规则: 清进入槽、rule 换方向或改挂 task 的收尾清理、给一个没
+          接管的 task 补任意一个别的槽 (读侧从此不再回退)、同方向兄弟争槽导致
+          rule 侧动作根本没写进去
+        - 方向组合非法 (没有进路径 / session 与别人混挂 / 配了达标却没有出路径):
+          写 rule 那条路上有闸, 而 ``rule delete`` 删掉最后一条 enter 规则造成同样
+          的状态、一道校验都没有 —— 那条路上也不该有闸, 拒绝删除会把「先删掉它」
+          这条自救路堵死
+
+        判据一律复用写入侧那几份 (``task_rule_set_error`` / 读侧选槽), 不在这里
+        重写一遍: 复刻永远滞后于被复刻者, 这个 PR 已经为此改过四轮。
+        """
+        problems: list[str] = []
+
+        # 空集不用自己挡: task_rule_set_error 对「一条 rule 都还没有」是放行的
+        # (装配分步进行)。再包一层守卫就是把它的判据抄了一半。
+        error = task_rule_set_error(
+            [r.resolved_direction for r in self._repo.list_by_task(task_id)],
+            self._task_has_target_action(task_id),
+        )
+        if error:
+            problems.append(error)
+
+        muted = self.report_muted_enter_rules(task_id)
+        if muted:
+            problems.append(
+                f"这些 enter 规则选不到动作, 触发后什么都不做: {', '.join(muted)}。"
+                "给它们各自装上 rule 侧动作 (task 未接管时才生效), 或把 task 的"
+                f'进入动作配回来: miloco-cli task set-actions {task_id} '
+                '--on-enter-desc "..."'
             )
+
+        for problem in problems:
+            logger.warning("task %s 配置有问题: %s", task_id, problem)
+        return problems
 
     def require_exit_path_for_target(self, task_id: str) -> None:
         """配达标动作前先确认 task 有出路径。判据与建 rule 时同一份。
@@ -791,7 +773,7 @@ class RuleService:
         await self._validate_perceive_devices_of(rule)
         self._validate_target_record(rule)
         self._validate_task_rule_set(rule, previous)
-        self._validate_action_reachable(rule, previous=previous)
+        self._validate_action_reachable(rule)
         await self._validate_scene_ids(rule)
 
         success = self._repo.update(rule)
@@ -936,7 +918,7 @@ class RuleService:
         _validate_rule_consistency(existing)
         self._validate_target_record(existing)
         self._validate_task_rule_set(existing, previous)
-        self._validate_action_reachable(existing, fields, previous)
+        self._validate_action_reachable(existing)
         # 与上面 perceive_device_ids 同口径:只校验这次 PATCH 真的动了的东西。
         # 无条件跑的话,场景被删 / 家庭被关之后连 `rule disable`(它本身就是一次
         # PATCH)都会 400 —— 规则坏掉的那一刻正好把「先关掉它」这条路堵死。
@@ -1292,6 +1274,8 @@ class RuleService:
         self._runner.set_task_actions(
             task_id, self._task_repo.get_boundary_actions(task_id)
         )
+        # 快照刚刷完 —— 此刻问读侧拿到的就是接下来 fire 时的答案。
+        self.report_task_config_problems(task_id)
         # 从 DB 读而非内存: DB 是归属的权威源, 且删 rule 时行已落库、runner 内存
         # 还留着那条 —— 正需要这个错位, 空拓扑触发 on_exit 时动作还有 rule 可归属。
         rules = self._repo.list_by_task(task_id)

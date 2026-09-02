@@ -1525,6 +1525,14 @@ class RuleRunner:
         )
         return exec_result
 
+    def selects_no_action_on_enter(self, rule: Rule) -> bool:
+        """这条规则的进入边沿此刻选不到任何动作吗。
+
+        供 ``RuleService.report_muted_enter_rules`` 诊断用。走的就是 fire 时那条
+        选槽链路 —— 判据只此一份, 诊断不会与实际执行分叉。
+        """
+        return self._select_slot(rule, RuleEvent.ENTERED) is None
+
     def _select_slot(
         self, rule: Rule, event: RuleEvent, action_slot: ActionSlot | None = None
     ) -> Slot:

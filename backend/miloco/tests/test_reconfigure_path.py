@@ -378,6 +378,156 @@ def test_task_full_view_exposes_runtime_state(env):
     assert task_service.get_full_view("t1").runtime_state == "on"
 
 
+# ── 哑规则诊断 ──────────────────────────────────────────────────────
+
+
+def _enter_rule(name, with_action=True, task_id="t1"):
+    r = Rule(
+        name=name,
+        task_id=task_id,
+        mode=RuleMode.EVENT,
+        condition=RuleCondition(perceive_device_ids=["cam1"], query="有人"),
+        action_descriptions=["自己的动作"] if with_action else [],
+    )
+    r.direction = RuleDirection.ENTER
+    return r
+
+
+def test_muted_report_is_empty_when_actions_are_reachable(env):
+    """正常配置别报 —— 误报会把这条诊断变成噪音, 然后没人看。"""
+    service, _runner, ids, _ = _build(
+        {"on_enter_desc": "开灯"}, [_enter_rule("[t1] naked", with_action=False)]
+    )
+    assert service.report_muted_enter_rules("t1") == []
+    assert ids
+
+
+def test_muted_report_ignores_exit_rules(env):
+    """不带动作的 exit 是正常配置 (只推状态), 别把它算成哑规则。"""
+    exiting = _enter_rule("[t1] out", with_action=False)
+    exiting.direction = RuleDirection.EXIT
+    service, _runner, _ids, _ = _build(
+        {"on_enter_desc": "开灯"}, [_enter_rule("[t1] in"), exiting]
+    )
+    assert service.report_muted_enter_rules("t1") == []
+
+
+def test_config_report_catches_a_task_left_without_an_entry_path(env):
+    """删掉最后一条 enter 规则 → task 再也进不去, 名下动作一条都不执行。
+
+    写 rule 那条路上 task_rule_set_error 会拦住同样的状态 (rule update
+    --direction exit), 而 delete 一道校验都没有 —— 那条路上也不该有闸, 拒绝删除
+    会把「先删掉它」这条自救路堵死。所以由诊断兜。
+    """
+    exiting = _enter_rule("[t1] out")
+    exiting.direction = RuleDirection.EXIT
+    service, _runner, ids, _ = _build(
+        {"on_enter_desc": "开灯", "on_exit_desc": "关灯"},
+        [_enter_rule("[t1] in"), exiting],
+    )
+    assert service.report_task_config_problems("t1") == []
+
+    RuleRepo().delete(ids[0])
+    service.reconfigure_task("t1")
+
+    problems = service.report_task_config_problems("t1")
+    assert len(problems) == 1
+    assert "没有进路径" in problems[0]
+
+
+def test_config_report_catches_a_session_rule_sharing_a_task(env):
+    """session 必须独占 task —— 这条只有真判据认得, 「有没有 enter」那种简化版
+    会漏掉它。钉的是「诊断复用写入侧那份判据」这件事。
+    """
+    session = _enter_rule("[t1] both")
+    session.direction = RuleDirection.SESSION
+    session.mode = RuleMode.STATE
+    session.action_descriptions = []
+    session.on_enter_desc = "进"
+    service, _runner, _ids, _ = _build(
+        {"on_enter_desc": "开灯"}, [_enter_rule("[t1] in"), session]
+    )
+
+    problems = service.report_task_config_problems("t1")
+    assert any("必须独占" in p for p in problems)
+
+
+def test_config_report_is_silent_on_an_empty_task(env):
+    """装配是分步的 —— 一条 rule 都还没有时别报, 否则每次建 task 都是一条 warning。"""
+    service, _runner, _ids, _ = _build({"on_enter_desc": "开灯"}, [])
+    assert service.report_task_config_problems("t1") == []
+
+
+def test_reconfigure_runs_the_muted_report(env, caplog):
+    """诊断要挂在收敛点上, 不是等人主动调 —— 挂着才覆盖所有写入路径。"""
+    import logging
+
+    service, _runner, ids, _ = _build(
+        {"on_exit_desc": "关灯"}, [_enter_rule("[t1] naked", with_action=False)]
+    )
+    with caplog.at_level(logging.WARNING, logger="miloco.rule.service"):
+        service.reconfigure_task("t1")
+
+    assert any(ids[0] in r.getMessage() for r in caplog.records)
+
+
+def test_muted_report_catches_a_cleared_enter_slot(env):
+    """靠 task 那份活着的规则, 槽被清掉之后要被报出来。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+    from miloco.task.service import TaskService
+
+    service, _runner, ids, _ = _build(
+        {"on_enter_desc": "开灯"}, [_enter_rule("[t1] naked", with_action=False)]
+    )
+    TaskService(rule_repo=RuleRepo(), rule_service=service).set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_desc=None)
+    )
+
+    assert service.report_muted_enter_rules("t1") == ids
+
+
+def test_muted_report_catches_a_task_that_just_became_owned(env):
+    """给一个没接管的 task 补任意一个别的槽, 自带动作的 enter 规则也会变哑。
+
+    读侧是全有或全无地判归属: task 占了任意一个槽之后, 空的进入槽就当"用户故意
+    留空"、不再回退 rule 行。所以这次写入碰的是退出槽, 害的却是进入方向 —— 这个
+    入口任何"清进入槽"式的闸都拦不到, 正是把它做成收敛点诊断的理由。
+    """
+    from miloco.task.schema import TaskActionsUpdateRequest
+    from miloco.task.service import TaskService
+
+    service, _runner, ids, _ = _build(None, [_enter_rule("[t1] own")])
+    # 起点: task 一个槽都没有 → 读侧回退 rule 行 → 不哑
+    assert service.report_muted_enter_rules("t1") == []
+
+    TaskService(rule_repo=RuleRepo(), rule_service=service).set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_exit_desc="关灯")
+    )
+
+    assert service.report_muted_enter_rules("t1") == ids
+
+
+def test_muted_report_catches_a_direction_change_that_strips_a_sibling(env):
+    """r1 换方向的收尾清掉 task 的进入槽, 靠它活着的 r2 跟着变哑。"""
+    service, _runner, ids, _ = _build(
+        None,
+        [_enter_rule("[t1] r1"), _enter_rule("[t1] r2", with_action=False)],
+    )
+    service.sync_rule_actions_to_task(RuleRepo().get_by_id(ids[0]))
+    # 写完要刷 runner 快照才问得准 —— 诊断问的就是 fire 时那份内存态。
+    service.reconfigure_task("t1")
+    assert service.report_muted_enter_rules("t1") == []
+
+    r1 = RuleRepo().get_by_id(ids[0])
+    r1.direction = RuleDirection.EXIT
+    r1.mode = RuleMode.EVENT
+    service._clear_task_slots(RuleRepo().get_by_id(ids[0]))
+    RuleRepo().update(r1)
+    service.reconfigure_task("t1")
+
+    assert service.report_muted_enter_rules("t1") == [ids[1]]
+
+
 def test_task_full_view_exposes_lifecycle(env):
     from miloco.task.service import TaskService
 

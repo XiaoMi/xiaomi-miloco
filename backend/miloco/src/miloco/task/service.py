@@ -172,15 +172,6 @@ class TaskService:
                 raise BusinessException("rule service 未就绪，无法校验达标配置")
             self._rule_service.require_duration_target(task_id)
             self._rule_service.require_exit_path_for_target(task_id)
-        clearing_enter = "on_enter_actions" in slots and not (
-            slots.get("on_enter_actions") or slots.get("on_enter_desc")
-        )
-        if clearing_enter:
-            if self._rule_service is None:
-                raise BusinessException("rule service 未就绪，无法校验进入动作")
-            self._rule_service.assert_enter_rules_survive_clearing(
-                task_id, {"on_enter_actions", "on_enter_desc"}
-            )
         if not self.repo.set_boundary_actions(task_id, **slots):
             return False
         if self._rule_service is not None:
