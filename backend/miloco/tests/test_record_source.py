@@ -418,7 +418,6 @@ class TestMilestoneReconcile:
 
         断言喂给状态机的拓扑里有它。只断言"建了没有"的话, 把重算挪到函数末尾照样绿。
         """
-        import miloco.database.task_repo as task_repo_module
         from miloco.task.state_machine import TaskStateMachine
 
         svc, repo = _rule_service("duration", (60, 0))
@@ -435,11 +434,7 @@ class TestMilestoneReconcile:
         repo.list_by_task = MagicMock(side_effect=lambda _t: list(built))
 
         actions = {"on_target_desc": "达标了"}
-        monkeypatch.setattr(
-            task_repo_module,
-            "TaskRepo",
-            lambda: MagicMock(get_boundary_actions=MagicMock(return_value=actions)),
-        )
+        svc._task_repo.get_boundary_actions = MagicMock(return_value=actions)
 
         seen: list[dict] = []
         sm = TaskStateMachine(
@@ -484,22 +479,10 @@ class TestMilestoneIsNotUserConfiguration:
         session_rule = _legacy_rule("r-session")
         session_rule.on_enter_desc = "开始计时"
         svc, repo = _rule_service("duration", (60, 0), rules=[_make_rule()])
-        written: dict = {}
 
-        import miloco.database.task_repo as task_repo_module
+        svc.sync_rule_actions_to_task(session_rule)
 
-        class _Repo:
-            def set_boundary_actions(self, task_id, **slots):
-                written.update(slots)
-                return True
-
-        original = task_repo_module.TaskRepo
-        task_repo_module.TaskRepo = _Repo
-        try:
-            svc.sync_rule_actions_to_task(session_rule)
-        finally:
-            task_repo_module.TaskRepo = original
-
+        written = svc._task_repo.set_boundary_actions.call_args.kwargs
         assert written.get("on_enter_desc") == "开始计时"
 
     def test_it_does_not_count_toward_the_task_rule_set(self):

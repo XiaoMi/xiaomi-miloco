@@ -903,8 +903,6 @@ class RuleService:
 
         清之前先排掉兄弟 rule 也管着的槽 —— 否则会把别人的动作一起抹掉。
         """
-        from miloco.database.task_repo import TaskRepo
-
         stale = set(_rule_action_slots(rule))
         if not stale:
             return
@@ -916,7 +914,7 @@ class RuleService:
         }
         if not stale:
             return
-        TaskRepo().set_boundary_actions(
+        self._task_repo.set_boundary_actions(
             rule.task_id,
             **{k: ([] if k.endswith("_actions") else None) for k in stale},
         )
@@ -939,8 +937,6 @@ class RuleService:
 
         阶段 B 动作 flag 落到 task 上之后这个函数整体删除。
         """
-        from miloco.database.task_repo import TaskRepo
-
         # 代建的达标规则不算 —— 它是派生物, 用户根本看不到它。算进来的话凡是配了
         # 达标通知的 task 都会走进下面那条跳过分支, 之后每一次改动作都只写 rule 行、
         # 不写 task 列, 而 fire 读的正是 task 列: CLI 返回成功、rule get 显示新值、
@@ -973,7 +969,7 @@ class RuleService:
         # rule 写入已经成功并且是主要效果, 不能被 task 侧同步的失败带崩。但也不能
         # 静默 —— 同步没成功就意味着"动作只读"那个坑还在, 必须留下明显的线索。
         try:
-            written = TaskRepo().set_boundary_actions(rule.task_id, **slots)
+            written = self._task_repo.set_boundary_actions(rule.task_id, **slots)
         except Exception as e:  # noqa: BLE001
             logger.warning(
                 "把 rule %s 的动作同步到 task %s 失败: %s; "
@@ -1105,10 +1101,11 @@ class RuleService:
         if sm is None:
             return
 
-        from miloco.database.task_repo import TaskRepo
         from miloco.task.state_machine import derive_directions
 
-        self._runner.set_task_actions(task_id, TaskRepo().get_boundary_actions(task_id))
+        self._runner.set_task_actions(
+            task_id, self._task_repo.get_boundary_actions(task_id)
+        )
         # 从 DB 读而非内存: DB 是归属的权威源, 且删 rule 时行已落库、runner 内存
         # 还留着那条 —— 正需要这个错位, 空拓扑触发 on_exit 时动作还有 rule 可归属。
         rules = self._repo.list_by_task(task_id)
