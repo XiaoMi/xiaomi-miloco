@@ -96,12 +96,13 @@ miloco-cli task enable <task_id>    # 启用
 
 | 改什么 | 改哪 | 怎么做 |
 |---|---|---|
-| rule 条件 / 动作 / 防抖 | rule | `miloco-cli rule update <rule_id> ...`（`rule_id` 从 `task get` 的 `rule_briefs[].rule_id` 拿） |
+| rule 条件 / 防抖 | rule | `miloco-cli rule update <rule_id> ...`（`rule_id` 从 `task get` 的 `rule_briefs[].rule_id` 拿） |
+| 动作（进入 / 退出 / 达标做什么） | task | `miloco-cli task set-actions <task_id> ...`（槽与 flag 见 SKILL.md §动作装在哪）。task 名下多条 rule 时 `rule update` 改动作不生效 |
 | 持续时长门槛 | rule | `miloco-cli rule update <rule_id> --duration-seconds <N>`（单位换算见 SKILL.md §Rule.duration_seconds）；desc 含字面分钟/小时数时同步改 |
 | 触发时间 / cron 表达式 | schedule | `miloco-cli cron remove <cron_id>` + `cron add ...`（cron 无 update API）；`cron_id` 从 `task get` 的 `cron_refs[].ref` 拿；新 cron 通过 `task_id` 参数直接绑到 task，无需额外 link 步骤；新建 cron 必带独立 `tz="<家庭时区>"` 字段（见 SKILL.md §Schedule.时区）。`dispatch_owner=external` 的老 cron 属 openclaw 侧接管，agent 通过自然语言指令让 openclaw 内部 cron API 处理 |
 | 目标值 / 单位 / window / recurring_pattern / expires_at | record | `miloco-cli task record update <task_id> --patch '{...}'`（白名单按 kind：progress=target/unit/window/recurring_pattern/expires_at；duration=target_minutes/recurring_pattern/expires_at；event=recurring_pattern/expires_at）|
 
-跨件套修改时**按 record → schedule → rule 顺序**逐一更新；任一步失败则停止后续。
+跨件套修改时**按 record → schedule → task set-actions → rule 顺序**逐一更新；任一步失败则停止后续。
 
 3. **附加同步 `task.description`(可能跑)** —— 步骤 2 完成后,**额外**判断是否要调:
 
