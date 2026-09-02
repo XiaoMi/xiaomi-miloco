@@ -109,6 +109,16 @@ def test_update_meta_writes_only_the_given_columns(repo):
     assert repo.update_meta("ghost", {"description": "x"}) is False
 
 
+def test_set_boundary_actions_refuses_lifecycle(repo):
+    """生命周期不走动作接口 —— update_meta 才是它的入口。
+
+    那一列曾在动作槽白名单里, 但四个调用方传的全是动作槽, 没有一个传它。
+    """
+    repo.create_task(task_id="t1", description="d")
+    with pytest.raises(ValueError, match="unknown task action slot"):
+        repo.set_boundary_actions("t1", lifecycle="temporary")
+
+
 def test_update_meta_rejects_columns_outside_the_whitelist(repo):
     """白名单挡住的是拼进 SQL 的列名 —— 那段是 f-string 拼的。"""
     repo.create_task(task_id="t1", description="d")

@@ -487,8 +487,13 @@ class RuleService:
             or previous.task_id != rule.task_id
         )
         if moved_home:
-            for name in self._slots_cleared_by(previous):
-                slots[name] = [] if name.endswith("_actions") else None
+            if previous.task_id == rule.task_id:
+                # 只有换方向那种才叠: 读出来的 slots 是 rule.task_id 的, 而
+                # _slots_cleared_by 查的是 previous.task_id —— 改挂 task 时那是
+                # 另一个 task 腾出的槽名, 叠上去会把一次合法的搬家判成"新家的
+                # 进入槽将被清空"。
+                for name in self._slots_cleared_by(previous):
+                    slots[name] = [] if name.endswith("_actions") else None
             pending = _rule_action_slots(rule)
         else:
             pending = _rule_action_slots(rule, changed_fields)

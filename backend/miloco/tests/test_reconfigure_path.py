@@ -382,7 +382,7 @@ def test_task_full_view_exposes_lifecycle(env):
     from miloco.task.service import TaskService
 
     service, _runner, _ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
-    TaskRepo().set_boundary_actions("t1", lifecycle="temporary")
+    TaskRepo().update_meta("t1", {"lifecycle": "temporary"})
 
     view = TaskService(rule_repo=RuleRepo(), rule_service=service).get_full_view("t1")
 

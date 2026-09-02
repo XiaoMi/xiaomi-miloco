@@ -483,6 +483,15 @@ def test_update_only_touches_the_fields_that_were_sent(service):
     assert view.expires_at is not None
 
 
+def test_update_rejects_unparseable_expiry():
+    """update 与 create 共用同一份校验器, 但共用不等于两条路都被走过。"""
+    import pytest as _pytest
+    from pydantic import ValidationError
+
+    with _pytest.raises(ValidationError, match="不是合法的 ISO8601"):
+        TaskUpdateRequest(expires_at="下周三")
+
+
 def test_update_can_move_the_expiry(service):
     """「今天改成明天」—— record 与 cron 那两份之外, task 这份也得跟着改。"""
     from datetime import datetime
@@ -578,6 +587,15 @@ def test_update_rejects_expiry_on_a_permanent_task(service):
         service.update_meta(
             "t1", TaskUpdateRequest(expires_at="2026-06-10T23:59:59+08:00")
         )
+
+
+def test_update_rejects_clearing_the_description(service):
+    """那一列 NOT NULL —— 放行会在 UPDATE 时撞约束落成 500。"""
+    from miloco.middleware.exceptions import ValidationException
+
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    with pytest.raises(ValidationException, match="description 不能清空"):
+        service.update_meta("t1", TaskUpdateRequest(description=None))
 
 
 def test_update_rejects_an_empty_body(service):

@@ -1143,6 +1143,35 @@ class TestRuleServicePatch:
             )
 
     @pytest.mark.asyncio
+    async def test_patch_moving_to_another_task_is_not_blocked(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """改挂 task 时, 旧 task 腾出的槽不能算到新 task 头上。
+
+        读出来的槽是 rule.task_id (新家) 的, 而 _slots_cleared_by 查的是
+        previous.task_id (旧家) —— 叠上去会把一次合法的搬家判成"新家的进入槽
+        将被清空", 400 拦下。
+        """
+        # 三个条件缺一不可, 否则走不到目标分支: 起点在旧 task (否则 moved_home
+        # 为假)、previous 自己带动作 (否则 _slots_cleared_by 返空集, 守卫有没有
+        # 都一样)、合并后 rule 没动作 (否则闸在第一关就 return)。
+        moving = _make_dynamic_rule(rule_id="r1", task_id=TASK_ID)
+        mock_rule_repo.get_by_id.return_value = moving
+        mock_rule_repo.list_by_task.return_value = [moving]
+        # 新家的进入槽有动作; 旧家管的也叫 on_enter, 名字一样但不是同一个 task。
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_enter_desc": "开台灯"}
+        }
+        service._require_task_exists = lambda _tid: None
+
+        assert (
+            await service.patch_rule(
+                "r1", RuleUpdate(task_id="new_task", action_descriptions=[])
+            )
+            is True
+        )
+
+    @pytest.mark.asyncio
     async def test_patch_keeps_passing_when_the_slot_survives(
         self, service, mock_rule_repo, mock_task_repo
     ):

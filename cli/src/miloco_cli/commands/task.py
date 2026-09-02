@@ -98,7 +98,9 @@ def task_create(task_id, description, lifecycle, expires_at, pretty):
 
     body = {"task_id": task_id, "description": description, "lifecycle": lifecycle}
     if expires_at:
-        body["expires_at"] = expires_at
+        # 与 record 的 --at 同处理: agent 习惯给 ISO 加引号, 而 exec tool 不解析
+        # shell 引号 (见 _strip_quotes)。
+        body["expires_at"] = _strip_quotes(expires_at)
     data = api_post(API_PREFIX, body)
     print_result(data, pretty)
 
@@ -139,7 +141,7 @@ def task_update(task_id, description, lifecycle, expires_at, clear_expires_at, p
     if lifecycle is not None:
         body["lifecycle"] = lifecycle
     if expires_at is not None:
-        body["expires_at"] = expires_at
+        body["expires_at"] = _strip_quotes(expires_at)
     elif clear_expires_at:
         # 显式 null 才是清空; 不传等于"这次不动它"。
         body["expires_at"] = None

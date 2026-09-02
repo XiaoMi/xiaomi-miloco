@@ -209,7 +209,6 @@ class TaskRepo:
             "on_exit_desc",
             "on_target_actions",
             "on_target_desc",
-            "lifecycle",
         }
         unknown = set(slots) - allowed
         if unknown:

@@ -16,6 +16,27 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 _TASK_ID_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
 
+def _validated_iso(v: str | None) -> str | None:
+    """到期时刻的格式校验 —— create 与 update 共用这一份。
+
+    入库前那步用 ``iso_to_ms``, 它抛裸 ValueError、router 不捕, 一路冒到全局兜底
+    变成 500。写命令的是 agent, 500 里没有能让它自己纠正的信息。用同一个解析器
+    保证两边口径一致。
+    """
+    if v is None:
+        return v
+    from miloco.utils.time_utils import iso_to_ms
+
+    try:
+        iso_to_ms(v)
+    except ValueError as e:
+        raise ValueError(
+            f"expires_at 不是合法的 ISO8601 时刻: {v!r} "
+            "(用 miloco-cli time-compute 产出的带偏移 ISO)"
+        ) from e
+    return v
+
+
 class TaskCreateRequest(BaseModel):
     """``POST /tasks`` 入参 (v2)。
 
@@ -38,25 +59,7 @@ class TaskCreateRequest(BaseModel):
         None, description="到期时刻 ISO8601（带时区偏移），仅 lifecycle=temporary"
     )
 
-    @field_validator("expires_at")
-    @classmethod
-    def _expiry_must_parse(cls, v: str | None) -> str | None:
-        """在这里试解析一次 —— 入库前那步用的是 ``iso_to_ms``, 它抛裸 ValueError,
-        router 不捕, 一路冒到全局兜底变成 500。写命令的是 agent, 500 里没有任何
-        能让它自己纠正的信息。用同一个解析器保证两边口径一致。
-        """
-        if v is None:
-            return v
-        from miloco.utils.time_utils import iso_to_ms
-
-        try:
-            iso_to_ms(v)
-        except ValueError as e:
-            raise ValueError(
-                f"expires_at 不是合法的 ISO8601 时刻: {v!r} "
-                "(用 miloco-cli time-compute 产出的带偏移 ISO)"
-            ) from e
-        return v
+    _check_expiry = field_validator("expires_at")(_validated_iso)
 
     @model_validator(mode="after")
     def _expiry_needs_temporary(self):
@@ -79,31 +82,16 @@ class TaskCreateRequest(BaseModel):
 class TaskUpdateRequest(BaseModel):
     """``PATCH /tasks/{task_id}``。
 
-    partial 语义: 只有出现在请求体里的字段才会被改, 显式传 ``null`` 表示清空。
-    "没传"和"传了 null"靠 ``model_fields_set`` 区分 —— 到期时刻要能被清掉
-    (限时改回长期), 而清掉与"这次不动它"必须分得开。
+    partial 语义: 只有出现在请求体里的字段才会被改。可清空的只有 ``expires_at``
+    (限时改回长期), 显式传 ``null`` 表示清空 —— 清掉与"这次不动它"靠
+    ``model_fields_set`` 区分。``description`` 那一列是 NOT NULL, 传 null 会被拒。
     """
 
     description: str | None = Field(None, max_length=200)
     lifecycle: Literal["permanent", "temporary"] | None = None
     expires_at: str | None = None
 
-    @field_validator("expires_at")
-    @classmethod
-    def _expiry_must_parse(cls, v: str | None) -> str | None:
-        """与 create 那条同一份解析器, 理由见 TaskCreateRequest。"""
-        if v is None:
-            return v
-        from miloco.utils.time_utils import iso_to_ms
-
-        try:
-            iso_to_ms(v)
-        except ValueError as e:
-            raise ValueError(
-                f"expires_at 不是合法的 ISO8601 时刻: {v!r} "
-                "(用 miloco-cli time-compute 产出的带偏移 ISO)"
-            ) from e
-        return v
+    _check_expiry = field_validator("expires_at")(_validated_iso)
 
 
 class TaskBoundaryActions(BaseModel):

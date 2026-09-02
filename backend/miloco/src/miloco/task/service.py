@@ -110,6 +110,9 @@ class TaskService:
         }
         if not updates:
             raise ValidationException("至少要传一个可改字段")
+        # description 那一列 NOT NULL, 放行会在 UPDATE 时撞约束落成 500。
+        if "description" in updates and updates["description"] is None:
+            raise ValidationException("description 不能清空")
 
         current = self.repo.get_full_view(task_id)
         if current is None:
