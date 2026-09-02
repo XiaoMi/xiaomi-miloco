@@ -201,13 +201,29 @@ class TestSpec:
 
         整串相等防任何改写；另外单挑两处**承重**措辞，让它们即便在整串被重排时也不会悄悄丢：
         「上方 gallery」是插入位的语义前提（人像必须在 gallery 之后，否则这句是事实错误），
-        「identity_assignments 时照旧用 track_id」是输出契约。
+        「identities 时照旧用 track_id」是输出契约（字段名须与 field_registry 的 schema 字面量
+        一致，见下面那条 test_note_field_name_matches_schema）。
         """
         expected = "【识别辅助】下方为每个待识别 track 的“外观单帧”：从本段视频中裁出的该 track 最大最清晰的一帧。请优先把每个 track 的外观单帧与上方 gallery 成员参考图逐一比对来判定身份；track 的 bbox 数字坐标仍可用于在视频画面中交叉核对位置。输出 identities 时照旧用 track_id 数字。"
         assert pci._INJECT_NOTE == expected
         assert "与上方 gallery 成员参考图" in pci._INJECT_NOTE
         assert "输出 identities 时照旧用 track_id 数字" in pci._INJECT_NOTE
         assert "\n" not in pci._INJECT_NOTE  # 别为源码行宽在句中断行
+
+    def test_note_field_name_matches_schema(self):
+        """说明块里点名的输出字段名，必须就是 schema 要模型输出的那个键。
+
+        这条是上面那条逐字断言管不住的一类漂移：说明块是**发给模型的文本**，位置还比 system
+        prompt 里的 schema 更靠近它的输出动作。在 schema 之后再报一个不同的键名，只会白增模型
+        写错键的概率；而解析侧对旧键名有兼容回退，这种不一致**不会报错**、只会静默存在——本
+        PR 评审时就是这么被发现的（文案沿用了评测某一臂的笔误）。
+        所以把两者绑在一起：schema 侧改名，这条会红，逼着说明块跟上。
+        """
+        from miloco.perception.engine.omni.field_registry import IDENTITY
+
+        assert f"输出 {IDENTITY.name} 时" in pci._INJECT_NOTE, (
+            f"schema 要求的键名是 {IDENTITY.name!r}，但说明块里写的不是它：{pci._INJECT_NOTE}"
+        )
 
     def test_normalized_to_configured_height(self):
         """归一高度是硬保证：宽高比再离谱也不能被 768 宽帽连高一起缩。"""
