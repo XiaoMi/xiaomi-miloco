@@ -71,6 +71,7 @@ class TransitionOutcome(str, Enum):
     EVENT_FIRED = "event_fired"
     MILESTONE_FIRED = "milestone_fired"
     ALREADY_IN_STATE = "already_in_state"
+    ALREADY_OFF = "already_off"
     BLOCKED_BY_EXIT_CONDITION = "blocked_by_exit_condition"
     STILL_HELD = "still_held"
     NOT_IN_SESSION = "not_in_session"
@@ -348,7 +349,9 @@ class TaskStateMachine:
         self, signal: TaskSignal, topology: TaskTopology
     ) -> TransitionOutcome:
         if self.runtime_state(signal.task_id) is not TaskRuntimeState.ON:
-            return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
+            # 与"已在态内"分开记: 这是退出信号落在已经关掉的 task 上, 判定摘要说
+            # "已在态内"正好反了, 而用户看这份摘要就是为了搞清楚发生了什么。
+            return self._done(TransitionOutcome.ALREADY_OFF, signal)
 
         if self._other_session_holds(signal, topology):
             # OR 的退出条件是「全部都不成立」。少了这一步就成了「任一条断开就整个

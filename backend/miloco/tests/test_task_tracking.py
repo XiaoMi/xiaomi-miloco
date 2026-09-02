@@ -57,6 +57,29 @@ def test_suppressed_outcomes_are_flagged():
     assert s["abnormal"] is False
 
 
+def test_every_suppressed_outcome_of_the_state_machine_is_classified():
+    """状态机所有"没触发"的结论都要落进被压制那一类。
+
+    漏一个就等于它从"我的规则怎么没反应"这份摘要里静默消失, 而这份摘要正是为了
+    回答那个问题存在的。
+    """
+    from miloco.task.state_machine import TransitionOutcome
+
+    fired = {
+        TransitionOutcome.ENTERED,
+        TransitionOutcome.EXITED,
+        TransitionOutcome.EVENT_FIRED,
+        TransitionOutcome.MILESTONE_FIRED,
+    }
+    abnormal = {TransitionOutcome.SIGNAL_DROPPED, TransitionOutcome.UNKNOWN_RULE}
+    t = DecisionTracker()
+    for outcome in TransitionOutcome:
+        if outcome in fired or outcome in abnormal:
+            continue
+        t.record("t1", "r1", outcome.value, 1)
+        assert t.summary("t1")["suppressed"] is True, outcome.value
+
+
 def test_abnormal_outcomes_are_flagged():
     t = DecisionTracker()
     t.record("t1", "r1", "signal_dropped", 1)

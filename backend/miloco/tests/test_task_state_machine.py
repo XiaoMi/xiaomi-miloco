@@ -129,10 +129,11 @@ def test_second_enter_is_idempotent():
 
 
 def test_exit_when_already_off_is_noop():
+    """记成 ALREADY_OFF 而不是 ALREADY_IN_STATE —— 后者的判定摘要正好说反。"""
     h = Harness()
     h.sm.register_task("t1", {"s": RuleDirection.SESSION})
 
-    assert h.sm.handle(_exited(rule_id="s")) is TransitionOutcome.ALREADY_IN_STATE
+    assert h.sm.handle(_exited(rule_id="s")) is TransitionOutcome.ALREADY_OFF
     assert h.dispatched == []
 
 
