@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from miloco.database.rule_repo import RuleLogRepo, RuleRepo
 from miloco.database.task_repo import TaskRepo
+from miloco.middleware.exceptions import ResourceNotFoundException
 from miloco.rule.runner import _NO_TASK_ACTIONS, RuleRunner
 from miloco.rule.schema import (
     Rule,
@@ -723,6 +724,8 @@ async def test_delete_task_forgets_the_task_dimension_state(env):
     assert sm.runtime_state("t1") is TaskRuntimeState.ON
     assert runner.task_owns_actions("t1") is True
     assert runner.tracker.last_decision("t1") is not None
+    runner.record_source.arm("t1")
+    assert "t1" in runner.record_source._arm_round
 
     _task_service(service).delete_task("t1")
 
@@ -730,6 +733,7 @@ async def test_delete_task_forgets_the_task_dimension_state(env):
     assert sm.runtime_state("t1") is TaskRuntimeState.OFF
     assert runner.task_owns_actions("t1") is False
     assert runner.tracker.last_decision("t1") is None
+    assert "t1" not in runner.record_source._arm_round
 
 
 @pytest.mark.asyncio
@@ -968,7 +972,7 @@ async def test_threshold_changed_mid_session_reschedules_the_timer(env):
     delays: list[float] = []
     original = source_type._feed_after
 
-    async def spy(self, ref, delay, target_at_arm):
+    async def spy(self, ref, delay, target_at_arm, this_round):
         delays.append(delay)  # 只记, 不真睡
 
     source_type._feed_after = spy
@@ -989,3 +993,150 @@ async def test_threshold_changed_mid_session_reschedules_the_timer(env):
 
     assert runner.state_machine.runtime_state("t1") is TaskRuntimeState.ON
     assert delays == [(120 - 30) * 60, (45 - 30) * 60]
+
+
+# ── 状态机自己发起的动作按槽名派, 不按代表 rule 的方向反推 ─────────────
+
+
+def test_state_machine_exit_reaches_the_exit_slot_on_a_non_mutual_task(env):
+    """enter + exit 型 task 的强制退出要拿到退出槽。
+
+    这条路的代表 rule 是名下任意一条, 而 _slot_for 只有 session 方向才把 EXITED
+    映射成退出槽 —— 让 fire 从代表 rule 的方向反推, enter 和 exit 两种代表都返回
+    空槽, 强制退出动作静默不执行, 正是 §19.5 要解的那个卡死。
+    """
+    _service, runner, _ids, _ = _build(_ACTIONS, [])
+    runner.set_task_actions("t1", _ACTIONS)
+    representative = _single_edge_rule(RuleDirection.ENTER)
+
+    assert runner._select_task_slot(
+        representative, RuleEvent.EXITED, ActionSlot.ON_EXIT
+    ) == ("dynamic", "task 侧退出")
+
+
+def test_state_machine_enter_does_not_pick_up_the_exit_slot(env):
+    """反向: 请求进入槽而代表 rule 是 exit 型, 反推出来的是退出槽。
+
+    不钉住的话派出去的是相反的动作 —— 该开灯的时候关灯。
+    """
+    _service, runner, _ids, _ = _build(_ACTIONS, [])
+    runner.set_task_actions("t1", _ACTIONS)
+    representative = _single_edge_rule(RuleDirection.EXIT)
+
+    assert runner._select_task_slot(
+        representative, RuleEvent.ENTERED, ActionSlot.ON_ENTER
+    ) == ("dynamic", "task 侧")
+
+
+@pytest.mark.asyncio
+async def test_losing_the_exit_path_really_dispatches_on_a_non_mutual_task(env):
+    """接线版: enter + exit 型 task 失去出路径时, 退出动作真的发出去。
+
+    上面两条钉的是选槽, 这条钉的是 dispatch_task_action 到 fire 的一整条链 ——
+    槽正确但没传下去, 上面两条照绿。
+    """
+    service, runner, ids, _ = _build(
+        _ACTIONS,
+        [_single_edge_rule(RuleDirection.ENTER), _single_edge_rule(RuleDirection.EXIT)],
+    )
+    runner.state_machine._dispatch_action = lambda t, sl, _p: (
+        runner.dispatch_task_action(t, sl.value)
+    )
+    enter_rule = RuleRepo().get_by_id(ids[0])
+    runner._state_machine_allows(enter_rule, RuleEvent.ENTERED)
+    assert runner.state_machine.runtime_state("t1") is TaskRuntimeState.ON
+
+    with patch(
+        "miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)
+    ) as sent:
+        await service.delete_rule(ids[1])
+        await asyncio.gather(*list(runner._fire_tasks), return_exceptions=True)
+
+    prompts = [
+        c.prompt_text for call in sent.call_args_list for c in call.args[1]
+    ]
+    assert any("task 侧退出" in p for p in prompts), prompts
+
+
+# ── 整体替换 (PUT) 与部分更新 (PATCH) 的收尾要一致 ──────────────────────
+
+
+@pytest.mark.asyncio
+async def test_full_update_clears_the_slot_it_left_behind(env, monkeypatch):
+    """PUT 换方向后旧槽要清 —— 留着就是一份没人认领也没人读得到的动作。
+
+    兄弟 rule 还管着的槽不能连带清掉, 所以这里让翻转前后的槽错开: 出→进, 兄弟
+    管着进入槽。
+    """
+    from miloco.rule.service import RuleService
+
+    moving = _single_edge_rule(RuleDirection.EXIT, descs=("走了",))
+    staying = _single_edge_rule(RuleDirection.ENTER, descs=("来了",))
+    staying.name = "[t1] 另一条"
+    service, _runner, ids, _ = _build(
+        {"on_enter_desc": "进", "on_exit_desc": "出"}, [moving, staying]
+    )
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+
+    flipped = RuleRepo().get_by_id(ids[0])
+    flipped.direction = RuleDirection.ENTER
+    await service.update_rule(flipped)
+
+    written = TaskRepo().get_boundary_actions("t1")
+    assert written["on_exit_desc"] is None
+    # 兄弟 rule 管着的进入槽不受影响
+    assert written["on_enter_desc"] == "进"
+
+
+@pytest.mark.asyncio
+async def test_full_update_reconfigures_the_task_it_left(env, monkeypatch):
+    """PUT 改挂 task 后, 原 task 也要重算拓扑 —— 少了它原 task 还挂着这条 rule。"""
+    from miloco.rule.service import RuleService
+
+    TaskRepo().create_task("t2", "d2")
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    runner.set_task_actions("t2", _ACTIONS)
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+    sm = runner.state_machine
+    assert sm.owns("t1")
+
+    moved = RuleRepo().get_by_id(ids[0])
+    moved.task_id = "t2"
+    await service.update_rule(moved)
+
+    assert not sm.owns("t1")
+    assert sm.owns("t2")
+
+
+@pytest.mark.asyncio
+async def test_full_update_rejects_a_task_that_does_not_exist(env, monkeypatch):
+    """task_id 填错要拿到业务错误。
+
+    不拦的话 FK 抛的 IntegrityError 不在 repo 那层的 except 里, 一路冒到全局
+    处理器变成 500 —— 而这只是一个参数填错。
+    """
+    from miloco.rule.service import RuleService
+
+    service, _runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+
+    bad = RuleRepo().get_by_id(ids[0])
+    bad.task_id = "t_nope"
+    with pytest.raises(ResourceNotFoundException):
+        await service.update_rule(bad)
+
+
+@pytest.mark.asyncio
+async def test_partial_update_rejects_a_task_that_does_not_exist(env, monkeypatch):
+    from miloco.rule.schema import RuleUpdate
+    from miloco.rule.service import RuleService
+
+    service, _runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+
+    with pytest.raises(ResourceNotFoundException):
+        await service.patch_rule(ids[0], RuleUpdate(task_id="t_nope"))

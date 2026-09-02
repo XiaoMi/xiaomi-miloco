@@ -1177,6 +1177,11 @@ class RuleRunner:
         动作在 task 行上, 但日志与冷却仍按 rule 归属, 所以要挑一条代表 rule。
         名下无 rule 时返回 False —— 那正是"删掉最后一条 rule"的情形, 动作已经无处
         归属, 只能记日志。
+
+        槽由本函数按名字定, 显式传给 fire —— 不能让它从代表 rule 的方向反推:
+        ``_slot_for`` 只有 session 方向才把 EXITED 映射成退出槽, enter + exit 型
+        task 的任一条代表 rule 都会返回空槽, 强制退出动作静默不执行; 反过来请求
+        进入槽而代表 rule 是 exit 型, 反推出来的是退出槽, 派的是相反的动作。
         """
         event = self._SLOT_TO_EVENT.get(slot_name)
         if event is None:
@@ -1197,7 +1202,13 @@ class RuleRunner:
             # 这条路没有"翻 off 之前"的位置可用 (状态机先改状态再派动作), 所以只撤
             # 不兜底 —— 这两条都不是感知到的真实离开。
             self._record_source.disarm(task_id)
-        self._spawn_fire(rule, event, [], f"task_state_machine_{slot_name}")
+        self._spawn_fire(
+            rule,
+            event,
+            [],
+            f"task_state_machine_{slot_name}",
+            action_slot=ActionSlot(slot_name),
+        )
         return True
 
     def _sync_record_source(self, rule: Rule, slot: ActionSlot | None) -> None:
@@ -1263,6 +1274,7 @@ class RuleRunner:
         extra_metadata: dict | None = None,
         caption: str = "",
         device_name: str = "",
+        action_slot: ActionSlot | None = None,
     ) -> None:
         """Schedule a fire as a background task; record handle to prevent GC."""
         task = asyncio.create_task(
@@ -1270,6 +1282,7 @@ class RuleRunner:
                 rule, event, sources, context, str(uuid.uuid4()),
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
+                action_slot=action_slot,
             )
         )
         self._fire_tasks.add(task)
@@ -1287,12 +1300,14 @@ class RuleRunner:
         extra_metadata: dict | None = None,
         caption: str = "",
         device_name: str = "",
+        action_slot: ActionSlot | None = None,
     ) -> None:
         try:
             await self._fire(
                 rule, event, sources, context, execute_id,
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
+                action_slot=action_slot,
             )
         except Exception:
             logger.exception(
@@ -1438,9 +1453,10 @@ class RuleRunner:
         actual_exited_at: str | None = None,
         caption: str = "",
         device_name: str = "",
+        action_slot: ActionSlot | None = None,
     ) -> RuleExecuteResult | None:
         """Pick the slot for (mode, event), execute, write log."""
-        slot = self._select_slot(rule, event)
+        slot = self._select_slot(rule, event, action_slot)
         if slot is None:
             logger.debug(
                 "rule %s event %s: empty slot, skipping", rule.id, event.value
@@ -1509,7 +1525,9 @@ class RuleRunner:
         )
         return exec_result
 
-    def _select_slot(self, rule: Rule, event: RuleEvent) -> Slot:
+    def _select_slot(
+        self, rule: Rule, event: RuleEvent, action_slot: ActionSlot | None = None
+    ) -> Slot:
         """Return ``("static", actions)`` / ``("dynamic", prompt_text)`` for the
         slot matching (direction, event), or ``None`` when the slot is empty.
 
@@ -1517,7 +1535,7 @@ class RuleRunner:
         ``actions`` vs ``action_descriptions``; session 看 ``on_*_actions`` vs
         ``on_*_desc``。Validation enforces these as mutually exclusive.
         """
-        task_slot = self._select_task_slot(rule, event)
+        task_slot = self._select_task_slot(rule, event, action_slot)
         if task_slot is not _NO_TASK_ACTIONS:
             return task_slot
 
@@ -1557,7 +1575,9 @@ class RuleRunner:
 
     # ---- 设备直控路径（V1 direct dispatch） ----
 
-    def _select_task_slot(self, rule: Rule, event: RuleEvent) -> Slot:
+    def _select_task_slot(
+        self, rule: Rule, event: RuleEvent, action_slot: ActionSlot | None = None
+    ) -> Slot:
         """从 task 的边界动作里选槽 (expand-contract 阶段 A: 读 task 优先)。
 
         返回 ``_NO_TASK_ACTIONS`` 表示该 task 没有动作快照 —— 调用方回退到 rule
@@ -1568,7 +1588,10 @@ class RuleRunner:
         if actions is None:
             return _NO_TASK_ACTIONS
 
-        slot = _slot_for(rule, event)
+        # 调用方给了槽就用它 —— 状态机自己发起的动作按槽名派, 方向反推只对
+        # "由某条 rule 的边沿引起"的动作成立。回退到 rule 旧列那条路不看覆盖值:
+        # 走到那里的只有迁移前的单 rule task, 方向反推本来就是对的。
+        slot = action_slot or _slot_for(rule, event)
         if slot is None:
             return None
         static_key, desc_key = f"{slot.value}_actions", f"{slot.value}_desc"
