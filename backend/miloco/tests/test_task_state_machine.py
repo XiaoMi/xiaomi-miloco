@@ -589,3 +589,35 @@ def test_task_layer_dispatches_by_signal_slot_not_by_direction():
 
     assert outcome is TransitionOutcome.EXITED
     assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+def test_reconfigure_keeps_an_enter_exit_task_on_when_no_exit_condition_holds():
+    """enter + exit 型没有会话条件, 不能拿"有没有条件撑着"去问。
+
+    问了答案恒为否 —— 改个防抖参数都会把 task 打成退出、白跑一次退出动作, 而那次
+    动作是真会对外下指令的。它该看的是"出口条件都没成立"。
+    """
+    h = Harness()
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
+    h.sm.handle(_entered(rule_id="a"))
+    h.dispatched.clear()
+    h.satisfied["x"] = False
+
+    h.sm.reconfigure("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
+
+    assert h.dispatched == []
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+
+
+def test_reconfigure_exits_an_enter_exit_task_whose_exit_condition_is_true():
+    """出口条件确实成立 → 该退。"""
+    h = Harness()
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
+    h.sm.handle(_entered(rule_id="a"))
+    h.dispatched.clear()
+    h.satisfied["x"] = True
+
+    h.sm.reconfigure("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
+
+    assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF

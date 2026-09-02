@@ -444,7 +444,7 @@ class TaskStateMachine:
             self._queues.setdefault(task_id, deque(maxlen=SIGNAL_QUEUE_DEPTH))
             self._wakeups.setdefault(task_id, asyncio.Event())
 
-            if was_on and not self._exit_side_still_holds(new_topology):
+            if was_on and not self._should_stay_on(new_topology):
                 self._dispatch_action(task_id, ActionSlot.ON_EXIT, None)
                 self._states[task_id] = TaskRuntimeState.OFF
         finally:
@@ -466,23 +466,32 @@ class TaskStateMachine:
                 self._track(TransitionOutcome.SIGNAL_DROPPED, stale)
             queue.clear()
 
-    def _exit_side_still_holds(self, topology: TaskTopology) -> bool:
-        """还有会话条件成立 → 该保持 ``on``。
+    def _should_stay_on(self, topology: TaskTopology) -> bool:
+        """配置变了、现实没变 —— 这个 task 还该留在 ``on`` 吗。
 
-        ``_is_condition_satisfied`` 是三值: ``True`` 成立, ``False`` 观测到不
-        成立, ``None`` 还没喂过数据(新加进来的 rule 就是这种)。只认 ``True``:
-        全是 ``None`` 时无从确认还撑着, 宁可多发一次退出动作也不要静默卡在 on;
-        事件型没有会话条件, 同样落到退出, 与改动前一致。
+        两种形态问的不是同一个问题, 不能共用一个判据:
 
-        **已知缺口**: enter + exit 型 task 也没有会话条件, 于是改任何配置(哪怕只
-        是调防抖参数)都会被判成"没撑着"而退出。这类 task"该不该留在 on"要看的是
-        "出口条件全都不成立", 与本函数的"有没有会话条件成立"不是同一个逻辑形式。
-        既有行为, 保守方向(多发一次退出而不是卡在 on), 单独立项。
+        - **session**: 有没有会话条件还成立。它的"条件成立"就等于"还在会话中"。
+        - **enter + exit**: 出口条件是不是都没成立。它压根没有会话条件, 拿"有没有
+          条件撑着"去问答案恒为否 —— 改个防抖参数都会把 task 打成退出、白跑一次
+          退出动作。
+
+        出路径被整个改没了是第三种情况, 与条件成不成立无关: 留在 on 就永远退不
+        出去, 那次退出动作也永远不会发。
+
+        ``_is_condition_satisfied`` 是三值: ``True`` 成立, ``False`` 观测到不成立,
+        ``None`` 还没喂过数据(新加进来的 rule 就是这种)。两条分支都只认 ``True``,
+        但导向相反的保守方向: session 全是 ``None`` 时无从确认还撑着, 宁可多发一次
+        退出也不要静默卡在 on; enter + exit 没观测到出口成立就不该退, 那次退出动作
+        是真会对外下指令的。
         """
-        return any(
-            self._is_condition_satisfied(rule_id) is True
-            for rule_id in topology.holding_rule_ids
-        )
+        # 按"有没有会话规则"分派, 不是按 is_session_type —— 后者的含义是"有出路径",
+        # enter + exit 也满足, 走进会话分支就正好踩上面说的那个坑。
+        if topology.holding_rule_ids:
+            return self._any_condition_true(topology.holding_rule_ids)
+        if not topology.exit_side_rule_ids:
+            return False
+        return not self._any_condition_true(topology.exit_side_rule_ids)
 
     # ── 手动触发 (debug, §5) ──────────────────────────────────────
 
