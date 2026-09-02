@@ -134,9 +134,9 @@ async def test_early_send_registers_pair_even_if_update_state_raises(proxy):
     """早送登记必须无条件、排在 update_state 之前（守住 _on_early_matched_rules 那条 invariant）。
 
     early_sent_rule_ids 除了去重，还兼职「抑制终态推退」——pair 并进 matched_pairs 后，
-    终态「未命中喂 False」循环才会放过它。若 update_state 抛异常（生产上 = on_target 规则
-    _schedule_target_timer_if_needed 里那处裸 DB 读，被 pipeline 整窗保护
-    吞掉）时 pair 漏登记，那条循环就会给刚 ENTER 真 fire 的 source 喂一帧 False、置起
+    终态「未命中喂 False」循环才会放过它。若 update_state 抛异常（生产上 = 条件层求值里
+    的裸 DB 读，被 pipeline 整窗保护吞掉）时 pair 漏登记，那条循环就会给刚 ENTER 真
+    fire 的 source 喂一帧 False、置起
     pending_exit、白吃掉单帧抗抖预算（下次真离开只需一帧就确认 EXIT）。这条 invariant 曾被
     「把登记挪到 update_state 之后」这一个改动静默破坏一整轮而全量测试无感——本用例就是针对
     那种改法的哨兵：把 _on_early_matched_rules 里 `early_sent_rule_ids[...] = None` 那行删掉
