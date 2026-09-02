@@ -203,10 +203,10 @@ class TestSpec:
         「上方 gallery」是插入位的语义前提（人像必须在 gallery 之后，否则这句是事实错误），
         「identity_assignments 时照旧用 track_id」是输出契约。
         """
-        expected = "【识别辅助】下方为每个待识别 track 的“外观单帧”：从本段视频中裁出的该 track 最大最清晰的一帧。请优先把每个 track 的外观单帧与上方 gallery 成员参考图逐一比对来判定身份；track 的 bbox 数字坐标仍可用于在视频画面中交叉核对位置。输出 identity_assignments 时照旧用 track_id 数字。"
+        expected = "【识别辅助】下方为每个待识别 track 的“外观单帧”：从本段视频中裁出的该 track 最大最清晰的一帧。请优先把每个 track 的外观单帧与上方 gallery 成员参考图逐一比对来判定身份；track 的 bbox 数字坐标仍可用于在视频画面中交叉核对位置。输出 identities 时照旧用 track_id 数字。"
         assert pci._INJECT_NOTE == expected
         assert "与上方 gallery 成员参考图" in pci._INJECT_NOTE
-        assert "输出 identity_assignments 时照旧用 track_id 数字" in pci._INJECT_NOTE
+        assert "输出 identities 时照旧用 track_id 数字" in pci._INJECT_NOTE
         assert "\n" not in pci._INJECT_NOTE  # 别为源码行宽在句中断行
 
     def test_normalized_to_configured_height(self):
@@ -355,3 +355,48 @@ class TestTermConsistency:
         # 只断言"没有数量括注"这一件事：整串相等由 test_one_image_per_track_in_candidate_order
         # 负责，名词一致性由上面那条负责。一条测试只为一件事变红，红了才指得准方向。
         assert not re.search(r"[（(]\s*\d+\s*帧\s*[）)]", label), label
+
+
+class TestFallbackHeightGate:
+    """末帧兜底同样要过最小框高这道闸。
+
+    不过的话，这道闸恰好在**最需要它的窗口**（全窗都是小框）失效：逐帧路径把小框全滤掉、返回
+    None，兜底无条件接管同一个小框在末帧裁出的图，再放大到归一高度送进去——清晰度一点没变，
+    净效果只是把选帧从「窗内最大」降级成「末帧」，比不做这个过滤更差。
+    """
+
+    def test_small_body_crop_also_blocked(self):
+        """全窗小框 + 兜底图也小 → 整段不注入（该 track 落进 skipped）。"""
+        frames = [_frame(40)]
+        boxes = [{1: (0, 0, 300, 30)}]                    # 原生框高 30 < 40
+        small = np.full((33, 20, 3), 90, dtype=np.uint8)  # 兜底图 33px，也不过闸
+        assert _build([IdentityQueryItem(track_id=1, body_crop=small)], frames, boxes) == []
+
+    def test_tall_body_crop_still_used(self):
+        """反向守卫：人够大时兜底照旧生效，别因为加了闸把正常兜底路径也堵死。"""
+        frames = [_frame(40)]
+        boxes = [{1: (0, 0, 300, 30)}]
+        imgs = _images(_build(
+            [IdentityQueryItem(track_id=1, body_crop=_frame(170, 200, 90))], frames, boxes))
+        assert len(imgs) == 1
+        assert abs(int(imgs[0].mean()) - 170) <= 2
+
+    def test_gate_follows_config(self):
+        """闸用的是配置值，不是硬编码 40。"""
+        frames, boxes = [_frame(40)], [{1: (0, 0, 300, 30)}]
+        def cand():
+            return IdentityQueryItem(track_id=1, body_crop=_frame(120, 60, 40))  # 兜底图 60px 高
+
+        assert len(_images(_build([cand()], frames, boxes, min_bbox_height_px=50))) == 1
+        assert _build([cand()], frames, boxes, min_bbox_height_px=80) == []
+
+    def test_other_fallback_paths_unaffected_when_person_is_large(self):
+        """闸只看图的高度，不看为什么走到兜底。
+
+        兜底有三条触发路径（无逐帧框 / 全窗 coasting / 全窗小框）。人够大时三条都该照常兜底——
+        这里用「压根没有逐帧框」这条验证，确认加闸没有连带堵掉它。
+        """
+        imgs = _images(_build(
+            [IdentityQueryItem(track_id=1, body_crop=_frame(200, 150, 70))], [], []))
+        assert len(imgs) == 1
+        assert abs(int(imgs[0].mean()) - 200) <= 2

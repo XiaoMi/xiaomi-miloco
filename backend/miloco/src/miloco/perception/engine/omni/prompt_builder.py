@@ -905,7 +905,9 @@ def _build_fused_user_content(
             ))
         else:
             logger.info(
-                "event=person_crop_inject_skip reason=multi_packet n_packets=%d", len(packets)
+                "event=person_crop_inject_skip reason=multi_packet "
+                "track_ids=%s injected=0/%d n_packets=%d",
+                [c.track_id for c in candidates], len(candidates), len(packets),
             )
 
     # 4.5. 已登记宠物多姿态参考图（P2）——仅 has_pets 时注入（用上游 scene 已算好的值，不重读盘）；

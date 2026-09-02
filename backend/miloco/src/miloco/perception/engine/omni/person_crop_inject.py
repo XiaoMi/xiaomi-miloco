@@ -55,11 +55,14 @@ _PAD_RATIO = 0.05
 #     显著变差,省下的正是"把图对回某个 track"这份负担。
 #   · 未验证:"外观单帧"这个名词本身。它只是离线评测当时的写法,没有任何对照臂测过它,
 #     所以换名词不是"违反已验证配置",而是"引入一处未验证改动" —— 要改走等价性 A/B。
+#   · 已订正:句末的输出字段名原写作 identity_assignments —— 那是评测某一臂的笔误(其它臂写的就是
+#     identities),解析侧双名兜底所以一直没炸。在 schema 之后再报一个不同的键名,只会白增模型
+#     写错键的概率,故订正为 schema 真正要求的 identities。别当笔误"还原"回去。
 #   · 已知瑕疵(故意保留):句中"最清晰"是给模型的先验(这张图看得清、可信),而实现是纯面积最大、
 #     不做任何清晰度算法。不订正它:prompt 的职责不是文档化选帧算法,删掉是净减信息。
 # 名词在本文件出现三次(本句内两次 + 下方绑定文本一次)。两处不一致会让模型看到两个名字、指代断掉,
 # 而各处又都有自己的断言、谁也发现不了 —— 由 test_label_reuses_the_term_from_the_note 守着。
-_INJECT_NOTE = "【识别辅助】下方为每个待识别 track 的“外观单帧”：从本段视频中裁出的该 track 最大最清晰的一帧。请优先把每个 track 的外观单帧与上方 gallery 成员参考图逐一比对来判定身份；track 的 bbox 数字坐标仍可用于在视频画面中交叉核对位置。输出 identity_assignments 时照旧用 track_id 数字。"
+_INJECT_NOTE = "【识别辅助】下方为每个待识别 track 的“外观单帧”：从本段视频中裁出的该 track 最大最清晰的一帧。请优先把每个 track 的外观单帧与上方 gallery 成员参考图逐一比对来判定身份；track 的 bbox 数字坐标仍可用于在视频画面中交叉核对位置。输出 identities 时照旧用 track_id 数字。"
 
 
 def person_crop_inject_config_from_settings() -> PersonCropInjectConfig:
@@ -216,6 +219,7 @@ def build_person_crop_content(
             return []
         blocks: list[dict] = []
         skipped: list[int] = []
+        too_small = 0
         for cand in candidates:
             crop: NDArray[np.uint8] | None = None
             if frames and per_frame_boxes:
@@ -226,7 +230,17 @@ def build_person_crop_content(
                 # 兜底:候选自带的末帧 body_crop(IdentityEngine 每窗已算好、padding 同值)。
                 # 走到这里的常见情形:mock 跟踪服务不产逐帧框、该 track 全窗 coasting、
                 # 或所有真匹配帧的框都没过 min_bbox_height_px。
-                crop = cand.body_crop
+                # 最后这种情形必须**同样过阈值**:否则"远处小框放大只得到一张糊图"这道闸恰好在
+                # 最需要它的窗口(全窗都是小框)被绕开 —— 净效果只是把选帧从"窗内最大"降级成
+                # "末帧",清晰度一点没变,比不过滤更差。
+                # body_crop 含 _PAD_RATIO 外扩、贴边时又被 clamp,这里拿不到原生框高,按原生阈值
+                # 宽松比一次(最多放过 1+2*_PAD_RATIO 的余量,不会误杀)。被卡掉的 track 落进下面
+                # 的 skipped、进 skip 日志,可观测性一并有了。
+                fb = cand.body_crop
+                if fb is not None and fb.shape[0] >= cfg.min_bbox_height_px:
+                    crop = fb
+                elif fb is not None:
+                    too_small += 1
             if crop is None or getattr(crop, "size", 0) == 0:
                 skipped.append(cand.track_id)
                 continue
@@ -241,9 +255,13 @@ def build_person_crop_content(
         if skipped:
             # 跳过是设计内的降级(不是错误),但要能看见:全员跳过时本段等价没注入,
             # 而线上召回若回落到基线水平,这行日志是唯一能区分"闸没开"与"图没裁出来"的证据。
+            # reason 是必填维度(另一个发射点在 prompt_builder 的多 packet 分支,用同一组核心字段),
+            # 否则按 event 聚合时两种形状的记录会互相丢字段。too_small 把"人太远太小被闸拦下"从
+            # "压根没有图可用"里拆出来 —— 前者是场景问题,后者才是数据管路问题,处置完全不同。
             logger.info(
-                "event=person_crop_inject_skip track_ids=%s injected=%d/%d",
-                skipped, len(blocks) // 2, len(candidates),
+                "event=person_crop_inject_skip reason=no_usable_crop "
+                "track_ids=%s injected=%d/%d too_small=%d",
+                skipped, len(blocks) // 2, len(candidates), too_small,
             )
         if not blocks:
             return []
