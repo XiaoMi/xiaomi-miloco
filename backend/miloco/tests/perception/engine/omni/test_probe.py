@@ -22,7 +22,9 @@ def _fake_async_client(
     exc: Exception | None = None,
     get_resp: _FakeResp | None = None,
     post_resp: _FakeResp | None = None,
+    seen: dict | None = None,
 ):
+    """``seen`` 传入则记录 GET 实际用的 url / headers，供鉴权头断言。"""
     g = get_resp if get_resp is not None else resp
     p = post_resp if post_resp is not None else resp
 
@@ -37,6 +39,9 @@ def _fake_async_client(
             return False
 
         async def get(self, *a, **k):
+            if seen is not None:
+                seen["url"] = a[0] if a else k.get("url")
+                seen["headers"] = k.get("headers") or {}
             if exc:
                 raise exc
             return g
@@ -429,3 +434,259 @@ async def test_probe_chat_stream_429_preserves_retry_after(monkeypatch):
     assert r["code"] == "rate_limited"
     # 关键:Retry-After 被解析出来传给上层 _grow_backoff_locked
     assert r["retry_after_seconds"] == 45.0
+
+
+# ─── Gemini 家族主机名判定（Gemini API / Vertex 两条接入路径）──────────────────
+
+
+def test_is_gemini_native_endpoint_covers_both_access_paths():
+    f = probe._is_gemini_native_endpoint
+    assert f("https://generativelanguage.googleapis.com/v1beta")
+    # Vertex 原生：express 形态与项目级形态，都经 /publishers/
+    assert f("https://aiplatform.googleapis.com/v1/publishers/google")
+    assert f(
+        "https://us-central1-aiplatform.googleapis.com"
+        "/v1/projects/p/locations/us-central1/publishers/google"
+    )
+    # 按主机名判而非 URL 子串：把域名塞进路径不算命中
+    assert not f("https://evil.com/aiplatform.googleapis.com")
+    assert not f("https://evil.com/generativelanguage.googleapis.com")
+    assert not f("https://api.xiaomimimo.com/v1")
+
+
+def test_parse_model_ids_tries_all_shapes():
+    """认识的几种形态都试：prefer_native 只决定先试哪一种，不是唯一依据。
+
+    绑死单一形态时，端点形态一旦判错（经代理转发、或没验证过的路径）就解出空列表
+    并被报成成功，下拉恒空且用户拿不到提示。
+    """
+    f = probe._parse_model_ids
+    native = {"models": [{"name": "models/gemini-3.6-flash"}]}
+    compat = {"data": [{"id": "m1"}]}
+    # 判对时按各自形态解
+    assert f(native, prefer_native=True) == ["gemini-3.6-flash"]
+    assert f(compat, prefer_native=False) == ["m1"]
+    # 判错时回退到另一种形态，而不是解出空列表
+    assert f(compat, prefer_native=True) == ["m1"]
+    assert f(native, prefer_native=False) == ["gemini-3.6-flash"]
+    # Vertex 的 publisherModels 形态（name 带 publishers/…/models/ 前缀）也认
+    assert f(
+        {"publisherModels": [{"name": "publishers/google/models/gemini-3.6-flash"}]},
+        prefer_native=True,
+    ) == ["gemini-3.6-flash"]
+    # 兼容形态的 id 原样透传：含 /models/ 是合法的（如 accounts/<org>/models/<name>），
+    # 套用原生形态的剥前缀规则会把它截断成 provider 认不出的名字
+    assert f(
+        {"data": [{"id": "accounts/fireworks/models/llama-v3-70b"}]}, prefer_native=False
+    ) == ["accounts/fireworks/models/llama-v3-70b"]
+    # 三种都不认 / 非 dict → 空
+    assert f({"someOtherShape": [{"name": "x"}]}, prefer_native=True) == []
+    assert f(["not", "a", "dict"], prefer_native=True) == []
+    # 条目不是 dict、列表位不是 list 都只跳过，不抛
+    assert f({"models": ["bad", {"name": "models/ok"}]}, prefer_native=True) == ["ok"]
+    assert f({"models": "notalist", "data": [{"id": "m1"}]}, prefer_native=True) == ["m1"]
+    # 产出不含空串：剥完前缀为空的条目要被丢掉，且不能因此短路掉另一种形态的回退
+    assert f({"models": [{"name": "models/"}]}, prefer_native=True) == []
+    assert f(
+        {"models": [{"name": "models/"}], "data": [{"id": "real"}]}, prefer_native=True
+    ) == ["real"]
+    # 标识是数字等标量时归一而非抛（旧实现会让调用方的 sorted 混排类型报 TypeError）
+    assert f({"data": [{"id": "a"}, {"id": 1}]}, prefer_native=False) == ["a", "1"]
+    # 但嵌套结构不是合法标识：跳过，而不是 str() 成一串垃圾文本混进下拉
+    assert f({"data": [{"id": {"name": "x"}}, {"id": "ok"}]}, prefer_native=False) == ["ok"]
+    assert f({"data": [{"id": ["a"]}]}, prefer_native=False) == []
+    assert f({"models": [{"name": {"k": "v"}}], "data": [{"id": "fallback"}]},
+             prefer_native=True) == ["fallback"]
+
+
+async def test_fetch_models_mixed_id_types_do_not_500(monkeypatch):
+    """条目 id 类型混杂时不能让异常逃出本接口。"""
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_async_client(_FakeResp(200, {"data": [{"id": "b"}, {"id": 1}]})),
+    )
+    r = await probe.fetch_models("https://aiplatform.googleapis.com/v1/publishers/google", "k")
+    assert r["ok"] is True and r["models"] == ["1", "b"]
+
+
+async def test_fetch_models_recovers_when_shape_mismatches(monkeypatch):
+    """原生端点回了兼容形态时仍解得出模型，而不是静默返回空列表。"""
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_async_client(_FakeResp(200, {"data": [{"id": "gemini-3.6-flash"}]})),
+    )
+    r = await probe.fetch_models(
+        "https://aiplatform.googleapis.com/v1/publishers/google", "k"
+    )
+    assert r == {"ok": True, "models": ["gemini-3.6-flash"]}
+
+
+def test_gemini_api_openai_compat_path_stays_on_openai_branch():
+    """Gemini API 主机下的 OpenAI 兼容 base_url 必须留在 Bearer 分支。
+
+    官方兼容 base_url 是 https://generativelanguage.googleapis.com/v1beta/openai/，
+    走 Authorization: Bearer + {data:[{id}]}。判成原生有两种落点、都坏：发 x-goog-api-key
+    被拒 → 401 误报 bad_key；或被收下 → 按 {models:[{name}]} 解析 → 空列表且 ok=true。
+    """
+    f = probe._is_gemini_native_endpoint
+    assert not f("https://generativelanguage.googleapis.com/v1beta/openai")
+    assert not f("https://generativelanguage.googleapis.com/v1beta/openai/")
+    # 不少工具要求 base 以 /v1 结尾——尾锚定判定会漏掉这一形态
+    assert not f("https://generativelanguage.googleapis.com/v1beta/openai/v1")
+    assert f("https://generativelanguage.googleapis.com/v1beta")
+    # 按路径段比对，不误伤名字里恰好含 openai 的段
+    assert f("https://generativelanguage.googleapis.com/v1beta/myopenai")
+    # 路径段与主机名一样做大小写归一：URL 路径大小写敏感，但判定不该因此漏判
+    assert not f("https://generativelanguage.googleapis.com/v1beta/OpenAI")
+    assert not f("https://generativelanguage.googleapis.com/v1beta/OPENAI/v1")
+
+
+async def test_fetch_models_gemini_openai_compat_uses_bearer(monkeypatch):
+    """兼容路径走到发请求这一层也要是 Bearer，且按 {data:[{id}]} 解析出模型。"""
+    seen: dict = {}
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_async_client(_FakeResp(200, {"data": [{"id": "gemini-3.6-flash"}]}), seen=seen),
+    )
+    r = await probe.fetch_models(
+        "https://generativelanguage.googleapis.com/v1beta/openai", "k"
+    )
+    assert r == {"ok": True, "models": ["gemini-3.6-flash"]}
+    assert "Authorization" in seen["headers"]
+    assert "x-goog-api-key" not in seen["headers"]
+
+
+def test_vertex_openai_compat_path_stays_on_openai_branch():
+    """Vertex 同主机下的 OpenAI 兼容路径必须留在 Bearer 分支。
+
+    该端点鉴权走 ``Authorization: Bearer``；只按主机名判会给它发 x-goog-api-key
+    → 401 → 误报 bad_key，正是本模块要消除的那类误报。
+    """
+    assert not probe._is_gemini_native_endpoint(
+        "https://us-central1-aiplatform.googleapis.com"
+        "/v1beta1/projects/p/locations/us-central1/endpoints/openapi"
+    )
+
+
+def test_vertex_non_native_path_not_treated_as_native():
+    """Vertex 主机上**任何**不经 publishers 段的路径都不按原生处理。
+
+    这条锁的是「白名单」而非「黑名单」语义：**若改成**只排除已知的 OpenAI 兼容路径，
+    该主机上其余非原生路径就会被误判成原生、发错鉴权头——本用例即为拦住那种改法。
+    """
+    assert not probe._is_gemini_native_endpoint(
+        "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/p/locations/l/datasets"
+    )
+    assert not probe._is_gemini_native_endpoint(
+        "https://aiplatform.googleapis.com/v1"
+    )
+
+
+async def test_fetch_models_vertex_openai_compat_uses_bearer(monkeypatch):
+    """走到发请求这一层也要是 Bearer —— 判定改错时这条会连带变红。"""
+    seen: dict = {}
+    monkeypatch.setattr(
+        probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(200, {"data": [{"id": "m1"}]}), seen=seen)
+    )
+    r = await probe.fetch_models(
+        "https://us-central1-aiplatform.googleapis.com"
+        "/v1beta1/projects/p/locations/us-central1/endpoints/openapi",
+        "k",
+    )
+    assert r == {"ok": True, "models": ["m1"]}
+    assert "Authorization" in seen["headers"]
+    assert "x-goog-api-key" not in seen["headers"]
+
+
+async def test_fetch_models_vertex_uses_goog_key_header(monkeypatch):
+    """Vertex 主机按 Gemini 家族处理：走 x-goog-api-key，不发 Bearer。"""
+    seen: dict = {}
+    monkeypatch.setattr(
+        probe.httpx,
+        "AsyncClient",
+        _fake_async_client(
+            _FakeResp(200, {"models": [{"name": "models/gemini-3.6-flash"}]}), seen=seen
+        ),
+    )
+    r = await probe.fetch_models("https://aiplatform.googleapis.com/v1/publishers/google", "k")
+    assert r == {"ok": True, "models": ["gemini-3.6-flash"]}
+    assert "x-goog-api-key" in seen["headers"]
+    assert "Authorization" not in seen["headers"]
+
+
+async def test_fetch_models_gemini_404_is_list_unsupported(monkeypatch):
+    """该端点没有 models.list（Vertex 实测回 404）→ 提示手填模型名，不报地址错。"""
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(404)))
+    r = await probe.fetch_models("https://aiplatform.googleapis.com/v1/publishers/google", "k")
+    assert r["ok"] is False and r["code"] == "list_unsupported" and r["models"] == []
+
+
+async def test_fetch_models_404_gate_is_endpoint_level_not_host_level(monkeypatch):
+    """404 归「列不出来」的判据是**端点**级，不是主机级。
+
+    同主机下的 OpenAI 兼容路径本身就有 /models 接口，那里的 404 更可能是路径写错，
+    应落 http_error；把判据放宽到「同族主机」会让它被误报成「该端点没有列模型接口」。
+    """
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(404)))
+    native = await probe.fetch_models(
+        "https://generativelanguage.googleapis.com/v1beta", "k"
+    )
+    assert native["code"] == "list_unsupported"
+
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(404)))
+    compat = await probe.fetch_models(
+        "https://generativelanguage.googleapis.com/v1beta/openai", "k"
+    )
+    assert compat["code"] == "http_error", "同主机的兼容路径 404 不该归 list_unsupported"
+
+
+async def test_fetch_models_gemini_401_403_still_bad_key(monkeypatch):
+    """坏 key / 被限制的 key 正是回 401/403 —— 不能被「列不出来」吞掉。"""
+    for status in (401, 403):
+        monkeypatch.setattr(
+            probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(status))
+        )
+        r = await probe.fetch_models("https://generativelanguage.googleapis.com/v1beta", "k")
+        assert r["code"] == "bad_key", f"HTTP {status} 应仍判 bad_key"
+
+
+async def test_fetch_models_non_gemini_unchanged(monkeypatch):
+    """非 Gemini 主机行为不变：401 → bad_key，404 → http_error。"""
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(401)))
+    assert (await probe.fetch_models("https://api.example.com/v1", "k"))["code"] == "bad_key"
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(404)))
+    assert (await probe.fetch_models("https://api.example.com/v1", "k"))["code"] == "http_error"
+
+
+async def test_probe_reachable_404_gate_is_endpoint_level_not_host_level(monkeypatch):
+    """预检侧的 404 判据同样是**端点**级，与拉模型列表那侧对称。
+
+    同主机下的 OpenAI 兼容路径 404 仍应报出来；放宽到「同族主机」会让它被当作
+    「该端点没有列模型接口」而放行，把地址错盖成「缺 key」。
+    """
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(404)))
+    assert (
+        await probe.probe_reachable("https://generativelanguage.googleapis.com/v1beta")
+        is None
+    )
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(404)))
+    compat = await probe.probe_reachable(
+        "https://generativelanguage.googleapis.com/v1beta/openai"
+    )
+    assert compat is not None and compat["code"] == "http_error"
+
+
+async def test_probe_reachable_gemini_404_not_reported_as_url_error(monkeypatch):
+    """Vertex 没有 models.list，404 不该在「缺 key」之前先被报成地址错。"""
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(404)))
+    assert (
+        await probe.probe_reachable("https://aiplatform.googleapis.com/v1/publishers/google")
+        is None
+    )
+    # 非 Gemini 主机的 404 仍然要报出来
+    monkeypatch.setattr(probe.httpx, "AsyncClient", _fake_async_client(_FakeResp(404)))
+    r = await probe.probe_reachable("https://api.example.com/v1")
+    assert r is not None and r["code"] == "http_error"
