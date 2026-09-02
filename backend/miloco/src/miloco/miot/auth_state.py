@@ -22,7 +22,6 @@ from enum import Enum
 
 from pydantic import BaseModel
 
-
 #: 瞬时故障的退避序列（秒）。定时任务本身每 300s 转一圈，这里控制的是
 #: 「同一轮里失败后多久再试」，上限刻意小于一圈，避免两套节奏互相错开。
 RETRY_BACKOFF_SECONDS: tuple[int, ...] = (5, 20, 60)

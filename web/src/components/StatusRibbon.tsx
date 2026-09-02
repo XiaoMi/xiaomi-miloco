@@ -5,7 +5,7 @@
  * 取代 v2 的"大色块 chip"——dev tool 风格更克制，不抢主区注意力。
  *
  * Item 1: 看家（perception running / paused / 异常）
- * Item 2: 米家（已连 / 未连）
+ * Item 2: 米家（已连 / 授权已失效 / 未连）
  */
 
 import { type ReactNode } from "react";

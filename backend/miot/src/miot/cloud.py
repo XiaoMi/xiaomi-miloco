@@ -227,6 +227,15 @@ class MIoTOAuth2Client:
         # 会一路落进下面的通用分支被当成 CODE_UNKNOWN,于是「凭据真失效」和
         # 「响应偶发不合法」在调用方眼里完全一样——那正是要区分开的两件事。
         # 两个位置都查:顶层是为兼容可能的另一种形状,不做形状假设。
+        # 本方法服务两条流程:请求体带 refresh_token 的是定时续期,带 code 的是
+        # 首次/重新授权的授权码兑换。授权码同样一次性,停留过久或回调被刷第二次
+        # 就会被拒。两条报同一个码,日志里「续期凭据失效」和「授权码已过期」就分
+        # 不开,排障的人会去查错的链路。两个码都在永久失效集合内,续期侧判定不变。
+        reject_code = (
+            MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN
+            if isinstance(data, dict) and "refresh_token" in data
+            else MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED
+        )
         err_obj = res_obj if isinstance(res_obj, dict) else {}
         result_obj = err_obj.get("result")
         for holder in (err_obj, result_obj if isinstance(result_obj, dict) else {}):
@@ -234,7 +243,7 @@ class MIoTOAuth2Client:
                 raise MIoTOAuth2Error(
                     f"oauth/get_token rejected, error={holder.get('error')}, "
                     f"description={holder.get('error_description')}",
-                    MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN,
+                    reject_code,
                 )
         if (
             not res_obj

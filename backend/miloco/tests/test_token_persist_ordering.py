@@ -14,7 +14,7 @@ Access Token）。换取成功那一刻旧令牌就在云端作废了，新令�
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from miot.client import MIoTClient
@@ -177,3 +177,113 @@ async def test_refresh_is_serialized_by_lock():
     await asyncio.gather(*(proxy.refresh_xiaomi_home_token_info() for _ in range(5)))
 
     assert peak == 1, f"刷新没有串行，峰值并发 {peak}"
+
+
+# ─────────────── 重新授权必须重建云端长连接 ───────────────
+
+
+def _client_tracking_mips():
+    """造一个 MIoTClient，记录 mips 是「重建」还是「只换密码重连」。"""
+    c = MIoTClient.__new__(MIoTClient)
+    calls: list[str] = []
+
+    c._oauth_info = MIoTOauthInfo(
+        access_token="at",
+        refresh_token="rt",
+        expires_ts=9999999999,
+        user_info=MIoTUserInfo(uid="u1", nickname="n", icon="", union_id="x"),
+    )
+    c._http_client = MagicMock()
+    c._http_client.update_http_header = lambda **kw: None
+    c._camera_client = None
+
+    async def _upd(_t):
+        calls.append("reconnect")
+
+    c._mips_cloud = MagicMock()
+    c._mips_cloud.update_access_token = _upd
+
+    async def _setup():
+        calls.append("rebuild")
+
+    c._setup_mips_async = _setup
+    return c, calls
+
+
+@pytest.mark.asyncio
+async def test_reauthorize_rebuilds_mips_even_when_client_exists():
+    """重新授权必须重建，不能退化成换密码重连。
+
+    账号级主题 ``user/{uid}/g_op/bind`` / ``unbind`` 只在重建时发出，而重连只把
+    ``_subs`` 里按 topic 字符串存着的旧 uid 主题原样重放。换了账号之后，新账号的
+    绑定/解绑推送就再也订阅不到——用户在米家 App 里加设备，这边收不到通知。
+    """
+    c, calls = _client_tracking_mips()
+    apply = c._MIoTClient__apply_access_token_async
+
+    await apply(rebuild_mips=True)
+
+    assert calls == ["rebuild"], (
+        f"重新授权应当重建 mips，实际是 {calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduled_refresh_only_reconnects():
+    """定时续期不换账号，走廉价的换密码重连即可，不必重建。"""
+    c, calls = _client_tracking_mips()
+    apply = c._MIoTClient__apply_access_token_async
+
+    await apply()
+
+    assert calls == ["reconnect"], f"定时续期应当只重连，实际是 {calls}"
+
+
+@pytest.mark.asyncio
+async def test_missing_mips_is_built_from_scratch():
+    """长连接还没建起来时（进程刚起、从库里恢复凭据做首次续期）应当重建。"""
+    c, calls = _client_tracking_mips()
+    c._mips_cloud = None
+    apply = c._MIoTClient__apply_access_token_async
+
+    await apply()
+
+    assert calls == ["rebuild"]
+
+
+@pytest.mark.asyncio
+async def test_authorize_end_to_end_rebuilds_mips():
+    """走完整的 ``get_access_token_async``，确认它真的要求了重建。
+
+    单独测 ``__apply_access_token_async(rebuild_mips=True)`` 不够：那只证明参数
+    生效，不证明授权路径传了它。把调用点的 ``rebuild_mips=True`` 去掉，上面那条
+    仍会绿——所以必须有这一条从入口进的。
+    """
+    c, calls = _client_tracking_mips()
+
+    async def _check_state(**kw):
+        return True
+
+    async def _exchange(code):
+        return MIoTOauthInfo(
+            access_token="at2", refresh_token="rt2", expires_ts=9999999999
+        )
+
+    c._oauth_client = MagicMock()
+    c._oauth_client.check_state_async = _check_state
+    c._oauth_client.get_access_token_async = _exchange
+
+    async def _user_info():
+        c._oauth_info.user_info = MIoTUserInfo(
+            uid="u2", nickname="n2", icon="", union_id="y"
+        )
+        return c._oauth_info.user_info
+
+    c.get_user_info_async = _user_info
+
+    await c.get_access_token_async(code="the_code", state="the_state")
+
+    assert calls == ["rebuild"], (
+        "重新授权走到底必须重建 mips（账号级主题只在重建时发出），"
+        f"实际是 {calls}"
+    )
