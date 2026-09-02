@@ -692,6 +692,29 @@ def test_on_target_on_an_event_rule_pauses_the_task(v2_db):
     conn.close()
 
 
+def test_the_report_gives_each_task_its_own_reason(v2_db, capsys):
+    """报告里的原因必须是这个 task 自己的那条。
+
+    两种存量形态都会被判不合法, 报告写死一种的话, 撞上另一种的用户照着处置找不到
+    对象 —— 这里的 task 名下一条 session 都没有, 报告却让他"只保留那条 session"。
+    报告是 stdout 直出的, 让人回去翻日志正好抵消了直出的意义。
+    """
+    _seed(
+        v2_db,
+        lambda c: (
+            _add_task(c, "t_no_exit"),
+            _add_rule(c, "r1", "t_no_exit", mode="event", on_target_desc="达标了提醒"),
+            _add_duration_record(c, "t_no_exit", 60),
+        ),
+    )
+    _migrate(v2_db)
+
+    report = capsys.readouterr().out
+    assert "t_no_exit" in report
+    assert "direction=exit 或 session 的规则" in report
+    assert "只保留那条 session" not in report
+
+
 # ── 字段清洗 ──────────────────────────────────────────────────────────
 
 

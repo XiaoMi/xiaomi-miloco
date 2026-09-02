@@ -1627,7 +1627,7 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
                 "    OR COALESCE(on_target_actions, '[]') NOT IN ('[]', '')"
             ).fetchall()
         }
-        illegal_tasks: list[str] = []
+        illegal_reasons: dict[str, str] = {}
         rows_by_task: dict[str, list[str]] = {}
         for row in cursor.execute("SELECT task_id, direction FROM rule").fetchall():
             rows_by_task.setdefault(row["task_id"], []).append(row["direction"])
@@ -1640,7 +1640,7 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
                 continue
             reason = task_rule_set_error(parsed, task_id in with_target)
             if reason:
-                illegal_tasks.append(task_id)
+                illegal_reasons[task_id] = reason
                 logger.warning(
                     "v2→v3 task %s 迁移后不合法, 置 paused: %s", task_id, reason
                 )
@@ -1648,7 +1648,7 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
         # ── (h) 置 paused ───────────────────────────────────────────
         # 只置 task.status。生效判据里 task 停用这一半已经为假, 再写 rule.enabled=0
         # 会在用户处置完重新启用后让这批规则永远起不来 (理由同 (f))。
-        for task_id in conflict_tasks + on_target_broken_tasks + illegal_tasks:
+        for task_id in conflict_tasks + on_target_broken_tasks + list(illegal_reasons):
             cursor.execute(
                 "UPDATE task SET status='paused', paused_at=? WHERE task_id=?",
                 (now, task_id),
@@ -1677,7 +1677,7 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
         counts,
         conflict_tasks,
         on_target_broken_tasks,
-        illegal_tasks,
+        illegal_reasons,
         len(terminate_when_rules),
     )
 
@@ -1686,7 +1686,7 @@ def _log_v3_report(
     counts: dict[str, int],
     conflict_tasks: list[str],
     on_target_broken_tasks: list[str],
-    illegal_tasks: list[str],
+    illegal_reasons: dict[str, str],
     terminate_when_count: int,
 ) -> None:
     """迁移报告。日志 + stdout 双出 —— 只写日志用户装完不会去翻。"""
@@ -1714,17 +1714,14 @@ def _log_v3_report(
             "  处置: 补 task record init --kind duration --content 的 target_minutes",
             "        后重新启用。",
         ]
-    if illegal_tasks:
-        lines += [
-            "",
-            "  下列 task 迁移后的规则组合不合法, 已置 paused:",
-            *(f"    - {t}" for t in illegal_tasks),
-            "  原因: 迁移后有一条 session 规则与别的规则挂在同一个 task 上",
-            "        (mode=state 迁成 session、mode=event 迁成 enter)。session 必须",
-            "        独占该 task —— 混挂会让它永久卡在 on。",
-            "  处置: 只保留那条 session, 别的删掉或改挂到新 task, 然后重新启用。",
-            "  每个 task 的准确原因见日志里对应的 warning 行。",
-        ]
+    if illegal_reasons:
+        # 原因按 task 逐条带上校验那份文案 —— 在报告里重写一遍等于第二份文案,
+        # 改了校验不会跟着改; 而写死一种形态的话, 撞上别种的用户拿到的处置建议
+        # 照着做找不到对象。
+        lines += ["", "  下列 task 迁移后的规则组合不合法, 已置 paused:"]
+        for task_id, reason in illegal_reasons.items():
+            lines += [f"    - {task_id}:", f"        {reason}"]
+        lines += ["  按各自的原因处置完再重新启用该 task。"]
     report = "\n".join(lines)
     logger.warning(report)
     print(report)
