@@ -44,6 +44,9 @@ logger = logging.getLogger(__name__)
 
 _META_COLUMN_NAMES = frozenset({"description", "lifecycle", "expires_at"})
 
+# 这些列传 null 是"清空"; 其余都是 NOT NULL, 传 null 会在 UPDATE 时撞约束。
+_NULLABLE_META = frozenset({"expires_at"})
+
 _ACTION_SLOT_NAMES = frozenset(
     {
         "on_enter_actions",
@@ -110,9 +113,12 @@ class TaskService:
         }
         if not updates:
             raise ValidationException("至少要传一个可改字段")
-        # description 那一列 NOT NULL, 放行会在 UPDATE 时撞约束落成 500。
-        if "description" in updates and updates["description"] is None:
-            raise ValidationException("description 不能清空")
+        # 点名 NOT NULL 的列会漏掉下一列 —— 反过来白名单可清空的那些。
+        nulled = sorted(
+            k for k, v in updates.items() if v is None and k not in _NULLABLE_META
+        )
+        if nulled:
+            raise ValidationException(f"{', '.join(nulled)} 不能清空")
 
         current = self.repo.get_full_view(task_id)
         if current is None:
@@ -172,7 +178,9 @@ class TaskService:
         if clearing_enter:
             if self._rule_service is None:
                 raise BusinessException("rule service 未就绪，无法校验进入动作")
-            self._rule_service.require_enter_rules_have_own_action(task_id)
+            self._rule_service.assert_enter_rules_survive_clearing(
+                task_id, {"on_enter_actions", "on_enter_desc"}
+            )
         if not self.repo.set_boundary_actions(task_id, **slots):
             return False
         if self._rule_service is not None:

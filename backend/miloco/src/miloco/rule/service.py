@@ -465,6 +465,22 @@ class RuleService:
         ``rule update <id> --clear action_descriptions`` 一条命令就能建出哑规则。
         ``changed_fields`` / ``previous`` 与随后那几个 sync 分支收的是同一组参数。
         """
+        moved_home = previous is not None and (
+            previous.resolved_direction is not rule.resolved_direction
+            or previous.task_id != rule.task_id
+        )
+        if moved_home:
+            # 换方向 / 挪家的收尾会清掉旧归属那边的槽。清的是 previous.task_id
+            # 的槽 (见 _clear_task_slots), 所以查的兄弟也在那个 task 里 —— 与
+            # 下面判"自己有没有动作可落"看的不是同一个 task。
+            # 这一问与本 rule 是什么方向无关, 必须排在方向那道 return 前面:
+            # enter 改 exit 正是它自己不再被查、而兄弟被抽走动作的那种。
+            self.assert_enter_rules_survive_clearing(
+                previous.task_id,
+                self._slots_cleared_by(previous),
+                exclude_rule_id=rule.id,
+            )
+
         if rule.resolved_direction is not RuleDirection.ENTER:
             return
         if rule.actions or rule.action_descriptions:
@@ -482,10 +498,6 @@ class RuleService:
 
         # 把这次写入对槽的影响叠上去, 三条支路与下面真正执行的那段一一对应:
         # 无槽可写 / 兄弟 rule 争同一个槽而整体跳过 / 正常写入。
-        moved_home = previous is not None and (
-            previous.resolved_direction is not rule.resolved_direction
-            or previous.task_id != rule.task_id
-        )
         if moved_home:
             if previous.task_id == rule.task_id:
                 # 只有换方向那种才叠: 读出来的 slots 是 rule.task_id 的, 而
@@ -516,13 +528,24 @@ class RuleService:
             return False
         return bool(slots.get("on_target_actions") or slots.get("on_target_desc"))
 
-    def require_enter_rules_have_own_action(self, task_id: str) -> None:
-        """清空 task 的进入动作前先确认名下没有靠它的 enter 规则。
+    def assert_enter_rules_survive_clearing(
+        self,
+        task_id: str,
+        slots_to_clear: set[str],
+        exclude_rule_id: str | None = None,
+    ) -> None:
+        """清掉这几个槽之后, task 名下的 enter 规则还能不能选到动作。
+
+        清空 task 动作槽的路径有两条 —— task 侧动作接口, 与 rule 换方向 / 改挂
+        task 时的收尾清理 (``_clear_task_slots``)。两条都调这里, 判据只有一份;
+        各自加一份的话, 静默的那条正好是 agent 更常走的。
 
         task 一旦被接管, 读侧就不再回退到 rule 行 (见 ``runner._select_task_slot``)
         —— 所以「rule 自己带了动作」并不等于清空 on_enter 之后它还做得成事。只有
         该 task 的槽会被清得一个不剩 (整体退回旧路径) 时, rule 行上那份才重新生效。
         """
+        if not ({"on_enter_actions", "on_enter_desc"} & slots_to_clear):
+            return
         try:
             slots = (self._task_repo.get_full_view(task_id) or {}).get("actions") or {}
         except Exception as e:  # noqa: BLE001
@@ -530,18 +553,13 @@ class RuleService:
                 f"读 task {task_id} 的动作配置失败, 无法确认能否清空进入动作"
             ) from e
         still_owned = any(
-            slots.get(k)
-            for k in (
-                "on_exit_actions",
-                "on_exit_desc",
-                "on_target_actions",
-                "on_target_desc",
-            )
+            v for k, v in slots.items() if k not in slots_to_clear
         )
         naked = [
             r.id
             for r in self._repo.list_by_task(task_id)
-            if r.resolved_direction is RuleDirection.ENTER
+            if r.id != exclude_rule_id
+            and r.resolved_direction is RuleDirection.ENTER
             and (still_owned or not (r.actions or r.action_descriptions))
         ]
         if naked:

@@ -589,6 +589,19 @@ def test_update_rejects_expiry_on_a_permanent_task(service):
         )
 
 
+@pytest.mark.parametrize("column", ["description", "lifecycle"])
+def test_update_rejects_clearing_a_not_null_column(service, column):
+    """可清空的只有到期时刻。
+
+    点名 NOT NULL 的列会漏掉下一列 —— 这里两列一起参数化, 加第三列时照抄一行。
+    """
+    from miloco.middleware.exceptions import ValidationException
+
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    with pytest.raises(ValidationException, match="不能清空"):
+        service.update_meta("t1", TaskUpdateRequest(**{column: None}))
+
+
 def test_update_rejects_clearing_the_description(service):
     """那一列 NOT NULL —— 放行会在 UPDATE 时撞约束落成 500。"""
     from miloco.middleware.exceptions import ValidationException

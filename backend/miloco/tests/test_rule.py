@@ -1143,6 +1143,77 @@ class TestRuleServicePatch:
             )
 
     @pytest.mark.asyncio
+    async def test_patch_direction_change_cannot_strip_a_sibling(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """换方向的收尾清理不能把兄弟的动作抽走。
+
+        `rule update r1 --direction exit` 一条命令: r1 的动作原本透传成 task 的
+        进入槽, 换方向后收尾把那个槽清空, 而不带动作的 r2 正是靠它活着 —— 从此
+        触发多少次都不做事, 命令却返回成功。同一次清空写成 task set-actions 是
+        被拦住的, 两条路径不能给相反答案。
+        """
+        r1 = _make_dynamic_rule(rule_id="r1")
+        r2 = _make_dynamic_rule(
+            rule_id="r2", name=_name(TASK_ID, "naked"), descriptions=[]
+        )
+        mock_rule_repo.get_by_id.return_value = r1
+        mock_rule_repo.list_by_task.return_value = [r1, r2]
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_enter_desc": "1. 开灯"}
+        }
+
+        with pytest.raises(ValidationException, match="靠这份进入动作"):
+            await service.patch_rule("r1", RuleUpdate(direction=RuleDirection.EXIT))
+        mock_rule_repo.update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_patch_direction_change_is_fine_without_naked_siblings(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """兄弟自带动作就别拦 —— 换方向本身是常规操作。
+
+        兄弟必须留一条 enter: 名下只剩 exit 的 task 没有进路径, 会被集合校验先
+        拒掉, 那时这条测试测的就不是本函数了。
+        """
+        r1 = _make_dynamic_rule(rule_id="r1")
+        r2 = _make_dynamic_rule(rule_id="r2", name=_name(TASK_ID, "own"))
+        mock_rule_repo.get_by_id.return_value = r1
+        mock_rule_repo.list_by_task.return_value = [r1, r2]
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_enter_desc": "1. 开灯"}
+        }
+
+        assert (
+            await service.patch_rule("r1", RuleUpdate(direction=RuleDirection.EXIT))
+            is True
+        )
+
+    @pytest.mark.asyncio
+    async def test_patch_moving_out_checks_the_old_task_not_the_new_one(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """挪家时清的是旧家的槽, 所以要查旧家的兄弟。
+
+        两家的兄弟不同才分得开: 旧家有一条靠那份动作活着的 enter 规则, 新家没有。
+        查新家的话这次搬家会被放行, 而旧家那条从此静默不做事。
+        """
+        r1 = _make_dynamic_rule(rule_id="r1", task_id=TASK_ID)
+        naked = _make_dynamic_rule(
+            rule_id="r2", task_id=TASK_ID, name=_name(TASK_ID, "naked"), descriptions=[]
+        )
+        by_task = {TASK_ID: [r1, naked], "new_task": []}
+        mock_rule_repo.get_by_id.return_value = r1
+        mock_rule_repo.list_by_task.side_effect = lambda tid: list(by_task.get(tid, []))
+        mock_task_repo.get_full_view.side_effect = lambda tid: {
+            "actions": {"on_enter_desc": "1. 开灯"} if tid == TASK_ID else {}
+        }
+        service._require_task_exists = lambda _tid: None
+
+        with pytest.raises(ValidationException, match="靠这份进入动作"):
+            await service.patch_rule("r1", RuleUpdate(task_id="new_task"))
+
+    @pytest.mark.asyncio
     async def test_patch_moving_to_another_task_is_not_blocked(
         self, service, mock_rule_repo, mock_task_repo
     ):
