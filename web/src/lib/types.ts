@@ -457,7 +457,7 @@ export interface OmniProfileRef {
 /** 拉取模型列表结果。 */
 export interface OmniModelsResult {
   ok: boolean;
-  /** 失败时的机器码(no_key/unreachable/bad_key/http_error);缺省回退 message。 */
+  /** 失败时的机器码(no_key/unreachable/bad_key/http_error/list_unsupported);缺省回退 message。 */
   code?: string;
   models: string[];
   message?: string;
