@@ -17,8 +17,10 @@ from miloco.database.task_repo import TaskConflict
 from miloco.rule.schema import (
     Rule,
     RuleCondition,
+    RuleDirection,
     RuleLifecycle,
     RuleMode,
+    TriggerOutcome,
 )
 from miloco.task.schema import CronRef, TaskCreateRequest, TaskUpdateRequest
 
@@ -671,6 +673,8 @@ def _service_with_rule_stub(record_state):
     record_svc.read_duration_target_state = MagicMock(return_value=record_state)
     rule_svc = RuleService.__new__(RuleService)
     rule_svc._task_record_service = record_svc
+    # 配达标动作还要查这个 task 有没有出路径, 那道闸读的是 rule 表
+    rule_svc._repo = RuleRepo()
     rule_svc.reconfigure_task = MagicMock()
     return TaskService(rule_repo=RuleRepo(), rule_service=rule_svc)
 
@@ -738,3 +742,99 @@ def test_list_summary_carries_task_boundary_actions(service, real_db):
     assert view.actions is not None
     assert view.actions.on_enter_desc == "进来推一条"
     assert view.actions.on_exit_desc == "出去推一条"
+
+
+def test_set_actions_replaces_the_whole_slot(service):
+    """同槽两列一起写。
+
+    两列互斥而选槽时静态优先, 只写传进来的那一列的话, 用户把动作从设备直控改成
+    Agent 文案时残留的静态列会继续赢 —— 请求返回成功、task get 显示新文案、实际
+    下发的还是旧的设备动作。
+    """
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    _mk_task(service)
+    service.set_boundary_actions(
+        "t1",
+        TaskActionsUpdateRequest(
+            on_enter_actions=[{"did": "lamp", "iid": "prop.2.1", "value": True}]
+        ),
+    )
+    service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_desc="提醒孩子先喝口水")
+    )
+
+    view = service.get_full_view("t1")
+    assert view.actions.on_enter_desc == "提醒孩子先喝口水"
+    assert view.actions.on_enter_actions == []
+    # 别的槽照旧不碰
+    assert view.actions.on_exit_desc is None
+
+
+@pytest.mark.asyncio
+async def test_resume_can_reenter_while_the_condition_is_still_true(real_db):
+    """停用要连带清掉条件层, 否则恢复后回不到 on。
+
+    停用期间 update_state 在入口就 return, 条件层冻在停用那一刻的值; 而状态机那边
+    运行态已归 off。恢复后条件若仍成立, 与冻住的旧值一比是 old==new、产不出边沿,
+    task 就再也进不去 —— 要等条件先假一次才有救。
+    """
+    from miloco.task.service import TaskService
+
+    rule_service, runner = _real_rule_service()
+    svc = TaskService(rule_repo=RuleRepo(), rule_service=rule_service)
+    rid = _setup_task_with_rule(svc)
+    runner.add_rule(RuleRepo().get_by_id(rid))
+    await runner.update_state(rid, "cam-001", True, "")
+    await runner.drain()
+    assert runner._state[rid].last_rule_state is True
+
+    svc.disable_task("t1")
+    svc.enable_task("t1")
+
+    # 恢复后第一帧条件仍成立 —— 必须重新产出进入边沿
+    outcome = await runner.update_state(rid, "cam-001", True, "")
+    await runner.drain()
+    assert outcome is not TriggerOutcome.STILL_IN, (
+        "恢复后条件仍成立却产不出边沿, task 永远回不到 on"
+    )
+
+
+def test_set_actions_rejects_target_desc_on_a_task_without_an_exit_path(real_db):
+    """事件型 task 配达标 = 配了个永远不响的通知。
+
+    运行态恒 off, 达标信号到状态机被判成"不在会话中"、一次都不派; 更根上的原因是
+    累计时长靠 session-start / session-end 配对, 没有出路径就永远发不出 session-end。
+    """
+    from miloco.middleware.exceptions import ValidationException
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+    RuleRepo().create(
+        Rule(
+            name="[t1] 进",
+            task_id="t1",
+            mode=RuleMode.EVENT,
+            direction=RuleDirection.ENTER,
+            condition=RuleCondition(perceive_device_ids=["cam-001"], query="有人"),
+            action_descriptions=["开灯"],
+        )
+    )
+
+    with pytest.raises(ValidationException, match="需要一条 direction=exit 或 session"):
+        service.set_boundary_actions(
+            "t1", TaskActionsUpdateRequest(on_target_desc="达标推送")
+        )
+
+
+def test_set_actions_allows_target_desc_before_any_rule_exists(real_db):
+    """装配是分步的 —— 先配动作后建规则是正常顺序, 那一刻判不出形态。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+
+    assert service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_target_desc="达标推送")
+    )

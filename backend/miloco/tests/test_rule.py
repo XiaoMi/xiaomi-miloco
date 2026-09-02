@@ -213,6 +213,9 @@ def mock_task_repo():
     repo = MagicMock()
     # rule create 前置校验 task 存在；mock 默认放行
     repo.task_exists = MagicMock(return_value=True)
+    # 默认「没配达标动作」。不显式给的话 MagicMock 的返回值恒真, 每条 rule create
+    # 都会被当成"这个 task 配了达标动作"去查出路径。
+    repo.get_full_view = MagicMock(return_value=None)
     return repo
 
 
@@ -5117,6 +5120,37 @@ class TestTaskRuleSetWiring:
         mock_rule_repo.create.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_create_rejects_losing_the_exit_path_under_a_target_action(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """配了达标动作的 task 不能只剩 enter —— 达标一次都不会响。
+
+        运行态恒 off, 达标信号被判成"不在会话中"; 更根上的原因是累计时长靠
+        session-start / session-end 配对, 没有出路径就永远发不出 session-end。
+        """
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_target_desc": "该休息啦"}
+        }
+        mock_rule_repo.list_by_task.return_value = []
+        with pytest.raises(ValidationException, match="需要一条 direction=exit"):
+            await service.create_rule(self._rule("r-enter", RuleDirection.ENTER))
+        mock_rule_repo.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_allows_an_enter_rule_next_to_an_exit_one(
+        self, service, mock_rule_repo, mock_task_repo
+    ):
+        """出路径还在就放行 —— 这道闸只挡"配了达标却没有出路径"。"""
+        mock_task_repo.get_full_view.return_value = {
+            "actions": {"on_target_desc": "该休息啦"}
+        }
+        mock_rule_repo.list_by_task.return_value = [
+            self._rule("r-exit", RuleDirection.EXIT)
+        ]
+        await service.create_rule(self._rule("r-enter", RuleDirection.ENTER))
+        mock_rule_repo.create.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_create_rejects_session_next_to_an_existing_rule(
         self, service, mock_rule_repo
     ):
@@ -5183,3 +5217,71 @@ class TestTaskRuleSetWiring:
         mock_rule_repo.get_by_id.return_value = previous
         mock_rule_repo.list_by_task.return_value = [previous]
         assert await service.patch_rule("r1", RuleUpdate(enabled=False))
+
+
+class TestExitRuleEdgeTimestamp:
+    """exit 型 rule 的"条件刚成立"走 ENTERED 边沿, 但它是 session 终点。
+
+    记账那步的 CLI 是按 metadata 的键名分派的 (_FIRE_PREAMBLE_WITH_RECORD 第 2 步),
+    键名跟着边沿走就会塞成起点 —— agent 把刚该结束的计时段又开一遍, 而 session-end
+    永远等不到它那一行, 计时段永不关闭。
+    """
+
+    @staticmethod
+    def _exit_rule(rule_id, duration_seconds=None):
+        return Rule(
+            id=rule_id,
+            name=_name(TASK_ID, rule_id),
+            task_id=TASK_ID,
+            direction=RuleDirection.EXIT,
+            lifecycle=RuleLifecycle.PERMANENT,
+            condition=_make_condition(),
+            action_descriptions=["孩子离开书桌"],
+            duration_seconds=duration_seconds,
+            duration_ratio=1.0,
+        )
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_instant_edge_reports_exited_at(self, mock_send, runner):
+        mock_send.return_value = True
+        runner.add_rule(self._exit_rule("rule-exit-ts"))
+
+        await runner.update_state("rule-exit-ts", "cam-001", True, "")
+        await runner.drain()
+
+        info = _extra_info(_last_dispatched_prompt(mock_send, RuleEvent.ENTERED))
+        assert "actual_exited_at" in info, f"退出槽的边沿缺 actual_exited_at：{info}"
+        assert "actual_started_at" not in info, (
+            f"退出槽不该出现 actual_started_at，agent 会去 session-start：{info}"
+        )
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_duration_path_reports_exited_at(self, mock_send, runner):
+        """滑窗那条路是另一处 _spawn_fire，得单独钉。"""
+        mock_send.return_value = True
+        # duration_seconds == sample_interval(3) → maxlen 1 → 首帧即达标
+        runner.add_rule(self._exit_rule("rule-exit-dur", duration_seconds=3))
+
+        await runner.update_state("rule-exit-dur", "cam-001", True, "")
+        await runner.drain()
+
+        info = _extra_info(_last_dispatched_prompt(mock_send, RuleEvent.ENTERED))
+        assert "actual_exited_at" in info, f"滑窗路径缺 actual_exited_at：{info}"
+        assert "actual_started_at" not in info, (
+            f"滑窗路径不该出现 actual_started_at：{info}"
+        )
+
+    def test_target_slot_gets_no_edge_timestamp(self):
+        """达标不是 session 边界, 一个键都不能给。
+
+        当前 _dispatch_event 在达标那一支提前返回、根本走不到这里, 所以这条只能
+        直接测函数。它守的是"哪天把那个提前返回去掉了, 达标也不会突然多出一个
+        session-start"。
+        """
+        from miloco.rule.runner import _edge_timestamp
+        from miloco.task.state_machine import ActionSlot
+
+        assert _edge_timestamp(ActionSlot.ON_TARGET, "2026-09-02T10:00:00+08:00") == {}
+        assert _edge_timestamp(None, "2026-09-02T10:00:00+08:00") == {}

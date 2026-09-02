@@ -1443,9 +1443,14 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
       (d) rule.lifecycle → task.lifecycle (多 rule 取第一条, 其余记日志)
       (e) rule.on_target_desc → task.on_target_desc + 补建 milestone rule;
           查不到 duration record 的 target_minutes → 不补建、该 task 置 paused
-      (f) rule.enabled 与 task.status 不一致 → 按 task.status 强制修正
-      (g) 需要 paused 的 task 统一置 paused + 名下 rule enabled=0
-      (h) PRAGMA user_version = 3 (同事务)
+      (f) 暂停 task 名下被关掉的 rule.enabled 恢复成 1 (NULL 一并兜到列默认值)。
+          enabled 是纯用户意图、不再镜像 task.status, 所以只单方向恢复、从不往 0
+          改。条数见报告的 rule_enabled_restored
+      (g) 迁移后跑一遍规则组合合法性。存量表达不了 exit / milestone, 所以只可能撞
+          「session 必须独占」, 撞上的 task 记入待暂停清单
+      (h) 待暂停清单统一置 paused + paused_at。不连带写 rule.enabled=0 —— 置 paused
+          已经让派生量为假, 再写 0 会让用户按报告处置完重新启用后这批永远起不来
+      (i) PRAGMA user_version = 3 (同事务)
       COMMIT
 
     crash 语义同 v1→v2: COMMIT 前 crash → rollback 到 v2 重跑; COMMIT 后 crash →
@@ -1582,7 +1587,7 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
         # 把名下 rule 一律写 0, 不恢复就永久失效 —— 新代码重新启用 task 不回写
         # enabled, task 显示 active、规则卡照常列出, 但再也不下发不触发。
         # 反方向不做: 把 active task 下用户手工关掉的那条打开, 等于让他主动停掉的
-        # 自动化自己开回来、立刻对设备下指令。必须排在 (g) 之前, 否则会把 (g) 刚置
+        # 自动化自己开回来、立刻对设备下指令。必须排在 (h) 之前, 否则会把 (h) 刚置
         # paused 的 task 下那些用户关掉的 rule 一起打开。
         # NULL 另兜: 列默认 1, 存成 NULL 是缺值不是用户关过, 而读侧把它当假。
         restored = [
@@ -1609,10 +1614,19 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
                 "v2→v3 restored %d rule.enabled=1: %s", len(restored), restored
             )
 
-        # ── (g') 迁移后校验: 变非法的 task 置 paused ─────────────────
-        # 存量表达不了 exit / milestone, 所以只可能撞上"session 必须独占"这一条
-        # (一 task 挂两条 mode=state → 两条 session, §19.7 的永久卡死)。判据与建
-        # rule 时同一份, 复制一份判据早晚会分叉。
+        # ── (g) 迁移后校验: 变非法的 task 记入待暂停清单 ──────────────
+        # 存量能撞上两条: "session 必须独占" (一 task 挂两条 mode=state → 两条
+        # session, §19.7 的永久卡死), 以及"配了达标动作就得有出路径" (存量 event
+        # 型 rule 带 on_target_desc → 迁成 enter-only + 达标, 达标一次都不会响)。
+        # 判据与建 rule 时同一份, 复制一份判据早晚会分叉。
+        with_target = {
+            row["task_id"]
+            for row in cursor.execute(
+                "SELECT task_id FROM task "
+                " WHERE COALESCE(on_target_desc, '') != ''"
+                "    OR COALESCE(on_target_actions, '[]') NOT IN ('[]', '')"
+            ).fetchall()
+        }
         illegal_tasks: list[str] = []
         rows_by_task: dict[str, list[str]] = {}
         for row in cursor.execute("SELECT task_id, direction FROM rule").fetchall():
@@ -1624,14 +1638,14 @@ def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
                 parsed = [RuleDirection(d) for d in directions if d]
             except ValueError:
                 continue
-            reason = task_rule_set_error(parsed)
+            reason = task_rule_set_error(parsed, task_id in with_target)
             if reason:
                 illegal_tasks.append(task_id)
                 logger.warning(
                     "v2→v3 task %s 迁移后不合法, 置 paused: %s", task_id, reason
                 )
 
-        # ── (g) 置 paused ───────────────────────────────────────────
+        # ── (h) 置 paused ───────────────────────────────────────────
         # 只置 task.status。生效判据里 task 停用这一半已经为假, 再写 rule.enabled=0
         # 会在用户处置完重新启用后让这批规则永远起不来 (理由同 (f))。
         for task_id in conflict_tasks + on_target_broken_tasks + illegal_tasks:

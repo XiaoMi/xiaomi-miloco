@@ -499,7 +499,9 @@ def test_session_rule_skips_the_slots_it_left_empty(env):
 
     达标文案的正规配法是 task set-actions, rule 行上恒空。无条件透传的话, 改一次
     会话规则的触发条件就会把 task 上那份清成 None, 连带把代建的达标规则也删掉。
-    on_target 只给 desc 一列: rule 侧压根没有 on_target_actions 字段, 不管辖它。
+    管辖到的槽两列都写, 达标槽也不例外: rule 侧没有 on_target_actions 字段, 那正
+    说明它管辖达标槽时 task 上那一列就该是空的 —— 不写的话残留的静态达标动作会继续
+    赢 (选槽静态优先), 这次改动静默失效。
     """
     from miloco.rule.service import _rule_action_slots
 
@@ -507,6 +509,7 @@ def test_session_rule_skips_the_slots_it_left_empty(env):
     assert slots == {
         "on_enter_actions": [],
         "on_enter_desc": "rule 侧",
+        "on_target_actions": [],
         "on_target_desc": "达标",
     }
 
@@ -841,3 +844,54 @@ async def test_clearing_a_rule_side_desc_clears_the_task_column(env, monkeypatch
     await service.patch_rule(ids[0], RuleUpdate(on_enter_desc=None))
 
     assert TaskRepo().get_boundary_actions("t1")["on_enter_desc"] is None
+
+
+@pytest.mark.asyncio
+async def test_changing_direction_moves_the_actions_to_the_new_slot(env, monkeypatch):
+    """改方向 = 动作换了个槽。旧槽要清、新槽要写。
+
+    只按"本次动过的字段"透传的话, `rule update --direction enter` 的字段集里没有
+    任何动作字段, 一个槽都不匹配 —— 规则照常触发, 但 task 已被接管、选槽时读到空
+    的进入槽就返回 None 且不回退到规则列, 一个动作都执行不了, 而 HTTP 返回 200。
+    """
+    from miloco.rule.schema import RuleUpdate
+
+    exit_rule = _rule("[t1] 出", mode=RuleMode.EVENT, direction=RuleDirection.EXIT)
+    exit_rule.on_enter_desc = None
+    exit_rule.action_descriptions = ["把书桌灯关掉"]
+    enter_rule = _rule("[t1] 进", mode=RuleMode.EVENT, direction=RuleDirection.ENTER)
+    enter_rule.on_enter_desc = None
+    enter_rule.action_descriptions = ["开灯"]
+    service, _runner, ids, _ = _build(None, [enter_rule, exit_rule])
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+    service.sync_rule_actions_to_task(RuleRepo().get_by_id(ids[1]))
+    assert TaskRepo().get_boundary_actions("t1")["on_exit_desc"] == "1. 把书桌灯关掉"
+
+    # 把出边那条改成入边; 原来那条入边先删掉, 否则两条 enter 争同一个槽
+    await service.delete_rule(ids[0])
+    await service.patch_rule(ids[1], RuleUpdate(direction=RuleDirection.ENTER))
+
+    actions = TaskRepo().get_boundary_actions("t1")
+    assert actions["on_enter_desc"] == "1. 把书桌灯关掉"
+    assert actions["on_exit_desc"] is None
+
+
+@pytest.mark.asyncio
+async def test_direction_change_keeps_a_slot_a_sibling_still_owns(env, monkeypatch):
+    """清旧槽前要排掉兄弟 rule 也管着的 —— 否则把别人的动作一起抹掉。"""
+    from miloco.rule.schema import RuleUpdate
+
+    moving = _rule("[t1] 出A", mode=RuleMode.EVENT, direction=RuleDirection.EXIT)
+    moving.on_enter_desc = None
+    moving.action_descriptions = ["A"]
+    staying = _rule("[t1] 出B", mode=RuleMode.EVENT, direction=RuleDirection.EXIT)
+    staying.on_enter_desc = None
+    staying.action_descriptions = ["B"]
+    service, _runner, ids, _ = _build({"on_exit_desc": "两条都管着"}, [moving, staying])
+    monkeypatch.setattr(RuleService, "_validate_perceive_device_ids", _anoop)
+    monkeypatch.setattr(RuleService, "_validate_scene_ids", _anoop)
+
+    await service.patch_rule(ids[0], RuleUpdate(direction=RuleDirection.ENTER))
+
+    assert TaskRepo().get_boundary_actions("t1")["on_exit_desc"] == "两条都管着"

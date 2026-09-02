@@ -112,10 +112,21 @@ class TaskService:
         }
         if not slots:
             return self.repo.get_description(task_id) is not None
+        # 槽是最小写入单位: 同槽两列互斥, 而选槽时静态优先
+        # (runner._select_task_slot)。只写传进来的那一列, 用户把动作从设备直控改成
+        # Agent 文案时残留的静态列会继续赢 —— 请求返回成功、task get 显示新文案、
+        # 实际下发的还是旧的设备动作。补全放在服务层, CLI 与 HTTP 直连同受约束。
+        for prefix in ("on_enter", "on_exit", "on_target"):
+            actions_key, desc_key = f"{prefix}_actions", f"{prefix}_desc"
+            if actions_key in slots and desc_key not in slots:
+                slots[desc_key] = None
+            elif desc_key in slots and actions_key not in slots:
+                slots[actions_key] = None
         if slots.get("on_target_actions") or slots.get("on_target_desc"):
             if self._rule_service is None:
                 raise BusinessException("rule service 未就绪，无法校验达标配置")
             self._rule_service.require_duration_target(task_id)
+            self._rule_service.require_exit_path_for_target(task_id)
         if not self.repo.set_boundary_actions(task_id, **slots):
             return False
         if self._rule_service is not None:

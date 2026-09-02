@@ -667,6 +667,31 @@ def test_on_target_without_target_minutes_pauses_task(v2_db):
     conn.close()
 
 
+def test_on_target_on_an_event_rule_pauses_the_task(v2_db):
+    """event 型 rule 带达标文案 → 迁成 enter-only + 达标, 达标一次都不会响。
+
+    没有出路径的 task 运行态恒 off, 达标信号被判成不在会话中; 而累计时长靠
+    session-start / session-end 配对, 也永远发不出 session-end。留成 active 等于
+    留一个隐形失效项, 用户看不出缺什么。
+    """
+    _seed(
+        v2_db,
+        lambda c: (
+            _add_task(c, "t1"),
+            _add_rule(c, "r1", "t1", mode="event", on_target_desc="达标了提醒"),
+            _add_duration_record(c, "t1", 60),
+        ),
+    )
+    _migrate(v2_db)
+
+    conn = _raw(v2_db)
+    assert (
+        conn.execute("SELECT status FROM task WHERE task_id='t1'").fetchone()[0]
+        == "paused"
+    )
+    conn.close()
+
+
 # ── 字段清洗 ──────────────────────────────────────────────────────────
 
 

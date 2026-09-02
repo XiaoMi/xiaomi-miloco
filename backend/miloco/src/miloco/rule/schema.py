@@ -241,11 +241,14 @@ class RuleConditionDNF(BaseModel):
     any_of: list[list[ConditionItem]] = Field(default_factory=list)
 
 
-def task_rule_set_error(directions: list[RuleDirection]) -> str | None:
+def task_rule_set_error(
+    directions: list[RuleDirection], has_target_action: bool = False
+) -> str | None:
     """task 名下 rule 集合的合法性 (spec §9)。合法返 None, 非法返错误文案。
 
-    校验对象是集合不是单条 rule —— 这两条约束都只有把同一 task 的 rule 放到一起
-    看才成立。
+    校验对象是集合不是单条 rule —— 这几条约束都只有把同一 task 的 rule 放到一起
+    看才成立。``has_target_action`` 是 task 配没配达标动作, 它决定第三条约束要不要
+    查 —— 达标动作存在 task 上而不在 rule 上, 所以只能由调用方带进来。
 
     **达标规则不算数**: 它是服务端按 task 的达标配置维护的派生物, 不是用户建的
     规则。算进来的话"只挂一条达标规则"会被判成"没有进路径", 而每个配了达标通知的
@@ -267,6 +270,15 @@ def task_rule_set_error(directions: list[RuleDirection]) -> str | None:
         return (
             "task 名下没有进路径: 只有 exit 规则的 task 永远进不了 on, 名下的动作"
             "一条都不会执行。至少要有一条 direction=enter 或 session 的规则。"
+        )
+
+    exit_directions = (RuleDirection.EXIT, RuleDirection.SESSION)
+    if has_target_action and not any(d in exit_directions for d in directions):
+        return (
+            "配了达标动作的 task 需要一条 direction=exit 或 session 的规则: 没有出"
+            "路径的 task 运行态恒 off, 达标信号会被判成不在会话中、一次都不触发; "
+            "更根上的原因是累计时长靠 session-start / session-end 配对, 没有出路径"
+            "就永远发不出 session-end, 累计只增不减、达标恒超阈值。"
         )
     return None
 

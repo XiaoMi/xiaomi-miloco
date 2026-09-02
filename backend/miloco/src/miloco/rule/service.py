@@ -259,8 +259,9 @@ def _rule_action_slots(
         # 达标动作在 task 列上, milestone rule 自己的动作字段恒空。
         return {}
     if direction is RuleDirection.SESSION:
-        # actions 为 None = rule 侧表达不了这一列, 别写它; 为 [] = 表达得了但是空的。
-        owned: tuple[tuple[str, list[Any] | None, str | None, set[str]], ...] = (
+        # 达标槽 rule 侧只有 desc 一列, 静态那列恒空 —— 这正说明它管辖达标槽时
+        # task 上那列就该是空的, 不能因为"表达不了"就不写。
+        owned: tuple[tuple[str, list[Any], str | None, set[str]], ...] = (
             (
                 "on_enter",
                 rule.on_enter_actions,
@@ -273,7 +274,7 @@ def _rule_action_slots(
                 rule.on_exit_desc,
                 {"on_exit_actions", "on_exit_desc"},
             ),
-            ("on_target", None, rule.on_target_desc, {"on_target_desc"}),
+            ("on_target", [], rule.on_target_desc, {"on_target_desc"}),
         )
     else:
         prefix = "on_exit" if direction is RuleDirection.EXIT else "on_enter"
@@ -289,8 +290,7 @@ def _rule_action_slots(
                 continue
         elif not changed_fields & source_fields:
             continue
-        if actions is not None:
-            slots[f"{name}_actions"] = [a.model_dump(mode="json") for a in actions]
+        slots[f"{name}_actions"] = [a.model_dump(mode="json") for a in actions]
         slots[f"{name}_desc"] = desc or None
     return slots
 
@@ -444,8 +444,29 @@ class RuleService:
         if previous is not None and previous.task_id == rule.task_id:
             before.append(previous.resolved_direction)
 
-        error = task_rule_set_error(after)
-        if error and task_rule_set_error(before) is None:
+        has_target = self._task_has_target_action(rule.task_id)
+        error = task_rule_set_error(after, has_target)
+        if error and task_rule_set_error(before, has_target) is None:
+            raise ValidationException(error)
+
+    def _task_has_target_action(self, task_id: str) -> bool:
+        """task 配没配达标动作。读不出来按"没配"处理 —— 这道闸不该把 rule 写入带崩。"""
+        try:
+            slots = (self._task_repo.get_full_view(task_id) or {}).get("actions") or {}
+        except Exception:  # noqa: BLE001
+            logger.warning("读 task %s 的达标配置失败, 这次按未配达标处理", task_id)
+            return False
+        return bool(slots.get("on_target_actions") or slots.get("on_target_desc"))
+
+    def require_exit_path_for_target(self, task_id: str) -> None:
+        """配达标动作前先确认 task 有出路径。判据与建 rule 时同一份。
+
+        名下一条 rule 都还没有时放行 —— 装配是分步的, 先配动作后建规则是正常顺序,
+        那一刻判不出形态。真装出没有出路径的组合会在建那条 rule 时被拦下。
+        """
+        directions = [r.resolved_direction for r in self._repo.list_by_task(task_id)]
+        error = task_rule_set_error(directions, has_target_action=True)
+        if error:
             raise ValidationException(error)
 
     def _validate_target_record(self, rule: Rule) -> None:
@@ -798,9 +819,25 @@ class RuleService:
         success = self._repo.update(existing)
         if success:
             self._runner.add_rule(existing)
-            # 带上这次动过的字段: 只透传被动过的槽, 别的槽保留 task 侧那份
-            self.sync_rule_actions_to_task(existing, fields)
+            moved_home = (
+                previous.resolved_direction is not existing.resolved_direction
+                or previous.task_id != existing.task_id
+            )
+            if moved_home:
+                # 换方向或改挂 task = 这份动作整体换了个家。旧的那份必须清 ——
+                # 留着就是一份没有 rule 认领、也再没人读得到的动作; 新的那份必须
+                # 写 —— 不写就是"规则照常触发、一个动作都选不到", 而 task 一旦被
+                # 接管就不会回退到 rule 列。这里不传动过的字段: 动作字段本身没变,
+                # 变的是它该落哪个槽。
+                self._clear_task_slots(previous)
+                self.sync_rule_actions_to_task(existing)
+            else:
+                # 带上这次动过的字段: 只透传被动过的槽, 别的槽保留 task 侧那份
+                self.sync_rule_actions_to_task(existing, fields)
             self.reconfigure_task(existing.task_id)
+            if previous.task_id != existing.task_id:
+                # 原 task 少了一条 rule, 拓扑得跟着变 —— 与删 rule 同一条路径。
+                self.reconfigure_task(previous.task_id)
         return success
 
     async def delete_rule(self, rule_id: str) -> bool:
@@ -860,6 +897,29 @@ class RuleService:
         return self._runner.state_machine
 
     # ---- 重新配置路径 (§19.5) ----
+
+    def _clear_task_slots(self, rule: Rule) -> None:
+        """把 rule 之前管辖的槽清空。只在它不再管辖那些槽时调 (换方向 / 改挂 task)。
+
+        清之前先排掉兄弟 rule 也管着的槽 —— 否则会把别人的动作一起抹掉。
+        """
+        from miloco.database.task_repo import TaskRepo
+
+        stale = set(_rule_action_slots(rule))
+        if not stale:
+            return
+        stale -= {
+            name
+            for r in self._repo.list_by_task(rule.task_id)
+            if r.id != rule.id
+            for name in _rule_action_slots(r)
+        }
+        if not stale:
+            return
+        TaskRepo().set_boundary_actions(
+            rule.task_id,
+            **{k: ([] if k.endswith("_actions") else None) for k in stale},
+        )
 
     def sync_rule_actions_to_task(
         self, rule: Rule, changed_fields: set[str] | None = None

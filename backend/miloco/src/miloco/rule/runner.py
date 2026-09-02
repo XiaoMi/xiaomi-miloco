@@ -205,6 +205,21 @@ def _slot_for(rule: Rule, event: RuleEvent) -> ActionSlot | None:
     return slot_for_edge(rule.resolved_direction.value, kind)
 
 
+def _edge_timestamp(slot: ActionSlot | None, edge_at: str) -> dict[str, str]:
+    """边沿发生的墙上时刻 → agent 认得的键名。键名跟着槽走, 不跟着边沿的方向走。
+
+    ``_FIRE_PREAMBLE_WITH_RECORD`` 第 2 步按键名分派 CLI: 进入槽是 session 起点、
+    退出槽是 session 终点。exit 型 rule 的"条件刚成立"走的是 ENTERED 边沿, 按边沿
+    给键名就会塞成起点 —— agent 照着把刚该结束的计时段又开一遍, 而 session-end
+    永远等不到它那一行。达标不是 session 边界, 一个都不给。
+    """
+    if slot is ActionSlot.ON_ENTER:
+        return {"actual_started_at": edge_at}
+    if slot is ActionSlot.ON_EXIT:
+        return {"actual_exited_at": edge_at}
+    return {}
+
+
 def _is_milestone(rule: Rule) -> bool:
     """这条 rule 是不是达标型。走 ``_slot_for`` 而不是自己判方向, 保持单一映射点。"""
     return _slot_for(rule, RuleEvent.ENTERED) is ActionSlot.ON_TARGET
@@ -552,9 +567,18 @@ class RuleRunner:
         return [r for r in self._rules.values() if self._is_effectively_enabled(r)]
 
     def set_task_paused(self, task_id: str, paused: bool) -> None:
-        """刷新派生量。task 启停的唯一入口。"""
+        """刷新派生量。task 启停的唯一入口。
+
+        停用时把名下 rule 的条件层状态一并清掉: 停用期间 ``update_state`` 在入口
+        就 return, 条件层冻在停用那一刻的值。而状态机那边 ``suspend`` 把运行态归
+        了 off —— 恢复后条件若仍成立, 与冻住的旧值一比是 old==new、产不出边沿,
+        task 就再也回不到 on, 要等条件先假一次才有救。
+        """
         if paused:
             self._paused_tasks.add(task_id)
+            for rule in self._rules.values():
+                if rule.task_id == task_id:
+                    self._reset_runtime_state(rule.id)
         else:
             self._paused_tasks.discard(task_id)
 
@@ -861,21 +885,22 @@ class RuleRunner:
             return TriggerOutcome.COUNTING
 
         if sum(win) / maxlen >= rule.duration_ratio:
-            # actual_started_at = 窗口里第一帧 true 的对齐时间（与 actual_exited_at 对称）。
-            # ratio<1 时比"窗口名义起点 fire_ts - duration_seconds"更准确反映用户真实开始时刻。
+            # 边沿时刻取窗口里第一帧 true 的对齐时间。ratio<1 时比"窗口名义起点
+            # fire_ts - duration_seconds"更准确反映条件真正开始成立的时刻。落成哪个
+            # 键名由槽决定 (见 _edge_timestamp), 不在这里定。
             win_list = list(win)
             first_true_offset = next(i for i, v in enumerate(win_list) if v == 1)
             first_true_round = (round_id - maxlen + 1) + first_true_offset
-            actual_started_at = ms_to_iso_local(
+            edge_at = ms_to_iso_local(
                 int(first_true_round * self._sample_interval * 1000)
             )
             logger.info(
-                "rule %s (task=%s, %s) duration met: actual_started_at=%s "
+                "rule %s (task=%s, %s) duration met: edge_at=%s "
                 "(sum=%d/maxlen=%d, ratio>=%.2f)",
                 rule.id,
                 rule.task_id,
                 rule.resolved_direction.value,
-                actual_started_at,
+                edge_at,
                 sum(win),
                 maxlen,
                 rule.duration_ratio,
@@ -910,7 +935,7 @@ class RuleRunner:
                 context,
                 extra_metadata={
                     "duration_seconds": rule.duration_seconds,
-                    "actual_started_at": actual_started_at,
+                    **_edge_timestamp(slot, edge_at),
                 },
                 caption=caption, device_name=device_name,
             )
@@ -942,10 +967,10 @@ class RuleRunner:
         ``_evaluate_duration``."""
         state = self._ensure_state(rule.id)
         if event == RuleEvent.ENTERED:
-            # 进入分支瞬间锚定 wall-clock 作为 actual_started_at —— 与 actual_exited_at
-            # 镜像：fire 到达 agent 时已晚 N 秒（链路延迟），但 metadata 时间戳是过去
-            # 时刻，agent --at <actual_started_at> 不受链路延迟影响。
-            actual_started_at = ms_to_iso_local(now_ms())
+            # 进入分支瞬间锚定 wall-clock 作为边沿时刻：fire 到达 agent 时已晚 N 秒
+            # （链路延迟），但 metadata 时间戳是过去时刻，agent --at <ts> 不受影响。
+            # 落成哪个键名由槽决定（见 _edge_timestamp）。
+            edge_at = ms_to_iso_local(now_ms())
             # state mode: ENTERED cancels any pending debounced exit
             pending = state.exit_debounce_task
             state.exit_debounce_task = None
@@ -979,8 +1004,8 @@ class RuleRunner:
                 return TriggerOutcome.STILL_IN
 
             # duration_seconds 配置时：不在翻转那一刻 fire；fire 由
-            # _evaluate_duration 在窗口达比例时触发（actual_started_at 走那条路径
-            # 用滑窗里第一帧 true 的对齐时间，本路径取的 wall-clock 不用）。
+            # _evaluate_duration 在窗口达比例时触发（边沿时刻走那条路径用滑窗里
+            # 第一帧 true 的对齐时间，本路径取的 wall-clock 不用）。
             if rule.duration_seconds:
                 return TriggerOutcome.NOT_FIRED
 
@@ -1002,8 +1027,8 @@ class RuleRunner:
             # retry. The state-machine bookkeeping above is already done; the
             # fire only writes log/cooldown state, which is safe to do async.
             # milestone rule 的进入边沿就是「达标」。按 TARGET_FIRED 记, 否则日志与
-            # 台账把达标记成一次进入, 事后分不出来; 也别注入 actual_started_at ——
-            # 达标不是 session 起点, agent 会照着它去调 session-start。
+            # 台账把达标记成一次进入, 事后分不出来。达标不是 session 边界,
+            # _edge_timestamp 对它返空。
             if slot is ActionSlot.ON_TARGET:
                 self._spawn_fire(
                     rule, RuleEvent.TARGET_FIRED, sources, context,
@@ -1016,7 +1041,7 @@ class RuleRunner:
             self._spawn_fire(
                 rule, event, sources, context, trigger_room, trigger_dids,
                 extra_metadata={
-                    "actual_started_at": actual_started_at,
+                    **_edge_timestamp(slot, edge_at),
                     **(extra_metadata or {}),
                 },
                 caption=caption, device_name=device_name,
