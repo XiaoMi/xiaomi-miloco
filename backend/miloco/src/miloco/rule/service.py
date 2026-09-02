@@ -354,11 +354,14 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
     _seed_reached_targets(rule_runner)
 
 
-def _seed_reached_targets(rule_runner: RuleRunner) -> None:
-    """启动时把"今天已经达标"的条件直接置真, 不产边沿 (§7)。
+def _seed_reached_targets(rule_runner: RuleRunner, task_id: str | None = None) -> None:
+    """把"今天已经达标"的条件直接置真, 不产边沿 (§7)。
 
-    防重复的载体是条件项的值, 而它只在内存、重启从假起 —— 不 seed 的话每次重启都
-    会把当天的达标重发一遍 (真机确认过一天发五次)。
+    防重复的载体是条件项的值, 而它只在内存 —— 凡是把条件层状态清掉的路径事后都得
+    补一次, 否则当天的达标会重发。启动是一条 (从假起), task 停用再启用是另一条
+    (停用时按 task 清掉了)。
+
+    ``task_id`` 给了就只 seed 那个 task 名下的。
 
     误判的是"达标了但还没发出去"那一小段窗口: 达标那一刻进程崩, 或 timer 到点时
     task 不在 session 而退出兜底也没赶上。它比重启窄得多, 而重启本身是常态 (升级、
@@ -368,6 +371,8 @@ def _seed_reached_targets(rule_runner: RuleRunner) -> None:
     if record_service is None:
         return
     for rule in rule_runner.get_all_rules():
+        if task_id is not None and rule.task_id != task_id:
+            continue
         ref = record_ref_of(rule)
         if ref is None:
             continue
@@ -383,7 +388,7 @@ def _seed_reached_targets(rule_runner: RuleRunner) -> None:
             continue
         rule_runner.seed_reached_target(ref.rule_id)
         logger.info(
-            "RECORD_TARGET_SEEDED: rule=%s task=%s 启动时已达标 "
+            "RECORD_TARGET_SEEDED: rule=%s task=%s 已达标 "
             "(accumulated_min=%s target_min=%s), 按已通知处理",
             ref.rule_id, ref.task_id, accumulated, target,
         )
@@ -1132,6 +1137,10 @@ class RuleService:
         if active:
             # enable: 停用期间 rule 可能被改过, 要重新登记拓扑
             self.reconfigure_task(task_id)
+            # 停用清掉了条件层状态, 达标那条"今天发过了"一并没了 —— 与重启同一个
+            # 失败模式、同一份修法。必须排在 reconfigure 之后: 代建的那条 rule 可能
+            # 正是它刚补上的。
+            _seed_reached_targets(self._runner, task_id)
             return
         self._runner.record_source.disarm(task_id)
         sm = self._runner.state_machine

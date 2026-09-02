@@ -294,6 +294,37 @@ async def test_restart_still_sends_a_target_reached_after_it(db):
 
 
 @pytest.mark.asyncio
+async def test_disable_then_enable_does_not_re_send_today_s_target(db):
+    """停用再启用不重发当天的达标。
+
+    与重启同一个失败模式: 防重复的载体是条件项的值, 而停用把名下 rule 的条件层
+    状态整个清掉, 达标那条"今天发过了"跟着没了。启用后重新进入会话, 达标源按当前
+    累计立刻喂真, 于是同一天再发一次。放在重启这一组里是因为两条路径要的是同一
+    份修法。
+    """
+    boot = _Boot(accumulated=60)
+    rule_id = await boot.service.create_rule(_session_rule(on_target_desc="达标推送"))
+
+    with patch(
+        "miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)
+    ) as first:
+        await _feed(boot.runner, rule_id, True)
+    assert ("[piano] 累计达标", "TARGET_FIRED") in _events(first)
+
+    boot.service.apply_task_status(TASK_ID, False)
+    boot.service.apply_task_status(TASK_ID, True)
+
+    with patch(
+        "miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)
+    ) as second:
+        await _feed(boot.runner, rule_id, True)
+
+    assert ("[piano] 累计达标", "TARGET_FIRED") not in _events(second)
+    # 进入动作照发 —— seed 只管达标那一条, 停用再启用本来就该重新进一次会话
+    assert ("[piano] 练琴计时", "ENTERED") in _events(second)
+
+
+@pytest.mark.asyncio
 async def test_a_paused_task_does_not_fire_after_restart(db):
     """task 停用是「有效启用」派生量的一半, 重启后必须从 task.status 重新 seed。
 
