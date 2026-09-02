@@ -575,6 +575,28 @@ class RuleLogRepo:
             logger.error("Error counting rule logs: error=%s", e)
             return 0
 
+    def count_by_rule_name(self, rule_name: str, after_ts: int | None = None) -> int:
+        """按规则名数日志。
+
+        代建的达标规则会随阈值增删反复消失重建, 每次都是新 id, 而名字跨重建稳定
+        —— 问"今天这个 task 达标通知发过没有"只能按名字问。
+        """
+        try:
+            clauses = ["rule_name = ?"]
+            params_list: list[int | str] = [rule_name]
+            if after_ts is not None:
+                clauses.append("timestamp > ?")
+                params_list.append(after_ts)
+            sql = (
+                "SELECT COUNT(*) as count FROM rule_log "
+                f"WHERE {' AND '.join(clauses)}"
+            )
+            results = self.db_connector.execute_query(sql, tuple(params_list))
+            return results[0]["count"] if results else 0
+        except (ValueError, TypeError, KeyError, AttributeError) as e:
+            logger.error("Error counting rule logs by name: error=%s", e)
+            return 0
+
     def count_by_rule_id(
         self,
         rule_id: str,

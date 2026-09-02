@@ -57,27 +57,31 @@ class _Boot:
     """一次「进程启动」：从库里重建 runner + 状态机 + record 源。"""
 
     def __init__(self, accumulated=0, target=30):
-        from miloco.database.rule_repo import RuleRepo
+        from miloco.database.rule_repo import RuleLogRepo, RuleRepo
         from miloco.database.task_repo import TaskRepo
         from miloco.rule.runner import RuleRunner
         from miloco.rule.service import RuleService, attach_task_state_machine
 
         self.accumulated = accumulated
+        self.target = target
         record_svc = MagicMock()
         record_svc.detect_record_kind = MagicMock(return_value="duration")
         record_svc.read_duration_target_state = MagicMock(
-            side_effect=lambda _t: (target, self.accumulated)
+            side_effect=lambda _t: (self.target, self.accumulated)
         )
         self.repo = RuleRepo()
+        # 真实日志 repo: 达标"今天发过没有"要按 rule 名从日志里查, mock 出来的
+        # 数字会让重建后补 seed 那条路永远不走
+        log_repo = RuleLogRepo()
         self.runner = RuleRunner(
             rules=self.repo.get_all(),
             miot_proxy=MagicMock(),
-            rule_log_repo=MagicMock(),
+            rule_log_repo=log_repo,
             task_record_service=record_svc,
         )
         self.service = RuleService(
             self.repo,
-            MagicMock(),
+            log_repo,
             self.runner,
             MagicMock(),
             task_repo=TaskRepo(),
@@ -228,7 +232,7 @@ async def test_the_record_source_rearms_from_the_current_accumulated(db):
     delays: list[float] = []
     original = type(boot2.runner.record_source)._feed_after
 
-    async def spy(self, ref, delay, target_at_arm):
+    async def spy(self, ref, delay, target_at_arm, this_round):
         delays.append(delay)  # 只记, 不真睡
 
     type(boot2.runner.record_source)._feed_after = spy
@@ -350,3 +354,44 @@ async def test_a_paused_task_does_not_fire_after_restart(db):
         await _feed(boot2.runner, rule_id, True)
 
     assert _events(mock) == []
+
+
+@pytest.mark.asyncio
+async def test_clearing_and_resetting_the_threshold_does_not_re_send(db):
+    """清掉阈值再设回来, 当天的达标不重发。
+
+    与重启、停用再启用同一个失败模式, 只是这次丢的载体是 rule 身份: 阈值一清,
+    代建的达标规则整条被删, 配回来是个新 id, 条件层状态从"还没喂过"起, 达标源
+    按当前累计立刻喂真 —— 无→真是一次新边沿。
+    """
+    boot = _Boot(accumulated=60)
+    rule_id = await boot.service.create_rule(_session_rule(on_target_desc="达标推送"))
+
+    with patch(
+        "miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)
+    ) as first:
+        await _feed(boot.runner, rule_id, True)
+    assert ("[piano] 累计达标", "TARGET_FIRED") in _events(first)
+
+    def milestone_ids():
+        return [
+            r.id
+            for r in boot.repo.list_by_task(TASK_ID)
+            if r.resolved_direction.value == "milestone"
+        ]
+
+    before = milestone_ids()
+    boot.target = None  # 用户清掉 target_minutes
+    boot.service.notify_record_changed(TASK_ID)
+    assert milestone_ids() == []
+
+    boot.target = 30  # 又设回来
+    with patch(
+        "miloco.rule.runner.dispatch_event", new=AsyncMock(return_value=True)
+    ) as second:
+        boot.service.notify_record_changed(TASK_ID)
+        await _feed(boot.runner, rule_id, True)
+
+    # 确认真的换了 id —— 同一个 id 的话这条测试测不到要测的东西
+    assert milestone_ids() and milestone_ids() != before
+    assert ("[piano] 累计达标", "TARGET_FIRED") not in _events(second)

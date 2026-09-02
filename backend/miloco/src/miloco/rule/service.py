@@ -602,10 +602,7 @@ class RuleService:
         if self._repo.exists_by_name(rule.name):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
 
-        if not self._task_repo.task_exists(rule.task_id):
-            raise ResourceNotFoundException(
-                f"task_not_found: rule.task_id={rule.task_id!r} 对应 task 不存在"
-            )
+        self._require_task_exists(rule.task_id)
 
         self._fill_default_duration_ratio(rule)
 
@@ -676,6 +673,11 @@ class RuleService:
         if self._repo.exists_by_name(rule.name, rule.id):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
 
+        # 与 create 同一道闸: task_id 是 FK, 指向不存在的 task 会让 sqlite 抛
+        # IntegrityError, 它不在 repo 那层的 except 里, 一路冒到全局处理器变成
+        # 500 —— 而这只是一个参数填错。
+        self._require_task_exists(rule.task_id)
+
         self._fill_default_duration_ratio(rule)
 
         _validate_rule_consistency(rule)
@@ -687,8 +689,18 @@ class RuleService:
         success = self._repo.update(rule)
         if success:
             self._runner.add_rule(rule)
+            # 与 PATCH 同一份收尾。整体替换同样能换方向、改挂 task, 少了这两步
+            # 旧槽里留着一份没人认领也没人读得到的动作, 旧 task 的拓扑还挂着一条
+            # 已经不属于它的 rule。
+            if (
+                previous.resolved_direction is not rule.resolved_direction
+                or previous.task_id != rule.task_id
+            ):
+                self._clear_task_slots(previous)
             self.sync_rule_actions_to_task(rule)
             self.reconfigure_task(rule.task_id)
+            if previous.task_id != rule.task_id:
+                self.reconfigure_task(previous.task_id)
         return success
 
     async def patch_rule(self, rule_id: str, update: RuleUpdate) -> bool:
@@ -722,6 +734,7 @@ class RuleService:
             existing.name = update.name
 
         if "task_id" in fields and update.task_id is not None:
+            self._require_task_exists(update.task_id)
             existing.task_id = update.task_id
 
         # mode 与 direction 是同一个语义的两种存储形态, 必须一起定。Rule 没开
@@ -877,8 +890,8 @@ class RuleService:
         """task 被删 —— 清掉所有 per-task 的内存态。
 
         rule 维度走 ``remove_rule_from_runner``, 它清不到按 task_id 存的那些:
-        状态机拓扑、运行态、判定跟踪、动作快照、停用标记。record timer 不在这里撤
-        —— 它按 rule_id 存, 逐条清 rule 时已经撤掉了。
+        状态机拓扑、运行态、判定跟踪、动作快照、停用标记、达标源的轮次计数。
+        record timer 不在这里撤 —— 它按 rule_id 存, 逐条清 rule 时已经撤掉了。
 
         ``task_id`` 是用户自己起的名字, 删掉再用同名重建是正常操作 —— 不清的话新
         task 会继承上一条的运行态(建第一条 rule 时派一次没来由的 on_exit)和停用
@@ -890,6 +903,7 @@ class RuleService:
             sm.unregister_task(task_id)
         self._runner.set_task_actions(task_id, None)
         self._runner.set_task_paused(task_id, False)
+        self._runner.record_source.forget_task(task_id)
 
     @property
     def decision_tracker(self):
@@ -902,6 +916,39 @@ class RuleService:
         return self._runner.state_machine
 
     # ---- 重新配置路径 (§19.5) ----
+
+    def _target_notified_today(self, rule_name: str) -> bool:
+        """今天这条达标规则的通知发出去过没有。
+
+        按名字问而不是按 id: 这条规则随阈值增删反复消失重建, 每次都是新 id。触发
+        日志按设计不跟着删, 是"到底发过没有"的唯一凭据。
+
+        成功和失败两种日志都算: 这里问的是"条件今天翻真过没有", 而这条规则只为
+        达标触发, 有日志就说明翻过。发不出去是投递的事, 与该不该重发无关 —— 条件
+        的值当时也不看投递结果。
+        """
+        from datetime import datetime
+
+        from miloco.utils.time_utils import deploy_timezone
+
+        day_start = datetime.now(deploy_timezone()).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        return (
+            self._log_repo.count_by_rule_name(
+                rule_name,
+                # 减一是因为 after_ts 是严格大于, 零点整那一条也要算进今天
+                after_ts=int(day_start.timestamp() * 1000) - 1,
+            )
+            > 0
+        )
+
+    def _require_task_exists(self, task_id: str) -> None:
+        """rule.task_id 是 FK, 指向不存在的 task 只能在写之前拦。"""
+        if not self._task_repo.task_exists(task_id):
+            raise ResourceNotFoundException(
+                f"task_not_found: rule.task_id={task_id!r} 对应 task 不存在"
+            )
 
     def _clear_task_slots(self, rule: Rule) -> None:
         """把 rule 之前管辖的槽清空。只在它不再管辖那些槽时调 (换方向 / 改挂 task)。
@@ -1083,6 +1130,12 @@ class RuleService:
             return
         rule.id = rule_id
         self._runner.add_rule(rule)
+        if self._target_notified_today(rule.name):
+            # 条件层状态按 rule_id 存, 重建换了 id 就等于把"今天发过了"擦掉 ——
+            # 与启动、停用再启用同一个失败模式, 只是这次丢的载体是 rule 身份。
+            # 清掉阈值再设回来就会当天重发一次。今天头一回配达标的 task 查不到
+            # 日志, 照常发。
+            self._runner.seed_reached_target(rule_id)
         logger.info("代建达标规则 %s (task=%s)", rule_id, task_id)
 
     def notify_record_changed(self, task_id: str) -> None:
