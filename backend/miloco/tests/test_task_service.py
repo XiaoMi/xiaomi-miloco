@@ -460,10 +460,132 @@ def test_delete_task_not_found_returns_none(service):
 
 def test_update_description(service):
     service.create_task(TaskCreateRequest(task_id="t1", description="old"))
-    ok = service.update_description("t1", TaskUpdateRequest(description="new"))
+    ok = service.update_meta("t1", TaskUpdateRequest(description="new"))
     assert ok is True
     view = service.get_full_view("t1")
     assert view.description == "new"
+
+
+def test_update_only_touches_the_fields_that_were_sent(service):
+    """partial: 没传的字段保持原样。"""
+    service.create_task(
+        TaskCreateRequest(
+            task_id="t1",
+            description="old",
+            lifecycle="temporary",
+            expires_at="2026-06-10T23:59:59+08:00",
+        )
+    )
+    service.update_meta("t1", TaskUpdateRequest(description="new"))
+    view = service.get_full_view("t1")
+    assert view.description == "new"
+    assert view.lifecycle == "temporary"
+    assert view.expires_at is not None
+
+
+def test_update_can_move_the_expiry(service):
+    """「今天改成明天」—— record 与 cron 那两份之外, task 这份也得跟着改。"""
+    from datetime import datetime
+
+    service.create_task(
+        TaskCreateRequest(
+            task_id="t1",
+            description="d",
+            lifecycle="temporary",
+            expires_at="2026-06-10T23:59:59+08:00",
+        )
+    )
+    service.update_meta("t1", TaskUpdateRequest(expires_at="2026-06-11T23:59:59+08:00"))
+    assert datetime.fromisoformat(
+        service.get_full_view("t1").expires_at
+    ) == datetime.fromisoformat("2026-06-11T23:59:59+08:00")
+
+
+def test_update_stores_the_expiry_as_integer_ms(real_db):
+    """改完之后库里仍是 ms 整数。
+
+    与 create 那条同一个理由: 存原样 ISO 也能往返回同一个时刻 (ms_to_iso_local
+    对字符串原样透传), 只断往返分不开对错 —— 而扫过期要拿这一列做数值比较。
+    """
+    import sqlite3
+
+    from miloco.database.task_repo import TaskRepo
+    from miloco.task.service import TaskService
+
+    service = TaskService(rule_repo=RuleRepo())
+    service.create_task(
+        TaskCreateRequest(
+            task_id="t1",
+            description="d",
+            lifecycle="temporary",
+            expires_at="2026-06-10T23:59:59+08:00",
+        )
+    )
+    service.update_meta("t1", TaskUpdateRequest(expires_at="2026-06-11T23:59:59+08:00"))
+    conn = sqlite3.connect(real_db)
+    try:
+        stored = conn.execute(
+            "SELECT expires_at FROM task WHERE task_id='t1'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert isinstance(stored, int)
+    # 2026-06-11T23:59:59+08:00 == 2026-06-11T15:59:59Z
+    assert stored == 1781193599000
+    assert TaskRepo().get_full_view("t1")["expires_at"] is not None
+
+
+def test_update_can_clear_the_expiry_back_to_permanent(service):
+    """限时改回长期: 两个字段一次请求里一起改, 中间态不落库。"""
+    service.create_task(
+        TaskCreateRequest(
+            task_id="t1",
+            description="d",
+            lifecycle="temporary",
+            expires_at="2026-06-10T23:59:59+08:00",
+        )
+    )
+    service.update_meta(
+        "t1", TaskUpdateRequest(lifecycle="permanent", expires_at=None)
+    )
+    view = service.get_full_view("t1")
+    assert view.lifecycle == "permanent"
+    assert view.expires_at is None
+
+
+def test_update_rejects_permanent_while_the_expiry_stays(service):
+    """只把 lifecycle 改成 permanent, 到期时刻还留在库里 —— 校验看的是写后组合。"""
+    from miloco.middleware.exceptions import ValidationException
+
+    service.create_task(
+        TaskCreateRequest(
+            task_id="t1",
+            description="d",
+            lifecycle="temporary",
+            expires_at="2026-06-10T23:59:59+08:00",
+        )
+    )
+    with pytest.raises(ValidationException, match="只能配 lifecycle=temporary"):
+        service.update_meta("t1", TaskUpdateRequest(lifecycle="permanent"))
+
+
+def test_update_rejects_expiry_on_a_permanent_task(service):
+    """反方向: task 是 permanent, 只塞到期时刻。"""
+    from miloco.middleware.exceptions import ValidationException
+
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    with pytest.raises(ValidationException, match="只能配 lifecycle=temporary"):
+        service.update_meta(
+            "t1", TaskUpdateRequest(expires_at="2026-06-10T23:59:59+08:00")
+        )
+
+
+def test_update_rejects_an_empty_body(service):
+    from miloco.middleware.exceptions import ValidationException
+
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    with pytest.raises(ValidationException, match="至少要传一个可改字段"):
+        service.update_meta("t1", TaskUpdateRequest())
 
 
 def test_list_for_dedupe(service):

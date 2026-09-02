@@ -77,9 +77,33 @@ class TaskCreateRequest(BaseModel):
 
 
 class TaskUpdateRequest(BaseModel):
-    """`PATCH /tasks/{task_id}` 改 description。"""
+    """``PATCH /tasks/{task_id}``。
 
-    description: str = Field(..., max_length=200)
+    partial 语义: 只有出现在请求体里的字段才会被改, 显式传 ``null`` 表示清空。
+    "没传"和"传了 null"靠 ``model_fields_set`` 区分 —— 到期时刻要能被清掉
+    (限时改回长期), 而清掉与"这次不动它"必须分得开。
+    """
+
+    description: str | None = Field(None, max_length=200)
+    lifecycle: Literal["permanent", "temporary"] | None = None
+    expires_at: str | None = None
+
+    @field_validator("expires_at")
+    @classmethod
+    def _expiry_must_parse(cls, v: str | None) -> str | None:
+        """与 create 那条同一份解析器, 理由见 TaskCreateRequest。"""
+        if v is None:
+            return v
+        from miloco.utils.time_utils import iso_to_ms
+
+        try:
+            iso_to_ms(v)
+        except ValueError as e:
+            raise ValueError(
+                f"expires_at 不是合法的 ISO8601 时刻: {v!r} "
+                "(用 miloco-cli time-compute 产出的带偏移 ISO)"
+            ) from e
+        return v
 
 
 class TaskBoundaryActions(BaseModel):

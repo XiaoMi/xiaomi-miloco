@@ -248,13 +248,27 @@ class TaskRepo:
             conn.commit()
             return "ok"
 
-    def update_description(self, task_id: str, description: str) -> bool:
-        """改 task.description。返回 affected>0。"""
+    def update_meta(self, task_id: str, updates: dict[str, Any]) -> bool:
+        """partial 改 task 的元信息列。返回 affected>0。
+
+        时间列入参走 ISO, 入库 int ms —— 与 ``create_task`` / task_record 同口径。
+        """
+        allowed = {"description", "lifecycle", "expires_at"}
+        unknown = set(updates) - allowed
+        if unknown:
+            raise ValueError(f"unknown task meta column(s): {sorted(unknown)}")
+        if not updates:
+            return False
+        params = [
+            iso_to_ms(v) if k == "expires_at" and v is not None else v
+            for k, v in updates.items()
+        ]
+        assignments = ", ".join(f"{k}=?" for k in updates)
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE task SET description=? WHERE task_id=?",
-                (description, task_id),
+                f"UPDATE task SET {assignments} WHERE task_id=?",
+                (*params, task_id),
             )
             conn.commit()
             return cursor.rowcount > 0

@@ -105,13 +105,48 @@ def task_create(task_id, description, lifecycle, expires_at, pretty):
 
 @task_group.command("update")
 @click.argument("task_id")
-@click.option("--description", required=True, help="新 description (≤200)")
+@click.option("--description", default=None, help="新 description (≤200)")
+@click.option(
+    "--lifecycle",
+    "lifecycle",
+    type=click.Choice(["permanent", "temporary"]),
+    default=None,
+    help="改生命周期。改成 permanent 时到期时刻要一起清 (--clear-expires-at)",
+)
+@click.option(
+    "--expires-at",
+    "expires_at",
+    default=None,
+    help="改到期时刻 ISO8601（time-compute 直出）。与销毁 cron、record 那两份取同一个值",
+)
+@click.option(
+    "--clear-expires-at",
+    "clear_expires_at",
+    is_flag=True,
+    help="清空到期时刻（限时改回长期时用）",
+)
 @click.option("--pretty", is_flag=True)
-def task_update(task_id, description, pretty):
-    """改 description。"""
+def task_update(task_id, description, lifecycle, expires_at, clear_expires_at, pretty):
+    """改 description / 生命周期 / 到期时刻。只有传了的字段会被改。"""
     from miloco_cli.client import api_patch
 
-    data = api_patch(f"{API_PREFIX}/{task_id}", {"description": description})
+    if clear_expires_at and expires_at:
+        _exit_error("--clear-expires-at 与 --expires-at 互斥")
+
+    body: dict[str, Any] = {}
+    if description is not None:
+        body["description"] = description
+    if lifecycle is not None:
+        body["lifecycle"] = lifecycle
+    if expires_at is not None:
+        body["expires_at"] = expires_at
+    elif clear_expires_at:
+        # 显式 null 才是清空; 不传等于"这次不动它"。
+        body["expires_at"] = None
+    if not body:
+        _exit_error("至少要传一个可改字段")
+
+    data = api_patch(f"{API_PREFIX}/{task_id}", body)
     print_result(data, pretty)
 
 

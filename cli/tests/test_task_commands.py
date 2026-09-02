@@ -128,6 +128,54 @@ def test_create_no_longer_accepts_refs(runner):
     assert "No such option" in result.output or "no such option" in result.output.lower()
 
 
+def test_update_sends_only_the_flags_that_were_given(runner):
+    """partial: 没传的字段不进 body, 否则会把别的字段一起冲掉。"""
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        mock_patch.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group,
+            ["update", "t1", "--expires-at", "2026-06-11T23:59:59+08:00"],
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_patch.call_args.args
+        assert body == {"expires_at": "2026-06-11T23:59:59+08:00"}
+
+
+def test_update_clear_expiry_sends_explicit_null(runner):
+    """清空必须是显式 null —— 不传等于"这次不动它", 两者要分得开。"""
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        mock_patch.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group,
+            ["update", "t1", "--lifecycle", "permanent", "--clear-expires-at"],
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_patch.call_args.args
+        assert body == {"lifecycle": "permanent", "expires_at": None}
+
+
+def test_update_rejects_clear_with_a_value(runner):
+    result = runner.invoke(
+        task_group,
+        [
+            "update",
+            "t1",
+            "--expires-at",
+            "2026-06-11T23:59:59+08:00",
+            "--clear-expires-at",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "互斥" in result.output
+
+
+def test_update_rejects_an_empty_body(runner):
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        result = runner.invoke(task_group, ["update", "t1"])
+        assert result.exit_code != 0
+        mock_patch.assert_not_called()
+
+
 def test_update_uses_patch(runner):
     with patch("miloco_cli.client.api_patch") as mock_patch:
         mock_patch.return_value = {"code": 0}

@@ -15,7 +15,10 @@ from typing import TYPE_CHECKING
 
 from miloco.database.rule_repo import RuleRepo
 from miloco.database.task_repo import TaskNotFound, TaskRepo
-from miloco.middleware.exceptions import BusinessException
+from miloco.middleware.exceptions import (
+    BusinessException,
+    ValidationException,
+)
 from miloco.rule.schema import SCENE_IID, RuleDirection
 from miloco.task.schema import (
     BackendSyncResult,
@@ -38,6 +41,8 @@ if TYPE_CHECKING:
     from miloco.rule.service import RuleService
 
 logger = logging.getLogger(__name__)
+
+_META_COLUMN_NAMES = frozenset({"description", "lifecycle", "expires_at"})
 
 _ACTION_SLOT_NAMES = frozenset(
     {
@@ -91,8 +96,34 @@ class TaskService:
             expires_at=req.expires_at,
         )
 
-    def update_description(self, task_id: str, req: TaskUpdateRequest) -> bool:
-        return self.repo.update_description(task_id, req.description)
+    def update_meta(self, task_id: str, req: TaskUpdateRequest) -> bool:
+        """partial 改 description / lifecycle / 到期时刻。
+
+        约束判的是**这次改动落地之后**的组合: permanent 带到期时刻是自相矛盾的
+        配置, 而两个字段可以分两次请求改 —— 只看本次传进来的那个, 「先把 lifecycle
+        改成 permanent」和「先把到期时刻塞给一个 permanent 的 task」都能穿过去。
+        """
+        updates = {
+            name: getattr(req, name)
+            for name in req.model_fields_set
+            if name in _META_COLUMN_NAMES
+        }
+        if not updates:
+            raise ValidationException("至少要传一个可改字段")
+
+        current = self.repo.get_full_view(task_id)
+        if current is None:
+            return False
+        after_lifecycle = updates.get("lifecycle", current.get("lifecycle"))
+        after_expiry = (
+            updates["expires_at"] if "expires_at" in updates else current.get("expires_at")
+        )
+        if after_expiry and after_lifecycle != "temporary":
+            raise ValidationException(
+                "expires_at 只能配 lifecycle=temporary: 改成 permanent 要同时清掉"
+                "到期时刻 (--clear-expires-at)"
+            )
+        return self.repo.update_meta(task_id, updates)
 
     def get_description(self, task_id: str) -> str | None:
         """按 task_id 取任务描述（住户日志「所属任务」用）。"""

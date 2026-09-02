@@ -72,7 +72,7 @@ async def get_task(task_id: str, current_user: str = Depends(verify_token)):
 
 
 @router.patch(
-    "/{task_id}", summary="Update Task Description", response_model=NormalResponse
+    "/{task_id}", summary="Update Task Meta", response_model=NormalResponse
 )
 async def update_task(
     task_id: str,
@@ -80,7 +80,7 @@ async def update_task(
     current_user: str = Depends(verify_token),
 ):
     logger.info("Update task - User: %s, task_id: %s", current_user, task_id)
-    ok = get_manager().task_service.update_description(task_id, req)
+    ok = get_manager().task_service.update_meta(task_id, req)
     if not ok:
         raise ResourceNotFoundException(f"task_not_found: {task_id}")
     return NormalResponse(code=0, message="Task updated", data=None)

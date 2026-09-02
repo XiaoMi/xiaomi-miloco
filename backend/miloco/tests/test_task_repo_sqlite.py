@@ -100,11 +100,20 @@ def test_set_status_not_found(repo):
     assert repo.set_status("ghost", "paused") == "not_found"
 
 
-def test_update_description(repo):
-    repo.create_task(task_id="t1", description="old")
-    assert repo.update_description("t1", "new") is True
-    assert repo.get_full_view("t1")["description"] == "new"
-    assert repo.update_description("ghost", "x") is False
+def test_update_meta_writes_only_the_given_columns(repo):
+    repo.create_task(task_id="t1", description="old", lifecycle="temporary")
+    assert repo.update_meta("t1", {"description": "new"}) is True
+    row = repo.get_full_view("t1")
+    assert row["description"] == "new"
+    assert row["lifecycle"] == "temporary"
+    assert repo.update_meta("ghost", {"description": "x"}) is False
+
+
+def test_update_meta_rejects_columns_outside_the_whitelist(repo):
+    """白名单挡住的是拼进 SQL 的列名 —— 那段是 f-string 拼的。"""
+    repo.create_task(task_id="t1", description="d")
+    with pytest.raises(ValueError, match="unknown task meta column"):
+        repo.update_meta("t1", {"status": "paused"})
 
 
 def test_delete_task_cascades_rule_and_cron(repo, real_db):
