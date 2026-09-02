@@ -184,6 +184,33 @@ build_miloco_cli() {
     (cd "$PROJECT_ROOT/cli" && uv build --out-dir "$DIST_DIR")
 }
 
+# 从发布 tgz 剥离 devDependencies/peerDependencies。远端 `openclaw plugins install`
+# 在 staging 目录跑 `npm install --omit=dev`，optional peer `openclaw` 会让 npm 连锁
+# 解析整个框架包（自带海量 peers），既把几百个无关包装进插件目录，还会触发 npm 10.9.x
+# Arborist #loadPeerSet 崩溃（"Cannot read properties of null (reading 'edgesOut')"，
+# 2026-09-02 cat@mac 实证，registry 侧依赖版本一更新即复现）。运行时
+# `openclaw/plugin-sdk/*` import 由 gateway 的 plugin-sdk native resolver 别名到宿主
+# 自身文件，插件目录无需装 openclaw 包（移除该包后 plugins doctor/inspect 实证
+# Status: loaded）。独立 dev/test 用的是源码 package.json（devDep 提供），不受影响。
+strip_openclaw_tgz_deps() {
+    local tgz tmp
+    tgz=$(ls "$DIST_DIR"/miloco-openclaw-plugin-*.tgz 2>/dev/null | head -1)
+    [[ -n "$tgz" ]] || die 1 "未找到 openclaw 插件 tgz，无法剥离 dev/peer 依赖"
+    tmp=$(mktemp -d)
+    tar -xzf "$tgz" -C "$tmp"
+    node -e '
+        const fs = require("fs");
+        const p = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+        delete p.devDependencies;
+        delete p.peerDependencies;
+        delete p.peerDependenciesMeta;
+        fs.writeFileSync(process.argv[1], JSON.stringify(p, null, 2) + "\n");
+    ' "$tmp/package/package.json"
+    tar -czf "$tgz" -C "$tmp" package
+    rm -rf "$tmp"
+    log "已剥离插件 tgz dev/peer 依赖: $(basename "$tgz")"
+}
+
 build_openclaw() {
     log "构建 openclaw 插件 ..."
 
@@ -198,6 +225,7 @@ build_openclaw() {
         npm pack --pack-destination "$DIST_DIR"
     )
     restore_pkg_json plugins/openclaw/package.json
+    strip_openclaw_tgz_deps
 }
 
 build_hermes() {
