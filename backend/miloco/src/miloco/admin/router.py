@@ -62,9 +62,15 @@ async def get_system_status(current_user: str = Depends(verify_token)):
     # SQLite status
     try:
         rule_service = manager.rule_service
-        total_rules = rule_service._repo.count_all()
         # 与 GET /rules 同口径: 代建的达标规则用户看不见, 计进来会让这个数字比
-        # rule list 数出来的多, 而差额无从解释。
+        # rule list 数出来的多, 而差额无从解释。两个数必须一起排 —— 只排启用数会
+        # 把差额挪到总数上, 面板读出来是"有一条规则被停用了", 而那条规则用户在任
+        # 何界面都找不到。
+        total_rules = sum(
+            1
+            for r in rule_service._repo.get_all()
+            if r.resolved_direction is not RuleDirection.MILESTONE
+        )
         enabled_rules = sum(
             1
             for r in await rule_service.get_effectively_enabled_rules()
