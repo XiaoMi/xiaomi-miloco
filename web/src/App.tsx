@@ -652,14 +652,19 @@ function MainApp() {
       <MiotBindDialog
         open={miotBindOpen}
         onClose={() => setMiotBindOpen(false)}
-        onDone={() => {
+        onDone={(scopePreserved) => {
           // 跟切家失败的 cross-reload toast 走同一根管子：直接 toast() 会被
           // 紧跟的 reload unmount ToastHost 立即吞掉,住户看不见绑定成功反馈。
           // 写 sessionStorage,reload 后 ToastHost mount 时 pop 出来显示。
           try {
             sessionStorage.setItem(
               "miloco_pending_toast",
-              JSON.stringify({ text: t("app.miotBound"), tone: "ok" }),
+              JSON.stringify({
+                text: scopePreserved
+                  ? t("app.miotBoundScopeKept")
+                  : t("app.miotBound"),
+                tone: "ok",
+              }),
             );
           } catch {
             /* sessionStorage 不可用降级,不影响 reload */

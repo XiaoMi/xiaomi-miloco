@@ -96,6 +96,25 @@ def _redact(data: Dict) -> str:
     return json.dumps(_redact_map(data))
 
 
+def _redact_response(res_obj, res_str: str) -> str:
+    """响应体转成可入日志的字符串。
+
+    令牌在 ``result`` 里，脱敏要下探一层。解析不出预期结构时（响应本就不合法
+    才走到这条路上）退回只报长度——宁可少一点排障信息，也不要把整个响应体
+    原样落盘，那里面可能有一枚可用的令牌。
+    """
+    if not isinstance(res_obj, dict):
+        return f"<unparsable len={len(res_str or '')}>"
+    safe = dict(res_obj)
+    result = safe.get("result")
+    if isinstance(result, dict):
+        safe["result"] = _redact_map(result)
+    try:
+        return json.dumps(safe, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return f"<unserializable len={len(res_str or '')}>"
+
+
 class MIoTOAuth2Client:
     """OAuth2 agent url, default: product env."""
 
@@ -256,8 +275,12 @@ class MIoTOAuth2Client:
             or not res_obj["result"]["access_token"]
             or not res_obj["result"]["refresh_token"]
         ):
+            # 响应体同样要脱敏:这条分支的判据之一是「access_token 非空但
+            # refresh_token 为空」,触发时响应里完全可能带着一枚可用的令牌,
+            # 而这个异常消息会进日志。只脱敏请求体等于留了另一半口子。
             raise MIoTOAuth2Error(
-                f"invalid http response, {res_str}, {_redact(data)}"
+                f"invalid http response, {_redact_response(res_obj, res_str)}, "
+                f"{_redact(data)}"
             )
 
         return MIoTOauthInfo(

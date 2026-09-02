@@ -19,6 +19,7 @@ import type {
   HomeEntrySource,
   HomeEntryType,
   HomeStatus,
+  MiotAuthorizeResult,
   Features,
   PerceptionCamera,
   Person,
@@ -1162,11 +1163,19 @@ export async function realBindMiot(): Promise<{ oauthUrl: string }> {
 export async function realAuthorizeMiot(
   code: string,
   state: string,
-): Promise<void> {
-  await apiFetch<Normal<unknown>>("/api/miot/authorize", {
+): Promise<MiotAuthorizeResult> {
+  const r = await apiFetch<
+    Normal<{ account_changed?: boolean; scope_preserved?: boolean } | null>
+  >("/api/miot/authorize", {
     method: "POST",
     body: JSON.stringify({ code, state }),
   });
+  // 老后端不返回这两个字段（data 为 null）：取不到就按原行为走——当成换了账号、
+  // 配置未保留，于是照旧跑选家流程。宁可多问一次，不要静默跳过而把配置丢了。
+  return {
+    accountChanged: r.data?.account_changed ?? true,
+    scopePreserved: r.data?.scope_preserved ?? false,
+  };
 }
 
 export async function realUnbindMiot(): Promise<void> {

@@ -232,3 +232,36 @@ async def test_both_rejection_codes_stay_permanent():
 
     assert is_permanent_auth_error(MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.value)
     assert is_permanent_auth_error(MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED.value)
+
+
+def test_response_body_is_redacted_when_shape_is_invalid():
+    """响应形状不合法时，异常消息里的响应体也要脱敏。
+
+    这条分支的判据之一是「access_token 非空但 refresh_token 为空」——触发时
+    响应里完全可能带着一枚可用的令牌，而异常消息会进日志。只脱敏请求体，
+    等于把另一半原样留着。
+    """
+    from miot.cloud import _redact_response
+
+    tok = "AT_live_token_that_must_not_leak_0123456789"
+    body = {
+        "code": 0,
+        "result": {"access_token": tok, "refresh_token": "", "expires_in": 3600},
+    }
+    out = _redact_response(body, json.dumps(body))
+
+    assert tok not in out, "响应体里的 access_token 原文进了异常消息"
+    assert out.startswith("{"), "正常结构应当仍以 JSON 呈现，便于排障"
+    # 排障需要的结构信息要留着
+    assert "expires_in" in out and "refresh_token" in out
+
+
+def test_unparsable_response_falls_back_to_length_only():
+    """解析不出预期结构时只报长度，不把整个响应体原样落盘。"""
+    from miot.cloud import _redact_response
+
+    raw = "<html>gateway error, token=AT_should_not_leak</html>"
+    out = _redact_response(None, raw)
+
+    assert "AT_should_not_leak" not in out
+    assert str(len(raw)) in out

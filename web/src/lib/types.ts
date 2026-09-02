@@ -805,3 +805,11 @@ export interface UpgradeStatus {
   /** idle | starting | downloading | installing | done | failed —— 前端据此点亮步骤 / 判完成。 */
   phase: string;
 }
+
+/** 米家授权接口的返回体。老后端不返回这两个字段，消费方需自带缺省。 */
+export type MiotAuthorizeResult = {
+  /** 这次绑的是不是另一个账号。换号时后端已重置接入范围配置。 */
+  accountChanged: boolean;
+  /** 后端是否保留了原有的家庭与摄像头配置（同账号重绑时为真）。 */
+  scopePreserved: boolean;
+};

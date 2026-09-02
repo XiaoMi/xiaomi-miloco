@@ -432,9 +432,9 @@ class MiotService:
         与 MIOT_TOKEN_INFO_KEY，晚一步读到的就是新 uid，判定会恒真。
 
         Returns:
-            dict: ``{"account_changed": bool, "scope_preserved": bool}``——供
-            CLI 决定要不要再跑一遍选家流程（它会覆写家庭白名单），也供 web
-            在完成后告知住户配置是保留了还是重置了。
+            dict: ``{"account_changed": bool, "scope_preserved": bool}``——命令行
+            与 web 都据此决定要不要再跑一遍选家流程（它是「唯一启用」语义，会
+            覆写家庭白名单），并据此告知住户配置是保留了还是重置了。
         """
         try:
             logger.info("authorize_with_code state=%s code=%s…", state, code[:8])
