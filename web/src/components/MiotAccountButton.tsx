@@ -21,6 +21,7 @@ import { IconX } from "@/lib/icons";
 import type { HomeStatus } from "@/lib/types";
 import { forwardRef, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { miotTone } from "@/lib/miotTone";
 import { toast } from "./Toast";
 
 interface Props {
@@ -89,8 +90,9 @@ export const MiotAccountButton = forwardRef<HTMLButtonElement, Props>(
       else onBind();
     };
 
-    // 授权失效 = 已绑定但云端已拒绝续期，比「未绑」更需要住户注意，走 error 档。
-    const authDegraded = !!(miot.bound && miot.authDegraded);
+    // 授权失效比「未绑」更需要住户注意，走 error 档。判据与状态条共用一份，
+    // 避免两处各写一遍再分头退化——其中一处曾把它门控在 bound 上。
+    const authDegraded = miotTone(miot) === "degraded";
     const dotToneClass = authDegraded
       ? "bg-error"
       : miot.bound
@@ -244,7 +246,10 @@ export const MiotAccountButton = forwardRef<HTMLButtonElement, Props>(
                 try {
                   sessionStorage.setItem(
                     "miloco_pending_toast",
-                    JSON.stringify({ text: t("account.toastUnbound"), tone: "ok" }),
+                    JSON.stringify({
+                      text: t("account.toastUnbound"),
+                      tone: "ok",
+                    }),
                   );
                 } catch {
                   /* sessionStorage 不可用降级 */
@@ -335,7 +340,9 @@ function ConfirmUnbindDialog({
         </div>
         <p className="text-body text-text-secondary">
           {t("account.confirmUnbindBodyPrefix")}
-          {accountName ? t("account.confirmUnbindBodyName", { name: accountName }) : ""}
+          {accountName
+            ? t("account.confirmUnbindBodyName", { name: accountName })
+            : ""}
           {t("account.confirmUnbindBodySuffix")}
         </p>
         <div className="mt-6 flex justify-end gap-2">
