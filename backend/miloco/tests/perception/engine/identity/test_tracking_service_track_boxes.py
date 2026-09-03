@@ -132,3 +132,37 @@ class TestAnalyzeCollectsPerFrame:
     def test_no_frames_returns_empty(self, cls):
         svc = self._service(cls, [])
         assert svc.analyze([], fps=1).per_frame_track_boxes == []
+
+
+def test_both_real_paths_produce_identical_response():
+    """两条真实跟踪路径喂同样的 tracker 时，产出必须完全一致。
+
+    帧循环里每多攒一种框，「两处必须同步」就多一条**无信号**的不变式：漏改一处不报错、类型也
+    拦不住，只会让走另一条路径的部署静默少拿该字段，要到比对两种部署的数据时才看得出来。二者
+    现在共用一份实现，这条用例把「共用」从结构事实钉成行为约束——谁把它重新内联回去并改出差异，
+    这里就红。
+
+    路径之间真正的差异在各自 tracker 的 ``get_tracking_results`` 语义（一条已前置滤掉 coasting、
+    另一条连 coasting 一起吐出并靠标记区分），不在这个循环里；所以喂同一个 tracker 就该同果。
+    """
+    per_frame = [
+        [_res(1, (10, 10, 30, 40))],
+        [_res(1, (12, 12, 40, 60)), _res(2, (300, 0, 340, 80), detected=False)],
+        [],
+        [_res(2, (305, 0, 345, 82))],
+    ]
+    frames = [np.zeros((32, 32, 3), dtype=np.uint8) for _ in per_frame]
+
+    def run(cls):
+        svc = object.__new__(cls)
+        svc._tracker = _FakeTracker([list(x) for x in per_frame])
+        r = svc.analyze(frames, fps=2)
+        # 时间戳取自墙钟，逐次不同，比对稳定字段即可
+        return (
+            r.frame_info.fps,
+            [(o.track_id, o.type, o.detected_this_frame) for o in r.object_info],
+            r.main_det_boxes,
+            r.per_frame_track_boxes,
+        )
+
+    assert run(RealTrackingService) == run(DeepSortTrackingService)

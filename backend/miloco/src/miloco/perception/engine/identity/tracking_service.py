@@ -144,6 +144,41 @@ def _build_response(
     )
 
 
+def _run_tracking(
+    tracker: Any, frames: list[NDArray[np.uint8]], fps: int
+) -> TrackingResponse:
+    """逐帧驱动 tracker,一趟循环收齐三样:末帧 track 状态、主体检测框、逐帧带 id 的框。
+
+    两条真实跟踪路径共用本函数 —— 它们的 analyze 只是绑定不同的 tracker,帧循环本身没有差异。
+    **路径差异不在这里**,而在各自 tracker 的 ``get_tracking_results`` 语义(一条已前置滤掉
+    coasting、另一条连 coasting 一起吐出并靠 detected_this_frame 标记),见本文件头部说明;
+    ``_track_boxes`` 按该标记过滤,于是同一份代码在两条路径上得到各自正确的结果。
+
+    共用一份而不是各写一份:这个循环里每多一种累积器,「两处必须同步」就多一条无信号的不变式 ——
+    漏改一处不报错、类型也拦不住,只会让走另一条路径的部署静默少拿该字段,要到比对两种部署的
+    数据时才看得出来。
+    """
+    if not frames:
+        now = time.time() * 1000
+        return TrackingResponse(
+            frame_info=FrameInfo(start_timestamp=now, end_timestamp=now, fps=fps),
+            object_info=[],
+        )
+    # 逐帧累积主体检测框:Smart Crop 要的是窗口内的空间覆盖,不是末帧快照。
+    # last_detections 每帧被覆盖,所以必须在循环内取,循环外只剩最后一帧的。
+    # 逐帧带 track_id 的框:单帧人像注入要"该 track 窗内哪一帧最大",同样只能在循环内取
+    # (get_tracking_results 循环外只剩末帧状态)。两者同一趟循环,不额外遍历。
+    main_boxes: list[tuple[int, int, int, int]] = []
+    per_frame: list[dict[int, tuple[int, int, int, int]]] = []
+    for frame in frames:
+        tracker.update(frame)
+        main_boxes.extend(_main_det_boxes(tracker))
+        per_frame.append(_track_boxes(tracker))
+    return _build_response(
+        tracker.get_tracking_results(), len(frames), fps, main_boxes, per_frame
+    )
+
+
 class TrackingService(ABC):
     _detector: Any
     _tracker: Any
@@ -217,25 +252,7 @@ class RealTrackingService(TrackingService):
         )
 
     def analyze(self, frames: list[NDArray[np.uint8]], fps: int = 2) -> TrackingResponse:
-        if not frames:
-            now = time.time() * 1000
-            return TrackingResponse(
-                frame_info=FrameInfo(start_timestamp=now, end_timestamp=now, fps=fps),
-                object_info=[],
-            )
-        # 逐帧累积主体检测框:Smart Crop 要的是窗口内的空间覆盖,不是末帧快照。
-        # last_detections 每帧被覆盖,所以必须在循环内取,循环外只剩最后一帧的。
-        # 逐帧带 track_id 的框:单帧人像注入要"该 track 窗内哪一帧最大",同样只能在循环内取
-        # (get_tracking_results 循环外只剩末帧状态)。两个累积器同一趟循环,不额外遍历。
-        main_boxes: list[tuple[int, int, int, int]] = []
-        per_frame: list[dict[int, tuple[int, int, int, int]]] = []
-        for frame in frames:
-            self._tracker.update(frame)
-            main_boxes.extend(_main_det_boxes(self._tracker))
-            per_frame.append(_track_boxes(self._tracker))
-        return _build_response(
-            self._tracker.get_tracking_results(), len(frames), fps, main_boxes, per_frame
-        )
+        return _run_tracking(self._tracker, frames, fps)
 
     def reset_session(self) -> None:
         """重置 SortTracker（清空 tracks + _next_track_id 归零）。
@@ -308,25 +325,7 @@ class DeepSortTrackingService(TrackingService):
         )
 
     def analyze(self, frames: list[NDArray[np.uint8]], fps: int = 2) -> TrackingResponse:
-        if not frames:
-            now = time.time() * 1000
-            return TrackingResponse(
-                frame_info=FrameInfo(start_timestamp=now, end_timestamp=now, fps=fps),
-                object_info=[],
-            )
-        # 逐帧累积主体检测框:Smart Crop 要的是窗口内的空间覆盖,不是末帧快照。
-        # last_detections 每帧被覆盖,所以必须在循环内取,循环外只剩最后一帧的。
-        # 逐帧带 track_id 的框:单帧人像注入要"该 track 窗内哪一帧最大",同样只能在循环内取。
-        # 两个累积器同一趟循环,不额外遍历。
-        main_boxes: list[tuple[int, int, int, int]] = []
-        per_frame: list[dict[int, tuple[int, int, int, int]]] = []
-        for frame in frames:
-            self._tracker.update(frame)
-            main_boxes.extend(_main_det_boxes(self._tracker))
-            per_frame.append(_track_boxes(self._tracker))
-        return _build_response(
-            self._tracker.get_tracking_results(), len(frames), fps, main_boxes, per_frame
-        )
+        return _run_tracking(self._tracker, frames, fps)
 
     def reset_session(self) -> None:
         self._tracker.reset()
