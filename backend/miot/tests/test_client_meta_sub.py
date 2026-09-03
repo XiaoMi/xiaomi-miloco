@@ -11,7 +11,8 @@ subscribed at the broker, NOT mere intent-to-subscribe:
   record it — otherwise the idempotency guard would short-circuit the
   proxy-level retry in _sync_meta_subscriptions and the entity's events would
   be silently lost forever.
-* While mips is disconnected only the intent is recorded (replayed at setup).
+* While mips is disconnected the call raises MipsConnectionError and records
+  nothing — the proxy-level diff must be able to retry it on the next sync.
 * Already-tracked entities are a no-op (idempotent).
 
 A bare MIoTClient is built via __new__ with only the attributes these methods
@@ -25,6 +26,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from miot.client import MIoTClient
+from miot.types import MipsConnectionError
 
 from miot import client as client_mod
 
@@ -87,14 +89,18 @@ async def test_sub_device_meta_failure_leaves_untracked_and_raises():
 
 
 @pytest.mark.asyncio
-async def test_sub_device_meta_disconnected_records_intent_only():
+async def test_sub_device_meta_disconnected_raises():
+    """mips unavailable → must RAISE, not record intent and return success:
+    recording would let the proxy mark the did subscribed while mips._subs
+    has no such topic (reconnect replay couldn't re-issue it)."""
     mips = _FakeMips(connected=False)
     client = _bare_client(mips)
 
-    await client.sub_device_meta_async("dev-1")
+    with pytest.raises(MipsConnectionError):
+        await client.sub_device_meta_async("dev-1")
 
     mips.sub_device_meta_changed_async.assert_not_awaited()
-    assert client._meta_sub_dids == {"dev-1"}
+    assert client._meta_sub_dids == set()
 
 
 @pytest.mark.asyncio
@@ -134,14 +140,15 @@ async def test_sub_home_scene_failure_leaves_untracked_and_raises():
 
 
 @pytest.mark.asyncio
-async def test_sub_home_scene_disconnected_records_intent_only():
+async def test_sub_home_scene_disconnected_raises():
     mips = _FakeMips(connected=False)
     client = _bare_client(mips)
 
-    await client.sub_home_scene_async("home-1")
+    with pytest.raises(MipsConnectionError):
+        await client.sub_home_scene_async("home-1")
 
     mips.sub_home_scene_changed_async.assert_not_awaited()
-    assert client._scene_sub_home_ids == {"home-1"}
+    assert client._scene_sub_home_ids == set()
 
 
 # --------------------------------------------------- _setup_mips_async replay
@@ -203,6 +210,8 @@ def _setup_client(
     client._callback_device_meta_changed = None
     client._callback_scene_changed = None
     client._callback_device_state_changed = None
+    client._callback_subscription_reset = None
+    client._callback_mips_connect = None
     return client
 
 
@@ -250,7 +259,8 @@ async def test_setup_replay_partial_failure_keeps_failed_untracked(monkeypatch):
 #
 # `_state_sub_dids` mirrors what is actually subscribed at the broker, same
 # contract as _meta_sub_dids: success records, failure does not, disconnected
-# records intent only, idempotent for already-tracked dids.
+# raises MipsConnectionError and records nothing, idempotent for
+# already-tracked dids.
 
 
 @pytest.mark.asyncio
@@ -280,14 +290,15 @@ async def test_sub_device_state_failure_leaves_untracked_and_raises():
 
 
 @pytest.mark.asyncio
-async def test_sub_device_state_disconnected_records_intent_only():
+async def test_sub_device_state_disconnected_raises():
     mips = _FakeMips(connected=False)
     client = _bare_client(mips)
 
-    await client.sub_device_state_async("dev-1")
+    with pytest.raises(MipsConnectionError):
+        await client.sub_device_state_async("dev-1")
 
     mips.sub_device_state_async.assert_not_awaited()
-    assert client._state_sub_dids == {"dev-1"}
+    assert client._state_sub_dids == set()
 
 
 @pytest.mark.asyncio
@@ -299,6 +310,27 @@ async def test_sub_device_state_idempotent():
     await client.sub_device_state_async("dev-1")
 
     mips.sub_device_state_async.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sub_device_state_superseded_not_tracked_and_retry_reissues():
+    """mips 层发现订阅被并发退订(SUBACK 后 topic 已被 unsub 弹掉)抛
+    MipsConnectionError 时,SDK 必须不记 `_state_sub_dids`;紧接的第二次订阅
+    要真正再次下发,而不是被 `did in set` 短路吞掉。"""
+    mips = _FakeMips(connected=True)
+    client = _bare_client(mips)
+    mips.sub_device_state_async = AsyncMock(
+        side_effect=[MipsConnectionError("superseded by unsubscribe"), None]
+    )
+
+    with pytest.raises(MipsConnectionError):
+        await client.sub_device_state_async("dev-1")
+    assert client._state_sub_dids == set()
+
+    # 下一轮对账重试:必须真正发出新的 SUBSCRIBE 并记账。
+    await client.sub_device_state_async("dev-1")
+    assert client._state_sub_dids == {"dev-1"}
+    assert mips.sub_device_state_async.await_count == 2
 
 
 # ------------------------------------------- _setup_mips_async state replay
@@ -346,6 +378,65 @@ async def test_setup_replay_state_partial_failure_keeps_failed_untracked(
     }
     # dev-bad failed → not re-recorded; dev-ok succeeded and is tracked.
     assert client._state_sub_dids == {"dev-ok"}
+
+
+@pytest.mark.asyncio
+async def test_setup_mips_fires_subscription_reset_with_post_replay_sets(monkeypatch):
+    """The upper-layer mirror invalidation callback must fire AFTER replay,
+    passing the post-replay tracked sets — so the mirror can be a faithful
+    copy (replay-failed entities dropped, departed re-subscribed ones kept)."""
+    fake = _SetupFakeMips()
+    client = _setup_client(
+        monkeypatch, fake, meta_dids={"dev-a", "dev-bad"}, scene_home_ids=set()
+    )
+    fake._fail_meta_dids = frozenset({"dev-bad"})
+    received: list = []
+
+    async def _reset(*args) -> None:
+        received.append(tuple(map(set, args)))
+
+    client._callback_subscription_reset = _reset
+
+    await client._setup_mips_async()
+
+    # Callback fired exactly once, after replay, with the post-replay sets:
+    # dev-bad's replay failed → dropped from the meta set; dev-a succeeded.
+    assert len(received) == 1
+    meta_dids, state_dids, scene_home_ids = received[0]
+    assert meta_dids == {"dev-a"}
+    assert state_dids == set()
+    assert scene_home_ids == set()
+
+
+@pytest.mark.asyncio
+async def test_setup_mips_connect_failure_clears_tracked_and_fires_reset(monkeypatch):
+    """If the rebuilt mips instance fails to connect, the broker has ZERO
+    subscriptions (old instance torn down, new never came up) — the tracked
+    sets and upper mirror must be emptied so the next reconcile re-issues
+    everything instead of no-op'ing forever (a silent hours-long push gap)."""
+    fake = _SetupFakeMips()
+    client = _setup_client(
+        monkeypatch,
+        fake,
+        meta_dids={"dev-a"},
+        scene_home_ids=set(),
+        state_dids={"dev-b"},
+    )
+    fake.init_async = AsyncMock(side_effect=MipsConnectionError("connect refused"))
+    received: list = []
+
+    async def _reset(*args):
+        received.append(tuple(map(set, args)))
+
+    client._callback_subscription_reset = _reset
+
+    await client._setup_mips_async()
+
+    assert client._meta_sub_dids == set()
+    assert client._state_sub_dids == set()
+    assert client._scene_sub_home_ids == set()
+    assert len(received) == 1
+    assert received[0] == (set(), set(), set())
 
 
 # ------------------------------------ mips_user_sub_error scoping (reconnect)
@@ -409,3 +500,80 @@ def test_home_scene_subscribe_results_do_not_touch_user_error():
     client._mips_user_sub_error = "stale user error"
     client._on_mips_subscribe_success("home/h1/scene/edit")
     assert client._mips_user_sub_error == "stale user error"
+
+
+# ------------------------------------------------- shrink guard (get_devices_async)
+#
+# get_devices_async keeps a streak of consecutive SHRUNK cloud replies (a
+# reply holding < _DEVICE_REPLY_SHRINK_RATIO of the buffered device count —
+# an empty reply is just the extreme case); two within
+# _DEVICE_REPLY_SHRINK_MIN_GAP_SEC count as ONE round (refresh_devices and
+# refresh_cameras hit it concurrently under different locks), and the buffer
+# is only dropped after TWO rounds so a transient partial reply doesn't
+# cause a full unsubscribe storm.
+
+
+def _dev_client(monkeypatch):
+    # 只 patch miot.client._now(生产代码取时间的唯一入口),不碰全局 time.monotonic,
+    # 以免顺带冻结 asyncio 事件循环的时钟(那样将来任何基于时间的等待都会永久挂住)。
+    client = MIoTClient.__new__(MIoTClient)
+    client._device_buffer = {"d1": SimpleNamespace(did="d1", lan_online=True)}
+    client._device_shrink_streak = 0
+    client._last_device_shrink_ts = 0.0
+    client._http_client = SimpleNamespace(get_devices_async=AsyncMock(return_value={}))
+    client._lan_client = SimpleNamespace(get_devices_async=AsyncMock(return_value={}))
+    clock = [1000.0]
+    monkeypatch.setattr(client_mod, "_now", lambda: clock[0])
+    return client, clock
+
+
+@pytest.mark.asyncio
+async def test_get_devices_shrink_same_round_counts_once(monkeypatch):
+    client, clock = _dev_client(monkeypatch)
+    # Two shrunk replies within the same round (identical monotonic time) — the
+    # second must NOT bump the streak: a single transient shrink in a
+    # refresh_devices+refresh_cameras gather must not trip the storm.
+    for _ in range(2):
+        res = await client.get_devices_async()
+        assert "d1" in res
+    assert client._device_shrink_streak == 1
+    assert client._device_buffer == {"d1": client._device_buffer["d1"]}
+
+
+@pytest.mark.asyncio
+async def test_get_devices_shrink_two_rounds_clears(monkeypatch):
+    client, clock = _dev_client(monkeypatch)
+    # First round: keep the buffer.
+    res = await client.get_devices_async()
+    assert "d1" in res
+    assert client._device_shrink_streak == 1
+    # >30s later (a genuine account clear, not one round): streak -> 2, buffer
+    # is dropped and the streak resets, so a following transient shrink re-arms.
+    clock[0] += 31.0
+    res = await client.get_devices_async()
+    assert "d1" not in res
+    assert client._device_shrink_streak == 0
+
+
+@pytest.mark.asyncio
+async def test_get_devices_partial_shrink_triggers_guard(monkeypatch):
+    """A single-home parse failure returns a PARTIAL list, not empty — the
+    guard must treat a >50% shrink the same as an empty reply (keep the
+    buffer), while a mild dip is normal."""
+    client, clock = _dev_client(monkeypatch)
+    client._device_buffer = {f"d{i}": SimpleNamespace(did=f"d{i}") for i in range(1, 4)}
+    # Cloud returns only 1 of 3 (< 0.5 ratio) → transient shrink, buffer kept.
+    client._http_client.get_devices_async = AsyncMock(
+        return_value={"d1": SimpleNamespace(did="d1")}
+    )
+    res = await client.get_devices_async()
+    assert set(res) == {"d1", "d2", "d3"}
+    assert client._device_shrink_streak == 1
+    # A mild dip (2 of 3, >= 0.5 ratio) is NOT a shrink — no guard.
+    client._device_shrink_streak = 0
+    client._http_client.get_devices_async = AsyncMock(
+        return_value={"d1": SimpleNamespace(did="d1"), "d2": SimpleNamespace(did="d2")}
+    )
+    res = await client.get_devices_async()
+    assert set(res) == {"d1", "d2"}  # merged normally
+    assert client._device_shrink_streak == 0

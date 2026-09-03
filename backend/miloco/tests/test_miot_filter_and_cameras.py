@@ -108,6 +108,47 @@ def test_voice_allow_is_orthogonal_to_feed_deny():
     assert miot_filter.voice_allowed_camera_dids(kv) == {"c2"}
 
 
+def test_crop_denied_camera_dids_empty():
+    """空集 = 全部机位都允许裁切（默认开）。"""
+    kv = _FakeKV()
+    assert miot_filter.crop_denied_camera_dids(kv) == set()
+
+
+def test_crop_denied_camera_dids_with_values():
+    kv = _FakeKV(
+        {ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY: json.dumps(["c1:ch0", "c2"])}
+    )
+    assert miot_filter.crop_denied_camera_dids(kv) == {"c1:ch0", "c2"}
+
+
+def test_set_cameras_crop_in_use_inverts_denylist():
+    """crop_in_use=False 才写进集合（deny-list 反转），True 是移出。"""
+    kv = _FakeKV()
+    assert miot_filter.set_cameras_crop_in_use(kv, ["c1"], False) == (["c1"], True)
+    assert miot_filter.set_cameras_crop_in_use(kv, ["c2:ch1"], False) == (
+        ["c1", "c2:ch1"],
+        True,
+    )
+    assert miot_filter.crop_denied_camera_dids(kv) == {"c1", "c2:ch1"}
+    # in_use=True 移出关闭集
+    assert miot_filter.set_cameras_crop_in_use(kv, ["c1"], True) == (["c2:ch1"], True)
+    # 本就不在集内再开 → 无写入
+    assert miot_filter.set_cameras_crop_in_use(kv, ["ghost"], True) == (
+        ["c2:ch1"],
+        False,
+    )
+
+
+def test_crop_deny_is_orthogonal_to_feed_deny_and_voice():
+    """裁切关闭集与感知黑名单 / 拾音白名单三者互不影响：改一个不动另两个。"""
+    kv = _FakeKV({ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"])})
+    miot_filter.set_cameras_voice_in_use(kv, ["c2"], True)
+    miot_filter.set_cameras_crop_in_use(kv, ["c3"], False)
+    assert miot_filter.denied_camera_dids(kv) == {"c1"}
+    assert miot_filter.voice_allowed_camera_dids(kv) == {"c2"}
+    assert miot_filter.crop_denied_camera_dids(kv) == {"c3"}
+
+
 def test_is_home_allowed_no_filter():
     kv = _FakeKV()
     # 空启用集 → 什么都不允许
@@ -256,6 +297,9 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
             ),
             get=kv.get,
             set=kv.set,
+            # delete 也要接：_clear_account_scope_state（账号切换清理）只用 delete，
+            # 不接的话那条路径在本 harness 下必抛 AttributeError、测不到。
+            delete=kv.delete,
         ),
         get_devices=AsyncMock(return_value=devices or {}),
         get_cameras=AsyncMock(return_value=cameras or {}),
@@ -1996,6 +2040,326 @@ async def test_set_camera_prompt_does_not_restart_or_refresh():
     svc._miot_proxy.refresh_cameras.assert_not_awaited()
     svc._sync_camera_adapter.assert_not_awaited()
     svc._restart_perception_engine.assert_not_awaited()
+
+
+# ─── MiotService: Smart Crop 逐机位开关（crop_in_use，deny-list / 默认开）──────
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_with_state_crop_field():
+    """crop_in_use 是存储偏好：不在关闭集即 True（**默认开**），与 in_use/voice/prompt 正交。"""
+    cameras = {"c1": _camera("c1"), "c2": _camera("c2")}
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY: json.dumps(["c1"]),
+    })
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+    assert by_did["c1"]["crop_in_use"] is False
+    assert by_did["c2"]["crop_in_use"] is True  # 无记录 → 默认开
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_with_state_crop_field_per_channel():
+    """双摄逐路：关掉 ch0 不影响 ch1（crop 按合成 did 存，与 perception_prompt 同口径）。"""
+    cam = _camera("dual", home_id="H1")
+    cam.channel_count = 2
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY: json.dumps(["dual:ch0"]),
+    })
+    svc = _make_service(devices={"dual": cam}, cameras={"dual": cam}, kv=kv)
+    out = await svc.list_cameras_with_state()
+    by_ch = {c["channel"]: c for c in out}
+    assert by_ch[0]["crop_in_use"] is False
+    assert by_ch[1]["crop_in_use"] is True
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_crop_writes_denylist():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    res = await svc.toggle_camera_crop([{"did": "c1", "crop_in_use": False}])
+    assert any(c["did"] == "c1" and c["crop_in_use"] is False for c in res)
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY)) == ["c1"]
+    # 再开回来 → 移出关闭集
+    res = await svc.toggle_camera_crop([{"did": "c1", "crop_in_use": True}])
+    assert any(c["did"] == "c1" and c["crop_in_use"] is True for c in res)
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY)) == []
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_crop_dual_camera_per_channel():
+    """双摄：合成 did 精确到某一路；裸物理 did 展成全部通道；越界通道被拒且不落库。"""
+    cam = _camera("dual", home_id="H1")
+    cam.channel_count = 2
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices={"dual": cam}, cameras={"dual": cam}, kv=kv)
+
+    # 合成 did 只关 ch0
+    await svc.toggle_camera_crop([{"did": "dual:ch0", "crop_in_use": False}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY)) == ["dual:ch0"]
+
+    # 裸物理 did 关整台 → 展成两路
+    await svc.toggle_camera_crop([{"did": "dual", "crop_in_use": False}])
+    assert set(json.loads(kv.get(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY))) == {
+        "dual:ch0",
+        "dual:ch1",
+    }
+
+    # 越界通道拒绝、不落库
+    with pytest.raises(ValidationException):
+        await svc.toggle_camera_crop([{"did": "dual:ch9", "crop_in_use": True}])
+    assert set(json.loads(kv.get(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY))) == {
+        "dual:ch0",
+        "dual:ch1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_crop_rejects_unknown_before_write():
+    """任一 did 未知 → 整批拒绝，合法的那条也不落库。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    with pytest.raises(ValidationException):
+        await svc.toggle_camera_crop([
+            {"did": "c1", "crop_in_use": False},
+            {"did": "ghost", "crop_in_use": False},
+        ])
+    assert kv.get(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_crop_allowed_when_camera_disabled():
+    """与拾音不同：裁切不从属于感知开关，感知已关的机位也能预配置（同 prompt）。"""
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),  # c1 感知已关闭
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    await svc.toggle_camera_crop([{"did": "c1", "crop_in_use": False}])
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY)) == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_toggle_camera_crop_does_not_restart_or_refresh():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    svc._miot_proxy.refresh_cameras = AsyncMock()
+    svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
+    svc._restart_perception_engine = AsyncMock()  # type: ignore[assignment]
+    await svc.toggle_camera_crop([{"did": "c1", "crop_in_use": False}])
+    svc._miot_proxy.refresh_cameras.assert_not_awaited()
+    svc._sync_camera_adapter.assert_not_awaited()
+    svc._restart_perception_engine.assert_not_awaited()
+
+
+# ─── 账号切换清理：这份 key 清单是手写的，靠本用例钉住 ──────────────────────
+
+
+def test_clear_account_scope_state_clears_all_scope_keys():
+    """_clear_account_scope_state 必须清掉**全部** per-camera / 家庭范围配置。
+
+    这份清单是手写的枚举（每加一项 per-camera 配置都要补一行），而唯一提到该方法的
+    test_miot_onboarding_kick 把它整体替换成了桩、不断言清了哪些 key —— 漏一项不会变红。
+    本用例就是那道闸：断言五个 key 全部被 delete。
+
+    漏清的后果不对称地隐蔽：同账号解绑重绑时相机 did 不变，上一轮的偏好会越过"回到出厂
+    默认"存活；换账号时旧 did 变成读不到也删不掉的死键。
+    """
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
+        ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY: json.dumps(["c1"]),
+        ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY: json.dumps({"c1": "x"}),
+        ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY: json.dumps(["c1:ch0"]),
+    })
+    svc = _make_service(devices={}, cameras={}, kv=kv)
+
+    svc._clear_account_scope_state()
+
+    for key in (
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY,
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY,
+        ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY,
+        ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY,
+        ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY,
+    ):
+        assert kv.get(key) is None, f"{key} 未被清理"
+
+
+def test_clear_account_scope_state_resets_crop_to_default_on():
+    """从读取侧确认语义：清理后该机位回到**默认开**，而不是留着上一账号的关闭态。"""
+    kv = _FakeKV({
+        ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY: json.dumps(["c1:ch0"]),
+    })
+    svc = _make_service(devices={}, cameras={}, kv=kv)
+    assert miot_filter.crop_denied_camera_dids(kv) == {"c1:ch0"}
+
+    svc._clear_account_scope_state()
+
+    assert miot_filter.crop_denied_camera_dids(kv) == set()
+
+
+# ─── crop_effective：生效态 = 全局双闸 AND 逐机位存储偏好 ──────────────────
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("g_enabled", "g_user", "per_camera_on", "expect_effective"),
+    [
+        (True, True, True, True),     # 三闸全开 → 在裁
+        (True, True, False, False),   # 逐机位关
+        (True, False, True, False),   # 用户级全局关
+        (False, True, True, False),   # 发版级全局关
+        (False, False, False, False),
+    ],
+)
+async def test_crop_effective_is_global_and_per_camera(
+    g_enabled, g_user, per_camera_on, expect_effective
+):
+    """crop_effective 必须是三闸相与；crop_in_use 始终只反映存储偏好、不受全局影响。"""
+    from unittest.mock import patch
+
+    from miloco.perception.engine.config import CropEnhanceConfig
+
+    denied = [] if per_camera_on else ["c1"]
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY: json.dumps(denied),
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    with patch(
+        "miloco.perception.engine.omni.crop_enhance.crop_enhance_config_from_settings",
+        return_value=CropEnhanceConfig(enabled=g_enabled, user_enabled=g_user),
+    ):
+        out = await svc.list_cameras_with_state()
+
+    row = next(c for c in out if c["did"] == "c1")
+    assert row["crop_effective"] is expect_effective
+    # 存储偏好不随全局闸变化——这正是"全局关掉时 crop_in_use 仍是 true"的语义
+    assert row["crop_in_use"] is per_camera_on
+
+
+@pytest.mark.asyncio
+async def test_crop_effective_fails_closed_when_config_unreadable():
+    """全局闸读不出来时按**关闭**派生：与引擎侧 fail-closed 同向，
+    免得列表显示"在裁"而实际没裁（宁可少报，不可虚报）。"""
+    from unittest.mock import patch
+
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    with patch(
+        "miloco.perception.engine.omni.crop_enhance.crop_enhance_config_from_settings",
+        side_effect=RuntimeError("settings 炸了"),
+    ):
+        out = await svc.list_cameras_with_state()
+
+    row = next(c for c in out if c["did"] == "c1")
+    assert row["crop_effective"] is False
+    assert row["crop_in_use"] is True   # 存储偏好仍如实透出
+
+
+@pytest.mark.asyncio
+async def test_crop_effective_distinguishes_global_off_from_per_camera_off():
+    """本字段存在的理由：靠 (crop_in_use, crop_effective) 两个值能区分两种"没在裁"。"""
+    from unittest.mock import patch
+
+    from miloco.perception.engine.config import CropEnhanceConfig
+
+    cams = {"c1": _camera("c1"), "c2": _camera("c2")}
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY: json.dumps(["c2"]),
+    })
+    svc = _make_service(devices=dict(cams), cameras=cams, kv=kv)
+    with patch(
+        "miloco.perception.engine.omni.crop_enhance.crop_enhance_config_from_settings",
+        return_value=CropEnhanceConfig(enabled=True, user_enabled=False),
+    ):
+        out = await svc.list_cameras_with_state()
+
+    by = {c["did"]: c for c in out}
+    # c1：逐机位开着，但被全局闸挡住 → (True, False)
+    assert (by["c1"]["crop_in_use"], by["c1"]["crop_effective"]) == (True, False)
+    # c2：逐机位自己关的 → (False, False)
+    assert (by["c2"]["crop_in_use"], by["c2"]["crop_effective"]) == (False, False)
+
+
+@pytest.mark.asyncio
+async def test_crop_effective_false_when_camera_not_in_scope():
+    """不在活跃集的相机根本没在投喂 → crop_effective 必须为 false，
+    即使全局双闸开着、逐机位偏好也是开。存储偏好 crop_in_use 仍如实透出 true。"""
+    from unittest.mock import patch
+
+    from miloco.perception.engine.config import CropEnhanceConfig
+
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),  # c1 感知已关闭
+    })
+    svc = _make_service(
+        devices={"c1": _camera("c1")}, cameras={"c1": _camera("c1")}, kv=kv
+    )
+    with patch(
+        "miloco.perception.engine.omni.crop_enhance.crop_enhance_config_from_settings",
+        return_value=CropEnhanceConfig(enabled=True, user_enabled=True),
+    ):
+        out = await svc.list_cameras_with_state()
+
+    row = next(c for c in out if c["did"] == "c1")
+    assert row["in_use"] is False
+    assert row["crop_in_use"] is True       # 存储偏好保留（关相机不改写它）
+    assert row["crop_effective"] is False   # 但没在投喂 → 没在裁
+
+
+@pytest.mark.asyncio
+async def test_crop_effective_distinguishes_three_kinds_of_not_cropping():
+    """(in_use, crop_in_use) 两个值要能把三种"没在裁"分开——这是把 crop_effective
+    称作"单一来源"的前提。"""
+    from unittest.mock import patch
+
+    from miloco.perception.engine.config import CropEnhanceConfig
+
+    cams = {"c1": _camera("c1"), "c2": _camera("c2"), "c3": _camera("c3")}
+    kv = _FakeKV({
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),   # 不在感知范围
+        ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY: json.dumps(["c2"]),  # 自己关了裁切
+    })
+    svc = _make_service(devices=dict(cams), cameras=cams, kv=kv)
+    with patch(
+        "miloco.perception.engine.omni.crop_enhance.crop_enhance_config_from_settings",
+        return_value=CropEnhanceConfig(enabled=True, user_enabled=True),
+    ):
+        out = await svc.list_cameras_with_state()
+    by = {c["did"]: c for c in out}
+
+    # c1：不在感知范围
+    assert (by["c1"]["in_use"], by["c1"]["crop_in_use"], by["c1"]["crop_effective"]) == (
+        False, True, False
+    )
+    # c2：在感知范围，但这一路自己关了裁切
+    assert (by["c2"]["in_use"], by["c2"]["crop_in_use"], by["c2"]["crop_effective"]) == (
+        True, False, False
+    )
+    # c3：三闸全通 → 真在裁
+    assert (by["c3"]["in_use"], by["c3"]["crop_in_use"], by["c3"]["crop_effective"]) == (
+        True, True, True
+    )
 
 
 # ── devices_in_current_home：给状态容器用的那条过滤入口 ──────────────────

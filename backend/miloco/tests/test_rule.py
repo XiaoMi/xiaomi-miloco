@@ -9,9 +9,11 @@ import asyncio
 import json
 import re
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from miloco.database.kv_repo import ScopeConfigKeys
 from miloco.middleware.exceptions import (
     BusinessException,
     ConflictException,
@@ -142,6 +144,12 @@ def _make_state_rule(
 
 TRIGGER_CONTEXT = "cam-001 检测到有人经过"
 
+# mock 的米家场景表：场景动作的 did 要在这里面，否则建规则时被存在性校验拦下。
+# 场景校验会按家庭白名单过滤，所以桩要带 home_id、KV 里也要有对应的白名单。
+MOCK_HOME_ID = "home-1"
+SCENE_IID_LITERAL = "scene"
+MOCK_SCENES = ("scene-1", "scene-A", "scene-B", "scene-movie", "scene-real")
+
 
 # ---- Fixtures ----
 
@@ -153,6 +161,19 @@ def mock_miot_proxy():
     proxy.get_device_properties = AsyncMock(return_value=[{"code": 0, "value": False}])
     proxy.set_device_properties = AsyncMock(return_value=[{"code": 0}])
     proxy.call_device_action = AsyncMock(return_value={"code": 0})
+    proxy.get_all_scenes = AsyncMock(
+        return_value={
+            sid: SimpleNamespace(home_id=MOCK_HOME_ID, scene_name=f"mock-{sid}")
+            for sid in MOCK_SCENES
+        }
+    )
+    proxy._kv_repo.get = MagicMock(
+        side_effect=lambda key, default=None: (
+            f'["{MOCK_HOME_ID}"]'
+            if key == ScopeConfigKeys.HOME_WHITE_LIST_KEY
+            else default
+        )
+    )
     return proxy
 
 
@@ -3177,7 +3198,6 @@ class TestPreambleSelection:
         assert "record_kind" not in _extra_info(enter_prompt)
 
 
-
 # ============================================================
 # on_target_desc 累计达标 timer 路径（spec 2026-06-15）
 # ============================================================
@@ -4142,3 +4162,420 @@ class TestRuleRunnerPerDeviceStateIndependence:
         await runner_fast.drain()
         assert mock_miot_proxy.set_device_properties.call_count == 1
 
+
+# ---- 场景 action（iid=SCENE_IID，did 位置放 scene_id）----
+
+
+def _make_scene_action(scene_id="scene-1", cooldown=5):
+    from miloco.rule.schema import SCENE_IID
+
+    return RuleAction(
+        did=scene_id, iid=SCENE_IID, idempotent=False, cooldown_minutes=cooldown
+    )
+
+
+class TestRuleRunnerSceneAction:
+    """场景没有 siid/aiid 可拆，必须在 iid 解析之前分流；台账走
+    miot.service._trigger_scene 统一落，source 标 rule。"""
+
+    @pytest.mark.asyncio
+    async def test_scene_action_delegates_with_rule_source(self, runner, monkeypatch):
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+
+        result = await runner._execute_action("rule-77", _make_scene_action())
+
+        assert result.result is True
+        assert result.skipped is False
+        assert result.error is None
+        spy.assert_awaited_once()
+        assert spy.await_args.args[1] == "scene-1"
+        assert spy.await_args.kwargs["source"] == "rule"
+        assert spy.await_args.kwargs["source_id"] == "rule-77"
+
+    @pytest.mark.asyncio
+    async def test_scene_action_never_reaches_iid_parsing(self, runner, monkeypatch):
+        """回归钉子：'scene' 拆不出 siid/aiid，走到通用解析必然 invalid_iid。"""
+        from unittest.mock import AsyncMock as _AM
+
+        monkeypatch.setattr(
+            "miloco.miot.service._trigger_scene", _AM(return_value=True)
+        )
+        result = await runner._execute_action("rule-77", _make_scene_action())
+        assert result.error is None or "invalid_iid" not in result.error
+
+    @pytest.mark.asyncio
+    async def test_scene_cooldown_skips_within_window(self, runner, monkeypatch):
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+        action = _make_scene_action()
+
+        first = await runner._execute_action("rule-cd-scene", action)
+        second = await runner._execute_action("rule-cd-scene", action)
+
+        assert first.skipped is False
+        assert second.skipped is True
+        assert second.result is True
+        assert spy.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_scene_cooldown_isolated_per_scene(self, runner, monkeypatch):
+        """冷却键是 (did, iid)：同规则的两个场景不能互相把对方压掉。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+
+        await runner._execute_action("rule-multi", _make_scene_action("scene-A"))
+        other = await runner._execute_action(
+            "rule-multi", _make_scene_action("scene-B")
+        )
+
+        assert other.skipped is False
+        assert spy.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_scene_failure_reported_and_not_cooled_down(
+        self, runner, monkeypatch
+    ):
+        """执行失败不写冷却，下一次 fire 还能重试。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=False)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+        action = _make_scene_action()
+
+        first = await runner._execute_action("rule-fail", action)
+        second = await runner._execute_action("rule-fail", action)
+
+        assert first.result is False
+        assert first.error == "scene_trigger_failed"
+        assert second.skipped is False
+        assert spy.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_scene_exception_reported(self, runner, monkeypatch):
+        """场景不存在 / 不在允许家庭 / SDK 抛错都要落到 execute_result，不吞。"""
+        from unittest.mock import AsyncMock as _AM
+
+        monkeypatch.setattr(
+            "miloco.miot.service._trigger_scene",
+            _AM(side_effect=RuntimeError("scene gone")),
+        )
+        result = await runner._execute_action("rule-exc", _make_scene_action())
+
+        assert result.result is False
+        assert "scene gone" in result.error
+
+
+class TestRuleServiceSceneActionValidation:
+    """场景读不到现值：幂等分支会跳过判定直接下发，等于没有去重。
+    service 层必须逼出 idempotent=false，再由既有校验逼出 cooldown_minutes。"""
+
+    @pytest.mark.asyncio
+    async def test_scene_action_idempotent_true_raises(self, service):
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=True, cooldown_minutes=5
+        )
+        rule = _make_static_rule(rule_id="", actions=[bad])
+        with pytest.raises(
+            ValidationException,
+            match=r"actions\[0\].*iid=scene requires idempotent=false",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_scene_action_without_cooldown_raises(self, service):
+        """场景缺冷却命中更具体的那条（下限 1），而非通用的「非幂等要配冷却」。"""
+        bad = RuleAction(did="scene-1", iid="scene", idempotent=False)
+        rule = _make_static_rule(rule_id="", actions=[bad])
+        with pytest.raises(
+            ValidationException,
+            match=r"actions\[0\].*iid=scene requires cooldown_minutes >= 1",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_scene_action_on_enter_slot_validated(self, service):
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=True, cooldown_minutes=5
+        )
+        rule = _make_state_rule(rule_id="", on_enter_actions=[bad])
+        with pytest.raises(
+            ValidationException,
+            match=r"on_enter_actions\[0\].*iid=scene requires idempotent=false",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_scene_action_valid_passes(self, service):
+        good = _make_scene_action()
+        rule = _make_static_rule(rule_id="", actions=[good])
+        assert await service.create_rule(rule) == "new-rule-id"
+
+    @pytest.mark.asyncio
+    async def test_scene_plus_tts_on_enter_passes(self, service):
+        """本次改动的目标形态：一个方向装两条 action（场景 + 播报）。"""
+        rule = _make_state_rule(
+            rule_id="",
+            on_enter_actions=[
+                _make_scene_action("scene-movie"),
+                RuleAction(
+                    did="speaker", iid="action.7.3", params=["观影模式已就绪"],
+                    idempotent=False, cooldown_minutes=5,
+                ),
+            ],
+        )
+        assert await service.create_rule(rule) == "new-rule-id"
+
+
+class TestRuleRunnerSceneActionGuards:
+    """service 校验只在 CRUD 走；runner 从 repo 直接灌规则，执行侧要有独立的闸。"""
+
+    @pytest.mark.asyncio
+    async def test_idempotent_scene_action_refused(self, runner, monkeypatch):
+        """库里混进 idempotent=true 的场景行 → 每次 fire 都真触发，必须挡住。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=True, cooldown_minutes=5
+        )
+
+        result = await runner._execute_action("rule-guard", bad)
+
+        assert result.result is False
+        assert "idempotent=false" in result.error
+        spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("dead_cooldown", [0, None])
+    async def test_scene_action_without_cooldown_refused(
+        self, runner, monkeypatch, dead_cooldown
+    ):
+        """冷却是场景唯一的去重手段；runner 把 0/None 当「无冷却」，
+        这种行下发就是零限频——和 idempotent=true 同级，执行侧要一起挡。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=False,
+            cooldown_minutes=dead_cooldown,
+        )
+
+        result = await runner._execute_action("rule-guard", bad)
+
+        assert result.result is False
+        assert "cooldown_minutes >= 1" in result.error
+        spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scene_like_iid_is_rejected_not_dispatched(
+        self, runner, mock_miot_proxy
+    ):
+        """`scene.1.2` 曾会被当成 call_action，拿 scene_id 当 did 发出去。"""
+        action = RuleAction(did="scene-1", iid="scene.1.2", idempotent=False,
+                            cooldown_minutes=5)
+        result = await runner._execute_action("rule-nearmiss", action)
+
+        assert result.result is False
+        assert result.error == "invalid_iid: scene.1.2"
+        mock_miot_proxy.call_device_action.assert_not_called()
+
+
+class TestRuleServiceSceneIdExistence:
+    """scene_id 抄错一位 → 规则建成功但永远是哑的；创建期就要挡。"""
+
+    @pytest.mark.asyncio
+    async def test_unknown_scene_id_rejected(self, service):
+        rule = _make_static_rule(
+            rule_id="", actions=[_make_scene_action("scene-typo")]
+        )
+        with pytest.raises(ValidationException, match=r"Invalid or not-allowed scene IDs: scene-typo"):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_known_scene_id_passes(self, service):
+        rule = _make_static_rule(
+            rule_id="", actions=[_make_scene_action("scene-real")]
+        )
+        assert await service.create_rule(rule) == "new-rule-id"
+
+    @pytest.mark.asyncio
+    async def test_empty_scene_cache_says_so_not_invalid_id(
+        self, service, mock_miot_proxy
+    ):
+        """拿不到场景表时别谎报「你的 id 无效」——两种失败的修法完全不同。"""
+        from unittest.mock import AsyncMock as _AM
+
+        mock_miot_proxy.get_all_scenes = _AM(return_value={})
+        rule = _make_static_rule(rule_id="", actions=[_make_scene_action("scene-1")])
+        with pytest.raises(ValidationException, match=r"Scene list unavailable"):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_patch_rule_also_validates_scene_id(self, service, mock_rule_repo):
+        """PATCH 路径不能是校验缺口。"""
+        from miloco.rule.schema import RuleUpdate
+
+        mock_rule_repo.get_by_id = MagicMock(return_value=_make_static_rule())
+        with pytest.raises(ValidationException, match=r"Invalid or not-allowed scene IDs: scene-typo"):
+            await service.patch_rule(
+                "rule-1",
+                RuleUpdate(actions=[_make_scene_action("scene-typo")]),
+            )
+
+    @pytest.mark.asyncio
+    async def test_non_scene_rule_does_not_query_scenes(
+        self, service, mock_miot_proxy
+    ):
+        """没有场景动作时不该白跑一次场景查询。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value={})
+        mock_miot_proxy.get_all_scenes = spy
+        await service.create_rule(_make_static_rule(rule_id=""))
+        spy.assert_not_awaited()
+
+
+class TestRuleServiceSceneHomeScope:
+    """场景校验必须与执行侧 is_home_allowed 同口径：校验放行的，运行期要真触发得动。
+    `get_all_scenes` 返回账号名下所有家，不过滤会让白名单外的场景建成功后每次 fire 都失败。"""
+
+    @pytest.mark.asyncio
+    async def test_scene_from_other_home_rejected(self, service, mock_miot_proxy):
+        mock_miot_proxy.get_all_scenes = AsyncMock(
+            return_value={
+                "scene-other": SimpleNamespace(home_id="home-2", scene_name="他家")
+            }
+        )
+        rule = _make_static_rule(
+            rule_id="", actions=[_make_scene_action("scene-other")]
+        )
+        with pytest.raises(
+            ValidationException, match=r"Invalid or not-allowed scene IDs: scene-other"
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_other_home_scene_ids_not_leaked_in_error(
+        self, service, mock_miot_proxy
+    ):
+        """报错串不该把白名单外的 scene_id 列给调用方——那些 id 在 scene list 里看不到。"""
+        mock_miot_proxy.get_all_scenes = AsyncMock(
+            return_value={
+                "scene-1": SimpleNamespace(home_id=MOCK_HOME_ID, scene_name="本家"),
+                "secret-other-home": SimpleNamespace(home_id="home-2", scene_name="他家"),
+            }
+        )
+        rule = _make_static_rule(rule_id="", actions=[_make_scene_action("scene-typo")])
+        with pytest.raises(ValidationException) as exc:
+            await service.create_rule(rule)
+        assert "secret-other-home" not in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_no_home_enabled_says_so(self, service, mock_miot_proxy):
+        """未选家时白名单为空，任何场景都触发不了；创建期就说清楚。"""
+        mock_miot_proxy._kv_repo.get = MagicMock(return_value=None)
+        rule = _make_static_rule(rule_id="", actions=[_make_scene_action("scene-1")])
+        with pytest.raises(ValidationException, match=r"No home is enabled"):
+            await service.create_rule(rule)
+
+
+class TestRuleServiceIidShape:
+    """iid 形态在 CRUD 层就要挡。执行侧白名单只会让规则静默哑掉，
+    调用方拿到的仍是「创建成功」。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_iid", ["scene.1.2", "scenes", "Scene", "prop.2",
+                                         "action.1.2.3", "prop.a.b"])
+    async def test_malformed_iid_rejected(self, service, bad_iid):
+        bad = RuleAction(did="d1", iid=bad_iid, value=True)
+        rule = _make_static_rule(rule_id="", actions=[bad])
+        with pytest.raises(ValidationException, match=r"iid must be"):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("good_iid", ["prop.2.1", "action.7.3", "scene"])
+    async def test_valid_iid_shapes_pass(self, service, good_iid):
+        a = (
+            _make_scene_action("scene-1")
+            if good_iid == SCENE_IID_LITERAL
+            else RuleAction(did="d1", iid=good_iid, value=True)
+        )
+        rule = _make_static_rule(rule_id="", actions=[a])
+        assert await service.create_rule(rule) == "new-rule-id"
+
+
+class TestRulePatchScopedValidation:
+    """PATCH 的校验要跟着「这次改了什么」走。场景被删 / 家庭被关之后规则开始
+    每次 fire 都失败，而 `rule disable` 本身就是一次 PATCH —— 无条件校验会
+    在规则坏掉的那一刻把「先关掉它」这条自救路径堵死。"""
+
+    @pytest.fixture
+    def rule_with_dead_scene(self, mock_rule_repo, mock_miot_proxy):
+        mock_rule_repo.get_by_id = MagicMock(
+            return_value=_make_static_rule(actions=[_make_scene_action("scene-gone")])
+        )
+        mock_miot_proxy.get_all_scenes = AsyncMock(return_value={})
+        return mock_rule_repo
+
+    @pytest.mark.asyncio
+    async def test_disable_still_works_when_scene_gone(
+        self, service, rule_with_dead_scene
+    ):
+        from miloco.rule.schema import RuleUpdate
+
+        assert await service.patch_rule("rule-1", RuleUpdate(enabled=False)) is True
+
+    @pytest.mark.asyncio
+    async def test_condition_edit_still_works_when_scene_gone(
+        self, service, rule_with_dead_scene
+    ):
+        from miloco.rule.schema import RuleConditionUpdate, RuleUpdate
+
+        upd = RuleUpdate(condition=RuleConditionUpdate(query="有人经过"))
+        assert await service.patch_rule("rule-1", upd) is True
+
+    @pytest.mark.asyncio
+    async def test_touching_actions_still_validates_scene(
+        self, service, rule_with_dead_scene
+    ):
+        """真改动作时该校验还是要校验。"""
+        from miloco.rule.schema import RuleUpdate
+
+        with pytest.raises(ValidationException, match=r"Scene list unavailable"):
+            await service.patch_rule(
+                "rule-1", RuleUpdate(actions=[_make_scene_action("scene-gone")])
+            )
+
+
+class TestRuleSceneCooldownFloor:
+    """场景去重完全靠冷却，runner 把 0 当「无冷却」——填 0 等于零限频。"""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad_cooldown", [0, -1])
+    async def test_zero_or_negative_cooldown_rejected(self, service, bad_cooldown):
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=False,
+            cooldown_minutes=bad_cooldown,
+        )
+        rule = _make_static_rule(rule_id="", actions=[bad])
+        with pytest.raises(
+            ValidationException, match=r"iid=scene requires cooldown_minutes >= 1"
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_one_minute_cooldown_passes(self, service):
+        good = RuleAction(
+            did="scene-1", iid="scene", idempotent=False, cooldown_minutes=1
+        )
+        rule = _make_static_rule(rule_id="", actions=[good])
+        assert await service.create_rule(rule) == "new-rule-id"

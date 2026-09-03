@@ -1492,6 +1492,9 @@ class PerceptionConfigBody(BaseModel):
     window_size: int | None = Field(default=None, ge=1, le=60)
     # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
     # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
+    # 注意本开关（连同 enabled）只是**必要非充分**条件：还要该机位自己的 per-camera 闸也开
+    # （KV CAMERA_CROP_DENY_LIST_KEY，deny-list/默认开，`scope camera crop-on/crop-off` 逐路配），
+    # 三闸相与才裁。生效态看 /api/miot/scope/cameras 的 crop_effective。
     smart_crop_enabled: bool | None = None
     min_suggestion_urgency: Literal["low", "medium", "high"] | None = Field(
         default=None,
@@ -1540,7 +1543,11 @@ def _perception_config_payload() -> dict:
         "window_size": s.perception.collect.window_size,
         # 双闸分开暴露:smart_crop_enabled = 用户态(开关位置,取 user_enabled)vs
         # smart_crop_available = 决定开关能不能点(取发版级开关 enabled)。
-        # available=false 时前端置灰 + 提示「服务端尚未开放」,避免"开关开着但后端不裁"。
+        # available=false 时前端置灰 + 提示「服务端尚未开放」,避免"开关开着但**发版级闸**
+        # 没开"。注意本接口这两个字段只覆盖三闸里的**全局两闸**:即便都为 true、开关也亮着,
+        # 某个机位仍可能被 per-camera 闸单独关掉而不裁(见 PerceptionConfigBody.
+        # smart_crop_enabled 上方注释)。逐机位的生效态本接口不透出,看
+        # /api/miot/scope/cameras 的 crop_effective。
         # 注意 available 不只反映发版级开关:整份 crop_enhance 校验不过(数值字段写成字符串 /
         # min>max)时运行时整份退默认,这里跟着报 false —— 此时那句提示归因是偏的,真因看
         # 日志 event=crop_enhance_config_bad 的 reason。

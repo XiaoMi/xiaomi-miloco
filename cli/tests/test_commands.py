@@ -2067,6 +2067,49 @@ def test_scope_camera_disable(runner):
     )
 
 
+# ─── scope camera crop-on / crop-off（Smart Crop 逐机位开关，走 crop 端点）────
+
+
+def test_scope_camera_crop_off(runner):
+    """crop-off → PUT crop 端点 crop_in_use=false。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "crop-off", "c1"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/crop",
+        {"items": [{"did": "c1", "crop_in_use": False}]},
+    )
+
+
+def test_scope_camera_crop_on_batch(runner):
+    """批量 did 语义与 mic-on/off 同款；合成 did 直接透传给 backend 解析。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(
+            cli, ["scope", "camera", "crop-on", "c1", "dual:ch0", "dual:ch1"]
+        )
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/crop",
+        {
+            "items": [
+                {"did": "c1", "crop_in_use": True},
+                {"did": "dual:ch0", "crop_in_use": True},
+                {"did": "dual:ch1", "crop_in_use": True},
+            ]
+        },
+    )
+
+
+def test_scope_camera_crop_requires_did(runner):
+    """不给 did 直接报用法错（nargs=-1 + required=True）。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        result = runner.invoke(cli, ["scope", "camera", "crop-off"])
+    assert result.exit_code != 0
+    mock_put.assert_not_called()
+
+
 # ─── scope camera mic-on / mic-off（拾音开关，走 voice 端点）──────────────────
 
 
@@ -2422,3 +2465,79 @@ def test_scope_camera_list_shows_composite_did(runner):
     data = json.loads(result.output)["data"]
     assert [r["did"] for r in data] == ["solo", "dual:ch0", "dual:ch1"]
     assert all("channel" not in r and "channel_count" not in r for r in data)
+
+
+def _rule_create_argv(action: str) -> list[str]:
+    return [
+        "rule", "create",
+        "--task-id", "movie",
+        "--name", "[movie] 观影模式",
+        "--source", "cam_001",
+        "--condition", "有人比耶手势",
+        "--action", action,
+    ]
+
+
+def test_rule_create_scene_action_requires_non_idempotent(runner):
+    """CLI 先拦，别等后端 400 才知道。"""
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":true,"cooldown_minutes":5}'
+    result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    combined = result.output + (result.stderr or "")
+    assert "--action[0]: iid=scene requires idempotent=false" in combined
+
+
+def test_rule_create_scene_action_omitting_idempotent_rejected(runner):
+    """不写 idempotent 时默认 true，同样要被拦——默认值不能悄悄放行。"""
+    action = '{"did":"1792764217947197440","iid":"scene","cooldown_minutes":5}'
+    result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    combined = result.output + (result.stderr or "")
+    assert "iid=scene requires idempotent=false" in combined
+
+
+def test_rule_create_scene_action_requires_cooldown(runner):
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false}'
+    result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    combined = result.output + (result.stderr or "")
+    assert "idempotent=false requires cooldown_minutes" in combined
+
+
+def test_rule_create_scene_action_valid(runner):
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_minutes":5}'
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {"code": 0, "data": {"rule_id": "r-scene"}}
+        result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code == 0
+    body = mock.call_args[0][1]
+    assert body["actions"] == [
+        {
+            "did": "1792764217947197440",
+            "iid": "scene",
+            "idempotent": False,
+            "cooldown_minutes": 5,
+        }
+    ]
+
+
+def test_rule_create_scene_action_rejects_zero_cooldown(runner):
+    """冷却是场景唯一的去重手段，0 等于每次 fire 都真触发一次。"""
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_minutes":0}'
+    result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    combined = result.output + (result.stderr or "")
+    assert "iid=scene requires cooldown_minutes >= 1" in combined
+
+
+def test_rule_create_scene_action_string_cooldown_no_traceback(runner):
+    """agent 可能把数字写成 "5"；CLI 不能因此抛 TypeError traceback，
+    要么放给后端收敛，要么走 _exit_error 的干净 JSON 报错。"""
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_minutes":"5"}'
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {"code": 0, "data": {"rule_id": "r-str"}}
+        result = runner.invoke(cli, _rule_create_argv(action))
+    combined = result.output + (result.stderr or "")
+    assert "Traceback" not in combined
+    assert "TypeError" not in combined
+    assert result.exit_code == 0
