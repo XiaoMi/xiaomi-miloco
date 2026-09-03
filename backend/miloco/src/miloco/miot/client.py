@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any
 
 from av.audio.frame import AudioFrame
 from av.video.frame import VideoFrame
@@ -38,6 +39,8 @@ from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import (
+    allowed_home_ids,
+    filter_by_home,
     is_home_allowed,
     physical_camera_did,
     select_active_camera_dids,
@@ -49,9 +52,17 @@ from miloco.miot.mips_listeners import (
     SceneEventListener,
 )
 from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
+from miloco.miot.state_push import write_online
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
+
+# 容器里这一笔的来源标记。与对齐、推送分开记，dump 里一眼能看出是谁删的
+STATE_RECONCILE_SOURCE = "iot_reconcile"
+
+# 云端重拉写在线标志时的来源标记。与推送分开记：排障方向完全不同 —— 一条去翻 MQTT
+# 日志，一条去看那次刷新
+STATE_REFRESH_SOURCE = "iot_refresh"
 
 
 # 三类对账(meta / device-state / scene)共享的总在飞订阅并发上限——压力落在
@@ -233,8 +244,8 @@ class MiotProxy:
         # 在锁内递增;对账提交不递增、只校验代次,防止把飞行期间的改写覆盖掉
         # (见 _reconcile_subscriptions)。
         self._sub_intent_generation = 0
-        # 三类对账共用一个并发闸:同时刻对同一条 broker 连接的在飞 SUBSCRIBE
-        # 总数不超过 _RECONCILE_CONCURRENCY(每类自建会把上限放大成 3×)
+        # 四类对账共用一个并发闸:同时刻对同一条 broker 连接的在飞 SUBSCRIBE
+        # 总数不超过 _RECONCILE_CONCURRENCY(每类自建会把上限按类数翻倍)
         self._sub_semaphore = asyncio.Semaphore(_RECONCILE_CONCURRENCY)
         # 相机清单是否至少成功拉取过一次（区分"真没相机"与"还没加载"）
         self._cameras_loaded = False
@@ -316,6 +327,17 @@ class MiotProxy:
         # reflect the push.
         self._subscribed_device_state_dids: set[str] = set()
 
+        # Dids whose device/{did}/up/properties_changed/# topic this proxy
+        # intends to subscribe. Mirrors _subscribed_device_state_dids;
+        # ACCOUNT-WIDE —— 家庭过滤放在写容器那一侧(见 state_push)。
+        self._subscribed_props_dids: set[str] = set()
+
+        # 上下线 / 属性推送的本层消费方。SDK 那两个回调是单槽、已被本类占着，
+        # 别的消费方（状态容器、属性历史）挂在这里。存在 proxy 上而不是 client 上，
+        # re-OAuth 重建 client 后不用重新注册
+        self._state_listeners: list[Callable[[Any], Awaitable[None]]] = []
+        self._props_listeners: list[Callable[[Any], Awaitable[None]]] = []
+
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
 
@@ -369,7 +391,7 @@ class MiotProxy:
         return instance
 
     def _reset_subscription_mirrors(self) -> None:
-        """清空三个订阅意图镜像。
+        """清空四个订阅意图镜像。
 
         必须原地清空(见 _reconcile_subscriptions 的"原地改写"要求)。
         不持锁——init/deinit 是生命周期边界,SDK 侧集合一并重置;此刻若有残留
@@ -380,6 +402,7 @@ class MiotProxy:
             self._subscribed_meta_dids,
             self._subscribed_device_state_dids,
             self._subscribed_scene_home_ids,
+            self._subscribed_props_dids,
         ):
             mirror.clear()
 
@@ -408,7 +431,7 @@ class MiotProxy:
 
     async def _subscription_sync_loop(self) -> None:
         """对账循环:串行跑轮次,期间有新触发或代次被改写则补一轮再停。"""
-        labels = ("meta", "device-state", "scene")
+        labels = ("meta", "device-state", "scene", "device-props")
         try:
             while True:
                 self._sub_sync_rerun_requested = False
@@ -417,6 +440,7 @@ class MiotProxy:
                     self._sync_meta_subscriptions(),
                     self._sync_device_state_subscriptions(),
                     self._sync_scene_subscriptions(),
+                    self._sync_props_subscriptions(),
                     return_exceptions=True,
                 )
                 for label, r in zip(labels, results):
@@ -469,6 +493,11 @@ class MiotProxy:
         # backend restart), plus a trailing reconciliation.
         self._miot_client.register_device_state_changed_callback(
             self._on_device_state_changed_event
+        )
+        # Device property push: fan out to this layer's consumers (state
+        # container today; property history when that lane lands).
+        self._miot_client.register_device_props_changed_callback(
+            self._on_device_props_changed_event
         )
         # Home scene change (rename/delete/edit): refresh the scene list.
         self._miot_client.register_scene_changed_callback(self._on_scene_changed_event)
@@ -855,6 +884,18 @@ class MiotProxy:
             await self.refresh_devices()
         return self._device_info_dict
 
+    async def devices_in_current_home(self) -> dict[str, MIoTDeviceInfo]:
+        """只回当前启用家庭的设备。`get_devices` 是账号全量，过滤在各调用方自己做。"""
+        return filter_by_home(self._kv_repo, await self.get_devices())
+
+    def has_enabled_home(self) -> bool:
+        """启用集非空。
+
+        用来把「作用域是空的」和「作用域里没有设备」分开 —— 两者的
+        `devices_in_current_home()` 都是空 dict，但前者说明还没选家庭。
+        """
+        return bool(allowed_home_ids(self._kv_repo))
+
     async def _on_lan_device_changed(self, did: str, info: MIoTLanDeviceInfo) -> None:
         # refresh_cameras deep-copies SDK state, so post-init lan_online
         # changes only reach _camera_info_dict via this hook.
@@ -988,6 +1029,10 @@ class MiotProxy:
 
         与 refresh_cameras 共用 ``_refresh_cameras_lock``,防并发改 ``_camera_info_dict``。
         """
+        from miloco.manager import get_manager
+
+        # 与 refresh_devices 同口径：代号在打云端之前记
+        scope = get_manager().current_scope()
         async with self._refresh_cameras_lock:
             try:
                 cameras = await self._miot_client.get_cameras_async()
@@ -1012,11 +1057,20 @@ class MiotProxy:
             logger.warning("refresh awake cache failed: %s", e)
         # 本方法经 get_cameras_async → get_devices_async 顺带增删了设备缓存(别名),
         # 与 refresh_cameras 尾部同理补对账,同样派后台任务不挡响应路径。
+        # 那次别名副作用也刷新了全量设备的 online,容器要跟着走。
+        try:
+            self._sync_iot_online_flags(self._device_info_dict, scope)
+        except Exception as e:
+            logger.warning("同步在线标志到容器失败: %s", e)
         self._spawn_subscription_sync()
         return self._camera_info_dict
 
     async def refresh_devices(self) -> dict[str, MIoTDeviceInfo] | None:
+        from miloco.manager import get_manager
+
         async with self._refresh_devices_lock:
+            # 代号在打云端之前记：这一趟要往返，回来时可能已经不是当初那个作用域了
+            scope = get_manager().current_scope()
             try:
                 devices = await self._miot_client.get_devices_async()
                 # 故意不 deepcopy:返回的就是 SDK buffer 本体。refresh_cameras 尾部的
@@ -1027,10 +1081,76 @@ class MiotProxy:
                 # 本方法挂在 /miot/home_info?refresh=true 与 /miot/refresh_miot_devices
                 # 两个 HTTP handler 上,不能被整批 SUBACK 拖住。
                 self._spawn_subscription_sync()
-                return devices
             except Exception as e:
                 logger.error("Failed to refresh devices: %s", e)
                 return None
+            try:
+                self._reconcile_iot_deletions(devices, scope)
+            except Exception as e:
+                # 调和失败不该让刷新看起来失败：设备缓存已换、订阅对账已派出
+                logger.warning("清理已离开当前家庭的设备失败: %s", e)
+            try:
+                self._sync_iot_online_flags(devices, scope)
+            except Exception as e:
+                logger.warning("同步在线标志到容器失败: %s", e)
+            return devices
+
+    def _sync_iot_online_flags(
+        self, devices: dict[str, MIoTDeviceInfo], scope: int
+    ) -> None:
+        """把当前家庭设备的在线标志重写一遍。
+
+        推送会在 MQTT 断连期间丢，而重拉会把缓存修对 —— 不跟着写容器，容器就停在旧值
+        上，且没有任何机制能看出它落后了。
+
+        同值不产事件（容器按值比对），所以每次刷新都重写不会刷爆订阅方。
+        """
+        from miloco.manager import get_manager
+
+        manager = get_manager()
+        if scope != manager.current_scope():
+            logger.info("作用域已变，跳过这次在线标志同步")
+            return
+        store = manager.state_store
+        for did, device in filter_by_home(self._kv_repo, devices).items():
+            write_online(
+                store,
+                did,
+                bool(getattr(device, "online", True)),
+                source=STATE_REFRESH_SOURCE,
+            )
+
+    def _reconcile_iot_deletions(
+        self, devices: dict[str, MIoTDeviceInfo], scope: int
+    ) -> None:
+        """删掉容器里已不属于当前家庭的设备。
+
+        设备换家、单台解绑、设备被删，三种情况同一个形态，一次覆盖，不用各写一个钩子。
+
+        方向是「容器里有、当前家庭没有」。反过来那批是「还没对齐到的」，归对齐管。
+
+        `devices` 是**本次刷新成功返回的那份**，不是 `_device_info_dict`、不是上一次的
+        缓存 —— 拿旧缓存做差集会把刚进来的设备算成多余的。
+        """
+        from miloco.manager import get_manager
+
+        manager = get_manager()
+        if scope != manager.current_scope():
+            # refresh_devices 是 MIPS 重连回调，切家过程中会被触发。不挡的话，一个旧
+            # 回调会拿旧家庭的设备集合去和刚清空重建的新树做差集，把新家庭的设备全删掉
+            logger.info("作用域已变，跳过这次设备清理")
+            return
+        if not devices:
+            # 「家里一台设备都没有」和「接口出问题」长得一样，宁可留一台幽灵设备。
+            # 过滤后为空则照常清理 —— 那是这个家庭确实没有设备
+            logger.info("云端没返回任何设备，跳过这次清理")
+            return
+        store = manager.state_store
+        keep = set(filter_by_home(self._kv_repo, devices))
+        # 只要第一层的键；`get` 落在中间节点会把整棵子树复制一遍，等出现第二个需要
+        # 枚举实体 id 的调用方再给容器加一个只取子节点名的接口
+        for did in set(store.get("iot/device", {})) - keep:
+            store.delete(f"iot/device/{did}", source=STATE_RECONCILE_SOURCE)
 
     @staticmethod
     def _log_device_diff(action: str, dev: MIoTDeviceInfo | None, did: str) -> None:
@@ -1141,9 +1261,9 @@ class MiotProxy:
         await self._meta_listener.on_event(msg, welcome=welcome)
 
     async def _on_device_state_changed_event(self, msg: MIoTDeviceStateEvent) -> None:
-        """处理云端上下线推送:直接更新两份缓存的 `online`。
+        """处理云端上下线推送:更新两份缓存的 `online`,再交给本层的消费方。
 
-        末尾的相机对账防抖只在三种情况重新武装:命中相机、两份缓存都不认识、
+        相机对账防抖只在三种情况重新武装:命中相机、两份缓存都不认识、
         相机清单从未成功加载(注意不是"缓存为空"——零相机账户加载成功是空字典,
         按空判断会让每条灯事件永续重拉)。已知非相机设备不武装。
         """
@@ -1170,6 +1290,29 @@ class MiotProxy:
                 )
         if cam is not None or dev is None or not self._cameras_loaded:
             await self._camera_state_listener.on_event(msg)
+        await self._fan_out(self._state_listeners, msg, "device-state")
+
+    def add_device_state_listener(
+        self, callback: Callable[[Any], Awaitable[None]]
+    ) -> None:
+        """加一个上下线推送的消费方。多次调用按注册顺序全部收到。"""
+        self._state_listeners.append(callback)
+
+    def add_device_props_listener(
+        self, callback: Callable[[Any], Awaitable[None]]
+    ) -> None:
+        """加一个属性推送的消费方。多次调用按注册顺序全部收到。"""
+        self._props_listeners.append(callback)
+
+    async def _fan_out(
+        self, listeners: list[Callable[[Any], Awaitable[None]]], msg: Any, label: str
+    ) -> None:
+        """逐个投递。一个消费方抛异常不影响其余 —— 它们互不知情，也不该互相背锅。"""
+        for callback in listeners:
+            try:
+                await callback(msg)
+            except Exception as e:
+                logger.error("%s listener failed: %s", label, e)
 
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:
         """True if an hr_change moved a device into a managed home from an
@@ -1271,6 +1414,44 @@ class MiotProxy:
             label="device-online-state",
         )
 
+    async def _sync_props_subscriptions(self) -> None:
+        """Reconcile per-device property push subs to the device list.
+
+        在 _spawn_subscription_sync 派出的后台任务里跑,并发安全见
+        _sync_meta_subscriptions。**ACCOUNT-WIDE**:属性历史对管辖范围外的设备
+        一样有用,而容器只装当前家庭 —— 那道过滤在写容器那一侧(state_push),
+        不在这里。
+
+        不设「本代已对齐」的门:订阅要同时喂容器和属性历史两个消费方,门是容器
+        一家的需求。对齐完成前到的推送由写容器那一侧丢掉。
+
+        Dids containing '/' (Huami/Zepp-bridged sub-devices) are skipped:
+        the '/' breaks the topic path AND the decoder regex.
+        """
+        skipped = [
+            did for did in self._device_info_dict if not _is_subscribable_did(did)
+        ]
+        if skipped:
+            logger.debug(
+                "device-props: skipping %d did(s) with '/': %s", len(skipped), skipped
+            )
+        await _reconcile_subscriptions(
+            lambda: {
+                did for did in self._device_info_dict if _is_subscribable_did(did)
+            },
+            self._subscribed_props_dids,
+            self._miot_client.sub_device_props_async,
+            self._miot_client.unsub_device_props_async,
+            lock=self._sub_intent_lock,
+            semaphore=self._sub_semaphore,
+            generation=lambda: self._sub_intent_generation,
+            label="device-props",
+        )
+
+    async def _on_device_props_changed_event(self, msg: Any) -> None:
+        """把属性推送交给本层的消费方。本类自己不缓存属性值,这里只做扇出。"""
+        await self._fan_out(self._props_listeners, msg, "device-props")
+
     async def _on_scene_changed_event(self, msg: MIoTSceneChangedEvent) -> None:
         """Forward home scene-change push events to the dedicated listener.
 
@@ -1281,7 +1462,11 @@ class MiotProxy:
         await self._scene_listener.on_event(msg)
 
     async def _on_subscription_reset(
-        self, meta_dids: set, state_dids: set, scene_home_ids: set
+        self,
+        meta_dids: set,
+        state_dids: set,
+        scene_home_ids: set,
+        props_dids: set,
     ) -> None:
         """mips 实例重建后,把本层意图镜像重建为 SDK 重放后的集合(原地改写,见
         _reconcile_subscriptions 的原地要求)。代次递增使飞行中对账的提交自失效,
@@ -1291,6 +1476,7 @@ class MiotProxy:
                 (self._subscribed_meta_dids, meta_dids),
                 (self._subscribed_device_state_dids, state_dids),
                 (self._subscribed_scene_home_ids, scene_home_ids),
+                (self._subscribed_props_dids, props_dids),
             ):
                 mirror.clear()
                 mirror.update(truth)

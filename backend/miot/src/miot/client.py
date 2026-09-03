@@ -37,6 +37,7 @@ from .types import (
     MIoTCameraStatus,
     MIoTDeviceBindEvent,
     MIoTDeviceInfo,
+    MIoTDevicePropsEvent,
     MIoTDeviceStateEvent,
     MIoTHomeInfo,
     MIoTLanDeviceInfo,
@@ -148,6 +149,9 @@ class MIoTClient:
     # Home ids whose `home/{home_id}/scene/#` topic is (intended to be)
     # subscribed. Same ownership model as _meta_sub_dids, but per home.
     _scene_sub_home_ids: set
+    # Dids whose `device/{did}/up/properties_changed/#` topic is (intended to
+    # be) subscribed. Same ownership/replay model as _meta_sub_dids.
+    _props_sub_dids: set
     _callback_scene_changed: Optional[Callable[[MIoTSceneChangedEvent], Any]]
 
     _init_done: bool
@@ -209,13 +213,15 @@ class MIoTClient:
         self._callback_user_bind = None
         self._callback_device_meta_changed = None
         self._callback_device_state_changed = None
+        self._callback_device_props_changed = None
         self._meta_sub_dids = set()
         self._state_sub_dids = set()
         self._scene_sub_home_ids = set()
+        self._props_sub_dids = set()
         self._callback_scene_changed = None
         self._callback_mips_connect: Optional[Callable[[], Any]] = None
         self._callback_subscription_reset: Optional[
-            Callable[[set[str], set[str], set[str]], Any]
+            Callable[[set[str], set[str], set[str], set[str]], Any]
         ] = None
 
         # Pre-declare sub-client slots so deinit_async can safely walk them
@@ -470,9 +476,11 @@ class MIoTClient:
             self._callback_user_bind = None
             self._callback_device_meta_changed = None
             self._callback_device_state_changed = None
+            self._callback_device_props_changed = None
             self._meta_sub_dids = set()
             self._state_sub_dids = set()
             self._scene_sub_home_ids = set()
+            self._props_sub_dids = set()
             self._callback_scene_changed = None
             self._callback_mips_connect = None
             self._callback_subscription_reset = None
@@ -870,6 +878,7 @@ class MIoTClient:
                 self._meta_sub_dids,
                 self._state_sub_dids,
                 self._scene_sub_home_ids,
+                self._props_sub_dids,
             )
             if asyncio.iscoroutine(ret):
                 await ret
@@ -931,6 +940,7 @@ class MIoTClient:
             self._meta_sub_dids = set()
             self._state_sub_dids = set()
             self._scene_sub_home_ids = set()
+            self._props_sub_dids = set()
             await self._fire_subscription_reset()
             return
         self._mips_cloud = mips
@@ -1014,6 +1024,19 @@ class MIoTClient:
             )
             _LOGGER.info(
                 "mips_cloud re-subscribed device-state for %d/%d devices",
+                ok,
+                len(dids),
+            )
+
+        # Same replay for per-device property push subs.
+        if self._props_sub_dids:
+            dids = sorted(self._props_sub_dids)
+            self._props_sub_dids = set()
+            ok = await _replay_subscriptions(
+                dids, self.sub_device_props_async, "device-props"
+            )
+            _LOGGER.info(
+                "mips_cloud re-subscribed device-props for %d/%d devices",
                 ok,
                 len(dids),
             )
@@ -1134,6 +1157,45 @@ class MIoTClient:
             return
         await mips.unsub_device_state_async(did)
 
+    def register_device_props_changed_callback(
+        self, callback: Optional[Callable[[MIoTDevicePropsEvent], Any]]
+    ) -> None:
+        """Register the single property-push handler.
+
+        Fires for every subscribed device's `properties_changed` push. Pass
+        None to clear. Several consumers fan out one layer up (MiotProxy) —
+        this slot stays single so the SDK contract matches the other three.
+        """
+        self._callback_device_props_changed = callback
+
+    def _on_device_props_msg(self, msg: MIoTDevicePropsEvent) -> None:
+        cb = self._callback_device_props_changed
+        if cb is None:
+            return
+        ret = cb(msg)
+        if asyncio.iscoroutine(ret):
+            asyncio.ensure_future(ret)
+
+    async def sub_device_props_async(self, did: str) -> None:
+        """订阅一台设备的属性推送(幂等);契约同 sub_device_state_async。"""
+        if did in self._props_sub_dids:
+            return
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            raise MipsConnectionError(
+                f"mips_cloud unavailable; device-props subscribe not issued did={did}"
+            )
+        await mips.sub_device_props_async(did, self._on_device_props_msg)
+        self._props_sub_dids.add(did)
+
+    async def unsub_device_props_async(self, did: str) -> None:
+        """Unsubscribe one device's property push subtree."""
+        self._props_sub_dids.discard(did)
+        mips = self._mips_cloud
+        if mips is None:
+            return
+        await mips.unsub_device_props_async(did)
+
     def register_scene_changed_callback(
         self, callback: Optional[Callable[[MIoTSceneChangedEvent], Any]]
     ) -> None:
@@ -1186,9 +1248,16 @@ class MIoTClient:
         self._callback_mips_connect = callback
 
     def register_subscription_reset_callback(
-        self, callback: Optional[Callable[[set[str], set[str], set[str]], Any]]
+        self,
+        callback: Optional[Callable[[set[str], set[str], set[str], set[str]], Any]],
     ) -> None:
-        """mips 重放后回调上层,把三个重放后的 tracked 集合交回(meta/state/scene)。"""
+        """mips 重放后回调上层,把四个重放后的 tracked 集合交回
+        (meta / state / scene / props)。
+
+        参数个数要与 _fire_subscription_reset 的实参一致:少一个的话调用时抛
+        TypeError,而那边的 except Exception 会把它吞掉 —— 表现是上层的订阅镜像
+        静默不再重建。
+        """
         self._callback_subscription_reset = callback
 
     def _on_mips_connect(self, connected: bool) -> None:

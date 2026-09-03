@@ -95,7 +95,9 @@ async def _log_cleanup_loop() -> None:
         except Exception as e:
             logger.error("Perception log cleanup failed: %s", e)
         try:
-            deleted_od = mgr.perception_service.cleanup_on_demand_logs(settings.perception.event_ttl_days)
+            deleted_od = mgr.perception_service.cleanup_on_demand_logs(
+                settings.perception.event_ttl_days
+            )
             logger.info("On-demand log cleanup: deleted %d entries", deleted_od)
         except Exception as e:
             logger.error("On-demand log cleanup failed: %s", e)
@@ -108,7 +110,9 @@ async def _log_cleanup_loop() -> None:
         # 每轮现读,运行时建/删 flag 下个周期立即生效。
         if (miloco_home() / ".debug_observability").exists():
             try:
-                dj = cleanup_trace_jsonl(trace_root, settings.perf.retention.trace_jsonl_days)
+                dj = cleanup_trace_jsonl(
+                    trace_root, settings.perf.retention.trace_jsonl_days
+                )
                 logger.info("Trace jsonl cleanup: removed %d day-dirs", dj)
             except Exception as e:
                 logger.error("Trace jsonl cleanup failed: %s", e)
@@ -127,10 +131,16 @@ async def _log_cleanup_loop() -> None:
                     obs_init_schema(conn)
                     counts = (
                         cleanup_traces_table(conn, settings.perf.retention.traces_days),
-                        cleanup_traces_device_table(conn, settings.perf.retention.traces_days),
+                        cleanup_traces_device_table(
+                            conn, settings.perf.retention.traces_days
+                        ),
                         cleanup_events_table(conn, settings.perf.retention.events_days),
-                        cleanup_agent_runs_table(conn, settings.perf.retention.agent_runs_days),
-                        cleanup_action_ledger_table(conn, settings.perf.retention.action_ledger_days),
+                        cleanup_agent_runs_table(
+                            conn, settings.perf.retention.agent_runs_days
+                        ),
+                        cleanup_action_ledger_table(
+                            conn, settings.perf.retention.action_ledger_days
+                        ),
                     )
                     # DELETE 把页标 free 但不还 OS,逐页回收(为何必须 fetchall、为何按
                     # chunk 分批)见 connector.incremental_vacuum。
@@ -149,7 +159,11 @@ async def _log_cleanup_loop() -> None:
                 logger.info(
                     "Observability cleanup: traces=%d, traces_device=%d, "
                     "events=%d, agent_runs=%d, action_ledger=%d",
-                    dt, dtd, de, da, dal,
+                    dt,
+                    dtd,
+                    de,
+                    da,
+                    dal,
                 )
             except Exception as e:
                 logger.error("Observability DB cleanup failed: %s", e)
@@ -246,7 +260,9 @@ async def _rollover_daily_loop() -> None:
     # period_start 错位导致 rollover 静默跳过。
     try:
         result = await asyncio.to_thread(
-            rollover_daily_job, service, _dt.now(deploy_timezone()),
+            rollover_daily_job,
+            service,
+            _dt.now(deploy_timezone()),
             _notify_rule_engine_rollover,
         )
         logger.info("Rollover self-heal at startup done: %s", result)
@@ -258,7 +274,9 @@ async def _rollover_daily_loop() -> None:
         await asyncio.sleep(wait)
         try:
             result = await asyncio.to_thread(
-                rollover_daily_job, service, _dt.now(deploy_timezone()),
+                rollover_daily_job,
+                service,
+                _dt.now(deploy_timezone()),
                 _notify_rule_engine_rollover,
             )
             logger.info("Daily rollover at 0:05 done: %s", result)
@@ -277,6 +295,7 @@ async def _backfill_tier_a_reid_embeddings() -> None:
     """
     try:
         from miloco.perception.engine.identity.engine import build_identity_library
+
         extractor = get_manager().perception_service.get_reid_extractor()
         if extractor is None:
             logger.info("启动 backfill tier_a ReID emb 跳过: 无可用 ReID extractor")
@@ -329,9 +348,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # 这一行能一眼判出后端实际读的是哪套存储、二者是否同锚。
     try:
         from miloco.perception.engine.identity.config_loader import resolve_library_root
+
         logger.info(
             "存储路径: workspace_dir=%s | database=%s | identity_lib=%s",
-            settings.directories.workspace_dir, settings.database_path, resolve_library_root(),
+            settings.directories.workspace_dir,
+            settings.database_path,
+            resolve_library_root(),
         )
     except Exception:  # noqa: BLE001
         logger.warning("打印存储路径失败（忽略）", exc_info=True)
@@ -376,6 +398,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     except Exception as e:
         logger.error("Manager initialization failed: %s", e)
         raise
+
+    # 状态容器的启动对齐：拉一遍在线设备属性写进容器。要打若干次云端请求,
+    # 所以不放 initialize() 里挡启动;关闭时在 shutdown 段取消。
+    get_manager().start_state_alignment()
 
     # Start monitoring threads after manager.initialize() completes
     mon = get_monitor()
@@ -444,6 +470,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await rollover_task
     except asyncio.CancelledError:
         pass
+
+    # 先取消对齐、再停容器:反了的话对齐还在往一个已停的容器里写,变更事件全被作废。
+    align_task = get_manager().state_align_task
+    if align_task is not None:
+        align_task.cancel()
+        try:
+            await align_task
+        except asyncio.CancelledError:
+            # 这个 CancelledError 是上一行 cancel() 自己引发的，不是外面在取消我们
+            pass
+    get_manager().deinit_iot_push()
+    get_manager().state_store.stop()
 
     # 关闭顺序遵循"生产者先于消费者":
     #   perception engine (traces/events 主要生产者)
@@ -598,6 +636,7 @@ def _resolved_static_dirs() -> tuple[Path, Path]:
 register_reset_hook(
     "miloco.main:_resolved_static_dirs", _resolved_static_dirs.cache_clear
 )
+
 
 @app.get("/{full_path:path}")
 async def spa_handler(full_path: str, request: Request):

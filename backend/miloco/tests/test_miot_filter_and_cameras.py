@@ -2,7 +2,7 @@
 
 Covers:
 - filter.py round-trip via in-memory KVRepo stub
-- enabled set semantics (empty = no filter)
+- enabled set semantics (empty = 一个家庭都没启用，fail-closed)
 - disabled set semantics (empty = no exclusion)
 - service.switch_home / toggle_camera 单项写
 - service.list_homes / list_cameras_with_state in_use 标记正确
@@ -346,6 +346,56 @@ async def test_list_homes_auto_selects_first_when_empty():
     by_id = {h["home_id"]: h for h in homes}
     assert by_id["H1"]["in_use"] is True
     assert by_id["H2"]["in_use"] is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_home_selected_picks_the_first_home_when_none_is_enabled():
+    kv = _FakeKV()
+    svc = _make_service(devices={"d1": _home("H2"), "d2": _home("H1")}, kv=kv)
+
+    homes, changed = await svc._ensure_home_selected()
+
+    assert changed is True
+    assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H1"]
+    assert {h["home_id"] for h in homes} == {"H1", "H2"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_home_selected_reports_no_change_when_one_is_already_enabled():
+    svc = _make_service(
+        devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_kv_with_home("H2")
+    )
+
+    _, changed = await svc._ensure_home_selected()
+
+    assert changed is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_home_selected_does_not_reset_sessions_by_itself():
+    """它的副作用只有写 KV。要不要因此重置会话是调用方的决定。"""
+    svc = _make_service(devices={"d1": _home("H1")}, kv=_FakeKV())
+    resets: list[int] = []
+    svc._schedule_agent_session_reset = lambda: resets.append(1)
+
+    await svc._ensure_home_selected()
+
+    assert resets == []
+
+
+@pytest.mark.asyncio
+async def test_switch_home_resets_sessions_once_when_no_home_was_enabled():
+    """用户点一次，不该先自动切到首个家庭再切到目标。
+
+    那样会重置两次会话，而且中间那段时间容器装的是用户没选的那个家。
+    """
+    svc = _make_service(devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_FakeKV())
+    resets: list[int] = []
+    svc._schedule_agent_session_reset = lambda: resets.append(1)
+
+    await svc.switch_home("H2")
+
+    assert resets == [1]
 
 
 @pytest.mark.asyncio
@@ -851,6 +901,8 @@ async def test_authorize_with_code_clears_scope_before_token_exchange():
         deinit=AsyncMock(),
         init=AsyncMock(),
         refresh_cameras=AsyncMock(),
+        refresh_devices=AsyncMock(),
+        refresh_scenes=AsyncMock(),
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
@@ -1409,6 +1461,8 @@ async def test_authorize_with_code_auto_selects_first_home():
         ),
         get_miot_auth_info=AsyncMock(),
         refresh_cameras=AsyncMock(),
+        refresh_devices=AsyncMock(),
+        refresh_scenes=AsyncMock(),
         get_devices=AsyncMock(return_value={"d1": _home("H1"), "d2": _home("H2")}),
         get_cameras=AsyncMock(return_value={}),
     )
@@ -2042,7 +2096,6 @@ async def test_set_camera_prompt_does_not_restart_or_refresh():
     svc._restart_perception_engine.assert_not_awaited()
 
 
-
 # ─── MiotService: Smart Crop 逐机位开关（crop_in_use，deny-list / 默认开）──────
 
 
@@ -2361,3 +2414,54 @@ async def test_crop_effective_distinguishes_three_kinds_of_not_cropping():
     assert (by["c3"]["in_use"], by["c3"]["crop_in_use"], by["c3"]["crop_effective"]) == (
         True, True, True
     )
+
+
+# ── devices_in_current_home：给状态容器用的那条过滤入口 ──────────────────
+
+
+def _proxy_with(devices: dict, kv: _FakeKV) -> MiotProxy:
+    """不跑 __init__ —— 造一个真 MiotProxy 要连云端和 SDK，这里只测过滤这一段。"""
+    proxy = object.__new__(MiotProxy)
+    proxy._device_info_dict = devices
+    proxy._kv_repo = kv
+    return proxy
+
+
+def test_devices_in_current_home_drops_the_other_homes():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    proxy = _proxy_with(
+        {
+            "mine": SimpleNamespace(home_id="H1"),
+            "parents": SimpleNamespace(home_id="H2"),
+        },
+        kv,
+    )
+
+    assert set(asyncio.run(proxy.devices_in_current_home())) == {"mine"}
+
+
+def test_devices_in_current_home_is_empty_when_no_home_is_enabled():
+    """空白名单表示一个家庭都没启用，不是「不过滤」。"""
+    proxy = _proxy_with({"mine": SimpleNamespace(home_id="H1")}, _FakeKV())
+
+    assert asyncio.run(proxy.devices_in_current_home()) == {}
+
+
+def test_devices_without_a_home_id_are_dropped():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    proxy = _proxy_with({"orphan": SimpleNamespace()}, kv)
+
+    assert asyncio.run(proxy.devices_in_current_home()) == {}
+
+
+def test_has_enabled_home_is_false_on_an_empty_white_list():
+    proxy = _proxy_with({"mine": SimpleNamespace(home_id="H1")}, _FakeKV())
+
+    assert proxy.has_enabled_home() is False
+
+
+def test_has_enabled_home_does_not_look_at_the_devices():
+    """启用了家庭但里面一台设备都没有，作用域仍然是存在的 —— 对齐靠这个区分二者。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+
+    assert _proxy_with({}, kv).has_enabled_home() is True
