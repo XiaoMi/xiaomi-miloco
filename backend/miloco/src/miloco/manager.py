@@ -29,6 +29,11 @@ from miloco.task.service import TaskService
 
 logger = logging.getLogger(__name__)
 
+# 同一作用域代内对同一台设备最多补拉几次。补拉的判据是「容器里没有这条叶子」，而永久
+# 不可读的属性永远不会进容器 —— 不限次的话，一台反复掉线的设备每次上线都会重新请求同一
+# 批读不到的属性，挤米家限频。留几次是为了瞬时不可读还有机会
+TOP_UP_MAX_ATTEMPTS = 3
+
 
 class Manager:
     """
@@ -57,6 +62,8 @@ class Manager:
             cls._instance._state_store = StateStore()
             cls._instance._iot_push_writer = None
             cls._instance._prop_top_up = None
+            # did → 本代已补拉次数。切作用域时清空（对齐也是一代跑一次，口径一致）
+            cls._instance._top_up_attempts = {}
         return cls._instance
 
     def __init__(self):
@@ -79,11 +86,7 @@ class Manager:
         )
         # 上线补拉是上下线扇出的第二个消费方，与写入器互不知情：写入器只管把标志写进
         # 容器，补拉只管把这台设备缺的属性补齐
-        self._prop_top_up = PropTopUpListener(
-            top_up=lambda did: top_up_missing_props(
-                self._state_store, self._miot_proxy, did
-            )
-        )
+        self._prop_top_up = PropTopUpListener(top_up=self._top_up_props)
         self._miot_proxy.add_device_state_listener(
             self._iot_push_writer.on_device_state
         )
@@ -92,12 +95,26 @@ class Manager:
         )
         self._miot_proxy.add_device_state_listener(self._prop_top_up.on_event)
 
+    async def _top_up_props(self, did: str) -> int:
+        """按代限次地补拉这台设备缺的属性。返回写进去的条数。
+
+        额度用完就直接返回 —— 第一次要么补上了（叶子有了，下次的缺口更小），要么那些
+        属性读不到（再试结果一样）。见 TOP_UP_MAX_ATTEMPTS。
+        """
+        used = self._top_up_attempts.get(did, 0)
+        if used >= TOP_UP_MAX_ATTEMPTS:
+            logger.debug("top-up: 本代额度已用完，跳过 did=%s", did)
+            return 0
+        self._top_up_attempts[did] = used + 1
+        return await top_up_missing_props(self._state_store, self._miot_proxy, did)
+
     def current_scope(self) -> int:
         return self._scope
 
     def begin_scope_switch(self) -> int:
         """代号 +1 并返回新值。唯一的递增入口。"""
         self._scope += 1
+        self._top_up_attempts.clear()
         return self._scope
 
     def mark_scope_aligned(self, scope: int) -> None:

@@ -159,6 +159,11 @@ async def test_a_flapping_device_is_topped_up_once(monkeypatch):
 
 def _wired_proxy(store, iids, rows):
     """一台裸 proxy，挂上写入器和补拉两个消费方 —— 与 Manager 的接线同形。"""
+    return _wired_proxy_from(store, _proxy(iids, rows))
+
+
+def _wired_proxy_from(store, fake):
+    """同上，但用调用方给的假 proxy（要看云端被打了几次的用例需要拿着它）。"""
     from miloco.manager import Manager
     from miloco.miot.client import MiotProxy
 
@@ -170,7 +175,6 @@ def _wired_proxy(store, iids, rows):
     proxy._cameras_loaded = True
     proxy._camera_state_listener = SimpleNamespace(on_event=AsyncMock())
 
-    fake = _proxy(iids, rows)
     proxy.get_readable_prop_iids = fake.get_readable_prop_iids
     proxy.get_device_properties = fake.get_device_properties
     proxy.calls = fake.calls
@@ -185,6 +189,7 @@ def _wired_proxy(store, iids, rows):
     manager._miot_proxy = proxy
     manager._scope = 0
     manager._aligned_scope = 0
+    manager._top_up_attempts = {}
     manager._wire_iot_push()
     return proxy, manager
 
@@ -216,3 +221,46 @@ async def test_an_offline_event_writes_the_flag_and_tops_up_nothing(store, monke
     assert store.get("iot/device/d1/status/online") is False
     assert proxy.calls == []
     manager._prop_top_up.deinit()
+
+
+async def test_the_top_up_budget_runs_out_within_one_scope(store):
+    """永久不可读的属性永远不进容器，所以「容器里没有」会让反复掉线的设备每次上线都
+    重新请求同一批读不到的属性 —— 额度是挡这个的。"""
+    from miloco.manager import TOP_UP_MAX_ATTEMPTS
+
+    proxy = _proxy(["prop.2.1"], [])  # 云端一条都不回，叶子永远补不上
+    _, manager = _wired_proxy_from(store, proxy)
+
+    for _ in range(TOP_UP_MAX_ATTEMPTS + 2):
+        await manager._top_up_props("d1")
+
+    assert len(proxy.calls) == TOP_UP_MAX_ATTEMPTS
+
+
+async def test_switching_the_scope_restores_the_budget(store):
+    """切家庭要重新对齐，那一代的补拉额度也该重新算。"""
+    from miloco.manager import TOP_UP_MAX_ATTEMPTS
+
+    proxy = _proxy(["prop.2.1"], [])
+    _, manager = _wired_proxy_from(store, proxy)
+    for _ in range(TOP_UP_MAX_ATTEMPTS):
+        await manager._top_up_props("d1")
+
+    manager.begin_scope_switch()
+    await manager._top_up_props("d1")
+
+    assert len(proxy.calls) == TOP_UP_MAX_ATTEMPTS + 1
+
+
+async def test_the_budget_is_per_device(store):
+    """一台设备用完额度不该拖累另一台。"""
+    from miloco.manager import TOP_UP_MAX_ATTEMPTS
+
+    proxy = _proxy(["prop.2.1"], [])
+    _, manager = _wired_proxy_from(store, proxy)
+    for _ in range(TOP_UP_MAX_ATTEMPTS):
+        await manager._top_up_props("d1")
+
+    await manager._top_up_props("d2")
+
+    assert len(proxy.calls) == TOP_UP_MAX_ATTEMPTS + 1
