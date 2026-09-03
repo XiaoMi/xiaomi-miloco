@@ -20,6 +20,7 @@ from miloco.perception.service import PerceptionService
 from miloco.person.service import PersonService
 from miloco.rule.service import RuleService, init_rule_service
 from miloco.rule.terminate_evaluator import TerminateEvaluator
+from miloco.state import StateStore
 from miloco.task.service import TaskService
 
 logger = logging.getLogger(__name__)
@@ -105,6 +106,12 @@ class Manager:
 
         self._task_service = TaskService(rule_service=self._rule_service)
 
+        # 状态容器：这里只做启动对齐一次，还没有消费方订阅它。
+        # 对齐 task 由 lifespan 建并负责取消 —— 它要打若干次云端请求，不能挡住启动，
+        # 而关闭时必须有人取消它，否则容器停了它还在往里写。
+        self._state_store = StateStore()
+        self._state_store.start()
+
         self._initialized = True
 
     def init_device_uuid(self):
@@ -116,6 +123,10 @@ class Manager:
         self.device_uuid = device_uuid
 
     # Service access properties
+    @property
+    def state_store(self) -> StateStore:
+        return self._state_store
+
     @property
     def miot_service(self) -> MiotService:
         return self._miot_service

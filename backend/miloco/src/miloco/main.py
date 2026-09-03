@@ -35,6 +35,7 @@ from miloco.home_profile.router import router as home_profile_router
 from miloco.manager import get_manager
 from miloco.middleware.exception_handler import handle_exception
 from miloco.miot.router import router as miot_router
+from miloco.miot.state_align import align_iot_state
 from miloco.node_monitor.event_log import NodeEventLog
 from miloco.node_monitor.monitor import get_monitor
 from miloco.node_monitor.resource_monitor import ResourceMonitor
@@ -377,6 +378,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         logger.error("Manager initialization failed: %s", e)
         raise
 
+    # 状态容器的启动对齐：拉一遍在线设备属性写进容器。要打若干次云端请求,
+    # 所以不放 initialize() 里挡启动;关闭时在 shutdown 段取消。
+    state_align_task = asyncio.create_task(
+        align_iot_state(get_manager().state_store, get_manager().miot_proxy)
+    )
+
     # Start monitoring threads after manager.initialize() completes
     mon = get_monitor()
     watchdog = WatchdogTask(mon)
@@ -444,6 +451,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await rollover_task
     except asyncio.CancelledError:
         pass
+
+    # 先取消对齐、再停容器:反了的话对齐还在往一个已停的容器里写,变更事件全被作废。
+    state_align_task.cancel()
+    try:
+        await state_align_task
+    except asyncio.CancelledError:
+        # 这个 CancelledError 是上一行 cancel() 自己引发的，不是外面在取消我们
+        pass
+    get_manager().state_store.stop()
 
     # 关闭顺序遵循"生产者先于消费者":
     #   perception engine (traces/events 主要生产者)

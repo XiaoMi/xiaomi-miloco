@@ -2,7 +2,7 @@
 
 Covers:
 - filter.py round-trip via in-memory KVRepo stub
-- enabled set semantics (empty = no filter)
+- enabled set semantics (empty = 一个家庭都没启用，fail-closed)
 - disabled set semantics (empty = no exclusion)
 - service.switch_home / toggle_camera 单项写
 - service.list_homes / list_cameras_with_state in_use 标记正确
@@ -2042,7 +2042,6 @@ async def test_set_camera_prompt_does_not_restart_or_refresh():
     svc._restart_perception_engine.assert_not_awaited()
 
 
-
 # ─── MiotService: Smart Crop 逐机位开关（crop_in_use，deny-list / 默认开）──────
 
 
@@ -2361,3 +2360,41 @@ async def test_crop_effective_distinguishes_three_kinds_of_not_cropping():
     assert (by["c3"]["in_use"], by["c3"]["crop_in_use"], by["c3"]["crop_effective"]) == (
         True, True, True
     )
+
+
+# ── devices_in_current_home：给状态容器用的那条过滤入口 ──────────────────
+
+
+def _proxy_with(devices: dict, kv: _FakeKV) -> MiotProxy:
+    """不跑 __init__ —— 造一个真 MiotProxy 要连云端和 SDK，这里只测过滤这一段。"""
+    proxy = object.__new__(MiotProxy)
+    proxy._device_info_dict = devices
+    proxy._kv_repo = kv
+    return proxy
+
+
+def test_devices_in_current_home_drops_the_other_homes():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    proxy = _proxy_with(
+        {
+            "mine": SimpleNamespace(home_id="H1"),
+            "parents": SimpleNamespace(home_id="H2"),
+        },
+        kv,
+    )
+
+    assert set(asyncio.run(proxy.devices_in_current_home())) == {"mine"}
+
+
+def test_devices_in_current_home_is_empty_when_no_home_is_enabled():
+    """空白名单表示一个家庭都没启用，不是「不过滤」。"""
+    proxy = _proxy_with({"mine": SimpleNamespace(home_id="H1")}, _FakeKV())
+
+    assert asyncio.run(proxy.devices_in_current_home()) == {}
+
+
+def test_devices_without_a_home_id_are_dropped():
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    proxy = _proxy_with({"orphan": SimpleNamespace()}, kv)
+
+    assert asyncio.run(proxy.devices_in_current_home()) == {}

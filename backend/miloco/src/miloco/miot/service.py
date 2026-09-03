@@ -53,6 +53,7 @@ from miloco.miot.filter import (
     synthetic_camera_did,
     voice_allowed_camera_dids,
 )
+from miloco.miot.iid import try_parse_iid
 from miloco.miot.lru import LRUStore
 from miloco.miot.message_dedup import MessageDeduper
 from miloco.miot.result_codes import summarize_results
@@ -73,28 +74,22 @@ _background_tasks: set[asyncio.Task] = set()
 
 def _parse_prop_iid(iid: str) -> tuple[int, int]:
     """Parse 'prop.{siid}.{piid}' → (siid, piid)."""
-    parts = iid.split(".")
-    if len(parts) != 3 or parts[0] != "prop":
+    parsed = try_parse_iid(iid, "prop")
+    if parsed is None:
         raise ValidationException(
             f"Invalid property iid format: '{iid}', expected prop.{{siid}}.{{piid}}"
         )
-    try:
-        return int(parts[1]), int(parts[2])
-    except ValueError as e:
-        raise ValidationException(f"Invalid iid numbers in '{iid}'") from e
+    return parsed
 
 
 def _parse_action_iid(iid: str) -> tuple[int, int]:
     """Parse 'action.{siid}.{aiid}' → (siid, aiid)."""
-    parts = iid.split(".")
-    if len(parts) != 3 or parts[0] != "action":
+    parsed = try_parse_iid(iid, "action")
+    if parsed is None:
         raise ValidationException(
             f"Invalid action iid format: '{iid}', expected action.{{siid}}.{{aiid}}"
         )
-    try:
-        return int(parts[1]), int(parts[2])
-    except ValueError as e:
-        raise ValidationException(f"Invalid iid numbers in '{iid}'") from e
+    return parsed
 
 
 def _truncate_value_len(value_json: str | None) -> int:
