@@ -323,20 +323,35 @@ def test_oauth_state_uses_sha256_and_stays_self_consistent():
 def test_no_unsanitized_caller_id_reaches_the_log_in_that_router():
     """米家接口那一组日志里不留未清洗的漏网。
 
-    每个接口都把鉴权依赖注入的调用者标识记一行「接口被调用」，写法逐字相同。只清
-    洗被扫描器点名的那一行会留下最难维护的中间态：读到这一处清了、下一处没清，
-    合理的推断是「两处的值来源不同」，而实际是同一个依赖。下一个碰到未清洗那几行
-    的改动，还会拿到一模一样的扫描报告、再走一遍同样的流程。
+    每个接口都把鉴权依赖注入的调用者标识记一行「接口被调用」。只清洗被扫描器点名
+    的那一处会留下最难维护的中间态：读到这一处清了、下一处没清，合理的推断是「两
+    处的值来源不同」，而实际是同一个依赖；下一个碰到未清洗那几行的改动，还会拿到
+    一模一样的扫描报告。
+
+    判据按 **AST 看实参**，不按行文本匹配：同一个值在这个文件里有好几种写法（``%s``
+    与 ``=%s``、单参数与多参数、单行与折行），按行匹配只能覆盖其中一种——上一版护栏
+    就是这么漏掉九处的，而它当时照样通过。
     """
+    import ast
     import pathlib
 
     import miloco.miot.router as mod
 
     src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
-    # 直接把注入进来的标识当 %s 实参传给 logger = 漏网
-    leaked = [
-        line.strip()
-        for line in src.splitlines()
-        if "logger." in line and "current_user)" in line and "_log_safe" not in line
-    ]
-    assert not leaked, "这些日志行还在直接用未清洗的调用者标识:\n" + "\n".join(leaked)
+    leaked = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (
+            isinstance(fn, ast.Attribute)
+            and isinstance(fn.value, ast.Name)
+            and fn.value.id == "logger"
+        ):
+            continue
+        # 第 0 个实参是 format 串，其后才是要被插进去的值
+        for arg in node.args[1:]:
+            if isinstance(arg, ast.Name) and arg.id == "current_user":
+                leaked.append(f"L{node.lineno}: {src.splitlines()[node.lineno - 1].strip()}")
+
+    assert not leaked, "这些日志调用还在直接用未清洗的调用者标识:\n" + "\n".join(leaked)

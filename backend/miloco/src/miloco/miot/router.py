@@ -45,7 +45,7 @@ logger = logging.getLogger(name=__name__)
 
 
 def _log_safe(value: object) -> str:
-    """把要进日志的值里的换行剥掉。
+    r"""把要进日志的值里的换行剥掉。
 
     带 ``\r`` / ``\n`` 的值进 ``logger`` 的 ``%s`` 参数，能在日志里伪造出额外的
     整行——读日志的人（和按行切的采集器）无从分辨哪行是真的。本文件每个接口都把
@@ -263,7 +263,7 @@ async def get_home_info(
     refresh: bool = Query(False, description="true = 先刷新云端设备/摄像头/场景"),
 ):
     """Get home info for CLI。refresh=true 触发 device refresh。"""
-    logger.info("Get home info API called, user=%s, refresh=%s", current_user, refresh)
+    logger.info("Get home info API called, user=%s, refresh=%s", _log_safe(current_user), refresh)
     data = await manager.miot_service.get_home_info(refresh=refresh)
     return NormalResponse(code=0, message="Home info retrieved successfully", data=data)
 
@@ -275,7 +275,7 @@ async def get_home_info(
 )
 async def get_device_spec(did: str, current_user: str = Depends(verify_token)):
     """Get spec for a single device (轻量，不拉全量 home_info)。"""
-    logger.info("Get device spec API called, user=%s, did=%s", current_user, did)
+    logger.info("Get device spec API called, user=%s, did=%s", _log_safe(current_user), did)
     data = await manager.miot_service.get_device_spec(did)
     return NormalResponse(code=0, message="ok", data=data)
 
@@ -293,7 +293,7 @@ async def control_device(
     """Control device: set_property / set_properties / call_action"""
     logger.info(
         "Control device API called, user: %s, did: %s, type: %s",
-        current_user,
+        _log_safe(current_user),
         did,
         request.type,
     )
@@ -329,7 +329,7 @@ async def get_device_status(
     """Get device property values. iid: comma-separated prop IIDs, e.g. prop.2.1,prop.2.2"""
     logger.info(
         "Get device status API called, user: %s, did: %s, iid: %s",
-        current_user,
+        _log_safe(current_user),
         did,
         iid,
     )
@@ -363,7 +363,7 @@ async def trigger_scene(
 ):
     """Trigger a MIoT manual scene"""
     logger.info(
-        "Trigger scene API called, user: %s, scene_id: %s", current_user, scene_id
+        "Trigger scene API called, user: %s, scene_id: %s", _log_safe(current_user), scene_id
     )
     success = await manager.miot_service.trigger_scene(scene_id)
     if not success:
@@ -490,7 +490,11 @@ async def send_notify(
 ):
     """Send notification"""
     logger.info(
-        "Send notify API called, notify: %s, user: %s", request.notify, current_user
+        # notify 是调用方 POST 上来的自由文本，schema 只约束非空、不限字符集——
+        # 这是这一行里真正外部可控的那个值，比旁边那个更需要剥换行。
+        "Send notify API called, notify: %s, user: %s",
+        _log_safe(request.notify),
+        _log_safe(current_user),
     )
     await manager.miot_service.send_notify(request.notify)
     return NormalResponse(code=0, message="Notification sent successfully", data=None)
@@ -632,7 +636,7 @@ async def record_clip(
     """
     logger.info(
         "record_clip API called, user: %s, camera: %s.%d, dur=%dms",
-        current_user, camera_id, channel, duration_ms,
+        _log_safe(current_user), camera_id, channel, duration_ms,
     )
     recorder = NalClipRecorder(duration_ms=duration_ms)
     try:
@@ -728,7 +732,7 @@ async def video_stream_websocket(
 ):
     """Video stream WebSocket."""
     logger.info(
-        "WebSocket connection request, %s, %s.%d", current_user, camera_id, channel
+        "WebSocket connection request, %s, %s.%d", _log_safe(current_user), camera_id, channel
     )
     start_time: datetime = datetime.now()
     token_hash: str = str(hash(websocket.cookies.get("access_token")))
@@ -817,7 +821,7 @@ async def audio_stream_websocket(
     """Audio stream WebSocket."""
     logger.info(
         "Audio WebSocket connection request, %s, %s.%d",
-        current_user,
+        _log_safe(current_user),
         camera_id,
         channel,
     )

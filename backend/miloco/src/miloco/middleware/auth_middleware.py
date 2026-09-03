@@ -27,7 +27,7 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
 
 
 def verify_token(request: Request) -> None:
-    """Verify service token from Authorization header (Bearer format).
+    r"""Verify service token from Authorization header (Bearer format).
 
     HTTP 鉴权**只**接受标准 ``Authorization: Bearer <token>`` 头部。
     不支持 ``?token=…`` URL query 参数——webUI 同源部署后 fetch 会自动从
