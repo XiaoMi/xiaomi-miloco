@@ -36,6 +36,11 @@ def verify_token(request: Request) -> None:
 
     （WebSocket 鉴权另行用 ``verify_websocket_token``，因为浏览器原生 WS API
     不能设 header，必须走 ``?token=…``——这是浏览器约束不是设计选择。）
+
+    **返回值约束**：本依赖恒返回 ``None``——鉴权通过就 return、不通过就抛。若将来
+    改成返回真实的调用者标识，**返回前必须剥掉 ``\r`` / ``\n``**：多处接口把注入
+    进来的这个值直接当 ``logger`` 的 ``%s`` 参数记「接口被调用」，带换行即可在日志
+    里伪造出整行。改这里的人不一定会去翻那些调用点，所以约束写在源头。
     """
     service_token = get_settings().server.token
     if not service_token:

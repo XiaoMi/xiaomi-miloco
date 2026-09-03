@@ -277,11 +277,16 @@ def test_authorize_log_value_strips_newlines():
     返回真实用户标识，这里就是真实的注入点。钉住清洗本身，不依赖「今天恰好是 None」
     这个会变的前提。
     """
+    # 导入实现，不复刻它——自己再算一遍的话，实现被回退测试照样绿。
+    from miloco.miot.router import _log_safe
+
     hostile = "admin\n2026-01-01 00:00:00 - root - INFO - 伪造的日志行"
-    safe = str(hostile).replace("\r", "").replace("\n", "")
+    safe = _log_safe(hostile)
     assert "\n" not in safe and "\r" not in safe
     # 内容不丢，只是拼成一行——排障仍看得出发生了什么
     assert "admin" in safe and "伪造的日志行" in safe
+    # 恒为 None 的今天也不能抛
+    assert _log_safe(None) == "None"
 
 
 def test_oauth_state_uses_sha256_and_stays_self_consistent():
@@ -313,3 +318,25 @@ def test_oauth_state_uses_sha256_and_stays_self_consistent():
     # 自比对成立：回跳带回同一个串才通过
     assert asyncio.run(c.check_state_async(redirect_state=state)) is True
     assert asyncio.run(c.check_state_async(redirect_state="not-it")) is False
+
+
+def test_no_unsanitized_caller_id_reaches_the_log_in_that_router():
+    """米家接口那一组日志里不留未清洗的漏网。
+
+    每个接口都把鉴权依赖注入的调用者标识记一行「接口被调用」，写法逐字相同。只清
+    洗被扫描器点名的那一行会留下最难维护的中间态：读到这一处清了、下一处没清，
+    合理的推断是「两处的值来源不同」，而实际是同一个依赖。下一个碰到未清洗那几行
+    的改动，还会拿到一模一样的扫描报告、再走一遍同样的流程。
+    """
+    import pathlib
+
+    import miloco.miot.router as mod
+
+    src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
+    # 直接把注入进来的标识当 %s 实参传给 logger = 漏网
+    leaked = [
+        line.strip()
+        for line in src.splitlines()
+        if "logger." in line and "current_user)" in line and "_log_safe" not in line
+    ]
+    assert not leaked, "这些日志行还在直接用未清洗的调用者标识:\n" + "\n".join(leaked)
