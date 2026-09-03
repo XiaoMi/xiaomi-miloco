@@ -52,6 +52,7 @@ from miloco.miot.mips_listeners import (
     SceneEventListener,
 )
 from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
+from miloco.miot.state_push import write_online
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
@@ -1012,6 +1013,10 @@ class MiotProxy:
 
         与 refresh_cameras 共用 ``_refresh_cameras_lock``,防并发改 ``_camera_info_dict``。
         """
+        from miloco.manager import get_manager
+
+        # 与 refresh_devices 同口径：代号在打云端之前记
+        scope = get_manager().current_scope()
         async with self._refresh_cameras_lock:
             try:
                 cameras = await self._miot_client.get_cameras_async()
@@ -1036,6 +1041,11 @@ class MiotProxy:
             logger.warning("refresh awake cache failed: %s", e)
         # 本方法经 get_cameras_async → get_devices_async 顺带增删了设备缓存(别名),
         # 与 refresh_cameras 尾部同理补对账,同样派后台任务不挡响应路径。
+        # 那次别名副作用也刷新了全量设备的 online,容器要跟着走。
+        try:
+            self._sync_iot_online_flags(self._device_info_dict, scope)
+        except Exception as e:
+            logger.warning("同步在线标志到容器失败: %s", e)
         self._spawn_subscription_sync()
         return self._camera_info_dict
 
@@ -1063,7 +1073,31 @@ class MiotProxy:
             except Exception as e:
                 # 调和失败不该让刷新看起来失败：设备缓存已换、订阅对账已派出
                 logger.warning("清理已离开当前家庭的设备失败: %s", e)
+            try:
+                self._sync_iot_online_flags(devices, scope)
+            except Exception as e:
+                logger.warning("同步在线标志到容器失败: %s", e)
             return devices
+
+    def _sync_iot_online_flags(
+        self, devices: dict[str, MIoTDeviceInfo], scope: int
+    ) -> None:
+        """把当前家庭设备的在线标志重写一遍。
+
+        推送会在 MQTT 断连期间丢，而重拉会把缓存修对 —— 不跟着写容器，容器就停在旧值
+        上，且没有任何机制能看出它落后了。
+
+        同值不产事件（容器按值比对），所以每次刷新都重写不会刷爆订阅方。
+        """
+        from miloco.manager import get_manager
+
+        manager = get_manager()
+        if scope != manager.current_scope():
+            logger.info("作用域已变，跳过这次在线标志同步")
+            return
+        store = manager.state_store
+        for did, device in filter_by_home(self._kv_repo, devices).items():
+            write_online(store, did, bool(getattr(device, "online", True)))
 
     def _reconcile_iot_deletions(
         self, devices: dict[str, MIoTDeviceInfo], scope: int

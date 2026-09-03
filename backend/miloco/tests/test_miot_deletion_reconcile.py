@@ -39,8 +39,8 @@ class _FakeManager:
         return self._scope
 
 
-def _device(home_id: str = HOME) -> SimpleNamespace:
-    return SimpleNamespace(home_id=home_id)
+def _device(home_id: str = HOME, online: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(home_id=home_id, online=online)
 
 
 @pytest.fixture
@@ -142,3 +142,54 @@ async def test_nothing_is_deleted_when_the_scope_changed_during_the_refresh(scen
     await scene.proxy.refresh_devices()
 
     assert scene.store.get("iot/device/new_home_device/status/online") is True
+
+
+async def test_a_refresh_rewrites_the_online_flags_of_the_current_home(scene):
+    """推送在 MQTT 断连期间会丢，重拉是它的补偿：缓存改了容器要跟上。"""
+    scene.proxy._miot_client.get_devices_async.return_value = {
+        "stay": _device(online=False)
+    }
+
+    await scene.proxy.refresh_devices()
+
+    assert scene.store.get("iot/device/stay/status/online") is False
+
+
+async def test_a_refresh_leaves_devices_outside_the_home_alone(scene):
+    scene.proxy._miot_client.get_devices_async.return_value = {
+        "other": _device(home_id="H2")
+    }
+
+    await scene.proxy.refresh_devices()
+
+    assert scene.store.get("iot/device/other/status/online") is MISSING
+
+
+async def test_a_refresh_from_a_stale_scope_writes_nothing(scene):
+    """refresh_devices 是 MIPS 重连回调，切家过程中会被触发。"""
+    devices = {"stay": _device()}
+
+    async def bump_then_return():
+        scene.manager._scope += 1
+        return devices
+
+    scene.proxy._miot_client.get_devices_async = bump_then_return
+
+    await scene.proxy.refresh_devices()
+
+    assert scene.store.get("iot/device/stay/status/online") is MISSING
+
+
+async def test_the_camera_online_refresh_also_syncs_the_flags(scene):
+    """它经 get_cameras_async 的别名副作用顺带刷新了全量设备的 online。"""
+    scene.proxy._device_info_dict = {"stay": _device(online=False)}
+    scene.proxy._camera_info_dict = {}
+    scene.proxy._refresh_cameras_lock = asyncio.Lock()
+    scene.proxy._cameras_loaded = False
+    scene.proxy._camera_awake_cache = {}
+    scene.proxy._spawn_subscription_sync = lambda: None
+    scene.proxy._miot_client.get_cameras_async = AsyncMock(return_value={})
+
+    await scene.proxy.refresh_camera_online_status()
+
+    assert scene.store.get("iot/device/stay/status/online") is False
