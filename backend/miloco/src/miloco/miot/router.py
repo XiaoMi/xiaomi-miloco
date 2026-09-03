@@ -136,7 +136,11 @@ async def authorize_miot(
     current_user: str = Depends(verify_token),
 ):
     """Exchange the authorization code (pasted by user) for an access token."""
-    logger.info("MiOT authorize API called, user: %s", current_user)
+    # 进日志前去掉换行：这个值来自请求，带换行就能伪造出额外的日志行。它目前恒为
+    # None（鉴权依赖成功时不返回值），但类型标注写的是 str——哪天补成返回真实用户
+    # 标识，这里就是真实的注入点，不该等到那时才防。
+    safe_current_user = str(current_user).replace("\r", "").replace("\n", "")
+    logger.info("MiOT authorize API called, user: %s", safe_current_user)
     # data 里带回 account_changed / scope_preserved：命令行与 web 都据此决定
     # 要不要再跑一遍选家流程（它是「唯一启用」语义，会覆写家庭白名单，把后端
     # 刚保住的配置又冲掉），并据此告知住户配置是保留了还是重置了。老客户端

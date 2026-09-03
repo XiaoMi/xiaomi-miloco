@@ -147,7 +147,14 @@ class MIoTOAuth2Client:
         else:
             self._oauth_host = f"{cloud_server}.{OAUTH2_API_HOST_DEFAULT}"
         self._device_id = f"{PROJECT_CODE}.{uuid}"
-        self._state = hashlib.sha1(f"d={self._device_id}".encode("utf-8")).hexdigest()
+        # state 是 OAuth 回跳的防重放串,只在本进程内自比对(check_state_async),
+        # 既不落库也不与云端约定,换算法不影响任何已有绑定;唯一影响是升级窗口内
+        # 「已发起、未回跳完成」的那一次授权需重走。
+        # 注意 common.py 的 calc_group_id 同样用 SHA1,但那是**与云端约定的算法**,
+        # 改了算出的 id 对不上、长连接订阅会失效——那处不能动。
+        self._state = hashlib.sha256(
+            f"d={self._device_id}".encode("utf-8")
+        ).hexdigest()
         self._session = None
 
     def _ensure_session(self) -> aiohttp.ClientSession:

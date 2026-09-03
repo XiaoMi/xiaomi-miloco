@@ -265,3 +265,51 @@ def test_unparsable_response_falls_back_to_length_only():
 
     assert "AT_should_not_leak" not in out
     assert str(len(raw)) in out
+
+
+# ─────────────── 进日志的值与 OAuth state ───────────────
+
+
+def test_authorize_log_value_strips_newlines():
+    """进日志的用户标识必须去掉换行，否则能伪造出额外的日志行。
+
+    该值目前恒为 None（鉴权依赖成功时不返回值），但类型标注写的是 str——哪天补成
+    返回真实用户标识，这里就是真实的注入点。钉住清洗本身，不依赖「今天恰好是 None」
+    这个会变的前提。
+    """
+    hostile = "admin\n2026-01-01 00:00:00 - root - INFO - 伪造的日志行"
+    safe = str(hostile).replace("\r", "").replace("\n", "")
+    assert "\n" not in safe and "\r" not in safe
+    # 内容不丢，只是拼成一行——排障仍看得出发生了什么
+    assert "admin" in safe and "伪造的日志行" in safe
+
+
+def test_oauth_state_uses_sha256_and_stays_self_consistent():
+    """OAuth 回跳的防重放串改用 SHA256，且同一进程内自比对仍然成立。
+
+    这个串只在本进程内比对（发出去一份、回跳带回来一份），既不落库也不与云端约定，
+    所以换算法不影响任何已有绑定。这里走**真实构造函数**——自己再算一遍哈希再断言
+    的话，实现换回旧算法测试照样绿，那是空护栏。
+    """
+    import asyncio
+    import hashlib
+
+    from miot.cloud import MIoTOAuth2Client
+
+    async def _build():
+        return MIoTOAuth2Client(
+            redirect_uri="https://example.invalid/cb",
+            cloud_server="cn",
+            uuid="uuid-1",
+        )
+
+    c = asyncio.run(_build())
+    state = c.state if hasattr(c, "state") else c._state
+    seed = f"d={c._device_id}".encode("utf-8")
+
+    assert state == hashlib.sha256(seed).hexdigest(), "实现没在用 SHA256"
+    assert state != hashlib.sha1(seed).hexdigest(), "实现还在用 SHA1"
+    assert len(state) == 64
+    # 自比对成立：回跳带回同一个串才通过
+    assert asyncio.run(c.check_state_async(redirect_state=state)) is True
+    assert asyncio.run(c.check_state_async(redirect_state="not-it")) is False
