@@ -32,6 +32,7 @@
     "stopFail": "Couldn't stop, try again later",
     "miotBound": "Xiaomi Home connected",
     "miotBoundScopeKept": "Xiaomi Home reconnected — your existing homes and cameras were kept",
+    "homeStatusUnavailable": "Can't reach the backend right now, retrying…",
     "loadOnDemandLogsFail": "Failed to load on-demand logs"
   }
 }

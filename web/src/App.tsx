@@ -540,7 +540,7 @@ function MainApp() {
         <OmniHealthBanner onGoToConfig={() => setActiveTab("usage")} />
 
         {/* 状态条(shrink-0) */}
-        {status.data && (
+        {status.data ? (
           <StatusRibbon
             status={status.data}
             allCamerasOff={
@@ -597,7 +597,15 @@ function MainApp() {
               status.reload();
             }}
           />
-        )}
+        ) : status.error ? (
+          // 冷启动时后端整体不可达：没有「上一份」可保留。此处若什么都不渲染，
+          // 该区域会整块空白、数据到达后还有一次布局跳动。给一句「正在重试」，
+          // 而不是像以前那样显示误导性的「米家未连 + 去绑定」——那会把住户引向
+          // 在故障窗口里重新授权。
+          <div className="shrink-0 flex items-center px-5 md:px-8 py-2.5 border-b border-border bg-bg-primary text-body text-text-tertiary">
+            {t("app.homeStatusUnavailable")}
+          </div>
+        ) : null}
 
         {/* 升级提示 banner（仅 release 部署 + 有新版 + 未按版本 dismiss 时显示）*/}
         <UpgradeNotice />
