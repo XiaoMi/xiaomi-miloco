@@ -957,8 +957,19 @@ class MIoTMipsCloud:
                     piid = int(item["piid"])
                 except (KeyError, TypeError, ValueError):
                     continue
+                if "value" not in item:
+                    # 与对齐侧同口径(state_align._read_values):没有 value 的不是
+                    # 「值为 None」,是一条残缺的推送。当成 None 写进容器会把真实值
+                    # 盖掉,而容器没有时间戳可仲裁、盖完 last_reported 是当下
+                    _LOGGER.warning(
+                        "properties_changed entry carries no value did=%s iid=prop.%s.%s",
+                        did,
+                        siid,
+                        piid,
+                    )
+                    continue
                 changes.append(
-                    MIoTPropChange(siid=siid, piid=piid, value=item.get("value"))
+                    MIoTPropChange(siid=siid, piid=piid, value=item["value"])
                 )
             if not changes:
                 return None

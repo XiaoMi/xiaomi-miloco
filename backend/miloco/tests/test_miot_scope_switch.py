@@ -98,7 +98,9 @@ async def scene():
     service._sync_camera_adapter = AsyncMock()
     service._restart_perception_engine = AsyncMock()
     service._kick_onboarding_trigger = lambda: None
-    service._schedule_agent_session_reset = lambda: None
+    # 记下来而不是丢掉：换账号漏了它，旧账号的上下文会串进新账号的 agent 会话
+    session_resets: list[int] = []
+    service._schedule_agent_session_reset = lambda: session_resets.append(1)
     manager = _FakeManager(store, trace)
 
     import miloco.manager as manager_module
@@ -106,7 +108,12 @@ async def scene():
     original = manager_module.get_manager
     manager_module.get_manager = lambda: manager
     yield SimpleNamespace(
-        service=service, manager=manager, store=store, trace=trace, proxy=proxy
+        service=service,
+        manager=manager,
+        store=store,
+        trace=trace,
+        proxy=proxy,
+        session_resets=session_resets,
     )
     manager_module.get_manager = original
     store.stop()
@@ -253,3 +260,14 @@ async def test_listing_homes_without_a_change_leaves_the_container_alone(scene):
 
     assert scene.store.get("iot/device/mine/status/online") is True
     assert scene.manager.aligns_started == 0
+
+
+async def test_authorizing_a_new_account_resets_the_agent_session(scene):
+    """换账号比换家庭更该清：旧账号的设备 / 房间 / 习惯不清会串进新账号。
+
+    main 上这件事搭在 list_homes 的兜底选家分支里，授权路径改调 _ensure_home_selected
+    之后那条路断了 —— 这条用例钉住补回来的那一行。
+    """
+    await scene.service.authorize_with_code(code="c", state="s")
+
+    assert scene.session_resets == [1]

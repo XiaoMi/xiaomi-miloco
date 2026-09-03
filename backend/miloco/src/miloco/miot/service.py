@@ -209,7 +209,12 @@ async def _write_action_ledger(
         logger.info(
             "action_ledger device=%s(did=%s room=%s) type=%s iid=%s success=%s "
             "reason=%s value_len=%d",
-            device_name or "?", did, room or "?", action_type, iid, success,
+            device_name or "?",
+            did,
+            room or "?",
+            action_type,
+            iid,
+            success,
             (result_msg or error or "ok"),
             _truncate_value_len(value_json),
         )
@@ -242,26 +247,25 @@ async def _trigger_scene(
         if not is_home_allowed(
             miot_proxy._kv_repo, getattr(scenes[scene_id], "home_id", None)
         ):
-            raise ValidationException(
-                f"Scene '{scene_id}' is not in an allowed home"
-            )
+            raise ValidationException(f"Scene '{scene_id}' is not in an allowed home")
         # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
         # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
         # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
         scene_name = getattr(scenes[scene_id], "scene_name", None)
-        scene_value_json = json.dumps(
-            {"scene_name": scene_name}, ensure_ascii=False
-        )
+        scene_value_json = json.dumps({"scene_name": scene_name}, ensure_ascii=False)
         ok = await miot_proxy.execute_miot_scene(scene_id)
         await _write_action_ledger(
             miot_proxy,
             action_type="scene_trigger",
-            did=scene_id, iid=scene_id,
+            did=scene_id,
+            iid=scene_id,
             value_json=scene_value_json,
             result_code=None,
             result_msg=None if ok else "场景触发失败",
-            success=bool(ok), error=None,
-            source=source, source_id=source_id,
+            success=bool(ok),
+            error=None,
+            source=source,
+            source_id=source_id,
             home_id=getattr(scenes[scene_id], "home_id", None),
         )
         return ok
@@ -271,11 +275,15 @@ async def _trigger_scene(
         await _write_action_ledger(
             miot_proxy,
             action_type="scene_trigger",
-            did=scene_id, iid=scene_id,
+            did=scene_id,
+            iid=scene_id,
             value_json=scene_value_json,
-            result_code=None, result_msg=None,
-            success=False, error=str(e),
-            source=source, source_id=source_id,
+            result_code=None,
+            result_msg=None,
+            success=False,
+            error=str(e),
+            source=source,
+            source_id=source_id,
             home_id=getattr(scenes.get(scene_id), "home_id", None),
         )
         raise
@@ -284,12 +292,16 @@ async def _trigger_scene(
         await _write_action_ledger(
             miot_proxy,
             action_type="scene_trigger",
-            did=scene_id, iid=scene_id,
+            did=scene_id,
+            iid=scene_id,
             # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
             value_json=scene_value_json,
-            result_code=None, result_msg=None,
-            success=False, error=str(e),
-            source=source, source_id=source_id,
+            result_code=None,
+            result_msg=None,
+            success=False,
+            error=str(e),
+            source=source,
+            source_id=source_id,
             # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
             home_id=getattr(scenes.get(scene_id), "home_id", None),
         )
@@ -347,9 +359,7 @@ class MiotService:
         if info is None:
             raise ResourceNotFoundException(f"Device '{did}' not found")
         if not is_home_allowed(self._kv_repo, getattr(info, "home_id", None)):
-            raise ValidationException(
-                f"Device '{did}' is not in an allowed home"
-            )
+            raise ValidationException(f"Device '{did}' is not in an allowed home")
 
     def _safe_lru_touch(self, did: str, iids: list[str]) -> None:
         """Best-effort LRU 写入；任何异常只 warning，不让控制返回受影响。
@@ -489,6 +499,10 @@ class MiotService:
                 # 走 _ensure_home_selected 而不是 list_homes：后者会再触发一轮编排，
                 # 而我们此刻正拿着编排锁，asyncio.Lock 不可重入
                 await self._ensure_home_selected()
+                # 换账号一定换掉了作用域，会话无条件重置。这件事在 list_homes 的兜底
+                # 选家分支里也有一份，改调 _ensure_home_selected 之后这条路断了，必须
+                # 在这里自己补 —— 不补的话旧账号的设备 / 房间 / 习惯会串进新账号
+                self._schedule_agent_session_reset()
                 # get_miot_auth_info 内部那次刷新跑在启用集还空着的时候，这里重来一遍
                 await self._refresh_all_caches()
 
@@ -892,9 +906,7 @@ class MiotService:
         """
         key = notify.strip()
         if self._notify_deduper.is_duplicate(key):
-            logger.info(
-                "send_notify skipped: identical message within dedup window"
-            )
+            logger.info("send_notify skipped: identical message within dedup window")
             return
         try:
             notify_id = await self._miot_proxy.get_miot_app_notify_id(notify)
@@ -936,9 +948,7 @@ class MiotService:
         """Get detected audio codec for a camera channel."""
         return self._miot_proxy.get_audio_codec(camera_id, channel)
 
-    async def start_video_stream(
-        self, camera_id: str, channel: int, callback
-    ) -> int:
+    async def start_video_stream(self, camera_id: str, channel: int, callback) -> int:
         """Subscribe to *decoded* video frames for live transcode.
 
         Returns the SDK ``reg_id`` (needed by :meth:`stop_video_stream`).
@@ -949,7 +959,8 @@ class MiotService:
         try:
             logger.info(
                 "Starting decoded video stream: camera_id=%s, channel=%s",
-                camera_id, channel,
+                camera_id,
+                channel,
             )
             if callback is None:
                 logger.info(
@@ -964,14 +975,13 @@ class MiotService:
             logger.error("Failed to start video stream: %s", e)
             raise MiotServiceException(f"Failed to start video stream: {str(e)}") from e
 
-    async def stop_video_stream(
-        self, camera_id: str, channel: int, reg_id: int
-    ):
+    async def stop_video_stream(self, camera_id: str, channel: int, reg_id: int):
         """Unsubscribe from the decoded video stream (paired with start)."""
         try:
             logger.info(
                 "Stopping decoded video stream: camera_id=%s, reg_id=%d",
-                camera_id, reg_id,
+                camera_id,
+                reg_id,
             )
             await self._miot_proxy.stop_camera_decode_video_stream(
                 camera_id, channel, reg_id
@@ -995,11 +1005,13 @@ class MiotService:
             allow = allowed_home_ids(self._kv_repo)
             if allow:
                 allowed_dids = set(
-                    filter_by_home(self._kv_repo, await self._miot_proxy.get_devices()).keys()
+                    filter_by_home(
+                        self._kv_repo, await self._miot_proxy.get_devices()
+                    ).keys()
                 )
                 allowed_scene_ids = set(
-                    filter_by_home(self._kv_repo,
-                        await self._miot_proxy.get_all_scenes() or {}
+                    filter_by_home(
+                        self._kv_repo, await self._miot_proxy.get_all_scenes() or {}
                     ).keys()
                 )
                 data["devices"] = [
@@ -1012,7 +1024,9 @@ class MiotService:
                 ]
                 data["areas"] = [
                     {"name": a}
-                    for a in sorted({d.get("room") for d in data["devices"] if d.get("room")})
+                    for a in sorted(
+                        {d.get("room") for d in data["devices"] if d.get("room")}
+                    )
                 ]
             else:
                 # 未选择家庭：清空 devices/scenes/areas
@@ -1099,10 +1113,13 @@ class MiotService:
                 await _write_action_ledger(
                     self._miot_proxy,
                     action_type="set_property",
-                    did=did, iid=request.iid,
+                    did=did,
+                    iid=request.iid,
                     value_json=attempted_value_json,
-                    result_code=code, result_msg=msg,
-                    success=success, error=None,
+                    result_code=code,
+                    result_msg=msg,
+                    success=success,
+                    error=None,
                 )
                 return {"results": results}
 
@@ -1129,8 +1146,10 @@ class MiotService:
                     iid=_request_iid(request),
                     did=did,
                     value_json=attempted_value_json,
-                    result_code=code, result_msg=msg,
-                    success=success, error=None,
+                    result_code=code,
+                    result_msg=msg,
+                    success=success,
+                    error=None,
                 )
                 return {"results": results}
 
@@ -1148,10 +1167,13 @@ class MiotService:
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type="call_action",
-                did=did, iid=request.iid,
+                did=did,
+                iid=request.iid,
                 value_json=attempted_value_json,
-                result_code=code, result_msg=msg,
-                success=success, error=None,
+                result_code=code,
+                result_msg=msg,
+                success=success,
+                error=None,
             )
             return {"result": result}
 
@@ -1165,10 +1187,13 @@ class MiotService:
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type=getattr(request, "type", None) or "call_action",
-                did=did, iid=_request_iid(request),
+                did=did,
+                iid=_request_iid(request),
                 value_json=attempted_value_json,
-                result_code=None, result_msg=None,
-                success=False, error=str(e),
+                result_code=None,
+                result_msg=None,
+                success=False,
+                error=str(e),
             )
             raise MiotServiceException(f"Failed to control device: {str(e)}") from e
 
@@ -1178,10 +1203,10 @@ class MiotService:
             devices = await self._miot_proxy.get_devices()
             if did not in devices:
                 raise ResourceNotFoundException(f"Device '{did}' not found")
-            if not is_home_allowed(self._kv_repo, getattr(devices[did], "home_id", None)):
-                raise ValidationException(
-                    f"Device '{did}' is not in an allowed home"
-                )
+            if not is_home_allowed(
+                self._kv_repo, getattr(devices[did], "home_id", None)
+            ):
+                raise ValidationException(f"Device '{did}' is not in an allowed home")
 
             # 用户主动指定 iids = 「这次确实关心这些 prop」→ 写 LRU；
             # 不传 iids 走全量可读冷查询，不算"用过"，不写。
@@ -1314,6 +1339,7 @@ class MiotService:
         显式 `switch_home` 与 `list_homes` 兜底自动切换共用此入口。fire-and-forget：
         openclaw 不可达 / 删除失败只 WARN、不上抛，绝不阻塞或打断切换本身。
         """
+
         async def _bg():
             from miloco.dispatch.dispatcher import MILOCO_SESSION_ROUTES
             from miloco.utils.agent_client import reset_agent_sessions
@@ -1551,9 +1577,7 @@ class MiotService:
                 f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
             )
         if bad_channel:
-            raise ValidationException(
-                f"非法通道号（格式错误或越界）: {bad_channel}"
-            )
+            raise ValidationException(f"非法通道号（格式错误或越界）: {bad_channel}")
 
         def _in_scope(pdid: str) -> bool:
             return is_home_allowed(
@@ -1668,9 +1692,7 @@ class MiotService:
             return getattr(cameras.get(pdid), "channel_count", None) or 1
 
         disabled = [
-            d
-            for d in all_dids
-            if len(denied_channels_of(denied, d, _cc(d))) >= _cc(d)
+            d for d in all_dids if len(denied_channels_of(denied, d, _cc(d))) >= _cc(d)
         ]
         if disabled:
             raise ValidationException(
@@ -1732,7 +1754,9 @@ class MiotService:
         cameras = await self._miot_proxy.get_cameras() or {}
 
         too_long = [
-            i["did"] for i in items if len((i.get("prompt") or "").strip()) > MAX_CAMERA_PROMPT_LEN
+            i["did"]
+            for i in items
+            if len((i.get("prompt") or "").strip()) > MAX_CAMERA_PROMPT_LEN
         ]
         if too_long:
             raise ValidationException(
@@ -1787,7 +1811,10 @@ class MiotService:
         cameras = await self._miot_proxy.get_cameras() or {}
         # 先整批解析 + 校验（任一项非法即抛，不写任何 KV），再统一写。
         resolved = [
-            (self._resolve_prompt_target_dids(i["did"], cameras), bool(i["crop_in_use"]))
+            (
+                self._resolve_prompt_target_dids(i["did"], cameras),
+                bool(i["crop_in_use"]),
+            )
             for i in items
         ]
         touched_physical = {physical_camera_did(i["did"]) for i in items}

@@ -371,6 +371,12 @@ def _write_device(
     return _write_props_per_leaf(store, did, props, samples)
 
 
+def _present_prop_iids(store: StateStore, did: str) -> set[str]:
+    """容器里这台设备已有哪些属性叶子。请求侧算缺口、写入侧防覆盖，两处同一份判据。"""
+    have = store.get(f"iot/device/{did}/prop", {})
+    return set(have) if isinstance(have, dict) else set()
+
+
 async def top_up_missing_props(
     store: StateStore,
     miot_proxy: Any,
@@ -403,8 +409,7 @@ async def top_up_missing_props(
         logger.warning("top-up: spec unavailable did=%s: %s", did, e)
         return 0, 0
 
-    have = store.get(f"iot/device/{did}/prop", {})
-    present = set(have) if isinstance(have, dict) else set()
+    present = _present_prop_iids(store, did)
     params: list[MIoTGetPropertyParam] = []
     for iid in iids:
         parsed = try_parse_iid(iid, "prop")
@@ -425,7 +430,19 @@ async def top_up_missing_props(
     if guard.moved_on():
         # 云端往返期间切了作用域：这批值属于旧作用域，写进刚清空的树就是幽灵设备
         return len(params), 0
-    written = _write_props_per_leaf(store, did, by_device.get(did) or {}, samples)
+    # 缺口是往返之前算的，而往返期间这台设备的推送照样写得进来（写容器那两道闸此刻都
+    # 开着）。云端给的是缓存里的最后一次上报、推送给的是实时值，容器没有时间戳可仲裁，
+    # 所以写之前再读一次，只补此刻仍然缺的。重读到写之间没有 await，推送插不进来
+    values = by_device.get(did) or {}
+    still_missing = _present_prop_iids(store, did)
+    fresh = {iid: value for iid, value in values.items() if iid not in still_missing}
+    if len(fresh) != len(values):
+        logger.info(
+            "top-up: did=%s 往返期间有 %d 条被推送填上了，不覆盖",
+            did,
+            len(values) - len(fresh),
+        )
+    written = _write_props_per_leaf(store, did, fresh, samples)
     logger.info(
         "top-up: did=%s requested=%d written=%d unreadable=%s",
         did,

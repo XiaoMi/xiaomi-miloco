@@ -123,14 +123,18 @@ class Manager:
         if used >= TOP_UP_MAX_ATTEMPTS:
             logger.debug("top-up: 本代额度已用完，跳过 did=%s", did)
             return 0
+        scope_at_start = self._scope
         requested, written = await top_up_missing_props(
             self._state_store,
             self._miot_proxy,
             did,
-            scope=self._scope,
+            scope=scope_at_start,
             current_scope=self.current_scope,
         )
-        if requested:
+        # 只给发起这次请求的那一代记账：往返期间切了作用域的话，计数表已经被
+        # begin_scope_switch 清过，这时写回去等于给新一代预扣一次 —— 而对新一代来说
+        # 这次请求一条都没写进去，正是「空跑不计次」要排除的那种
+        if requested and self._scope == scope_at_start:
             self._top_up_attempts[did] = used + 1
         return written
 

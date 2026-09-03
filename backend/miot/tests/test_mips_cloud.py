@@ -1142,3 +1142,35 @@ async def test_a_second_handler_on_the_same_topic_is_reported(caplog):
         )
     finally:
         await mips.deinit_async()
+
+
+def test_an_entry_without_a_value_is_skipped():
+    """缺 value 不是「值为 None」，是一条残缺的推送 —— 当成 None 写进容器会把真实值
+    盖掉，而容器没有时间戳可仲裁。与对齐侧同口径。"""
+    event = _props_decoder()(
+        "device/d1/up/properties_changed",
+        b'{"method":"properties_changed","params":['
+        b'{"siid":2,"piid":1},{"siid":3,"piid":4,"value":2}]}',
+    )
+
+    assert [(c.siid, c.piid, c.value) for c in event.changes] == [(3, 4, 2)]
+
+
+def test_a_message_whose_only_entry_lacks_a_value_is_dropped():
+    assert (
+        _props_decoder()(
+            "device/d1/up/properties_changed/2/1",
+            b'{"method":"properties_changed","params":{"siid":2,"piid":1}}',
+        )
+        is None
+    )
+
+
+def test_an_explicit_null_value_is_kept():
+    """显式 null 是设备真的报了空值，与缺键不是一回事。"""
+    event = _props_decoder()(
+        "device/d1/up/properties_changed/2/1",
+        b'{"method":"properties_changed","params":{"siid":2,"piid":1,"value":null}}',
+    )
+
+    assert [(c.siid, c.piid, c.value) for c in event.changes] == [(2, 1, None)]

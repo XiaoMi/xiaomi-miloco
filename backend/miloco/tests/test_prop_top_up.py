@@ -345,3 +345,46 @@ async def test_the_shutdown_cancels_the_pending_top_up(store, monkeypatch):
     await asyncio.sleep(0.15)
 
     assert proxy.calls == []
+
+
+async def test_a_push_during_the_round_trip_is_not_overwritten(store):
+    """补拉请求的那批，恰好是这台设备上线后最可能自己推上来的那批。云端给的是缓存里的
+    最后一次上报、推送给的是实时值，容器没有时间戳可仲裁 —— 所以写之前要再看一眼。"""
+    proxy = _proxy(
+        ["prop.2.1", "prop.3.1"], [_row("d1", 2, 1, 18), _row("d1", 3, 1, 7)]
+    )
+    original = proxy.get_device_properties
+
+    async def push_then_return(params):
+        rows = await original(params)
+        # 往返期间设备推来实时值
+        store.set("iot/device/d1/prop/2.1", 26, source="iot_push")
+        return rows
+
+    proxy.get_device_properties = push_then_return
+
+    requested, written = await _top_up(store, proxy, "d1")
+
+    assert (requested, written) == (2, 1)
+    assert store.get("iot/device/d1/prop/2.1") == 26
+    assert store.get("iot/device/d1/prop/3.1") == 7
+
+
+async def test_a_scope_switch_during_the_round_trip_does_not_spend_the_new_budget(
+    store,
+):
+    """计数表已被 begin_scope_switch 清过，这时记账等于给新一代预扣一次。"""
+    proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+    # 接线时假件的方法就被拷到 proxy 上了，要替换的是 proxy 那份
+    wired, manager = _wired_proxy_from(store, proxy)
+    original = wired.get_device_properties
+
+    async def switch_then_return(params):
+        manager.begin_scope_switch()
+        return await original(params)
+
+    wired.get_device_properties = switch_then_return
+
+    await manager._top_up_props("d1")
+
+    assert manager._top_up_attempts == {}
