@@ -148,6 +148,19 @@ class TrackingResponse:
     #     所以需要逐帧、且需要不成 track 的类别(tracker 只跟 HUMAN,宠物永远进不了 box_info)
     # 无 tracker 的实现(Mock)留空 → crop 侧退化为只用运动块。
     main_det_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
+    # 本窗口**每一抽帧**上各 track 的框(xyxy 像素);下标 = 帧序,与喂给 analyze 的帧列表同序
+    # (即 IdentityPacket.all_frames,identity.py 把同一个 list 同时交给两边)。
+    # 这是与上面两者并列的**第三套**需求,三者互不能替代:
+    #   - object_info/box_info  逐 track 但只有末帧一个框 —— 贴名字、抽 ReID 够用
+    #   - main_det_boxes        逐帧但**不带 track_id** —— Smart Crop 只要空间并集
+    #   - 本字段                逐帧**且带 track_id** —— 单帧人像注入要回答"某个 track 在窗内
+    #                           哪一帧裁出来最大",上面两者都答不了
+    # **只收本帧真匹配到检测的框**(get_tracking_results 的 detected_this_frame):coasting 帧上
+    # 框是上一次真匹配时的检测框、原地冻结,拿它去裁**当前**帧会裁到人已离开的背景、甚至隔壁
+    # 那个人 —— 而注入是把图绑到 track_id 上,绑错等于直接喂一个错身份证据。同 IdentityEngine
+    # 内各 coasting 闸的口径(见 TrackedObject.detected_this_frame)。
+    # 无 tracker 的实现(Mock)留空 → 注入侧退化为用候选自带的末帧 body_crop。
+    per_frame_track_boxes: list[dict[int, tuple[int, int, int, int]]] = field(default_factory=list)
 
 
 @dataclass
@@ -265,6 +278,10 @@ class IdentityPacket:
     # 透传 TrackingResponse.main_det_boxes（窗口内每抽帧的 human/cat/dog 框，xyxy 像素），
     # 供 Smart Crop 算裁切区域并集。见该字段注释：与 targets/box_info 是两套需求。
     main_det_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
+    # 透传 TrackingResponse.per_frame_track_boxes(逐抽帧、带 track_id 的框),供单帧人像注入
+    # 选"该 track 窗内裁出面积最大的一帧"。见该字段注释:与 main_det_boxes / box_info 三者
+    # 各服务一套需求。下标与 all_frames 同序。
+    per_frame_track_boxes: list[dict[int, tuple[int, int, int, int]]] = field(default_factory=list)
 
 
 # =============================================================================
