@@ -92,6 +92,7 @@
     "testNotFound": "Model or URL not found",
     "testRejectedAuthed": "Connected, but the request was rejected (model name or API key may be wrong)",
     "testUnreachable": "Couldn't reach the Base URL",
+    "modelsListUnsupported": "This Base URL returned no model list — enter the model name manually (and double-check the Base URL path)",
     "testNoKey": "No API key configured",
     "testHttpError": "Server returned an error — check the Base URL",
     "testRateLimited": "Rate-limited by the provider, please retry later",
