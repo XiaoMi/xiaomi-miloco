@@ -147,6 +147,12 @@ class Manager:
 
         logger.info("Manager initialization started")
 
+        # 容器本身在 __new__ 里就建好了，这里只是接上 event loop 开始投递。必须排在
+        # 所有写入方之前：没 start 的容器照样收值，但变更事件会被丢掉（只留一条告警和
+        # dropped 计数），等接了订阅方就是每次启动静默漏掉第一批边沿。
+        # 对齐由 start_state_alignment 起，关闭时 lifespan 取消，切换时编排取消
+        self._state_store.start()
+
         mon = get_monitor()
         mon.register(NodeName.CAMERA, NodeKind.SOURCE, watchdog_s=60)
         mon.register(NodeName.COLLECTOR, NodeKind.WINDOW, watchdog_s=60)
@@ -199,10 +205,6 @@ class Manager:
             )
 
         self._task_service = TaskService(rule_service=self._rule_service)
-
-        # 容器本身在 __new__ 里就建好了，这里只是接上 event loop 开始投递。
-        # 对齐由 start_state_alignment 起，关闭时 lifespan 取消，切换时编排取消
-        self._state_store.start()
 
         self._initialized = True
 
