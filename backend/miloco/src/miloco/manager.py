@@ -16,7 +16,7 @@ from miloco.home_profile.service import HomeProfileService
 from miloco.miot.client import MiotProxy
 from miloco.miot.mips_listeners import PropTopUpListener
 from miloco.miot.service import MiotService
-from miloco.miot.state_align import align_iot_state, top_up_missing_props
+from miloco.miot.state_align import align_iot_state, read_missing_props
 from miloco.miot.state_push import IotPushWriter
 from miloco.node_monitor import NodeKind, NodeName, get_monitor
 from miloco.perception import init_perception_module
@@ -95,23 +95,27 @@ class Manager:
         self._miot_proxy.add_device_state_listener(self._prop_top_up.on_event)
 
     async def _top_up_props(self, did: str) -> int:
-        """按代限次地补拉这台设备缺的属性。返回写进去的条数。
+        """设备转上线时补拉它在容器里缺的属性。返回写进去的条数。
 
-        三道闸，理由各不相同：
+        **正确性不在这里，在写入器。** 写入的两道闸（本代已对齐 / 还在当前家庭）由
+        `IotPushWriter.write_pulled_props` 在写入的那一刻判，与推送共用一份 —— 补拉要打
+        一趟云端，往返期间设备可能搬出当前家庭（同一代之内、代号不变），在这里判是判不住
+        的。这个方法只做两件写入器管不了的事：
 
-        * **还在当前家庭**：上下线订阅是账号全量的（`device list` 要显示全部设备），而
-          容器只装当前家庭 —— 不判这一条，别人家的设备会被写进喂给规则和 agent 的那份
-          数据源里；
-        * **此刻在线**：防抖窗口里可能又掉线了。离线设备云端给的是缓存里的最后一次上报、
-          可能任意旧，写进去会把 `last_reported` 刷成当下而响应不带时间戳，消费方看不出来
-          —— 对齐当初跳过离线设备就是这个理由；
-        * **本代额度没用完**：判据「容器里没有这条叶子」是代理指标，永久不可读的属性
-          永远不会进容器，不限次的话反复掉线的设备每次上线都重新请求同一批（见
-          TOP_UP_MAX_ATTEMPTS）。
+        * **额度**：判据「容器里没有这条叶子」是代理指标，永久不可读的属性永远不会进
+          容器，不限次的话反复掉线的设备每次上线都重新请求同一批（见
+          TOP_UP_MAX_ATTEMPTS）。只在真打了云端时才算一次 —— 空跑消耗额度会把「留几次
+          给瞬时不可读」这个用意吃掉；
+        * **在线检查**：离线设备云端给的是缓存里的最后一次上报、可能任意旧，写进去会把
+          `last_reported` 刷成当下而响应不带时间戳，消费方看不出来 —— 对齐当初跳过离线
+          设备就是这个理由。这一条写入器判不了（它不知道这批值是拉来的还是推来的）。
 
-        **额度只在真打了云端时才算一次**：没有缺口时补拉根本不发请求，那种空跑消耗额度会
-        把「留几次给瞬时不可读」这个用意直接吃掉。
+        前面那三道是**早退**，为的是省掉没必要的云端往返（尤其对齐窗口里：那时补进去的
+        叶子会被对齐的整台替换直接删掉），不是闸。删掉它们只会变慢，不会变错。
         """
+        if not self.scope_is_aligned():
+            logger.debug("top-up: 本代还没对齐完，跳过 did=%s", did)
+            return 0
         device = (await self._miot_proxy.devices_in_current_home()).get(did)
         if device is None:
             logger.debug("top-up: 不在当前家庭，跳过 did=%s", did)
@@ -124,19 +128,16 @@ class Manager:
             logger.debug("top-up: 本代额度已用完，跳过 did=%s", did)
             return 0
         scope_at_start = self._scope
-        requested, written = await top_up_missing_props(
-            self._state_store,
-            self._miot_proxy,
-            did,
-            scope=scope_at_start,
-            current_scope=self.current_scope,
+        requested, values = await read_missing_props(
+            self._state_store, self._miot_proxy, did
         )
         # 只给发起这次请求的那一代记账：往返期间切了作用域的话，计数表已经被
-        # begin_scope_switch 清过，这时写回去等于给新一代预扣一次 —— 而对新一代来说
-        # 这次请求一条都没写进去，正是「空跑不计次」要排除的那种
+        # begin_scope_switch 清过，这时写回去等于给新一代预扣一次
         if requested and self._scope == scope_at_start:
             self._top_up_attempts[did] = used + 1
-        return written
+        if not values:
+            return 0
+        return await self._iot_push_writer.write_pulled_props(did, values)
 
     def deinit_iot_push(self) -> None:
         """取消补拉的待触发计时器。

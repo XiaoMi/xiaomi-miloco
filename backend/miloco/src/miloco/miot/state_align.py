@@ -34,6 +34,7 @@ from miot.types import MIoTGetPropertyParam
 
 from miloco.miot.iid import try_parse_iid
 from miloco.miot.result_codes import code_message, is_failure, is_known_code
+from miloco.miot.state_push import present_prop_iids
 from miloco.state import StateStore
 from miloco.state.path import validate_segment
 
@@ -389,27 +390,17 @@ def _write_device(
     return _write_props_per_leaf(store, did, props, samples)
 
 
-def _present_prop_iids(store: StateStore, did: str) -> set[str]:
-    """容器里这台设备已有哪些属性叶子。请求侧算缺口、写入侧防覆盖，两处同一份判据。"""
-    have = store.get(f"iot/device/{did}/prop", {})
-    return set(have) if isinstance(have, dict) else set()
+async def read_missing_props(
+    store: StateStore, miot_proxy: Any, did: str
+) -> tuple[int, dict[str, Any]]:
+    """读出这台设备在容器里缺的那些可读属性。返回（请求了几条，读到的值）。
 
+    **只读不写。** 写归 `state_push` 的拉取入口 —— 那边的两道闸是在写入的那一刻判的，
+    而这里要打一趟云端，往返期间设备可能搬出当前家庭（同一代之内、代号不变），在这里
+    判是判不住的。
 
-async def top_up_missing_props(
-    store: StateStore,
-    miot_proxy: Any,
-    did: str,
-    *,
-    scope: int,
-    current_scope: Callable[[], int],
-) -> tuple[int, int]:
-    """把这台设备在容器里缺的可读属性补齐。返回（请求了几条，写进去了几条）。
-
-    只补缺的，不整台重拉：整台重拉会用云端缓存里的旧值盖掉刚推来的新值，而容器没有
-    时间戳可仲裁，盖完 `last_reported` 是当下，事后看不出来。
-
-    `scope` / `current_scope` 与 `align_iot_state` 同义：要打一趟云端，回来时可能已经
-    不是当初那个作用域了，写之前再比一次，不等就整轮放弃。
+    只请求容器里缺的，不整台重拉：整台重拉会用云端缓存里的旧值盖掉刚推来的新值，而容器
+    没有时间戳可仲裁，盖完 `last_reported` 是当下，事后看不出来。
 
     **返回请求数是给调用方限次用的**：没有缺口时这里根本不打云端，那种空跑不该消耗额度。
 
@@ -418,16 +409,15 @@ async def top_up_missing_props(
     上线还有机会。
     """
     samples = _Samples()
-    guard = _ScopeGuard(scope, current_scope)
     if not _is_valid_segment(did):
-        return 0, 0
+        return 0, {}
     try:
         iids = await miot_proxy.get_readable_prop_iids(did)
     except Exception as e:
         logger.warning("top-up: spec unavailable did=%s: %s", did, e)
-        return 0, 0
+        return 0, {}
 
-    present = _present_prop_iids(store, did)
+    present = present_prop_iids(store, did)
     params: list[MIoTGetPropertyParam] = []
     for iid in iids:
         parsed = try_parse_iid(iid, "prop")
@@ -440,35 +430,20 @@ async def top_up_missing_props(
             continue
         params.append(MIoTGetPropertyParam(did=did, siid=siid, piid=piid))
     if not params:
-        return 0, 0
+        return 0, {}
 
     meta = {did: _DeviceMeta(online=True, model=str(_model_of(miot_proxy, did)))}
     unreadable: dict[str, int] = {}
     by_device = await _read_values(miot_proxy, params, meta, unreadable, samples)
-    if guard.moved_on():
-        # 云端往返期间切了作用域：这批值属于旧作用域，写进刚清空的树就是幽灵设备
-        return len(params), 0
-    # 缺口是往返之前算的，而往返期间这台设备的推送照样写得进来（写容器那两道闸此刻都
-    # 开着）。云端给的是缓存里的最后一次上报、推送给的是实时值，容器没有时间戳可仲裁，
-    # 所以写之前再读一次，只补此刻仍然缺的。重读到写之间没有 await，推送插不进来
     values = by_device.get(did) or {}
-    present_now = _present_prop_iids(store, did)
-    fresh = {iid: value for iid, value in values.items() if iid not in present_now}
-    if len(fresh) != len(values):
-        logger.info(
-            "top-up: did=%s 往返期间有 %d 条被推送填上了，不覆盖",
-            did,
-            len(values) - len(fresh),
-        )
-    written = _write_props_per_leaf(store, did, fresh, samples)
     logger.info(
-        "top-up: did=%s requested=%d written=%d unreadable=%s",
+        "top-up: did=%s requested=%d read=%d unreadable=%s",
         did,
         len(params),
-        written,
+        len(values),
         unreadable or {},
     )
-    return len(params), written
+    return len(params), values
 
 
 def _model_of(miot_proxy: Any, did: str) -> str:

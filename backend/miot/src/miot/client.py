@@ -1248,9 +1248,16 @@ class MIoTClient:
         self._callback_mips_connect = callback
 
     def register_subscription_reset_callback(
-        self, callback: Optional[Callable[[set[str], set[str], set[str]], Any]]
+        self,
+        callback: Optional[Callable[[set[str], set[str], set[str], set[str]], Any]],
     ) -> None:
-        """mips 重放后回调上层,把三个重放后的 tracked 集合交回(meta/state/scene)。"""
+        """mips 重放后回调上层,把四个重放后的 tracked 集合交回
+        (meta / state / scene / props)。
+
+        参数个数要与 _fire_subscription_reset 的实参一致:少一个的话调用时抛
+        TypeError,而那边的 except Exception 会把它吞掉 —— 表现是上层的订阅镜像
+        静默不再重建。
+        """
         self._callback_subscription_reset = callback
 
     def _on_mips_connect(self, connected: bool) -> None:

@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from miloco.miot import mips_listeners
-from miloco.miot.state_align import top_up_missing_props
+from miloco.miot.state_align import read_missing_props
 from miloco.state import StateStore
 
 
@@ -50,15 +50,31 @@ def _row(did, siid, piid, value, code=0):
     return {"did": did, "siid": siid, "piid": piid, "value": value, "code": code}
 
 
-async def _top_up(store, proxy, did, *, scope=0, current_scope=None):
-    """代号默认恒定不变 —— 只有作用域那条用例关心它。"""
-    return await top_up_missing_props(
-        store,
-        proxy,
-        did,
-        scope=scope,
-        current_scope=current_scope or (lambda: scope),
+async def _read(store, proxy, did):
+    """读侧：返回（请求了几条，读到的值）。这一层不写容器。"""
+    return await read_missing_props(store, proxy, did)
+
+
+def _writer(store, proxy, *, home=("d1",), aligned=True):
+    """写侧：两道闸都在写入时判，与推送共用一份。"""
+    from miloco.miot.state_push import IotPushWriter
+
+    async def devices_in_current_home():
+        return {did: SimpleNamespace(home_id="H1") for did in home}
+
+    proxy.devices_in_current_home = devices_in_current_home
+    return IotPushWriter(store, proxy, scope_is_aligned=lambda: aligned)
+
+
+async def _top_up(store, proxy, did, **writer_kwargs):
+    """读 + 写走一遍，返回（请求了几条，写进去了几条）—— 与生产同一条路。"""
+    requested, values = await _read(store, proxy, did)
+    if not values:
+        return requested, 0
+    written = await _writer(store, proxy, **writer_kwargs).write_pulled_props(
+        did, values
     )
+    return requested, written
 
 
 async def test_a_missing_property_is_filled_in(store):
@@ -119,9 +135,9 @@ async def test_a_bridged_did_is_not_topped_up(store):
     """did 带 '/' 当不了路径段，连云端都不该打。"""
     proxy = _proxy(["prop.2.1"], [])
 
-    _requested, written = await _top_up(store, proxy, "blt/1")
+    requested, values = await _read(store, proxy, "blt/1")
 
-    assert written == 0
+    assert (requested, values) == (0, {})
     assert proxy.calls == []
 
 
@@ -258,6 +274,8 @@ async def test_switching_the_scope_restores_the_budget(store):
         await manager._top_up_props("d1")
 
     manager.begin_scope_switch()
+    # 切换后必须等新一代对齐跑完才放行 —— 补拉的理由是「对齐跳过了离线设备的属性」
+    manager.mark_scope_aligned(manager.current_scope())
     await manager._top_up_props("d1")
 
     assert len(proxy.calls) == TOP_UP_MAX_ATTEMPTS + 1
@@ -301,20 +319,23 @@ async def test_a_device_that_went_offline_again_is_not_topped_up(store):
 
 
 async def test_a_scope_switch_during_the_cloud_round_trip_discards_the_result(store):
-    """补拉要打一趟云端，回来时可能已经切了家庭 —— 写进刚清空的树就是幽灵设备。"""
-    scope = {"now": 0}
+    """补拉要打一趟云端，回来时可能已经切了家庭 —— 写进刚清空的树就是幽灵设备。
+
+    代号一推进「已对齐」就自动失效，所以写入器的对齐闸就是这道闸，不用另设一道。
+    """
     proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
-    original = proxy.get_device_properties
 
-    async def switch_then_return(params):
-        scope["now"] += 1
-        return await original(params)
+    requested, written = await _top_up(store, proxy, "d1", aligned=False)
 
-    proxy.get_device_properties = switch_then_return
+    assert (requested, written) == (1, 0)
+    assert store.snapshot("iot/**") == {}
 
-    requested, written = await _top_up(
-        store, proxy, "d1", scope=0, current_scope=lambda: scope["now"]
-    )
+
+async def test_a_device_that_left_the_home_during_the_round_trip_is_not_written(store):
+    """家庭闸在写入时判，所以往返期间搬出当前家庭也挡得住 —— 往返前判一次是挡不住的。"""
+    proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+
+    requested, written = await _top_up(store, proxy, "d1", home=())
 
     assert (requested, written) == (1, 0)
     assert store.snapshot("iot/**") == {}
@@ -363,7 +384,8 @@ async def test_a_push_during_the_round_trip_is_not_overwritten(store):
 
     proxy.get_device_properties = push_then_return
 
-    requested, written = await _top_up(store, proxy, "d1")
+    requested, values = await _read(store, proxy, "d1")
+    written = await _writer(store, proxy).write_pulled_props("d1", values)
 
     assert (requested, written) == (2, 1)
     assert store.get("iot/device/d1/prop/2.1") == 26
@@ -388,3 +410,27 @@ async def test_a_scope_switch_during_the_round_trip_does_not_spend_the_new_budge
     await manager._top_up_props("d1")
 
     assert manager._top_up_attempts == {}
+
+
+async def test_no_top_up_before_the_alignment_finished(store):
+    """对齐是整台一次性替换写 prop 子树的：补拉在对齐窗口里写进去的叶子，凡是对齐
+    读不到的都会被那次替换删掉（不是变旧）。而且此刻额度也不该扣。"""
+    proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+    _, manager = _wired_proxy_from(store, proxy)
+    manager._aligned_scope = -1  # 本代还没对齐完
+
+    await manager._top_up_props("d1")
+
+    assert proxy.calls == []
+    assert manager._top_up_attempts == {}
+
+
+async def test_the_top_up_records_the_pull_source(store):
+    """补拉是拉来的，不是推来的 —— 混记会让排障时去翻那个时刻的 MQTT 日志。"""
+    from miloco.miot.state_push import PULL_SOURCE
+
+    proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+
+    await _top_up(store, proxy, "d1")
+
+    assert store.get_entry("iot/device/d1/prop/2.1").source == PULL_SOURCE
