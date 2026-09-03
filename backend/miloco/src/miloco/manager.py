@@ -14,8 +14,9 @@ from miloco.database.kv_repo import KVRepo, SystemConfigKeys
 from miloco.database.person_repo import PersonRepo
 from miloco.home_profile.service import HomeProfileService
 from miloco.miot.client import MiotProxy
+from miloco.miot.mips_listeners import PropTopUpListener
 from miloco.miot.service import MiotService
-from miloco.miot.state_align import align_iot_state
+from miloco.miot.state_align import align_iot_state, top_up_missing_props
 from miloco.miot.state_push import IotPushWriter
 from miloco.node_monitor import NodeKind, NodeName, get_monitor
 from miloco.perception import init_perception_module
@@ -55,6 +56,7 @@ class Manager:
             # initialize() 不一定跑完，而没建起来的话编排会在清空那一步炸掉
             cls._instance._state_store = StateStore()
             cls._instance._iot_push_writer = None
+            cls._instance._prop_top_up = None
         return cls._instance
 
     def __init__(self):
@@ -75,12 +77,20 @@ class Manager:
             current_scope=self.current_scope,
             scope_is_aligned=self.scope_is_aligned,
         )
+        # 上线补拉是上下线扇出的第二个消费方，与写入器互不知情：写入器只管把标志写进
+        # 容器，补拉只管把这台设备缺的属性补齐
+        self._prop_top_up = PropTopUpListener(
+            top_up=lambda did: top_up_missing_props(
+                self._state_store, self._miot_proxy, did
+            )
+        )
         self._miot_proxy.add_device_state_listener(
             self._iot_push_writer.on_device_state
         )
         self._miot_proxy.add_device_props_listener(
             self._iot_push_writer.on_device_props
         )
+        self._miot_proxy.add_device_state_listener(self._prop_top_up.on_event)
 
     def current_scope(self) -> int:
         return self._scope

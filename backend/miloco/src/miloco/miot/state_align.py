@@ -298,6 +298,39 @@ async def _write_online_flags(
     return True
 
 
+def _write_props_per_leaf(
+    store: StateStore, did: str, props: dict[str, Any], samples: _Samples
+) -> int:
+    """逐条写属性叶子，只丢有问题的那几条。返回写进去的条数。
+
+    父路径写不得：容器的 `set` 恒为替换，写 `iot/device/<did>/prop` 会把同级其他属性
+    全删掉。
+    """
+    path = f"iot/device/{did}/prop"
+    written = 0
+    for iid, value in props.items():
+        try:
+            # iid 拼进路径，含 '/' 就会多出一层、值落到别处；整台写那条是容器替我们校的
+            validate_segment(iid)
+        except (TypeError, ValueError) as e:
+            if samples.take("iid_rejected"):
+                logger.warning("align: iid rejected did=%s iid=%r: %s", did, iid, e)
+            continue
+        try:
+            if store.set(f"{path}/{iid}", value, source=SOURCE):
+                written += 1
+        except (TypeError, ValueError) as e:
+            if samples.take("value_rejected"):
+                logger.warning(
+                    "align: value rejected did=%s iid=prop.%s type=%s: %s",
+                    did,
+                    iid,
+                    type(value).__name__,
+                    e,
+                )
+    return written
+
+
 def _write_device(
     store: StateStore, did: str, props: dict[str, Any], samples: _Samples
 ) -> int:
@@ -335,28 +368,63 @@ def _write_device(
                 "align: batch write rejected did=%s (%s); retrying per property", did, e
             )
 
-    written = 0
-    for iid, value in props.items():
-        try:
-            # iid 拼进路径，含 '/' 就会多出一层、值落到别处；整台写那条是容器替我们校的
-            validate_segment(iid)
-        except (TypeError, ValueError) as e:
-            if samples.take("iid_rejected"):
-                logger.warning("align: iid rejected did=%s iid=%r: %s", did, iid, e)
+    return _write_props_per_leaf(store, did, props, samples)
+
+
+async def top_up_missing_props(store: StateStore, miot_proxy: Any, did: str) -> int:
+    """把这台设备在容器里缺的可读属性补齐。返回写进去的条数。
+
+    只补缺的，不整台重拉：整台重拉会用云端缓存里的旧值盖掉刚推来的新值，而容器没有
+    时间戳可仲裁，盖完 `last_reported` 是当下，事后看不出来。
+
+    只在设备转上线时调用 —— 对齐跳过了离线设备的属性，而对齐一个作用域只跑一次，所以
+    启动时离线的设备在整代里一条属性都没有。异常只记日志、不往外抛：补不上的下一次
+    上线还有机会。
+    """
+    samples = _Samples()
+    if not _is_valid_segment(did):
+        return 0
+    try:
+        iids = await miot_proxy.get_readable_prop_iids(did)
+    except Exception as e:
+        logger.warning("top-up: spec unavailable did=%s: %s", did, e)
+        return 0
+
+    have = store.get(f"iot/device/{did}/prop", {})
+    present = set(have) if isinstance(have, dict) else set()
+    params: list[MIoTGetPropertyParam] = []
+    for iid in iids:
+        parsed = try_parse_iid(iid, "prop")
+        if parsed is None:
+            if samples.take("bad_iid"):
+                logger.warning("top-up: unparsable iid did=%s iid=%s", did, iid)
             continue
-        try:
-            if store.set(f"{path}/{iid}", value, source=SOURCE):
-                written += 1
-        except (TypeError, ValueError) as e:
-            if samples.take("value_rejected"):
-                logger.warning(
-                    "align: value rejected did=%s iid=prop.%s type=%s: %s",
-                    did,
-                    iid,
-                    type(value).__name__,
-                    e,
-                )
+        siid, piid = parsed
+        if f"{siid}.{piid}" in present:
+            continue
+        params.append(MIoTGetPropertyParam(did=did, siid=siid, piid=piid))
+    if not params:
+        return 0
+
+    meta = {did: _DeviceMeta(online=True, model=str(_model_of(miot_proxy, did)))}
+    unreadable: dict[str, int] = {}
+    by_device = await _read_values(miot_proxy, params, meta, unreadable, samples)
+    written = _write_props_per_leaf(store, did, by_device.get(did) or {}, samples)
+    logger.info(
+        "top-up: did=%s requested=%d written=%d unreadable=%s",
+        did,
+        len(params),
+        written,
+        unreadable or {},
+    )
     return written
+
+
+def _model_of(miot_proxy: Any, did: str) -> str:
+    """读失败分组要按型号计数；拿不到就给个占位。"""
+    devices = getattr(miot_proxy, "_device_info_dict", None) or {}
+    device = devices.get(did) if isinstance(devices, dict) else None
+    return str(getattr(device, "model", "?"))
 
 
 async def align_iot_state(

@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from miloco.state import StateStore
 from miloco.state.path import validate_segment
@@ -81,13 +81,11 @@ class IotPushWriter:
         *,
         current_scope: Callable[[], int],
         scope_is_aligned: Callable[[], bool],
-        on_came_online: Callable[[Any], Awaitable[None]] | None = None,
     ) -> None:
         self._store = store
         self._proxy = miot_proxy
         self._current_scope = current_scope
         self._scope_is_aligned = scope_is_aligned
-        self._on_came_online = on_came_online
         self._counts: dict[str, int] = {}
         self._warn_countdown = 1
 
