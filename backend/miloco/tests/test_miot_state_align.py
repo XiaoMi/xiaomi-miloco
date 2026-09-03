@@ -400,6 +400,44 @@ async def test_a_wellformed_did_outside_the_home_is_dropped(store, caplog):
     assert any("out_of_home row did=d9 iid=prop.2.1" in m for m in warnings)
 
 
+async def test_a_bridged_did_from_the_response_is_not_blamed_on_the_home_filter(
+    store, caplog
+):
+    """did 带 '/' 的是桥接子设备，报成家庭外会把排查的人带去查家庭白名单。"""
+    proxy = _EchoProxy(
+        {"d1": _device()},
+        {
+            ("d1", 2, 1): {"code": 0, "value": 26},
+            ("bridge/0", 2, 1): {"code": 0, "value": 99},
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("bad_did_received row did=bridge/0" in m for m in warnings)
+    assert not any("out_of_home" in m for m in warnings)
+
+
+async def test_bridged_dids_do_not_eat_the_out_of_home_sample_budget(store, caplog):
+    """桥接子设备成批回来，共用额度的话「绕过家庭过滤」那条一行都打不出。"""
+    rows = {
+        (f"bridge/{index}", 2, 1): {"code": 0, "value": 1}
+        for index in range(SAMPLE_LIMIT + 1)
+    }
+    # 排在成批的桥接行之后：额度被占满时它就是打不出来的那一条
+    rows[("d9", 2, 1)] = {"code": 0, "value": 99}
+    rows[("d1", 2, 1)] = {"code": 0, "value": 26}
+    proxy = _EchoProxy({"d1": _device()}, rows)
+
+    with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
+        await align_iot_state(store, proxy)
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any("out_of_home row did=d9 iid=prop.2.1" in m for m in warnings)
+
+
 async def test_dict_value_is_dropped_instead_of_becoming_a_subtree(store, caplog):
     """dict 会被容器展开成一层子树，这条属性就不再是叶子，按叶子读的人取到空。"""
     proxy = _FakeProxy(

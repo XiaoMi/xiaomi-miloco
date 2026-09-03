@@ -131,6 +131,15 @@ def _log_unreadable(
         logger.warning(*args)
 
 
+def _is_valid_segment(value: Any) -> bool:
+    """这个 did 当不当得了路径段。分类只要布尔，不需要拒收理由。"""
+    try:
+        validate_segment(value)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 async def _read_values(
     miot_proxy: Any,
     params: list[MIoTGetPropertyParam],
@@ -168,10 +177,16 @@ async def _read_values(
                 continue
             if did not in requested:
                 # 判据是「本轮请求过没有」而不是「在不在 meta 里」：离线设备和拿不到
-                # spec 的设备都在 meta 里，却一条属性都没请求过。分两类记是因为排查
-                # 方向不同 —— 家庭外的写进去等于绕过家庭过滤，本轮没请求的则是云端
-                # 缓存值，写进去会把 last_reported 盖成当下、看不出它其实很旧
-                kind = "out_of_home" if did not in meta else "not_requested"
+                # spec 的设备都在 meta 里，却一条属性都没请求过。分三类记是因为排查
+                # 方向不同 —— 家庭外的写进去等于绕过家庭过滤；did 当不了路径段的是
+                # 桥接子设备，成批且常态，混进家庭外那一类会把它的样本额度占满；本轮
+                # 没请求的则是云端缓存值，写进去会把 last_reported 盖成当下
+                if did in meta:
+                    kind = "not_requested"
+                elif _is_valid_segment(did):
+                    kind = "out_of_home"
+                else:
+                    kind = "bad_did_received"
                 if samples.take(kind):
                     logger.warning(
                         "align: drop %s row did=%s iid=prop.%s.%s",
@@ -266,8 +281,9 @@ def _write_device(
     返回值就会把一条都没进树的量算进返回值。
     """
     try:
-        # 名单闸在上游（_read_values 按 meta 丢掉了名单外的行），这里是防御性重校：
-        # 真放行一个含 '/' 的 did，路径会被劈成两段
+        # 名单闸在上游（_read_values 按「本轮请求过没有」丢掉了名单外的行，而请求
+        # 名单里每个 did 都过了段校验），这里是防御性重校：真放行一个含 '/' 的 did，
+        # 路径会被劈成两段
         validate_segment(did)
     except (TypeError, ValueError) as e:
         # 与请求侧分开记：桥接子设备是常态且成批，共用额度会把云端异常这条挤掉
