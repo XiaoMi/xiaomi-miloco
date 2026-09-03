@@ -112,8 +112,16 @@ class TaskService:
             rule_briefs.append(
                 RuleBrief(
                     rule_id=rule.id,
+                    name=rule.name,
+                    mode=rule.mode.value,
                     query=rule.condition.query,
                     actions_desc=self._rule_actions_desc(rule),
+                    action_descriptions=list(rule.action_descriptions),
+                    on_enter_desc=rule.on_enter_desc,
+                    on_exit_desc=rule.on_exit_desc,
+                    on_target_desc=rule.on_target_desc,
+                    device_actions=self._rule_device_actions(rule),
+                    editable_desc_slots=self._rule_editable_desc_slots(rule),
                 )
             )
         return TaskFullView(
@@ -125,6 +133,54 @@ class TaskService:
             rule_briefs=rule_briefs,
             cron_refs=[CronRef(**c) for c in raw["cron_refs"]],
         )
+
+    @staticmethod
+    def _rule_editable_desc_slots(rule) -> list[str]:
+        """哪些 agent 文案槽位允许 Web 就地编辑。
+
+        判定与 ``rule/service.py:_validate_rule_consistency`` 的校验矩阵同源:
+        同一槽位的「设备直控」与「agent 文案」互斥, 所以走设备直控的槽位不给编辑
+        (填了也会被 422 挡回来)。放在 backend 算, 前端只管渲染, 免得两边漂移。
+
+        ``on_target_desc`` 只在**已经**有值时才可编辑: 它额外要求任务挂着带
+        ``target_minutes`` 的时长记录, 从零新建的话前端无从判断, 交给 agent 建。
+        已知边角: 这里只看字段自身真值, 不回查 record —— 若 task 的 duration record
+        事后被改成 ``target_minutes=null``, 槽位照旧渲染。但那种状态下该 rule 的
+        **任何**一次 PATCH 都会被 ``_validate_on_target_desc_compat`` 拦下 (它对合并
+        后的整条规则跑), 藏掉这个框也救不回来, 故不为此多查一次 record。
+        """
+        if rule.mode.value == "event":
+            return [] if rule.actions else ["action_descriptions"]
+        slots: list[str] = []
+        if not rule.on_enter_actions:
+            slots.append("on_enter_desc")
+        if not rule.on_exit_actions:
+            slots.append("on_exit_desc")
+        if rule.on_target_desc:
+            slots.append("on_target_desc")
+        return slots
+
+    @staticmethod
+    def _rule_device_actions(rule) -> list[str]:
+        """设备直控动作摘要 (只读展示用)。
+
+        与 ``_rule_actions_desc`` 的差别: 这里**只**收设备动作、不收 agent 文案,
+        因为前端要把两者分开渲染 (文案可编辑, 设备动作只读)。
+
+        逐条动作的字符串格式**刻意与 ``_rule_actions_desc`` 逐字对齐** (event 带
+        ``=value``、state 只给 ``on_enter:{iid}``): 前端浏览态渲染压平列、编辑态渲染
+        这一列, 同一个动作在同一个抽屉里必须长同一个样。以压平列为准而不是反过来,
+        是因为那一列是 agent 判重的输入, 不能为了 Web 好看去动它。
+        """
+        if rule.mode.value == "event":
+            return [
+                f"{a.iid}={a.value if a.value is not None else a.params}"
+                for a in rule.actions
+            ]
+        out: list[str] = []
+        out.extend(f"on_enter:{a.iid}" for a in rule.on_enter_actions)
+        out.extend(f"on_exit:{a.iid}" for a in rule.on_exit_actions)
+        return out
 
     @staticmethod
     def _rule_actions_desc(rule) -> list[str]:

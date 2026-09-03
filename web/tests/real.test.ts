@@ -25,7 +25,7 @@ import {
   realTestOmniConfig,
   realEventRefUrl,
   realEventCropMeta,
-  realUpdateRuleQuery,
+  realUpdateRule,
   realUpdateTaskDescription,
   _resetUsageStatsCache,
 } from "@/api/real";
@@ -598,7 +598,7 @@ describe("任务详情就地编辑 — 写接口契约", () => {
 
   it("改触发条件：PATCH /api/rules/{id} 只带 condition.query（不动感知设备）", async () => {
     const cap = captureFetch();
-    await realUpdateRuleQuery("rule-1", "孩子在书桌前学习");
+    await realUpdateRule("rule-1", { query: "孩子在书桌前学习" });
     expect(cap.method).toBe("PATCH");
     expect(cap.url).toBe("/api/rules/rule-1");
     // 只提交 condition.query：backend patch_rule 按 model_fields_set 合并，
@@ -606,9 +606,43 @@ describe("任务详情就地编辑 — 写接口契约", () => {
     expect(cap.body).toEqual({ condition: { query: "孩子在书桌前学习" } });
   });
 
+  it("改规则名 / 意图文案：一次 PATCH 合并提交，未改的字段不带上", async () => {
+    const cap = captureFetch();
+    await realUpdateRule("rule-1", {
+      name: "[piano_practice] 孩子坐在钢琴前",
+      actionDescriptions: ["提醒住户", "记一次练琴"],
+    });
+    expect(cap.method).toBe("PATCH");
+    // 只带这次真改过的字段：query / on_*_desc 缺席 → backend 保留原值。
+    expect(cap.body).toEqual({
+      name: "[piano_practice] 孩子坐在钢琴前",
+      action_descriptions: ["提醒住户", "记一次练琴"],
+    });
+  });
+
+  it("state 模式的进入 / 离开文案各自映射到 snake_case 字段", async () => {
+    const cap = captureFetch();
+    await realUpdateRule("rule-2", {
+      onEnterDesc: "进入时提醒",
+      onExitDesc: "离开时关灯",
+      onTargetDesc: "满 30 分钟表扬一句",
+    });
+    expect(cap.body).toEqual({
+      on_enter_desc: "进入时提醒",
+      on_exit_desc: "离开时关灯",
+      on_target_desc: "满 30 分钟表扬一句",
+    });
+  });
+
+  it("空 patch → 空 body，不误清任何字段", async () => {
+    const cap = captureFetch();
+    await realUpdateRule("rule-3", {});
+    expect(cap.body).toEqual({});
+  });
+
   it("id 走 encodeURIComponent，特殊字符不越界成新路径", async () => {
     const cap = captureFetch();
-    await realUpdateRuleQuery("a/b?c", "x");
+    await realUpdateRule("a/b?c", { query: "x" });
     expect(cap.url).toBe("/api/rules/a%2Fb%3Fc");
   });
 
@@ -620,7 +654,7 @@ describe("任务详情就地编辑 — 写接口契约", () => {
           headers: { "Content-Type": "application/json" },
         }),
     ) as unknown as typeof fetch;
-    await expect(realUpdateRuleQuery("nope", "x")).rejects.toThrow(
+    await expect(realUpdateRule("nope", { query: "x" })).rejects.toThrow(
       "Rule 'nope' not found",
     );
   });

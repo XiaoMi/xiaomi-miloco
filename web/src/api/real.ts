@@ -28,6 +28,8 @@ import type {
   ScopeCamera,
   ScopeHome,
   Task,
+  TaskRuleDescSlot,
+  TaskRulePatch,
   TokenBreakdown,
   UsageCallType,
   UsageGroup,
@@ -2047,8 +2049,16 @@ interface BackendTaskSummary {
   created_at: string;
   rule_briefs?: {
     rule_id: string;
+    name?: string;
+    mode?: "event" | "state";
     query: string;
     actions_desc?: string[];
+    action_descriptions?: string[];
+    on_enter_desc?: string | null;
+    on_exit_desc?: string | null;
+    on_target_desc?: string | null;
+    device_actions?: string[];
+    editable_desc_slots?: TaskRuleDescSlot[];
   }[];
   record: {
     kind: "progress" | "duration" | "event";
@@ -2071,8 +2081,16 @@ export async function realListTasks(): Promise<Task[]> {
     createdAt: t.created_at,
     ruleBriefs: (t.rule_briefs ?? []).map((b) => ({
       ruleId: b.rule_id,
+      name: b.name ?? "",
+      mode: b.mode ?? "event",
       query: b.query,
       actionsDesc: b.actions_desc ?? [],
+      actionDescriptions: b.action_descriptions ?? [],
+      onEnterDesc: b.on_enter_desc ?? null,
+      onExitDesc: b.on_exit_desc ?? null,
+      onTargetDesc: b.on_target_desc ?? null,
+      deviceActions: b.device_actions ?? [],
+      editableDescSlots: b.editable_desc_slots ?? [],
     })),
     record: t.record
       ? {
@@ -2129,20 +2147,31 @@ export async function realUpdateTaskDescription(
   );
 }
 
-// 改规则触发条件文本（PATCH /api/rules/{id}）。
-// condition 走部分更新：只带 query，perceive_device_ids（感知设备）由 backend
-// 保留原值——住户在 Web 上只改"什么情况算命中"，不动看哪几个摄像头。
-// backend patch_rule 落库成功后会重新 add_rule 进 RuleRunner，新条件即时生效。
-export async function realUpdateRuleQuery(
+// 改规则（PATCH /api/rules/{id}）—— 一次带上住户在 Web 上改动的所有字段。
+// 部分更新语义：只发本次真变了的键，其余（感知设备 perceive_device_ids、设备直控
+// actions 等）由 backend 保留原值——住户只改"什么情况算命中 / 命中后要干嘛"的文本，
+// 不动看哪几个摄像头、也不手改结构化设备动作。
+// backend patch_rule 落库成功后会重新 add_rule 进 RuleRunner：query / name 下一个
+// 感知 cycle 就进 omni prompt，desc 文案下一次命中就是新的，都无需重启。
+export async function realUpdateRule(
   ruleId: string,
-  query: string,
+  patch: TaskRulePatch,
 ): Promise<void> {
+  const body: Record<string, unknown> = {};
+  if (patch.name !== undefined) body.name = patch.name;
+  if (patch.query !== undefined) body.condition = { query: patch.query };
+  if (patch.actionDescriptions !== undefined) {
+    body.action_descriptions = patch.actionDescriptions;
+  }
+  if (patch.onEnterDesc !== undefined) body.on_enter_desc = patch.onEnterDesc;
+  if (patch.onExitDesc !== undefined) body.on_exit_desc = patch.onExitDesc;
+  if (patch.onTargetDesc !== undefined) body.on_target_desc = patch.onTargetDesc;
   await apiFetch<Normal<unknown>>(
     `/api/rules/${encodeURIComponent(ruleId)}`,
     {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ condition: { query } }),
+      body: JSON.stringify(body),
     },
   );
 }

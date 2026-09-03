@@ -95,7 +95,10 @@ agent 自己起，snake_case `[a-z0-9_]{1,32}`，需含语义（`drink_8_today` 
 
 ### 重复检查
 
-调 `miloco-cli task list --pretty` 拿活跃 task 列表，按 task_id + description + rule_briefs 比对：
+调 `miloco-cli task list --pretty` 拿活跃 task 列表，按 task_id + description + rule_briefs 比对
+（`rule_briefs` 里**判重只看 `actions_desc` 这一列** —— 它是设备动作与 agent 文案压平后的
+人话摘要；`action_descriptions` / `on_*_desc` / `device_actions` 是同一批动作的结构化原值，
+供 Web 编辑回填，判重时会把同一个动作数两遍；`editable_desc_slots` 是 Web 专用，忽略）：
 
 | 类型 | 判据 | 处理 |
 |---|---|---|
@@ -580,7 +583,7 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 
 | 维度取值 | flag |
 |---|---|
-| name（必填） | `--name "[<task_id>] <场景描述>"` |
+| name（必填） | `--name "[<task_id>] <场景描述>"`；`<场景描述>` 与 `condition.query` 同一套措辞规则 —— **不含断言式措辞**（"检测到 / 识别到 / 感知到 / 已..." 等开头），backend 会 422 退回（见 §Rule.condition.query） |
 | `mode=event` | `--mode event` |
 | `mode=state` | `--mode state` |
 | `condition.query` | `--condition "<query>"` |

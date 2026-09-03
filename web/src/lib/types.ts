@@ -763,10 +763,54 @@ export interface TaskRecordSummary {
 // 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
 export interface TaskRuleBrief {
   ruleId: string;
+  // 规则名。它与 query 一起进感知调用的「待判断规则」消息（system 之后的独立 user
+  // 消息，见 prompt_builder.py::_assemble_fused_messages），是「名称」里唯一真正
+  // 影响命中判定的字段（任务名 task.description 不进模型），故开放编辑。
+  // 约定格式 `[<task_id>] <场景描述>`，前缀由 UI 固定、只让改后半段。
+  name: string;
+  // event：命中即触发一次；state：进入 / 离开状态各触发一次。
+  // 仅供展示 / 排查参考——「渲染几个编辑框」由 editableDescSlots 决定，**不要**按 mode 推：
+  // 同槽位的设备直控与文案在 backend 校验里互斥，mode 推不出来（推错 → 保存吃 422）。
+  mode: "event" | "state";
   // 规则的自然语言条件（"孩子在书桌前学习" 之类）
   query: string;
-  // 命中后执行的动作人话摘要
+  // 命中后执行的动作人话摘要（压平列，含 on_enter: / on_exit: 前缀，设备动作与
+  // 文案混排）。只用于兜底展示，**不可逆解析，不拿它回填编辑框**。
   actionsDesc: string[];
+  // ↓ 结构化原值：agent 命中后读到的「意图」文案。哪几个真能改由后端的
+  //   editableDescSlots 说了算（同槽位的设备直控与文案互斥），前端别自己按 mode 推。
+  actionDescriptions: string[];
+  onEnterDesc: string | null;
+  onExitDesc: string | null;
+  // 累计达标文案（要求所属 task 挂着 duration record 且配了 target_minutes；
+  // 与规则自身的滑窗字段 duration_seconds / duration_ratio 无关，那是 rule engine
+  // 内部 timer 驱动的 TARGET_FIRED）。为 null 时后端不列入 editableDescSlots、前端
+  // 也就不渲染：task 有没有挂合格 record 前端判断不了（配了的话从零填其实能存下，
+  // 并非一定被挡），从零新建交给 agent。
+  // 见 task/service.py::_rule_editable_desc_slots 与
+  // rule/service.py::_validate_on_target_desc_compat。
+  onTargetDesc: string | null;
+  // 设备直控动作摘要，只读——设备动作是结构化 JSON，不在 Web 上手改。
+  deviceActions: string[];
+  // 允许就地编辑的文案槽位，由后端按 rule 校验矩阵算好（见 task/service.py）。
+  editableDescSlots: TaskRuleDescSlot[];
+}
+
+export type TaskRuleDescSlot =
+  | "action_descriptions"
+  | "on_enter_desc"
+  | "on_exit_desc"
+  | "on_target_desc";
+
+// 规则的部分更新载荷（对齐 backend PATCH /api/rules/{id} 的字段子集）。
+// 只带住户在 Web 上真能改的那几项；感知设备、设备动作等由 backend 保留原值。
+export interface TaskRulePatch {
+  name?: string;
+  query?: string;
+  actionDescriptions?: string[];
+  onEnterDesc?: string;
+  onExitDesc?: string;
+  onTargetDesc?: string;
 }
 
 // 任务视图 = 基础字段 + record 进度摘要 + 驱动规则，一次 summary 请求全拿到。
