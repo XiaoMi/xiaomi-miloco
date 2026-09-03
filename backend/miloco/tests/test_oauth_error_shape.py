@@ -320,17 +320,19 @@ def test_oauth_state_uses_sha256_and_stays_self_consistent():
     assert asyncio.run(c.check_state_async(redirect_state="not-it")) is False
 
 
-def test_no_unsanitized_caller_id_reaches_the_log_in_that_router():
+def test_no_unsanitized_value_reaches_the_log_in_that_router():
     """米家接口那一组日志里不留未清洗的漏网。
 
-    每个接口都把鉴权依赖注入的调用者标识记一行「接口被调用」。只清洗被扫描器点名
-    的那一处会留下最难维护的中间态：读到这一处清了、下一处没清，合理的推断是「两
-    处的值来源不同」，而实际是同一个依赖；下一个碰到未清洗那几行的改动，还会拿到
-    一模一样的扫描报告。
+    钉住两个值，理由不同：**调用者标识**今天恒为 ``None``（两条鉴权依赖成功时都
+    不返回值），钉它是为了「将来补成返回真实身份」那天不必回头逐处补；**通知文本**
+    是调用方提交上来的自由字符串、只被约束非空不限字符集，是今天就真的外部可控的
+    那个，钉它是防现时回退——带服务凭据的调用方塞一个含换行的值进去，日志里就多出
+    一整行看起来完全正常的记录，按行切的采集器分不出真假。
 
-    判据按 **AST 看实参**，不按行文本匹配：同一个值在这个文件里有好几种写法（``%s``
-    与 ``=%s``、单参数与多参数、单行与折行），按行匹配只能覆盖其中一种——上一版护栏
-    就是这么漏掉九处的，而它当时照样通过。
+    判据按 **AST 看实参**，不按行文本匹配：同一个值在这个文件里有好几种写法
+    （占位符写法不同、单参数与多参数、单行与折行），按行匹配只覆盖其中一种。
+    位置实参与关键字实参都看，也包括第 0 个——``logger.info(f"user={x}")`` 这种
+    写法会把值拼进格式串本身。
     """
     import ast
     import pathlib
@@ -338,6 +340,42 @@ def test_no_unsanitized_caller_id_reaches_the_log_in_that_router():
     import miloco.miot.router as mod
 
     src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
+
+    def _bare_names(node: ast.expr) -> list[str]:
+        """这个实参里有哪些「必须先清洗、却没被清洗」的值。
+
+        **向下遍历整棵子树**，不只看顶层——``extra={"user": current_user}`` 会把值
+        埋进字典、f-string 会把它埋进 ``JoinedStr``，只看顶层就全漏过去了。
+        """
+        found: list[str] = []
+
+        def visit(n: ast.AST) -> None:
+            # 已被 _log_safe(...) 包住的，整棵子树都算清洗过——不往下看。
+            # 注意不能用 ast.walk + continue：那是平铺遍历，跳过调用节点本身
+            # 之后它的实参照样会被访问到。
+            if (
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "_log_safe"
+            ):
+                return
+            if isinstance(n, ast.Name) and n.id == "current_user":
+                found.append("current_user")
+                return
+            if (
+                isinstance(n, ast.Attribute)
+                and n.attr == "notify"
+                and isinstance(n.value, ast.Name)
+                and n.value.id == "request"
+            ):
+                found.append("request.notify")
+                return
+            for child in ast.iter_child_nodes(n):
+                visit(child)
+
+        visit(node)
+        return found
+
     leaked = []
     for node in ast.walk(ast.parse(src)):
         if not isinstance(node, ast.Call):
@@ -349,9 +387,11 @@ def test_no_unsanitized_caller_id_reaches_the_log_in_that_router():
             and fn.value.id == "logger"
         ):
             continue
-        # 第 0 个实参是 format 串，其后才是要被插进去的值
-        for arg in node.args[1:]:
-            if isinstance(arg, ast.Name) and arg.id == "current_user":
-                leaked.append(f"L{node.lineno}: {src.splitlines()[node.lineno - 1].strip()}")
+        args = list(node.args) + [kw.value for kw in node.keywords]
+        for arg in args:
+            for name in _bare_names(arg):
+                leaked.append(
+                    f"L{node.lineno} [{name}]: {src.splitlines()[node.lineno - 1].strip()}"
+                )
 
-    assert not leaked, "这些日志调用还在直接用未清洗的调用者标识:\n" + "\n".join(leaked)
+    assert not leaked, "这些日志调用还在直接用未清洗的值:\n" + "\n".join(leaked)
