@@ -55,8 +55,8 @@ async def scene():
     proxy._device_info_dict = {}
     proxy._kv_repo = _FakeKV([HOME])
     proxy._miot_client = SimpleNamespace(get_devices_async=AsyncMock(return_value={}))
-    proxy._sync_meta_subscriptions = AsyncMock()
-    proxy._sync_scene_subscriptions = AsyncMock()
+    # 订阅对账已派后台任务(见 _spawn_subscription_sync)，与容器调和无关，置空
+    proxy._spawn_subscription_sync = lambda: None
 
     import miloco.manager as manager_module
 

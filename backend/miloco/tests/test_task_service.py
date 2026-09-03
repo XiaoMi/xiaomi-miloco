@@ -373,3 +373,48 @@ def test_list_for_dedupe_returns_cron_refs(service):
 
     by_id = {v.task_id: v for v in views}
     assert by_id["t1"].cron_refs == [CronRef(ref="job-int", dispatch_owner="internal")]
+
+
+def test_action_desc_renders_scene_id_not_none():
+    """场景没有 value/params;只按 iid 渲染会给用户看到 `scene=None`,
+    且同一条规则装两个场景时两行完全一样(前端直接展示这个串)。"""
+    from miloco.rule.schema import RuleAction
+    from miloco.task.service import _action_desc
+
+    a = RuleAction(did="scene-A", iid="scene", idempotent=False, cooldown_minutes=5)
+    b = RuleAction(did="scene-B", iid="scene", idempotent=False, cooldown_minutes=5)
+
+    assert _action_desc(a) == "scene:scene-A"
+    assert _action_desc(a) != _action_desc(b)
+
+
+def test_action_desc_keeps_prop_and_action_shape():
+    """既有两种形态的展示串不能被改动带偏。"""
+    from miloco.rule.schema import RuleAction
+    from miloco.task.service import _action_desc
+
+    prop = RuleAction(did="d1", iid="prop.2.1", value=True)
+    tts = RuleAction(
+        did="d2", iid="action.7.3", params=["你好"],
+        idempotent=False, cooldown_minutes=5,
+    )
+    assert _action_desc(prop) == "prop.2.1=True"
+    assert _action_desc(tts) == "action.7.3=['你好']"
+
+
+def test_state_action_desc_keeps_payload_out():
+    """state 摘要只带形态。前端按「；」切分摘要串(TasksPage.splitActions),
+    TTS 文案里的分号会把一条动作切成几行残句。"""
+    from miloco.rule.schema import RuleAction
+    from miloco.task.service import _action_desc_short
+
+    tts = RuleAction(
+        did="speaker", iid="action.7.3", params=["灯已调暗；投影已开启"],
+        idempotent=False, cooldown_minutes=5,
+    )
+    scene = RuleAction(
+        did="scene-A", iid="scene", idempotent=False, cooldown_minutes=5
+    )
+    assert _action_desc_short(tts) == "action.7.3"
+    assert "；" not in _action_desc_short(tts)
+    assert _action_desc_short(scene) == "scene:scene-A"

@@ -9,6 +9,9 @@
 
 另有 ``CAMERA_PROMPT_MAP_KEY``（每摄像头自定义「感知须知」prompt，did→文本）——
 唯一的 map 语义 key（JSON object，非集合），供逐设备注入 omni 场景指导。
+
+``CAMERA_CROP_DENY_LIST_KEY``（已关闭 Smart Crop 的相机集合，deny-list / 默认开）同为
+JSON array，但键口径是**合成 did**（逐路，同 prompt），与按整台走的启停 / 拾音不同。
 """
 
 from __future__ import annotations
@@ -84,6 +87,20 @@ def voice_allowed_camera_dids(kv_repo: KVRepo) -> set[str]:
     改开关即时生效、不重启感知引擎。读 KV 失败时按空集处理（fail-closed）。
     """
     return set(_load_list(kv_repo, ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY))
+
+
+def crop_denied_camera_dids(kv_repo: KVRepo) -> set[str]:
+    """已**关闭** Smart Crop 的相机 did 集合（deny-list / 默认开）；空表示全部机位都开。
+
+    键是**合成 did**（``did:ch{n}``，多通道逐路），同 ``camera_prompts``——"该不该裁"取决于
+    该路镜头的视野，与按整台走的启停 / 拾音不同口径。
+
+    与全局双闸（``perception.engine.crop_enhance.enabled`` / ``user_enabled``）**相与**：
+    全局关则整个能力不可用、本集无意义；全局开时才逐机位看本集。引擎每感知窗实时读取，
+    改开关下一窗即生效、不重启感知引擎。读 KV 失败时按空集处理（fail-open = 继续裁：本项
+    只影响视频编码构图、不涉隐私，与 ``voice_allowed_camera_dids`` 的 fail-closed 相反）。
+    """
+    return set(_load_list(kv_repo, ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY))
 
 
 def is_home_allowed(kv_repo: KVRepo, home_id: str | None) -> bool:
@@ -280,6 +297,19 @@ def set_cameras_voice_in_use(
     """批量切换相机拾音启用状态。去重后一次性写入 KV。拾音无投喂上限，不设 cap。"""
     return _toggle_members(
         kv_repo, ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY, dids, include=in_use
+    )
+
+
+def set_cameras_crop_in_use(
+    kv_repo: KVRepo, dids: list[str], in_use: bool
+) -> tuple[list[str], bool]:
+    """批量切换相机 Smart Crop 启用状态。``in_use=False`` 即加入**关闭集**（deny-list，
+    故 ``include=not in_use``，同 ``set_camera_in_use``）。``dids`` 为合成 did。
+
+    去重后一次性写入 KV。裁切无投喂上限，不设 cap。
+    """
+    return _toggle_members(
+        kv_repo, ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY, dids, include=not in_use
     )
 
 

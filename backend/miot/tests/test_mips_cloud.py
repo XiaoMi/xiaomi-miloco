@@ -30,6 +30,7 @@ from miot.types import (
     MIoTDeviceBindEvent,
     MIoTDeviceStateEvent,
     MIoTSceneChangedEvent,
+    MipsConnectionError,
     MipsSubscribeRejectedError,
     MipsSubscribeTimeoutError,
 )
@@ -746,10 +747,10 @@ async def test_subscribe_transient_rejection_keeps_topic_and_reconnect_retries()
 
 
 @pytest.mark.asyncio
-async def test_device_state_subscribes_exact_topics():
-    """sub_device_state_async subscribes the exact per-op leaf topics
-    (NOT a `state/#` wildcard — the broker ACL rejects the wildcard, same as
-    the g_op/# case)."""
+async def test_device_state_subscribes_wildcard():
+    """sub_device_state_async issues ONE wildcard subscription per did —
+    `device/{did}/state/#` (same filter as xiaomi-ha; probe-verified allowed
+    by the broker ACL). Exact leaves are NOT subscribed individually."""
     mips, _ = _make_mips()
     holder: dict[str, _FakeMqttClient] = {}
 
@@ -763,12 +764,11 @@ async def test_device_state_subscribes_exact_topics():
     try:
         await asyncio.gather(
             mips.sub_device_state_async("dev-1", handler=lambda _m: None),
-            _ack_subscribes(fake, 2),
+            _ack_subscribes(fake, 1),
         )
         topics = {t for t, _, _ in fake.subscribed}
-        assert "device/dev-1/state/online" in topics
-        assert "device/dev-1/state/offline" in topics
-        assert "device/dev-1/state/#" not in topics
+        assert "device/dev-1/state/#" in topics
+        assert len(topics) == 1
     finally:
         await mips.deinit_async()
 
@@ -776,8 +776,8 @@ async def test_device_state_subscribes_exact_topics():
 @pytest.mark.parametrize("op", ["online", "offline"])
 @pytest.mark.asyncio
 async def test_device_state_decoded_event_dispatched(op):
-    """device/{did}/state/{online,offline} → MIoTDeviceStateEvent with
-    event=op and did parsed from the topic; payload kept in `raw`."""
+    """Messages arrive on exact leaf topics despite the `#` subscription →
+    MIoTDeviceStateEvent with event=op and did parsed from the topic."""
     mips, _ = _make_mips()
     holder: dict[str, _FakeMqttClient] = {}
 
@@ -793,7 +793,7 @@ async def test_device_state_decoded_event_dispatched(op):
     try:
         await asyncio.gather(
             mips.sub_device_state_async("dev-42", handler=received.append),
-            _ack_subscribes(fake, 2),
+            _ack_subscribes(fake, 1),
         )
         fake.fire_message(
             f"device/dev-42/state/{op}",
@@ -809,8 +809,35 @@ async def test_device_state_decoded_event_dispatched(op):
 
 
 @pytest.mark.asyncio
-async def test_device_state_unsubscribes_exact_topics():
-    """unsub_device_state_async removes both online + offline leaf topics."""
+async def test_device_state_unknown_leaf_dropped():
+    """We subscribe `state/#`, so ANY other leaf the cloud publishes under
+    state/ reaches the decoder too — it must be silently dropped (the
+    load-bearing `if not m` guard), not raise or dispatch an illegal event."""
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+    received: list = []
+    try:
+        await asyncio.gather(
+            mips.sub_device_state_async("dev-9", handler=received.append),
+            _ack_subscribes(fake, 1),
+        )
+        fake.fire_message("device/dev-9/state/whatever", b"{}")
+        await asyncio.sleep(0.01)
+        assert received == []
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_device_state_unsubscribes_wildcard():
+    """unsub_device_state_async removes the single wildcard topic."""
     mips, _ = _make_mips()
     holder: dict[str, _FakeMqttClient] = {}
 
@@ -824,20 +851,62 @@ async def test_device_state_unsubscribes_exact_topics():
     try:
         await asyncio.gather(
             mips.sub_device_state_async("dev-7", handler=lambda _m: None),
-            _ack_subscribes(fake, 2),
+            _ack_subscribes(fake, 1),
         )
         await mips.unsub_device_state_async("dev-7")
         unsubbed = set(fake.unsubscribed)
-        assert "device/dev-7/state/online" in unsubbed
-        assert "device/dev-7/state/offline" in unsubbed
+        assert "device/dev-7/state/#" in unsubbed
     finally:
         await mips.deinit_async()
 
 
 @pytest.mark.asyncio
-async def test_device_state_reconnect_resubscribes_both_topics():
-    """After disconnect/reconnect both online + offline leaf topics are
-    re-issued by the _subs replay."""
+async def test_subscribe_superseded_by_concurrent_unsubscribe_raises():
+    """SUBACK 等待期间同 topic 被并发退订(上层 bind 作废路径的 unsub 弹掉了
+    在飞订阅自己的 _subs 条目)时,订阅必须抛 MipsConnectionError——否则 SDK
+    在 await 之后记"已订阅"、broker 却已 UNSUB,`did in set` 短路会吞掉之后
+    所有重试,该 did 的推送静默丢失直到 mips 实例重建。"""
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+
+    try:
+        subscribe_task = asyncio.create_task(
+            mips.sub_device_state_async("dev-x", handler=lambda _m: None)
+        )
+        # 等 SUBSCRIBE 发出、停在 SUBACK 等待上。
+        for _ in range(50):
+            if fake.subscribed:
+                break
+            await asyncio.sleep(0.005)
+        _, _, mid = fake.subscribed[-1]
+
+        # 并发退订:弹掉 _subs 条目、发出 UNSUBSCRIBE,但不补 SUBACK。
+        await mips.unsub_device_state_async("dev-x")
+
+        # SUBACK 到达后,订阅路径必须发现自己的授权已过期。
+        fake.fire_suback(mid, [2])
+        with pytest.raises(MipsConnectionError):
+            await subscribe_task
+
+        # _subs 里已无该 topic(不会进重连重放),且 UNSUBSCRIBE 已发出。
+        with mips._subs_lock:
+            assert "device/dev-x/state/#" not in mips._subs
+        assert "device/dev-x/state/#" in set(fake.unsubscribed)
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_device_state_reconnect_resubscribes_wildcard():
+    """After disconnect/reconnect the wildcard topic is re-issued by the
+    _subs replay."""
     mips, _ = _make_mips()
     holder: dict[str, _FakeMqttClient] = {}
 
@@ -851,18 +920,17 @@ async def test_device_state_reconnect_resubscribes_both_topics():
     try:
         await asyncio.gather(
             mips.sub_device_state_async("dev-rec", handler=lambda _m: None),
-            _ack_subscribes(fake, 2),
+            _ack_subscribes(fake, 1),
         )
         before = len(fake.subscribed)
         fake.fire_disconnect(reason_code=1)
         fake.fire_connect(reason_code=0)
         for _ in range(10):
             await asyncio.sleep(0)
-            if len(fake.subscribed) >= before + 2:
+            if len(fake.subscribed) >= before + 1:
                 break
         resub_topics = {t for t, _, _ in fake.subscribed[before:]}
-        assert "device/dev-rec/state/online" in resub_topics
-        assert "device/dev-rec/state/offline" in resub_topics
+        assert "device/dev-rec/state/#" in resub_topics
         for _, _, mid in fake.subscribed[before:]:
             fake.fire_suback(mid, [2])
         await asyncio.sleep(0.01)

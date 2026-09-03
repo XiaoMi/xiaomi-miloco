@@ -760,7 +760,11 @@ export interface PerceptionConfig {
   smart_crop_enabled?: boolean;
   /** 发版级开关(backend crop_enhance.enabled)的只读投影,**PUT 不可写**。
    *  false = 当前这一版没打开该能力,用户开关即便为 true 也不裁 → 前端置灰 + 提示,
-   *  避免"开关开着但后端不裁"的静默失效。老后端不返此字段 → undefined,同样置灰。 */
+   *  避免"开关开着但**发版级闸**没开"的静默失效。老后端不返此字段 → undefined,同样置灰。
+   *  注意本字段与 smart_crop_enabled 只覆盖三闸里的**全局两闸**:两者都 true、开关既亮
+   *  又可点时,某个机位仍可能被 per-camera 闸(逐路 deny-list,`miloco-cli scope camera
+   *  crop-on/crop-off` 配)单独关掉而不裁。逐机位生效态本接口不透出,在
+   *  /api/miot/scope/cameras 每行的 crop_effective。 */
   smart_crop_available?: boolean;
   // 老 backend(<0.10.x)不返此字段,前端在读取处 ?? DEFAULTS.min_suggestion_urgency 回退。
   // 声明成可选是为了把这层运行时兼容语义显式化,别让未来维护者把 ?? 当成死代码删。

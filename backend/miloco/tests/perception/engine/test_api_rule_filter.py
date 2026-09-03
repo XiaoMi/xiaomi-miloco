@@ -274,3 +274,88 @@ async def test_device_rule_map_empty_rules_yields_empty_lists():
     ])
     result = await _run_perceive(batch, [])
     assert result.device_rule_map == {"cam_a": [], "cam_b": []}
+
+
+# ─── per-camera Smart Crop 闸注入（api.py 的 contexts 构造）──────────────────
+#
+# 覆盖 `per_camera_crop_enabled=did not in crop_denied` 这行的**反转方向**：写反了会让
+# 关掉的机位照旧裁、开着的机位不裁，而下游 _maybe_encode_adaptive 的单测看不出来
+# （它只管"给了 False 就回退"）。
+
+
+@pytest.mark.asyncio
+async def test_per_camera_crop_enabled_injected_per_device():
+    """deny-list 里的机位注入 False，不在集内的注入 True（默认开）。"""
+    cam_a = _make_snapshot("cam_a", "客厅")
+    cam_b = _make_snapshot("cam_b", "卧室")
+    batch = BatchedSnapshot(snapshots=[cam_a, cam_b])
+
+    engine = PerceptionEngine(PerceptionConfig())
+    captured: dict = {}
+
+    async def fake_run_batch_pipeline(batch_, contexts, *args, **kwargs):
+        captured["contexts"] = contexts
+        return BatchPipelineResult()
+
+    with patch(
+        "miloco.perception.engine.api._crop_denied_dids", return_value={"cam_a"}
+    ), patch(
+        "miloco.perception.engine.pipeline.run_batch_pipeline",
+        side_effect=fake_run_batch_pipeline,
+    ):
+        await engine.realtime_perceive(batch, rules=[])
+
+    assert captured["contexts"]["cam_a"].per_camera_crop_enabled is False
+    assert captured["contexts"]["cam_b"].per_camera_crop_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_per_camera_crop_enabled_defaults_true_when_kv_empty():
+    """KV 无记录（空集）→ 全部机位默认开。"""
+    cam = _make_snapshot("cam_x", "厨房")
+    batch = BatchedSnapshot(snapshots=[cam])
+
+    engine = PerceptionEngine(PerceptionConfig())
+    captured: dict = {}
+
+    async def fake_run_batch_pipeline(batch_, contexts, *args, **kwargs):
+        captured["contexts"] = contexts
+        return BatchPipelineResult()
+
+    with patch(
+        "miloco.perception.engine.api._crop_denied_dids", return_value=set()
+    ), patch(
+        "miloco.perception.engine.pipeline.run_batch_pipeline",
+        side_effect=fake_run_batch_pipeline,
+    ):
+        await engine.realtime_perceive(batch, rules=[])
+
+    assert captured["contexts"]["cam_x"].per_camera_crop_enabled is True
+
+
+class _FakeManager:
+    """只提供 kv_repo 的桩：真 Manager 在单测环境下取 kv_repo 会抛 AttributeError，
+    不打桩的话下面两条都会因为"取 manager 就炸"而**恰好**通过——正向那条就白测了。"""
+
+    kv_repo = object()
+
+
+def test_crop_denied_dids_reads_through():
+    """正向：KV 有值时如实透出（钉住"真的读了"，防被改成恒空集还全绿）。"""
+    from miloco.perception.engine.api import _crop_denied_dids
+
+    with patch("miloco.manager.get_manager", return_value=_FakeManager()), patch(
+        "miloco.miot.filter.crop_denied_camera_dids", return_value={"cam_a", "cam_b:ch1"}
+    ):
+        assert _crop_denied_dids() == {"cam_a", "cam_b:ch1"}
+
+
+def test_crop_denied_dids_fails_open_on_kv_error():
+    """读 KV 抛错 → 返回空集（fail-open = 继续裁），不把异常传上去打断感知。"""
+    from miloco.perception.engine.api import _crop_denied_dids
+
+    with patch("miloco.manager.get_manager", return_value=_FakeManager()), patch(
+        "miloco.miot.filter.crop_denied_camera_dids",
+        side_effect=RuntimeError("kv down"),
+    ):
+        assert _crop_denied_dids() == set()

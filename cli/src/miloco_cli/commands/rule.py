@@ -9,6 +9,10 @@ from miloco_cli.output import print_result
 
 API_PREFIX = "/api/rules"
 
+# 与 backend rule/schema.py 的 SCENE_IID 对齐。CLI 是独立包不依赖 miloco，
+# 故复刻字面量；改动时两处同步。
+SCENE_IID = "scene"
+
 
 def _rule_cursor_file():
     from miloco_cli.config import miloco_home
@@ -113,7 +117,10 @@ def rule_list(enabled_only, pretty):
         "{\"did\":\"<id>\",\"iid\":\"prop.<siid>.<piid>\",\"value\":<v>,\"idempotent\":true}\n"
         "通知/播报（必带冷却）："
         "{\"did\":\"<id>\",\"iid\":\"action.<siid>.<aiid>\",\"params\":[\"<text>\"],"
-        "\"idempotent\":false,\"cooldown_minutes\":10}"
+        "\"idempotent\":false,\"cooldown_minutes\":10}\n"
+        "触发米家场景（did 放 scene_id，必带冷却）："
+        "{\"did\":\"<scene_id>\",\"iid\":\"scene\","
+        "\"idempotent\":false,\"cooldown_minutes\":5}"
     ),
 )
 @click.option(
@@ -721,7 +728,7 @@ def _parse_actions(raw_actions: tuple[str, ...], flag_name: str = "--action") ->
     verbatim so agents see guidance tied to the exact flag they invoked.
 
     ``idempotent: false`` actions must declare ``cooldown_minutes`` to
-    avoid spamming notifications.
+    avoid spamming notifications; ``iid: scene`` must be non-idempotent.
     """
     parsed: list[dict] = []
     for raw in raw_actions:
@@ -744,9 +751,25 @@ def _parse_actions(raw_actions: tuple[str, ...], flag_name: str = "--action") ->
 
 def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
     for i, a in enumerate(actions):
+        if a.get("iid") == SCENE_IID and a.get("idempotent") is not False:
+            _exit_error(
+                f"{flag_name}[{i}]: iid={SCENE_IID} requires idempotent=false"
+            )
         if a.get("idempotent") is False and a.get("cooldown_minutes") is None:
             _exit_error(
                 f"{flag_name}[{i}]: idempotent=false requires cooldown_minutes"
+            )
+        # 冷却是场景唯一的去重手段，填 0 等于每次 fire 都真触发一次。
+        # 只对数值比较：agent 可能把数字写成 "5"，直接比会 TypeError traceback，
+        # 破坏 _exit_error 的干净报错；字符串形态交给后端 pydantic 收敛或 400。
+        cooldown = a.get("cooldown_minutes")
+        if (
+            a.get("iid") == SCENE_IID
+            and isinstance(cooldown, (int, float))
+            and cooldown < 1
+        ):
+            _exit_error(
+                f"{flag_name}[{i}]: iid={SCENE_IID} requires cooldown_minutes >= 1"
             )
 
 
