@@ -8,10 +8,13 @@
 
 **两道闸对应两种失效**：
 
-* 换作用域用代号 —— 授权新账号时旧 MIPS 连接还没拆，那段窗口里旧账号的推送会写进刚
-  清空的树；
+* 换作用域用 `scope_is_aligned()`（它比的是「已对齐的代号 == 当前代号」，代号一推进就
+  自动失效）—— 授权新账号时旧 MIPS 连接还没拆，那段窗口里旧账号的推送会写进刚清空的树；
 * 掉出作用域用设备集 —— 代号是全局的，挡不住同一代之内一台设备搬出当前家庭，那时删除
   调和已经把它的叶子删了，一条在途的推送会把它整个写回来，变成谁也删不掉的幽灵设备。
+
+**上下线那条只过第二道闸**，理由见 `on_device_state`。切账号时启用集会先被清空，而
+`filter_by_home` 对空启用集一律返回假，所以那个窗口是失败关闭的。
 
 **属性推送多一道对齐门，上下线不需要**。对齐拿的是云端缓存里的最后一次上报，推送拿的是
 实时值，两者都不带时间戳，谁覆盖谁只能靠顺序定死（先对齐再落推送）。而在线标志的容器值
@@ -79,12 +82,10 @@ class IotPushWriter:
         store: StateStore,
         miot_proxy: Any,
         *,
-        current_scope: Callable[[], int],
         scope_is_aligned: Callable[[], bool],
     ) -> None:
         self._store = store
         self._proxy = miot_proxy
-        self._current_scope = current_scope
         self._scope_is_aligned = scope_is_aligned
         self._counts: dict[str, int] = {}
         self._warn_countdown = 1

@@ -50,10 +50,21 @@ def _row(did, siid, piid, value, code=0):
     return {"did": did, "siid": siid, "piid": piid, "value": value, "code": code}
 
 
+async def _top_up(store, proxy, did, *, scope=0, current_scope=None):
+    """代号默认恒定不变 —— 只有作用域那条用例关心它。"""
+    return await top_up_missing_props(
+        store,
+        proxy,
+        did,
+        scope=scope,
+        current_scope=current_scope or (lambda: scope),
+    )
+
+
 async def test_a_missing_property_is_filled_in(store):
     proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
 
-    written = await top_up_missing_props(store, proxy, "d1")
+    _requested, written = await _top_up(store, proxy, "d1")
 
     assert written == 1
     assert store.get("iot/device/d1/prop/2.1") == 26
@@ -64,7 +75,7 @@ async def test_a_property_already_in_the_container_is_not_requested(store):
     store.set("iot/device/d1/prop/2.1", 99, source="iot_push")
     proxy = _proxy(["prop.2.1", "prop.3.1"], [_row("d1", 3, 1, True)])
 
-    await top_up_missing_props(store, proxy, "d1")
+    await _top_up(store, proxy, "d1")
 
     assert proxy.calls == [[(3, 1)]]
     assert store.get("iot/device/d1/prop/2.1") == 99
@@ -74,7 +85,7 @@ async def test_nothing_missing_means_no_cloud_call(store):
     store.set("iot/device/d1/prop/2.1", 26, source="iot_align")
     proxy = _proxy(["prop.2.1"], [])
 
-    written = await top_up_missing_props(store, proxy, "d1")
+    _requested, written = await _top_up(store, proxy, "d1")
 
     assert written == 0
     assert proxy.calls == []
@@ -85,7 +96,7 @@ async def test_the_top_up_does_not_wipe_the_devices_other_leaves(store):
     store.set("iot/device/d1/prop/2.1", 26, source="iot_align")
     proxy = _proxy(["prop.2.1", "prop.3.1"], [_row("d1", 3, 1, False)])
 
-    await top_up_missing_props(store, proxy, "d1")
+    await _top_up(store, proxy, "d1")
 
     assert store.get("iot/device/d1/status/online") is True
     assert store.get("iot/device/d1/prop/2.1") == 26
@@ -98,7 +109,7 @@ async def test_a_failed_row_is_skipped_without_killing_the_batch(store):
         [_row("d1", 2, 1, None, code=-704220043), _row("d1", 3, 1, 7)],
     )
 
-    written = await top_up_missing_props(store, proxy, "d1")
+    _requested, written = await _top_up(store, proxy, "d1")
 
     assert written == 1
     assert store.get("iot/device/d1/prop/3.1") == 7
@@ -108,7 +119,7 @@ async def test_a_bridged_did_is_not_topped_up(store):
     """did 带 '/' 当不了路径段，连云端都不该打。"""
     proxy = _proxy(["prop.2.1"], [])
 
-    written = await top_up_missing_props(store, proxy, "blt/1")
+    _requested, written = await _top_up(store, proxy, "blt/1")
 
     assert written == 0
     assert proxy.calls == []
@@ -162,7 +173,7 @@ def _wired_proxy(store, iids, rows):
     return _wired_proxy_from(store, _proxy(iids, rows))
 
 
-def _wired_proxy_from(store, fake):
+def _wired_proxy_from(store, fake, *, home=("d1",), online=True):
     """同上，但用调用方给的假 proxy（要看云端被打了几次的用例需要拿着它）。"""
     from miloco.manager import Manager
     from miloco.miot.client import MiotProxy
@@ -180,7 +191,7 @@ def _wired_proxy_from(store, fake):
     proxy.calls = fake.calls
 
     async def devices_in_current_home():
-        return {"d1": SimpleNamespace(home_id="H1")}
+        return {did: SimpleNamespace(home_id="H1", online=online) for did in home}
 
     proxy.devices_in_current_home = devices_in_current_home
 
@@ -257,10 +268,80 @@ async def test_the_budget_is_per_device(store):
     from miloco.manager import TOP_UP_MAX_ATTEMPTS
 
     proxy = _proxy(["prop.2.1"], [])
-    _, manager = _wired_proxy_from(store, proxy)
+    _, manager = _wired_proxy_from(store, proxy, home=("d1", "d2"))
     for _ in range(TOP_UP_MAX_ATTEMPTS):
         await manager._top_up_props("d1")
 
     await manager._top_up_props("d2")
 
     assert len(proxy.calls) == TOP_UP_MAX_ATTEMPTS + 1
+
+
+async def test_a_device_outside_the_current_home_is_not_topped_up(store):
+    """上下线订阅是账号全量的，别人家的设备一样会推上线事件过来 —— 补拉不判家庭，
+    它的属性就会被写进喂给规则和 agent 的那份数据源。"""
+    proxy = _proxy(["prop.2.1"], [_row("d-other", 2, 1, 26)])
+    _, manager = _wired_proxy_from(store, proxy, home=("d1",))
+
+    await manager._top_up_props("d-other")
+
+    assert proxy.calls == []
+    assert store.snapshot("iot/**") == {}
+
+
+async def test_a_device_that_went_offline_again_is_not_topped_up(store):
+    """离线设备云端给的是缓存里的最后一次上报、可能任意旧 —— 对齐当初跳过它就是这个
+    理由，补拉不该在防抖窗口里又掉线之后照拉。"""
+    proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+    _, manager = _wired_proxy_from(store, proxy, online=False)
+
+    await manager._top_up_props("d1")
+
+    assert proxy.calls == []
+
+
+async def test_a_scope_switch_during_the_cloud_round_trip_discards_the_result(store):
+    """补拉要打一趟云端，回来时可能已经切了家庭 —— 写进刚清空的树就是幽灵设备。"""
+    scope = {"now": 0}
+    proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+    original = proxy.get_device_properties
+
+    async def switch_then_return(params):
+        scope["now"] += 1
+        return await original(params)
+
+    proxy.get_device_properties = switch_then_return
+
+    requested, written = await _top_up(
+        store, proxy, "d1", scope=0, current_scope=lambda: scope["now"]
+    )
+
+    assert (requested, written) == (1, 0)
+    assert store.snapshot("iot/**") == {}
+
+
+async def test_a_run_that_asks_the_cloud_nothing_does_not_spend_budget(store):
+    """空跑消耗额度会把「留几次给瞬时不可读」这个用意直接吃掉。"""
+    from miloco.manager import TOP_UP_MAX_ATTEMPTS
+
+    store.set("iot/device/d1/prop/2.1", 26, source="iot_align")
+    proxy = _proxy(["prop.2.1"], [])
+    _, manager = _wired_proxy_from(store, proxy)
+
+    for _ in range(TOP_UP_MAX_ATTEMPTS + 2):
+        await manager._top_up_props("d1")
+
+    assert manager._top_up_attempts == {}
+
+
+async def test_the_shutdown_cancels_the_pending_top_up(store, monkeypatch):
+    """不取消的话，关闭期间计时器到点会对着拆掉一半的 proxy 打云端。"""
+    monkeypatch.setattr(mips_listeners, "PROP_TOPUP_DEBOUNCE_SEC", 0.05)
+    proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+    _, manager = _wired_proxy_from(store, proxy)
+    await manager._prop_top_up.on_event(SimpleNamespace(did="d1", event="online"))
+
+    manager.deinit_iot_push()
+    await asyncio.sleep(0.15)
+
+    assert proxy.calls == []

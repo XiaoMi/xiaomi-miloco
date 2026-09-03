@@ -21,8 +21,8 @@ async def store():
     s.stop()
 
 
-def _writer(store, *, home=("d1",), scope=0, aligned=True):
-    """proxy 只提供 devices_in_current_home；代号与对齐由两个可调对象给。"""
+def _writer(store, *, home=("d1",), aligned=True):
+    """proxy 只提供 devices_in_current_home；对齐判据由一个可调对象给。"""
 
     async def devices_in_current_home():
         return {did: SimpleNamespace(home_id="H1") for did in home}
@@ -30,7 +30,6 @@ def _writer(store, *, home=("d1",), scope=0, aligned=True):
     return IotPushWriter(
         store,
         SimpleNamespace(devices_in_current_home=devices_in_current_home),
-        current_scope=lambda: scope,
         scope_is_aligned=lambda: aligned,
     )
 

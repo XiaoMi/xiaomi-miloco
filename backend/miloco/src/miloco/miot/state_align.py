@@ -371,24 +371,37 @@ def _write_device(
     return _write_props_per_leaf(store, did, props, samples)
 
 
-async def top_up_missing_props(store: StateStore, miot_proxy: Any, did: str) -> int:
-    """把这台设备在容器里缺的可读属性补齐。返回写进去的条数。
+async def top_up_missing_props(
+    store: StateStore,
+    miot_proxy: Any,
+    did: str,
+    *,
+    scope: int,
+    current_scope: Callable[[], int],
+) -> tuple[int, int]:
+    """把这台设备在容器里缺的可读属性补齐。返回（请求了几条，写进去了几条）。
 
     只补缺的，不整台重拉：整台重拉会用云端缓存里的旧值盖掉刚推来的新值，而容器没有
     时间戳可仲裁，盖完 `last_reported` 是当下，事后看不出来。
+
+    `scope` / `current_scope` 与 `align_iot_state` 同义：要打一趟云端，回来时可能已经
+    不是当初那个作用域了，写之前再比一次，不等就整轮放弃。
+
+    **返回请求数是给调用方限次用的**：没有缺口时这里根本不打云端，那种空跑不该消耗额度。
 
     只在设备转上线时调用 —— 对齐跳过了离线设备的属性，而对齐一个作用域只跑一次，所以
     启动时离线的设备在整代里一条属性都没有。异常只记日志、不往外抛：补不上的下一次
     上线还有机会。
     """
     samples = _Samples()
+    guard = _ScopeGuard(scope, current_scope)
     if not _is_valid_segment(did):
-        return 0
+        return 0, 0
     try:
         iids = await miot_proxy.get_readable_prop_iids(did)
     except Exception as e:
         logger.warning("top-up: spec unavailable did=%s: %s", did, e)
-        return 0
+        return 0, 0
 
     have = store.get(f"iot/device/{did}/prop", {})
     present = set(have) if isinstance(have, dict) else set()
@@ -404,11 +417,14 @@ async def top_up_missing_props(store: StateStore, miot_proxy: Any, did: str) -> 
             continue
         params.append(MIoTGetPropertyParam(did=did, siid=siid, piid=piid))
     if not params:
-        return 0
+        return 0, 0
 
     meta = {did: _DeviceMeta(online=True, model=str(_model_of(miot_proxy, did)))}
     unreadable: dict[str, int] = {}
     by_device = await _read_values(miot_proxy, params, meta, unreadable, samples)
+    if guard.moved_on():
+        # 云端往返期间切了作用域：这批值属于旧作用域，写进刚清空的树就是幽灵设备
+        return len(params), 0
     written = _write_props_per_leaf(store, did, by_device.get(did) or {}, samples)
     logger.info(
         "top-up: did=%s requested=%d written=%d unreadable=%s",
@@ -417,7 +433,7 @@ async def top_up_missing_props(store: StateStore, miot_proxy: Any, did: str) -> 
         written,
         unreadable or {},
     )
-    return written
+    return len(params), written
 
 
 def _model_of(miot_proxy: Any, did: str) -> str:

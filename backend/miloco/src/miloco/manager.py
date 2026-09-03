@@ -81,7 +81,6 @@ class Manager:
         self._iot_push_writer = IotPushWriter(
             self._state_store,
             self._miot_proxy,
-            current_scope=self.current_scope,
             scope_is_aligned=self.scope_is_aligned,
         )
         # 上线补拉是上下线扇出的第二个消费方，与写入器互不知情：写入器只管把标志写进
@@ -98,15 +97,51 @@ class Manager:
     async def _top_up_props(self, did: str) -> int:
         """按代限次地补拉这台设备缺的属性。返回写进去的条数。
 
-        额度用完就直接返回 —— 第一次要么补上了（叶子有了，下次的缺口更小），要么那些
-        属性读不到（再试结果一样）。见 TOP_UP_MAX_ATTEMPTS。
+        三道闸，理由各不相同：
+
+        * **还在当前家庭**：上下线订阅是账号全量的（`device list` 要显示全部设备），而
+          容器只装当前家庭 —— 不判这一条，别人家的设备会被写进喂给规则和 agent 的那份
+          数据源里；
+        * **此刻在线**：防抖窗口里可能又掉线了。离线设备云端给的是缓存里的最后一次上报、
+          可能任意旧，写进去会把 `last_reported` 刷成当下而响应不带时间戳，消费方看不出来
+          —— 对齐当初跳过离线设备就是这个理由；
+        * **本代额度没用完**：判据「容器里没有这条叶子」是代理指标，永久不可读的属性
+          永远不会进容器，不限次的话反复掉线的设备每次上线都重新请求同一批（见
+          TOP_UP_MAX_ATTEMPTS）。
+
+        **额度只在真打了云端时才算一次**：没有缺口时补拉根本不发请求，那种空跑消耗额度会
+        把「留几次给瞬时不可读」这个用意直接吃掉。
         """
+        device = (await self._miot_proxy.devices_in_current_home()).get(did)
+        if device is None:
+            logger.debug("top-up: 不在当前家庭，跳过 did=%s", did)
+            return 0
+        if not getattr(device, "online", True):
+            logger.debug("top-up: 防抖窗口里又掉线了，跳过 did=%s", did)
+            return 0
         used = self._top_up_attempts.get(did, 0)
         if used >= TOP_UP_MAX_ATTEMPTS:
             logger.debug("top-up: 本代额度已用完，跳过 did=%s", did)
             return 0
-        self._top_up_attempts[did] = used + 1
-        return await top_up_missing_props(self._state_store, self._miot_proxy, did)
+        requested, written = await top_up_missing_props(
+            self._state_store,
+            self._miot_proxy,
+            did,
+            scope=self._scope,
+            current_scope=self.current_scope,
+        )
+        if requested:
+            self._top_up_attempts[did] = used + 1
+        return written
+
+    def deinit_iot_push(self) -> None:
+        """取消补拉的待触发计时器。
+
+        与 `MiotProxy.deinit` 里那四个 listener 同理：不取消的话，关闭期间计时器到点会
+        对着一个已经拆掉一半的 proxy 打云端、往已经 stop 的容器里写。
+        """
+        if self._prop_top_up is not None:
+            self._prop_top_up.deinit()
 
     def current_scope(self) -> int:
         return self._scope
