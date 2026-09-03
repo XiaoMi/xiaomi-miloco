@@ -289,19 +289,30 @@ class TestConfigFromSettings:
 
 class TestShippedDefault:
     def test_shipped_settings_enable_injection(self):
-        """随包默认是**开**的。
+        """随包默认是**开**的，且两个数值取评测扫出来的档位。
 
-        这条单独钉住，是为了让上面那些 `test_not_injected_*` 的阴性结论有意义 —— 若哪天把随包
-        默认改成关，失败会定位到这一条并说明原因，而不是让一堆阴性用例"照样绿"地失去判别力。
+        **直接读随包 yaml、不走配置读取函数**：后者拿到的是合并后的配置，而合并优先级里
+        环境变量与本机 config.json 都盖在随包值之上。走合并配置的话，任何人在本机用过本能力
+        自带的止损开关（那条命令写 config.json）之后再跑测试，这条就会转红，而随包值其实没动过
+        —— 排查者去翻 yaml 看到仍是开，复现不出来，红灯指向的方向正好是错的。
+        同目录 crop_enhance 的随包用例是同一个做法。
         """
-        from miloco.config import get_settings
+        from pathlib import Path
 
-        raw = get_settings().perception.engine.get("person_crop_inject", {})
-        assert raw.get("enabled") is True
-        cfg = pci.person_crop_inject_config_from_settings()
-        assert cfg.enabled is True
-        assert cfg.crop_height == 256
-        assert cfg.min_bbox_height_px == 40
+        import yaml
+
+        import miloco
+
+        raw = yaml.safe_load(
+            (Path(miloco.__file__).parent / "config" / "settings.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        block = (raw.get("perception") or {}).get("engine", {}).get("person_crop_inject")
+        assert block is not None, "随包 settings.yaml 里缺 person_crop_inject 段"
+        assert block.get("enabled") is True
+        assert block.get("crop_height") == 256
+        assert block.get("min_bbox_height_px") == 40
 
 
 class TestConfigNumericValidation:
