@@ -258,22 +258,27 @@ async def test_subscription_reset_rebuilds_intent_sets(proxy_env):
     meta_set = p._subscribed_meta_dids
     state_set = p._subscribed_device_state_dids
     scene_set = p._subscribed_scene_home_ids
+    props_set = p._subscribed_props_dids
     meta_set.clear()
     meta_set.update({"stale-1"})
     state_set.clear()
     state_set.update({"stale-1"})
     scene_set.clear()
     scene_set.update({"stale-home"})
+    props_set.clear()
+    props_set.update({"stale-1"})
 
-    await reset_cb({"did-1"}, {"did-1"}, {"home-9"})
+    await reset_cb({"did-1"}, {"did-1"}, {"home-9"}, {"did-2"})
 
     assert p._subscribed_meta_dids == {"did-1"}
     assert p._subscribed_device_state_dids == {"did-1"}
     assert p._subscribed_scene_home_ids == {"home-9"}
+    assert p._subscribed_props_dids == {"did-2"}
     # 原地改写不变式的真正断言:重建必须原地改,不能换新集合对象。
     assert p._subscribed_meta_dids is meta_set
     assert p._subscribed_device_state_dids is state_set
     assert p._subscribed_scene_home_ids is scene_set
+    assert p._subscribed_props_dids is props_set
 
     await p.deinit()
 
