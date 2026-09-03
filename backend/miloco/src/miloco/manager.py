@@ -16,6 +16,7 @@ from miloco.home_profile.service import HomeProfileService
 from miloco.miot.client import MiotProxy
 from miloco.miot.service import MiotService
 from miloco.miot.state_align import align_iot_state
+from miloco.miot.state_push import IotPushWriter
 from miloco.node_monitor import NodeKind, NodeName, get_monitor
 from miloco.perception import init_perception_module
 from miloco.perception.service import PerceptionService
@@ -53,10 +54,33 @@ class Manager:
             # 容器在这里建、在 initialize() 里 start：切换编排够得着它的时候
             # initialize() 不一定跑完，而没建起来的话编排会在清空那一步炸掉
             cls._instance._state_store = StateStore()
+            cls._instance._iot_push_writer = None
         return cls._instance
 
     def __init__(self):
         pass
+
+    def _wire_iot_push(self) -> None:
+        """把两条推送接进状态容器。
+
+        写入器挂在 Manager 上是因为它要同时够得着容器和 proxy，别处都够不着其中一个；
+        订阅归 proxy，容器只是消费方之一。
+
+        单独一个方法是为了可测：漏挂一条 listener 的后果是推送静默不进容器，而
+        initialize() 整条在测试里跑不起来。
+        """
+        self._iot_push_writer = IotPushWriter(
+            self._state_store,
+            self._miot_proxy,
+            current_scope=self.current_scope,
+            scope_is_aligned=self.scope_is_aligned,
+        )
+        self._miot_proxy.add_device_state_listener(
+            self._iot_push_writer.on_device_state
+        )
+        self._miot_proxy.add_device_props_listener(
+            self._iot_push_writer.on_device_props
+        )
 
     def current_scope(self) -> int:
         return self._scope
@@ -140,6 +164,8 @@ class Manager:
                 cloud_server=get_settings().miot.cloud_server,
             )
 
+        self._wire_iot_push()
+
         # Initialize all services
         self._miot_service = MiotService(
             self._miot_proxy,
@@ -182,6 +208,10 @@ class Manager:
     @property
     def state_store(self) -> StateStore:
         return self._state_store
+
+    @property
+    def iot_push_writer(self) -> IotPushWriter | None:
+        return self._iot_push_writer
 
     @property
     def miot_service(self) -> MiotService:
@@ -261,8 +291,10 @@ class Manager:
             kv = self._kv_repo
             svc = OnboardingTriggerService(
                 kv_repo=kv,
-                is_miot_ready=lambda: bool(kv.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY))
-                and bool(allowed_home_ids(kv)),
+                is_miot_ready=lambda: (
+                    bool(kv.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY))
+                    and bool(allowed_home_ids(kv))
+                ),
                 has_persons=lambda: bool(self._person_service.list_persons()),
                 has_profile_entries=lambda: bool(hp_store.load_profile().entries),
             )
@@ -282,6 +314,7 @@ class Manager:
             from miloco.perception.engine.identity.registration_session import (
                 RegistrationSessionManager,
             )
+
             lib = IdentityLibrary(resolve_library_root())
             rsm = RegistrationSessionManager(lib)
             self._register_session_manager = rsm

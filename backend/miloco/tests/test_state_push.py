@@ -157,3 +157,58 @@ async def test_rewriting_a_changed_online_value_delivers_an_event(store):
     await _settle()
 
     assert [change.new for change in seen] == [False]
+
+
+async def test_the_proxy_hands_state_events_to_every_listener():
+    """一个 listener 抛异常不该让另一个收不到 —— 缓存更新和写容器互不背锅。"""
+    from unittest.mock import AsyncMock
+
+    from miloco.miot.client import MiotProxy
+
+    proxy = object.__new__(MiotProxy)
+    proxy._camera_info_dict = {}
+    proxy._device_info_dict = {}
+    proxy._cameras_loaded = True
+    proxy._camera_state_listener = SimpleNamespace(on_event=AsyncMock())
+    proxy._state_listeners = []
+
+    boom = AsyncMock(side_effect=RuntimeError("boom"))
+    ok = AsyncMock()
+    proxy.add_device_state_listener(boom)
+    proxy.add_device_state_listener(ok)
+
+    await proxy._on_device_state_changed_event(_state())
+
+    boom.assert_awaited_once()
+    ok.assert_awaited_once()
+
+
+async def test_the_manager_wires_both_push_lanes_into_the_container(store):
+    """漏挂一条 listener 的后果是推送静默不进容器，生产里看不出来。"""
+    from miloco.manager import Manager
+    from miloco.miot.client import MiotProxy
+
+    proxy = object.__new__(MiotProxy)
+    proxy._state_listeners = []
+    proxy._props_listeners = []
+
+    async def devices_in_current_home():
+        return {"d1": SimpleNamespace(home_id="H1")}
+
+    proxy.devices_in_current_home = devices_in_current_home
+
+    manager = object.__new__(Manager)
+    manager._state_store = store
+    manager._miot_proxy = proxy
+    manager._scope = 0
+    manager._aligned_scope = 0
+
+    manager._wire_iot_push()
+
+    for callback in proxy._props_listeners:
+        await callback(_props())
+    for callback in proxy._state_listeners:
+        await callback(_state())
+
+    assert store.get("iot/device/d1/prop/2.1") == 26
+    assert store.get("iot/device/d1/status/online") is True

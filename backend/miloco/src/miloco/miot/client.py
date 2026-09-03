@@ -11,6 +11,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any
 
 from av.audio.frame import AudioFrame
 from av.video.frame import VideoFrame
@@ -320,6 +321,12 @@ class MiotProxy:
         # cameras included) so `device list` and `scope camera list` both
         # reflect the push.
         self._subscribed_device_state_dids: set[str] = set()
+
+        # 上下线 / 属性推送的本层消费方。SDK 那两个回调是单槽、已被本类占着，
+        # 别的消费方（状态容器、属性历史）挂在这里。存在 proxy 上而不是 client 上，
+        # re-OAuth 重建 client 后不用重新注册
+        self._state_listeners: list[Callable[[Any], Awaitable[None]]] = []
+        self._props_listeners: list[Callable[[Any], Awaitable[None]]] = []
 
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
@@ -1199,9 +1206,9 @@ class MiotProxy:
         await self._meta_listener.on_event(msg, welcome=welcome)
 
     async def _on_device_state_changed_event(self, msg: MIoTDeviceStateEvent) -> None:
-        """处理云端上下线推送:直接更新两份缓存的 `online`。
+        """处理云端上下线推送:更新两份缓存的 `online`,再交给本层的消费方。
 
-        末尾的相机对账防抖只在三种情况重新武装:命中相机、两份缓存都不认识、
+        相机对账防抖只在三种情况重新武装:命中相机、两份缓存都不认识、
         相机清单从未成功加载(注意不是"缓存为空"——零相机账户加载成功是空字典,
         按空判断会让每条灯事件永续重拉)。已知非相机设备不武装。
         """
@@ -1228,6 +1235,29 @@ class MiotProxy:
                 )
         if cam is not None or dev is None or not self._cameras_loaded:
             await self._camera_state_listener.on_event(msg)
+        await self._fan_out(self._state_listeners, msg, "device-state")
+
+    def add_device_state_listener(
+        self, callback: Callable[[Any], Awaitable[None]]
+    ) -> None:
+        """加一个上下线推送的消费方。多次调用按注册顺序全部收到。"""
+        self._state_listeners.append(callback)
+
+    def add_device_props_listener(
+        self, callback: Callable[[Any], Awaitable[None]]
+    ) -> None:
+        """加一个属性推送的消费方。多次调用按注册顺序全部收到。"""
+        self._props_listeners.append(callback)
+
+    async def _fan_out(
+        self, listeners: list[Callable[[Any], Awaitable[None]]], msg: Any, label: str
+    ) -> None:
+        """逐个投递。一个消费方抛异常不影响其余 —— 它们互不知情，也不该互相背锅。"""
+        for callback in listeners:
+            try:
+                await callback(msg)
+            except Exception as e:
+                logger.error("%s listener failed: %s", label, e)
 
     def _is_move_into_scope(self, msg: MIoTDeviceBindEvent) -> bool:
         """True if an hr_change moved a device into a managed home from an
