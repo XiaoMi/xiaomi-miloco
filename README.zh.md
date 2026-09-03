@@ -174,4 +174,6 @@ Miloco 站在以下开源项目之上：
 
 完整许可条款见 [LICENSE.md](LICENSE.md)。
 
+Xiaomi Miloco 包含依其各自许可证授权的第三方组件，详见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+
 **重要声明**：本项目仅限非商业用途。未经小米公司书面授权，不得用于开发应用程序（APP）、Web 服务或其他形式的软件。

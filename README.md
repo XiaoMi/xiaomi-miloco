@@ -174,4 +174,6 @@ Miloco stands on the shoulders of the following open-source projects:
 
 See [LICENSE.md](LICENSE.md) for the full license terms.
 
+Xiaomi Miloco includes third-party components that are licensed under their respective licenses. Please refer to [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for details.
+
 **Important notice**: This project is for non-commercial use only. Without written authorization from Xiaomi Inc., it may not be used to develop applications (apps), web services, or other forms of software.
