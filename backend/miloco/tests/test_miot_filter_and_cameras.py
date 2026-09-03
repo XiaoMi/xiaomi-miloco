@@ -926,7 +926,7 @@ def _scope_proxy_env(tmp_path, monkeypatch):
     miot_client.register_camera_status_changed_async = AsyncMock()
     miot_client.unregister_camera_status_changed_async = AsyncMock()
     miot_client.set_camera_connected = MagicMock()
-    miot_client.set_camera_dids = MagicMock()
+    miot_client.set_cloud_online_dids = MagicMock()
     miot_client.create_camera_instance_async = AsyncMock()
     miot_client.get_cameras_async = AsyncMock(return_value={})
     proxy._miot_client = miot_client  # type: ignore[assignment]
@@ -1146,11 +1146,11 @@ async def test_refresh_cameras_no_destroy_when_scope_allows(_scope_proxy_env):
 
 
 @pytest.mark.asyncio
-async def test_refresh_cameras_pushes_scoped_camera_dids_to_lan(_scope_proxy_env):
-    """refresh_cameras 必须把 select_active_camera_dids 算出的 scoped 集传给
-    MIoTLan.set_camera_dids，而不是账号下的全部相机——否则不在当前 scope 里的
-    相机（c_out，属于未启用的 H2）永远不会连上，MIoTLan 就永远判不出"全部相机
-    已连上"，探测暂停功能形同虚设。"""
+async def test_refresh_cameras_pushes_scoped_cloud_online_dids_to_lan(_scope_proxy_env):
+    """refresh_cameras 必须把「云端在线 ∧ 当前 scope」的相机物理 did 集传给
+    MIoTLan.set_cloud_online_dids，而不是账号下的全部相机——否则不在当前 scope 里
+    的相机（c_out，属于未启用的 H2）会被计入停表判据，MIoTLan 永远判不出"全部
+    云端在线相机已连上"，探测永不停。scope 过滤后 c_out 被排除，判据成立。"""
     proxy, kv, miot_client = _scope_proxy_env
 
     cam_in = _camera("c_in", home_id="H1")
@@ -1162,7 +1162,7 @@ async def test_refresh_cameras_pushes_scoped_camera_dids_to_lan(_scope_proxy_env
 
     await proxy.refresh_cameras()
 
-    miot_client.set_camera_dids.assert_called_once_with({"c_in"})
+    miot_client.set_cloud_online_dids.assert_called_once_with({"c_in"})
 
 
 @pytest.mark.asyncio

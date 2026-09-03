@@ -383,17 +383,16 @@ def test_is_cross_subnet_none_when_ip_unknown_or_invalid():
 
 
 @pytest.mark.unit
-def test_scan_devices_throttles_but_never_stops_when_all_cameras_connected():
-    """全部**已启用**相机都已连上时，扫描降频到 OT_PROBE_INTERVAL_MAX —— 但绝不停表。
+def test_scan_devices_stops_when_all_cloud_online_connected():
+    """所有「云端在线 ∧ 当前 scope」相机都已连上 → 扫描停表：不探测、不排下一轮。
 
-    _camera_dids 是「已启用」集而非「全部」集：用户没打开开关的相机、以及非相机
-    设备都不在里面，它们靠这个全局共享的广播维持 lan_online。一旦停表，它们会在
-    _KA_TIMEOUT(100s) 后翻 False，而 toggle_camera 拿 lan_online 当硬门 → 用户再也
-    开不了那台相机，且 __maybe_resume_scan 用同一判据恒早退，没有恢复路径。
-    45s < 100s 是这个设计的关键不变量。"""
+    可开启相机 = 云端在线 ∧ in-scope，正好全在 _cloud_online_dids 里；集合外只剩
+    云端离线（toggle 的 online 门挡着）与 scope 外（home_allowed 门挡着），无需
+    探测。已连相机在线态由拉流状态（mark_reachable）维持，不依赖扫描。
+    """
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
-    miot_lan._camera_dids = {"did1", "did2"}
+    miot_lan._cloud_online_dids = {"did1", "did2"}
     miot_lan._connected_dids = {"did1", "did2"}
 
     with patch.object(miot_lan, "ping_internal") as mock_ping, patch.object(
@@ -401,27 +400,22 @@ def test_scan_devices_throttles_but_never_stops_when_all_cameras_connected():
     ) as mock_probe:
         miot_lan._MIoTLan__scan_devices()
 
-    # 探测照做：集合外的设备（未启用相机 / 非相机设备）需要它刷新在线态。
-    mock_ping.assert_called_once()
-    mock_probe.assert_called_once()
-    # 定时器照排，间隔为最低频。
-    miot_lan._internal_loop.call_later.assert_called_once()
-    assert (
-        miot_lan._internal_loop.call_later.call_args[0][0]
-        == miot_lan.OT_PROBE_INTERVAL_MAX
-    )
-    assert miot_lan._scan_throttled is True
-    # 保活窗必须盖得住降频后的扫描间隔，否则集合外设备照样掉线。
-    assert miot_lan.OT_PROBE_INTERVAL_MAX < _MIoTLanDevice._KA_TIMEOUT
+    # 停表：不探测、不排下一轮。
+    mock_ping.assert_not_called()
+    mock_probe.assert_not_called()
+    miot_lan._internal_loop.call_later.assert_not_called()
 
 
 @pytest.mark.unit
-def test_scan_devices_does_not_pause_when_no_cameras_known():
-    """相机集为空时不能当成「全都连上了」——一台相机都还不知道就降频，会让
-    引导期（尚未 refresh_cameras）的设备发现变慢。"""
+def test_scan_devices_stops_when_no_cloud_online_cameras():
+    """没有云端在线相机（空集 ⊆ 空集）→ 停表，等同步。
+
+    刻意不做空集防御：还没同步时停表，等 set_cloud_online_dids 推下集来，
+    __resume_scan 会恢复探测，广播等同步后再发。
+    """
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
-    miot_lan._camera_dids = set()
+    miot_lan._cloud_online_dids = set()
     miot_lan._connected_dids = set()
 
     with patch.object(miot_lan, "ping_internal") as mock_ping, patch.object(
@@ -429,19 +423,17 @@ def test_scan_devices_does_not_pause_when_no_cameras_known():
     ) as mock_probe:
         miot_lan._MIoTLan__scan_devices()
 
-    mock_ping.assert_called_once()
-    mock_probe.assert_called_once()
-    miot_lan._internal_loop.call_later.assert_called_once()
-    assert miot_lan._scan_throttled is False
+    mock_ping.assert_not_called()
+    mock_probe.assert_not_called()
+    miot_lan._internal_loop.call_later.assert_not_called()
 
 
 @pytest.mark.unit
 def test_scan_devices_runs_when_not_all_connected():
-    """With at least one camera not yet connected, scanning proceeds and
-    reschedules as usual."""
+    """有一台云端在线相机尚未连上 → 探测照做并正常重排。"""
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
-    miot_lan._camera_dids = {"did1", "did2"}
+    miot_lan._cloud_online_dids = {"did1", "did2"}
     miot_lan._connected_dids = {"did1"}
 
     with patch.object(miot_lan, "ping_internal") as mock_ping, patch.object(
@@ -455,30 +447,29 @@ def test_scan_devices_runs_when_not_all_connected():
 
 
 @pytest.mark.unit
-def test_set_camera_connected_resumes_paused_scan():
-    """相机掉线时，若扫描此前因「全连上」而暂停，必须重新拉起。"""
+def test_set_camera_connected_disconnect_resumes_stopped_scan():
+    """相机掉线时，若扫描此前因「全云在线相机已连上」而停表，必须恢复。"""
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
-    miot_lan._camera_dids = {"did1"}
+    miot_lan._cloud_online_dids = {"did1"}
     miot_lan._connected_dids = {"did1"}
-    miot_lan._scan_timer = MagicMock()  # 已排期
-    miot_lan._scan_throttled = True  # 但处于降频态
+    miot_lan._scan_timer = None  # 停表态
 
     miot_lan._MIoTLan__set_camera_connected("did1", False)
 
     assert "did1" not in miot_lan._connected_dids
     miot_lan._internal_loop.call_later.assert_called_once()
+    assert miot_lan._internal_loop.call_later.call_args[0][0] == 0
 
 
 @pytest.mark.unit
 def test_set_camera_connected_true_does_not_resume():
-    """标记连上永远不该自己重启扫描——只有掉线 / 新相机才恢复。"""
+    """标记连上永远不该自己重启扫描——连接只会让条件更满足，恢复由掉线/新增驱动。"""
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
-    miot_lan._camera_dids = {"did1", "did2"}
+    miot_lan._cloud_online_dids = {"did1", "did2"}
     miot_lan._connected_dids = {"did1"}
-    miot_lan._scan_timer = MagicMock()
-    miot_lan._scan_throttled = True
+    miot_lan._scan_timer = None
 
     miot_lan._MIoTLan__set_camera_connected("did2", True)
 
@@ -487,34 +478,33 @@ def test_set_camera_connected_true_does_not_resume():
 
 
 @pytest.mark.unit
-def test_set_camera_dids_resumes_scan_for_new_camera():
-    """新出现的相机 did（尚未连上）必须把暂停的扫描拉起来。"""
+def test_set_cloud_online_dids_resumes_scan_for_new_camera():
+    """新出现的云端在线相机 did（尚未连上）必须把停表的扫描拉起来。"""
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
-    miot_lan._camera_dids = {"did1"}
+    miot_lan._cloud_online_dids = {"did1"}
     miot_lan._connected_dids = {"did1"}
-    miot_lan._scan_timer = MagicMock()
-    miot_lan._scan_throttled = True
+    miot_lan._scan_timer = None  # 停表态
 
-    miot_lan._MIoTLan__set_camera_dids({"did1", "did2"})
+    miot_lan._MIoTLan__set_cloud_online_dids({"did1", "did2"})
 
-    assert miot_lan._camera_dids == {"did1", "did2"}
+    assert miot_lan._cloud_online_dids == {"did1", "did2"}
     miot_lan._internal_loop.call_later.assert_called_once()
+    assert miot_lan._internal_loop.call_later.call_args[0][0] == 0
 
 
 @pytest.mark.unit
-def test_maybe_resume_scan_noop_when_not_throttled():
-    """扫描本就在正常退避排期上（未降频）时不该被打扰。
+def test_resume_scan_noop_while_scan_running():
+    """扫描本就在排期上（_scan_timer 非空）时，集合变化不该重排。
 
-    否则每轮 set_camera_dids / set_camera_connected 都会把退避重置回
-    OT_PROBE_INTERVAL_MIN，在「有相机还没连上」的整个窗口里探测流量白涨一个量级。
+    只有停表态（_scan_timer 为空）才恢复；否则下一轮自己重判，退避不被重置，
+    探测流量不会白涨一个量级。
     """
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
-    miot_lan._camera_dids = {"did1"}
+    miot_lan._cloud_online_dids = {"did1"}
     miot_lan._connected_dids = set()
     miot_lan._scan_timer = MagicMock()  # 已排期
-    miot_lan._scan_throttled = False  # 且未降频 → 正常排期中
 
     miot_lan._MIoTLan__set_camera_connected("did1", False)
 
@@ -522,29 +512,27 @@ def test_maybe_resume_scan_noop_when_not_throttled():
 
 
 @pytest.mark.unit
-def test_devices_outside_enabled_set_keep_being_probed_while_throttled():
-    """回归（死锁防线）：降频态下集合外的设备仍被探测覆盖。
+def test_unconnected_cloud_online_camera_keeps_scan_running():
+    """回归（旧死锁防线）：一台云端在线但未连上的相机让扫描保持运行。
 
-    场景：camA 已启用并连上（_camera_dids == _connected_dids == {camA}），camB 刚绑定
-    还没打开开关，因此不在 _camera_dids 里。旧实现在这一刻停表，camB 拿不到任何探测，
-    _KA_TIMEOUT 后 lan_online 掉 False；而 toggle_camera 拿 lan_online 当硬门 →
-    用户再也开不了 camB，且 __maybe_resume_scan 用同一判据恒早退，无恢复路径。
+    场景：camA 已连上（在 connected），camB 云端在线但还没连上。旧实现用「已启用」
+    活跃集判「全连上」，camB 不在里面会被当成全连而降频停表 → camB lan_online 掉
+    False → toggle 硬门挡 → 再也开不了。新判据用云端在线集，camB 在里面且未连 →
+    inequality → 扫描持续探它，lan_online 保持新鲜，随时能开。
     """
     miot_lan = _make_mock_lan()
     miot_lan._internal_loop = MagicMock()
-    miot_lan._camera_dids = {"camA"}
+    miot_lan._cloud_online_dids = {"camA", "camB"}
     miot_lan._connected_dids = {"camA"}
 
     with patch.object(miot_lan, "ping_internal") as mock_ping, patch.object(
         miot_lan, "_probe_unicast_targets"
     ) as mock_probe:
-        # 连跑两轮，确认降频态是可持续的（每轮都重排定时器，永不停）。
-        miot_lan._MIoTLan__scan_devices()
         miot_lan._MIoTLan__scan_devices()
 
-    assert mock_ping.call_count == 2
-    assert mock_probe.call_count == 2
-    assert miot_lan._internal_loop.call_later.call_count == 2
+    assert mock_ping.call_count == 1
+    assert mock_probe.call_count == 1
+    assert miot_lan._internal_loop.call_later.call_count == 1
     assert miot_lan._scan_timer is not None
 
 
@@ -592,7 +580,7 @@ def test_native_failure_does_not_rearm_keepalive_grace():
     miot_lan._lan_devices = {"did1": device}
     miot_lan._connected_dids = {"did1"}
 
-    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan") as mock_resume:
+    with patch.object(miot_lan, "_MIoTLan__resume_scan") as mock_resume:
         miot_lan._MIoTLan__set_camera_connected(
             "did1", False, keep_alive_on_stop=False
         )
@@ -620,7 +608,7 @@ def test_cross_subnet_camera_still_has_offline_path_after_unplug():
     assert device._ka_timer is None
 
     # 相机被拔电，原生报 DISCONNECTED（非主动关流）。
-    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan"):
+    with patch.object(miot_lan, "_MIoTLan__resume_scan"):
         miot_lan._MIoTLan__set_camera_connected(
             "did1", False, keep_alive_on_stop=False
         )
@@ -639,7 +627,7 @@ def test_repeated_native_failures_do_not_push_offline_deadline():
     device, clock = _real_device(miot_lan)
     miot_lan._MIoTLan__set_camera_connected("did1", True)
 
-    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan"):
+    with patch.object(miot_lan, "_MIoTLan__resume_scan"):
         miot_lan._MIoTLan__set_camera_connected(
             "did1", False, keep_alive_on_stop=False
         )
@@ -661,7 +649,7 @@ def test_deliberate_stop_does_extend_deadline():
     device, clock = _real_device(miot_lan)
     miot_lan._MIoTLan__set_camera_connected("did1", True)
 
-    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan"):
+    with patch.object(miot_lan, "_MIoTLan__resume_scan"):
         miot_lan._MIoTLan__set_camera_connected("did1", False)
         first_deadline = device._ka_timer.when()
         clock["now"] += 3
@@ -682,7 +670,7 @@ def test_deliberate_stop_still_rearms_keepalive_grace():
     miot_lan._lan_devices = {"did1": device}
     miot_lan._connected_dids = {"did1"}
 
-    with patch.object(miot_lan, "_MIoTLan__maybe_resume_scan"):
+    with patch.object(miot_lan, "_MIoTLan__resume_scan"):
         miot_lan._MIoTLan__set_camera_connected("did1", False)
 
     device.mark_reachable.assert_called_once_with(start_grace=True)

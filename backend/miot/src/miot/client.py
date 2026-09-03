@@ -795,15 +795,15 @@ class MIoTClient:
             did, connected, keep_alive_on_stop=keep_alive_on_stop
         )
 
-    def set_camera_dids(self, dids: Set[str]) -> None:
-        """Tell the LAN prober the current *scoped* (active) camera set.
+    def set_cloud_online_dids(self, dids: Set[str]) -> None:
+        """Tell the LAN prober the cloud-online, in-scope camera set.
 
-        MUST be the set of dids actually expected to connect (home-filtered,
-        not blacklisted, capped, etc.) — not every camera-class device on the
-        account — otherwise a camera outside the current scope would never
-        report connected and the scan interval would never throttle down.
+        The stop condition — "every cloud-online camera is streaming" — is
+        evaluated against this set; anything outside it (cloud-offline or
+        out-of-scope) is not enableable and needs no probing. Must be
+        **physical** dids (see ``MIoTLan.set_cloud_online_dids``).
         """
-        self._lan_client.set_camera_dids(dids)
+        self._lan_client.set_cloud_online_dids(dids)
 
     # ------------------------------------------------------------------ mips
 

@@ -221,21 +221,16 @@ class MIoTLan:
     _last_scan_interval: Optional[float]
     _callbacks_device_status_changed: Dict[str, _MIoTLanRegDeviceData]
     _unicast_targets: Dict[str, str]
-    # 上层推下来的**拉流活跃集**相机 did（在启用家庭 ∧ 未拉黑 ∧ 在线 ∧ 镜头未关
-    # ∧ 截到上限）与已连上的 did 集合。已连上的相机可达性已经证实，单播探测按
-    # 目标跳过；全部连上时扫描**降频**到 OT_PROBE_INTERVAL_MAX。
+    # 上层推下来的**云端在线且当前 scope** 相机物理 did 集（home_allowed ∧ online）
+    # 与已连上的 did 集合。已连上的相机可达性已经证实，单播探测按目标跳过。
     #
-    # ⚠️ 这是「已启用」集，不是「已知/全部」集——用户没打开开关的相机不在里面、
-    # 永远不会 connected。所以**绝不能据此停表**：停表后集合外的设备（未启用
-    # 相机、非相机设备）拿不到探测，lan_online 会在 _KA_TIMEOUT 后翻 False，而
-    # toggle_camera 拿 lan_online 当硬门 → 用户再也开不了那台相机，且无恢复路径
-    # （__maybe_resume_scan 用同一判据，恒早退）。降频到 45s < _KA_TIMEOUT 100s
-    # 才能既省探测流量、又让集合外设备的在线态始终被刷新。
-    _camera_dids: Set[str]
+    # 停表判据：所有云端在线相机都已连上（cloud_online ⊆ connected）→ 不探测。
+    # 集合外只剩「云端离线」（toggle 的 online 门挡着，开不了、无需探测）与
+    # 「scope 外」（home_allowed 门挡着，本 scope 不让开）。可开启相机 = 云端在线
+    # ∧ in-scope，正好都在这个集合里，所以停表不会挡任何合法操作；任何状态变化
+    # （断开/云端新增/开关流）都制造 inequality，由 __resume_scan 恢复探测。
+    _cloud_online_dids: Set[str]
     _connected_dids: Set[str]
-    # 是否处于「全部已启用相机都已连上」的降频态。__maybe_resume_scan 靠它区分
-    # 「正常退避排期（别打扰）」与「降频态（该提前扫一次）」。
-    _scan_throttled: bool
 
     _init_lock: asyncio.Lock
     _init_done: bool
@@ -274,9 +269,8 @@ class MIoTLan:
         self._last_scan_interval = None
         self._callbacks_device_status_changed = {}
         self._unicast_targets = {}
-        self._camera_dids = set()
+        self._cloud_online_dids = set()
         self._connected_dids = set()
-        self._scan_throttled = False
 
         self._init_lock = asyncio.Lock()
         self._init_done = False
@@ -338,9 +332,8 @@ class MIoTLan:
                 self._scan_timer = None
                 self._last_scan_interval = None
                 self._unicast_targets = {}
-                self._camera_dids = set()
+                self._cloud_online_dids = set()
                 self._connected_dids = set()
-                self._scan_throttled = False
                 # 注意：故意不清空 _callbacks_device_status_changed。
                 # __on_network_info_change_external_async 会在网卡变化时主动 deinit→init，
                 # 复位会让用户在 init_async 后注册的回调在第一次网络抖动时丢失。
@@ -463,36 +456,34 @@ class MIoTLan:
         """Internal: replace unicast targets (runs on internal loop thread)."""
         self._unicast_targets = targets
 
-    def set_camera_dids(self, dids: Set[str]) -> None:
-        """Set the **enabled** (streaming-active) camera dids.
+    def set_cloud_online_dids(self, dids: Set[str]) -> None:
+        """Set the **cloud-online in-scope** camera physical dids.
 
-        This is what lets the LAN layer tell "every enabled camera is
-        connected" (→ scanning throttles down to ``OT_PROBE_INTERVAL_MAX``,
-        see ``__scan_devices``) from "one is still missing". A newly-appeared
-        camera did brings the scan back to full rate.
+        Stop condition: when every cloud-online camera is already connected
+        (``_cloud_online_dids <= _connected_dids``) the scan stops entirely —
+        see ``__scan_devices``. Anything outside this set is either
+        cloud-offline (toggle's ``online`` gate refuses to enable it) or out
+        of scope (``home_allowed`` gate refuses it), neither needs probing.
+        A new cloud-online camera appearing brings the scan back.
 
-        Must be the **scoped active set**, not every camera on the account:
-        a camera outside the current scope never connects, so including it
-        would make "all connected" permanently unreachable and the throttle
-        would never engage.
-
-        Because this is the *enabled* set, the throttle must never become a
-        full stop — cameras the user has not switched on are absent here yet
-        still rely on the shared broadcast to keep their ``lan_online`` fresh.
+        Must be **physical** dids (multi-lens cameras converge to one entry)
+        so the comparison with ``_connected_dids`` is at the same granularity.
         Safe to call when not initialized (no-op).
         """
         if not self._init_done:
             return
         try:
             self._internal_loop.call_soon_threadsafe(
-                self.__set_camera_dids, set(dids)
+                self.__set_cloud_online_dids, set(dids)
             )
         except RuntimeError as e:
-            _LOGGER.debug("set_camera_dids skipped: internal loop unavailable: %s", e)
+            _LOGGER.debug(
+                "set_cloud_online_dids skipped: internal loop unavailable: %s", e
+            )
 
-    def __set_camera_dids(self, dids: Set[str]) -> None:
-        self._camera_dids = dids
-        self.__maybe_resume_scan()
+    def __set_cloud_online_dids(self, dids: Set[str]) -> None:
+        self._cloud_online_dids = dids
+        self.__resume_scan()
 
     def set_camera_connected(
         self, did: str, connected: bool, keep_alive_on_stop: bool = True
@@ -500,12 +491,10 @@ class MIoTLan:
         """Mark a camera did as connected (native miss stream up) or not.
 
         A connected camera is proven reachable, so ``_probe_unicast_targets``
-        skips it per-target; once **every enabled** camera is connected the
-        scan loop throttles down to ``OT_PROBE_INTERVAL_MAX`` (see
-        ``__scan_devices``) and returns to full rate when one disconnects or a
-        new camera appears. It never stops outright — devices outside the
-        enabled set depend on the shared broadcast. Safe to call when not
-        initialized (no-op).
+        skips it per-target; once **every cloud-online in-scope** camera is
+        connected the scan loop stops (see ``__scan_devices``) and resumes
+        when one disconnects or a new cloud-online camera appears. Safe to
+        call when not initialized (no-op).
         """
         if not self._init_done:
             return
@@ -549,33 +538,26 @@ class MIoTLan:
                     # 跨不了子网，没有任何东西会重新武装它。已有定时器保持原
                     # deadline 不变，失败重试不会把它往后推。
                     device.ensure_offline_timer()
-            self.__maybe_resume_scan()
+            self.__resume_scan()
 
-    def __all_cameras_connected(self) -> bool:
-        """**已启用**（拉流活跃集）相机非空且全部处于已连接状态。
+    def __all_cloud_online_connected(self) -> bool:
+        """所有「云端在线且当前 scope」的相机都已连上（停表判据）。
 
-        空集返回 False——「一台相机都还没启用」不该被当成「全都连上了」而降频。
-
-        注意这只是「降频」的判据，不是「停表」的判据：集合外仍有未启用相机与
-        非相机设备依赖扫描维持 lan_online，详见 ``__scan_devices`` 的说明。
+        空集返回 True（空 ⊆ 空）：还没有云端在线相机时没有可探之物，停表等
+        同步；同步到来时 ``__resume_scan`` 会恢复探测。
         """
-        return bool(self._camera_dids) and self._camera_dids <= self._connected_dids
+        return self._cloud_online_dids <= self._connected_dids
 
-    def __maybe_resume_scan(self) -> None:
-        """扫描此前因「相机全连上」而降频、现在条件不再成立时，提前扫一次。
+    def __resume_scan(self) -> None:
+        """扫描因「全部云端在线相机已连上」停表后、条件不再成立时立即恢复扫一次。
 
-        扫描循环**永不停表**（见 ``__scan_devices``），所以这里只做「加速」：把
-        已排期的下一次扫描提前到现在并重置退避，让掉线/新增的相机尽快被发现。
-
-        ``_scan_throttled`` 为 False 表示扫描本就在正常退避排期上，无需干预——
-        否则每轮 ``set_camera_dids`` 都会把退避重置回 5s，探测流量白涨一个量级。
+        - ``_scan_timer`` 非空 = 扫描仍在跑/已排期，无需干预（下一轮会自己重判，
+          也不会重置退避，避免探测流量白涨）；
+        - ``_scan_timer`` 为空 = 停表态；条件已不成立 → 重置退避并立刻扫一次。
+        恢复后由 ``__scan_devices`` 决定继续排期还是再次停表。
         """
-        if not self._scan_throttled or self.__all_cameras_connected():
+        if self._scan_timer is not None or self.__all_cloud_online_connected():
             return
-        self._scan_throttled = False
-        if self._scan_timer is not None:
-            self._scan_timer.cancel()
-            self._scan_timer = None
         self._last_scan_interval = None
         self._scan_timer = self._internal_loop.call_later(0, self.__scan_devices)
 
@@ -601,7 +583,7 @@ class MIoTLan:
         实测的拦截边界：拦 = 同网段 UDP 单播、全局广播 255.255.255.255、多播 224.x；
         放行 = 定向子网广播（192.168.1.255）与 TCP——这正是广播发现与 miss 拉流在
         宿主机仍能工作、只有同网段单播失效的原因。所以在未豁免的 macOS 上，这里对同
-        网段目标的 sendto 会每轮失败一次（记 debug、不影响广播与其它目标，功能等价于
+        网段目标的 sendto 会每轮失败一次（记 info、不影响广播与其它目标，功能等价于
         改动前）；根治办法是换部署形态（跑 Linux 容器，或改成 launchd daemon /
         签名启动器），不在本进程代码内。
 
@@ -631,8 +613,9 @@ class MIoTLan:
                     self._probe_msg, socket.MSG_DONTWAIT, (ip, self.OT_PORT)
                 )
             except OSError as e:
-                # 无路由/不可达等：记 debug 不刷屏，不影响其它目标与广播。
-                _LOGGER.debug("unicast probe to %s failed: %s", ip, e)
+                # 无路由/不可达等：记 info——发送成功仍静默，失败路径必须可见，
+                # 否则真机上「单播被 LNP 拦（errno 65）」与「根本没发」无法区分。
+                _LOGGER.info("unicast probe to %s failed: %s", ip, e)
 
     def __local_subnets(self) -> list["ipaddress.IPv4Network"]:
         """本机所有可解析网段。空列表 = 当前判不出本机网段（网卡全掉 / 刷新窗口）。"""
@@ -684,7 +667,7 @@ class MIoTLan:
             device.on_delete()
         self._lan_devices.clear()
         self._unicast_targets.clear()
-        self._camera_dids.clear()
+        self._cloud_online_dids.clear()
         self._connected_dids.clear()
         self.__deinit_socket()
         self._internal_loop.stop()
@@ -869,19 +852,14 @@ class MIoTLan:
         if self._scan_timer:
             self._scan_timer.cancel()
             self._scan_timer = None
-        # 全部已启用相机都已连上：可达性已由拉流本身证实（连上时 mark_reachable
-        # 直接标在线并取消离线定时器），探测对**这些**相机没必要再打，故把扫描
-        # 降到最低频。
-        #
-        # ⚠️ 只能降频，**不能停表**：_camera_dids 是「已启用」集而非「全部」集，
-        # 集合外还有未启用的相机与非相机设备靠这个全局共享的广播维持 lan_online。
-        # 一旦停表，它们会在 _KA_TIMEOUT(100s) 后翻 False，而 toggle_camera 拿
-        # lan_online 当硬门 → 用户再也开不了那台相机；且 __maybe_resume_scan 用的
-        # 是同一判据，推同样的集合不会重排定时器，没有任何恢复路径。
-        # OT_PROBE_INTERVAL_MAX(45s) < _KA_TIMEOUT(100s)，降频后集合外设备的在线态
-        # 仍能被持续刷新。
-        all_connected = self.__all_cameras_connected()
-        self._scan_throttled = all_connected
+        # 停表判据：所有「云端在线且当前 scope」的相机都已连上。可开启相机 =
+        # 云端在线 ∧ in-scope，正好全在这个集合里；集合外只剩开不了/不让开的，
+        # 无需探测。已连相机的在线态由拉流状态（mark_reachable）维持，不依赖
+        # 扫描。停表后任何状态变化（断开/云端新增/开关流）会制造 inequality，
+        # 由 __resume_scan 恢复探测。
+        if self.__all_cloud_online_connected():
+            _LOGGER.debug("scan stopped: all cloud-online cameras connected")
+            return
         try:
             # Scan devices — broadcast
             self.ping_internal()
@@ -891,19 +869,11 @@ class MIoTLan:
         except Exception as err:
             # Ignore any exceptions to avoid blocking the loop
             _LOGGER.error("ping device error, %s", err)
-        scan_time = (
-            self.OT_PROBE_INTERVAL_MAX
-            if all_connected
-            else self.__get_next_scan_time()
-        )
+        scan_time = self.__get_next_scan_time()
         self._scan_timer = self._internal_loop.call_later(
             scan_time, self.__scan_devices
         )
-        _LOGGER.debug(
-            "next scan time: %ss%s",
-            scan_time,
-            " (throttled: all enabled cameras connected)" if all_connected else "",
-        )
+        _LOGGER.debug("next scan time: %ss", scan_time)
 
     def __get_next_scan_time(self) -> float:
         if not self._last_scan_interval:

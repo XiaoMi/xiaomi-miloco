@@ -774,15 +774,25 @@ class MiotProxy:
                     )
                 )
                 active = {physical_camera_did(d) for d in active_channels}
-                # MIoTLan 靠这个知道"全部相机是否都已连上"才能把探测降频——必须传
-                # 这个 scoped 后的 active 集，不能传账号下全部相机（不在当前 scope 里
-                # 的相机永远不会连上，会让"全连上"永远判不成立）。
-                self._miot_client.set_camera_dids(active)
+                # MIoTLan 停表判据：所有「云端在线 ∧ 当前 scope」的相机都在拉流。
+                # 传这个集而不是上面的 active（已启用）集：未启用但云端在线、随时
+                # 可开启的相机也要保持探测新鲜，否则 toggle 的 lan_online 硬门会挡
+                # 它；scope 外 / 云端离线的相机开不了、无需探测。物理 did 收敛与
+                # _connected_dids 对齐（多摄任一路在拉流 = 该台 connected）。
+                cloud_online = {
+                    physical_camera_did(d)
+                    for d, info in cameras.items()
+                    if is_home_allowed(self._kv_repo, getattr(info, "home_id", None))
+                    and bool(getattr(info, "online", False))
+                }
+                self._miot_client.set_cloud_online_dids(cloud_online)
                 logger.debug(
-                    "Camera streaming set: channels=%s physical=%s managers=%s",
+                    "Camera streaming set: channels=%s physical=%s managers=%s "
+                    "cloud_online=%s",
                     sorted(active_channels),
                     sorted(active),
                     sorted(self._camera_img_managers),
+                    sorted(cloud_online),
                 )
                 for camera_did in cameras.keys():
                     if camera_did not in self._camera_img_managers:
