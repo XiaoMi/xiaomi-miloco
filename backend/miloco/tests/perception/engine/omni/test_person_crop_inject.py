@@ -111,8 +111,8 @@ class TestFrameSelection:
     def test_answer_moves_with_the_box_index(self):
         """把最大框换到另一个下标，选出的帧必须跟着换 —— 钉住"帧 j 配框 j"这层对应。
 
-        若实现里帧与框的下标错开（上游下采只抽帧不抽框就出过这种事），赢家摆在正中间的用例
-        会歪打正着；所以这里把赢家分别放在首位和末位各验一次。
+        若实现里帧与框的下标错开，赢家摆在正中间的用例会歪打正着；所以这里把赢家分别放在
+        首位和末位各验一次。
         """
         frames = [_frame(11), _frame(22), _frame(33)]
         big, small = {1: (0, 0, 220, 320)}, {1: (0, 0, 60, 60)}
@@ -124,8 +124,8 @@ class TestFrameSelection:
     def test_length_mismatch_gives_up_per_frame_path(self):
         """帧数与框数不等时整条逐帧路径放弃、退末帧兜底 —— **不**按较短者截断。
 
-        截断只是换一种错位（用另一时刻的框裁这一帧），而图是绑 track_id 的。上游 omni 下采曾
-        只抽帧不抽框，当时正是靠这里的静默截断把错位藏住、无任何日志。
+        截断只是换一种错位（用另一时刻的框裁这一帧），而图是绑 track_id 的，配错等于喂一条错的
+        身份证据；故宁可整条放弃 + 告警，也不静默截断——静默截断会让这类错位没有任何可观测信号。
         """
         frames = [_frame(11), _frame(22), _frame(33)]
         cand = IdentityQueryItem(track_id=1, body_crop=_frame(160, 100, 60))
@@ -199,7 +199,7 @@ class TestSpec:
     def test_note_wording_is_verbatim(self):
         """文案是已验证配置的一部分（去掉 track_id 绑定的对照臂显著变差），逐字钉住。
 
-        整串相等防任何改写；另外单挑两处**承重**措辞，让它们即便在整串被重排时也不会悄悄丢：
+        整串相等防任何改写；另外单挑几处**承重**措辞，让它们即便在整串被重排时也不会悄悄丢：
         「上方 gallery」是插入位的语义前提（人像必须在 gallery 之后，否则这句是事实错误），
         「identities 时照旧用 track_id」是输出契约（字段名须与 field_registry 的 schema 字面量
         一致，见下面那条 test_note_field_name_matches_schema）。
@@ -289,7 +289,7 @@ class TestConfigFromSettings:
 
 class TestShippedDefault:
     def test_shipped_settings_enable_injection(self):
-        """随包默认是**开**的，且两个数值取评测扫出来的档位。
+        """随包默认是**开**的，归一高度与最小框高取评测扫出来的档位。
 
         **直接读随包 yaml、不走配置读取函数**：后者拿到的是合并后的配置，而合并优先级里
         环境变量与本机 config.json 都盖在随包值之上。走合并配置的话，任何人在本机用过本能力
@@ -357,8 +357,8 @@ class TestTermConsistency:
     def test_label_reuses_the_term_from_the_note(self):
         """绑定文本里的名词必须是说明块里定义过的那一个。
 
-        说明块用「的“X”：」给这个概念下定义，绑定文本再引用它。两处若不一致，模型会看到两个名字
-        （说明块讲 A、图前标 B），指代就断了。而两处各有各的字面量断言，改一处忘改另一处时谁也发现
+        说明块用「的“X”：」给这个概念下定义，绑定文本再引用它。二者若不一致，模型会看到两个名字
+        （说明块讲 A、图前标 B），指代就断了。而两边各有各的字面量断言，改一处忘改另一处时谁也发现
         不了 —— 这条从说明块里**反解**出名词再去校验绑定文本，把这个空档堵上。
         """
         term = re.search(r'的“(.+?)”：', pci._INJECT_NOTE).group(1)
@@ -420,8 +420,8 @@ class TestFallbackHeightGate:
     def test_other_fallback_paths_unaffected_when_person_is_large(self):
         """闸只看图的高度，不看为什么走到兜底。
 
-        兜底有三条触发路径（无逐帧框 / 全窗 coasting / 全窗小框）。人够大时三条都该照常兜底——
-        这里用「压根没有逐帧框」这条验证，确认加闸没有连带堵掉它。
+        兜底的触发路径不止一条（无逐帧框、全窗 coasting、全窗小框等）。人够大时它们都该照常
+        兜底——这里用「压根没有逐帧框」这条验证，确认加闸没有连带堵掉其余路径。
         """
         imgs = _images(_build(
             [IdentityQueryItem(track_id=1, body_crop=_frame(200, 150, 70))], [], []))

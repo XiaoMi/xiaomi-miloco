@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 _MIN_PNG_BYTES = 100  # 对齐 prompt_builder._MIN_JPEG_BYTES:更短视为损坏,跳过
 # 抠图 padding:bbox 各边外扩 5%。与 IdentityConfig.body_crop_padding_ratio 同值(见模块 docstring),
-# 故不做成配置项 —— 它从未作为实验维度被扫过,暴露出来只会招致两条路径口径漂移。
+# 故不做成配置项 —— 它从未作为实验维度被扫过,暴露出来只会招致主路径与兜底路径口径漂移。
 _PAD_RATIO = 0.05
 
 # 前置说明块(整段注入图之前只出现一次)。措辞**不要**当文案润色顺手改,但要分清哪部分是什么:
@@ -60,13 +60,15 @@ _PAD_RATIO = 0.05
 #     不报错,只能靠那条用例守。
 #   · 已知瑕疵(故意保留):句中"最清晰"是给模型的先验(这张图看得清、可信),而实现是纯面积最大、
 #     不做任何清晰度算法。不订正它:prompt 的职责不是文档化选帧算法,删掉是净减信息。
-# 名词在本文件出现三次(本句内两次 + 下方绑定文本一次)。两处不一致会让模型看到两个名字、指代断掉,
-# 而各处又都有自己的断言、谁也发现不了 —— 由 test_label_reuses_the_term_from_the_note 守着。
+# 本句与下方绑定文本必须用同一个名词:不一致会让模型看到两个名字、指代断掉,而两边各有各的断言、
+# 谁也发现不了 —— 由 test_label_reuses_the_term_from_the_note 守着。
 _INJECT_NOTE = "【识别辅助】下方为每个待识别 track 的“外观单帧”：从本段视频中裁出的该 track 最大最清晰的一帧。请优先把每个 track 的外观单帧与上方 gallery 成员参考图逐一比对来判定身份；track 的 bbox 数字坐标仍可用于在视频画面中交叉核对位置。输出 identities 时照旧用 track_id 数字。"
 
 
 def person_crop_inject_config_from_settings() -> PersonCropInjectConfig:
-    """热读 settings 的 perception.engine.person_crop_inject,过滤未知键,缺省补默认(免重启)。
+    """热读 settings 的 perception.engine.person_crop_inject,过滤未知键,缺省补默认。
+
+    生效方式见 PersonCropInjectConfig 的 docstring —— 「每窗热读」不等于「免重启」。
 
     任何异常/非法结构都 fail-closed 退默认(= 关闸):本函数在推理主路径上,抛出去会被
     ``omni.run_omni_fused`` 折成整相机本窗 skipped。同 ``crop_enhance_config_from_settings``。
