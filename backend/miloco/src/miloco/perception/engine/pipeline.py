@@ -155,7 +155,8 @@ def _downsample_for_omni(
     frames = [packet.all_frames[i] for i in idxs]
     # per_frame_track_boxes 与 all_frames **同序同长、按下标一一对应**, 必须用同一组下标
     # 同步抽 —— 只抽帧不抽框会让"第 j 帧"配到"第 j 个框"(那是抽稀前另一个时刻的框),
-    # 出厂 fps=3/omni_fps=1 下错位 step-1 起、最远到 n-1 帧。下游单帧人像注入正是拿这
+    # 错位量 = idxs[j] - j: 自 step-1 起随 j 递增, 上界 n - len(idxs)(因 idxs[-1] 恒为
+    # n-1)。出厂档 12 帧抽成 4 帧时末帧错位 8 帧、约两秒半。下游单帧人像注入正是拿这
     # 两者配对裁图, 错位就等于用旧时刻的框去裁当前帧: 人已走开 → 裁到背景或隔壁那个人,
     # 而那张图是绑 track_id 的, 等于给模型喂一个错的身份证据。
     # 长度不符(理论上不该发生: 同一趟 analyze 逐帧 append 而来)时**整份弃用**而非按下标
