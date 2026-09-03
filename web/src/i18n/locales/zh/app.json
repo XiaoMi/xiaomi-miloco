@@ -1,6 +1,5 @@
 {
   "app": {
-    "loadHomeStatusFail": "看不到家里状态",
     "loadPersonsFail": "家人列表加载失败",
     "loadCamerasFail": "摄像头列表加载失败",
     "loadScopeCamerasFail": "摄像头作用域加载失败",

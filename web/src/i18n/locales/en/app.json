@@ -1,6 +1,5 @@
 {
   "app": {
-    "loadHomeStatusFail": "Couldn't load home status",
     "loadPersonsFail": "Couldn't load family list",
     "loadCamerasFail": "Couldn't load cameras",
     "loadScopeCamerasFail": "Couldn't load camera scope",
