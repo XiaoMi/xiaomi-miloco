@@ -284,6 +284,19 @@ async def test_subscription_reset_rebuilds_intent_sets(proxy_env):
 
 
 @pytest.mark.asyncio
+async def test_init_registers_the_props_push_callback(proxy_env):
+    """漏了这一行，属性推送一条都到不了本层的消费方，且到处都不报错。"""
+    p, client = proxy_env
+    await p.init()
+
+    cb = client.register_device_props_changed_callback.call_args.args[0]
+    assert cb.__self__ is p
+    assert cb.__func__.__name__ == "_on_device_props_changed_event"
+
+    await p.deinit()
+
+
+@pytest.mark.asyncio
 async def test_bind_event_forwards_despite_sub_failure(proxy_env):
     """A failed bind-triggered subscribe must only log — it must NOT abort
     delivery to _bind_listener.on_event, or this bind's debounce/welcome

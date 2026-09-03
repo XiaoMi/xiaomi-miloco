@@ -212,3 +212,37 @@ async def test_the_manager_wires_both_push_lanes_into_the_container(store):
 
     assert store.get("iot/device/d1/prop/2.1") == 26
     assert store.get("iot/device/d1/status/online") is True
+
+
+async def test_a_push_travels_from_the_sdk_callback_into_the_container(store):
+    """每段单测都过不代表接上了：这条从 proxy 注册给 SDK 的那个回调开始走。"""
+    from miloco.manager import Manager
+    from miloco.miot.client import MiotProxy
+    from miot.types import MIoTDevicePropsEvent, MIoTPropChange
+
+    proxy = object.__new__(MiotProxy)
+    proxy._state_listeners = []
+    proxy._props_listeners = []
+
+    async def devices_in_current_home():
+        return {"d1": SimpleNamespace(home_id="H1")}
+
+    proxy.devices_in_current_home = devices_in_current_home
+
+    manager = object.__new__(Manager)
+    manager._state_store = store
+    manager._miot_proxy = proxy
+    manager._scope = 0
+    manager._aligned_scope = 0
+    manager._wire_iot_push()
+
+    await proxy._on_device_props_changed_event(
+        MIoTDevicePropsEvent(
+            did="d1",
+            changes=[MIoTPropChange(siid=2, piid=1, value=26)],
+            timestamp_ms=1,
+        )
+    )
+
+    assert store.get("iot/device/d1/prop/2.1") == 26
+    manager._prop_top_up.deinit()
