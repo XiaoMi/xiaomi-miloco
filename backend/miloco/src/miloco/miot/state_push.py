@@ -31,7 +31,6 @@
 启动对齐那条通道不走这里，它有自己的一套判据（采集期就按当前家庭取设备、每台设备前比一次
 代号）：`state_align._write_device` 整台写 `prop` 子树、用的是替换语义，而它被容器拒收后
 退化的 `_write_props_per_leaf` 与写在线标志的 `_write_online_flags` 是逐叶子直写。
-**要给这里加一道跨通道的闸，那两处得一起改。**
 """
 
 from __future__ import annotations
