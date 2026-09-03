@@ -822,3 +822,43 @@ async def test_a_round_that_keeps_its_scope_finishes_normally(store):
 
     assert landed is True
     assert store.get("iot/device/d1/prop/2.1") == 1
+
+
+# ── 采集期到的上下线推送不该被采集起点的快照打回去 ─────────────────────
+
+
+async def test_the_online_flag_is_reread_at_write_time(store):
+    """采集期每台设备都要问一次 spec，冷缓存时是逐台云端往返；这段时间到的上下线推送
+    已经把新值写进容器了（那条链只设家庭闸），拿采集起点的快照写就是把实时值打回去。"""
+    device = _device()
+    proxy = _FakeProxy({"d1": device}, {("d1", 2, 1): {"code": 0, "value": 26}})
+    original = proxy.get_readable_prop_iids
+
+    async def flip_offline_then_return(did):
+        # 模拟采集期到的一条 offline 推送：它先改设备缓存，再写容器
+        device.online = False
+        return await original(did)
+
+    proxy.get_readable_prop_iids = flip_offline_then_return
+
+    await _align(store, proxy)
+
+    assert store.get("iot/device/d1/status/online") is False
+
+
+async def test_the_snapshot_is_the_fallback_when_the_reread_fails(store):
+    """重读失败时写个几秒前的值，也好过一台设备在容器里连痕迹都没有。"""
+    proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 26}})
+    collected: dict[str, bool] = {}
+
+    async def devices_then_break():
+        if collected:
+            raise RuntimeError("设备集取不到了")
+        collected["done"] = True
+        return {"d1": _device()}
+
+    proxy.devices_in_current_home = devices_then_break
+
+    await _align(store, proxy)
+
+    assert store.get("iot/device/d1/status/online") is True

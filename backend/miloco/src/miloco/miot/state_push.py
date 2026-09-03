@@ -51,11 +51,18 @@ def _valid_did(did: Any) -> bool:
     return True
 
 
-def write_online(store: StateStore, did: str, online: bool) -> bool:
-    """写在线标志。返回这一笔有没有进树。"""
+def write_online(
+    store: StateStore, did: str, online: bool, *, source: str = SOURCE
+) -> bool:
+    """写在线标志。返回这一笔有没有进树。
+
+    `source` 默认记成推送。云端重拉那条通道（`_sync_iot_online_flags`）要传自己的标记
+    —— 两条通道的排障方向完全不同（一条去翻 MQTT 日志、一条去看那次刷新），混记会让
+    dump 指错方向。
+    """
     if not _valid_did(did):
         return False
-    return store.set(f"iot/device/{did}/status/online", bool(online), source=SOURCE)
+    return store.set(f"iot/device/{did}/status/online", bool(online), source=source)
 
 
 def write_prop(store: StateStore, did: str, siid: int, piid: int, value: Any) -> bool:

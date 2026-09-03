@@ -193,3 +193,16 @@ async def test_the_camera_online_refresh_also_syncs_the_flags(scene):
     await scene.proxy.refresh_camera_online_status()
 
     assert scene.store.get("iot/device/stay/status/online") is False
+
+
+async def test_the_refresh_lane_records_its_own_source(scene):
+    """两条通道的排障方向完全不同 —— 一条去翻 MQTT 日志、一条去看那次刷新。
+    混记会让 dump 指错方向。"""
+    from miloco.miot.client import STATE_REFRESH_SOURCE
+
+    scene.proxy._miot_client.get_devices_async.return_value = {"stay": _device()}
+
+    await scene.proxy.refresh_devices()
+
+    entry = scene.store.get_entry("iot/device/stay/status/online")
+    assert entry.source == STATE_REFRESH_SOURCE

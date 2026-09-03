@@ -268,6 +268,7 @@ async def _yield_to_dispatch() -> None:
 
 async def _write_online_flags(
     store: StateStore,
+    miot_proxy: Any,
     meta: dict[str, _DeviceMeta],
     samples: _Samples,
     guard: _ScopeGuard,
@@ -276,18 +277,35 @@ async def _write_online_flags(
 
     先写标志再写属性：一条属性都读不到的设备也要在容器里留下痕迹。
 
+    **在线态在这里重读，不用 `meta` 里那份。** 采集期每台设备都要问一次它的 spec，
+    冷缓存时是逐台云端往返，`meta` 里的在线态是那之前记的；而这段时间到的上下线推送
+    已经把新值写进容器了（上下线那条只设家庭闸、不设对齐闸），拿旧快照写就是把实时值
+    打回去。与补拉侧同一条原则：打完往返回来重读，不拿旧快照盖新推送。
+    `devices_in_current_home()` 返回的是共享引用、`.online` 由推送回调就地改写，所以
+    循环里每台读到的都是此刻的值。
+
     两种拒收都要接：抛异常那种在这里到不了（did 进 meta 前已过段校验、值是 bool），
     留着是防御；真会发生的是撞上叶子上限那种，它不抛、只让 `set` 返回假，不看就成了
     静默丢失 —— 尤其在一条属性都读不到的那条早退路径上，收尾行是唯一的信号。
     """
+    try:
+        live = await miot_proxy.devices_in_current_home()
+    except Exception as e:
+        # 取不到就退回采集期快照：写个几秒前的值也好过一台设备在容器里连痕迹都没有
+        logger.warning("align: 重读设备集失败，在线标志退回采集期快照: %s", e)
+        live = {}
     for did, info in meta.items():
         # 每台之前都比一次：这个循环里每台之后都让出一次 loop，切换落在中间是可能的
         if guard.moved_on():
             return False
         try:
-            landed = store.set(
-                f"iot/device/{did}/status/online", info.online, source=SOURCE
+            device = live.get(did)
+            online = (
+                bool(getattr(device, "online", info.online))
+                if device is not None
+                else info.online
             )
+            landed = store.set(f"iot/device/{did}/status/online", online, source=SOURCE)
         except (TypeError, ValueError) as e:
             if samples.take("online_flag_rejected"):
                 logger.warning("align: online flag rejected did=%s: %s", did, e)
@@ -434,8 +452,8 @@ async def top_up_missing_props(
     # 开着）。云端给的是缓存里的最后一次上报、推送给的是实时值，容器没有时间戳可仲裁，
     # 所以写之前再读一次，只补此刻仍然缺的。重读到写之间没有 await，推送插不进来
     values = by_device.get(did) or {}
-    still_missing = _present_prop_iids(store, did)
-    fresh = {iid: value for iid, value in values.items() if iid not in still_missing}
+    present_now = _present_prop_iids(store, did)
+    fresh = {iid: value for iid, value in values.items() if iid not in present_now}
     if len(fresh) != len(values):
         logger.info(
             "top-up: did=%s 往返期间有 %d 条被推送填上了，不覆盖",
@@ -490,7 +508,7 @@ async def align_iot_state(
             logger.warning("align: no home is enabled; nothing to align")
             return False
         params, meta = await _collect_params(miot_proxy, samples)
-        if not await _write_online_flags(store, meta, samples, guard):
+        if not await _write_online_flags(store, miot_proxy, meta, samples, guard):
             return False
         offline = sum(1 for info in meta.values() if not info.online)
         if not params:

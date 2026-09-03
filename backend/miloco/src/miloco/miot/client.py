@@ -60,6 +60,10 @@ logger = logging.getLogger(__name__)
 # 容器里这一笔的来源标记。与对齐、推送分开记，dump 里一眼能看出是谁删的
 STATE_RECONCILE_SOURCE = "iot_reconcile"
 
+# 云端重拉写在线标志时的来源标记。与推送分开记：排障方向完全不同 —— 一条去翻 MQTT
+# 日志，一条去看那次刷新
+STATE_REFRESH_SOURCE = "iot_refresh"
+
 
 # 三类对账(meta / device-state / scene)共享的总在飞订阅并发上限——压力落在
 # 同一条 broker 连接上,分闸会让上限变成 3×;SDK 重放侧 _REPLAY_CONCURRENCY
@@ -1109,7 +1113,12 @@ class MiotProxy:
             return
         store = manager.state_store
         for did, device in filter_by_home(self._kv_repo, devices).items():
-            write_online(store, did, bool(getattr(device, "online", True)))
+            write_online(
+                store,
+                did,
+                bool(getattr(device, "online", True)),
+                source=STATE_REFRESH_SOURCE,
+            )
 
     def _reconcile_iot_deletions(
         self, devices: dict[str, MIoTDeviceInfo], scope: int
