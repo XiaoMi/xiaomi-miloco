@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # 不可读的属性永远不会进容器 —— 不限次的话，一台反复掉线的设备每次上线都会重新请求同一
 # 批读不到的属性，挤米家限频。留几次是为了瞬时不可读还有机会
 TOP_UP_MAX_ATTEMPTS = 3
+# 对齐失败后重试几次、首次等多久（之后逐次翻倍）。对齐是这一代属性的唯一来源，
+# 一次云端抖动不该让整代停在「未对齐」
+ALIGN_MAX_ATTEMPTS = 4
+ALIGN_RETRY_BASE_SEC: float = 30.0
 
 
 class Manager:
@@ -64,6 +68,8 @@ class Manager:
             cls._instance._prop_top_up = None
             # did → 本代已补拉次数。切作用域时清空（对齐也是一代跑一次，口径一致）
             cls._instance._top_up_attempts = {}
+            # 对齐窗口里被早退掉的补拉需求。对齐完成后补一轮；切作用域时连同额度一起清
+            cls._instance._top_up_pending = set()
         return cls._instance
 
     def __init__(self):
@@ -110,13 +116,17 @@ class Manager:
           `last_reported` 刷成当下而响应不带时间戳，消费方看不出来 —— 对齐当初跳过离线
           设备就是这个理由。这一条写入器判不了（它不知道这批值是拉来的还是推来的）。
 
-        「本代已对齐」和「还在当前家庭」那两道是**早退**，为的是省掉没必要的云端往返
-        （尤其对齐窗口里：那时补进去的叶子会被对齐的整台替换直接删掉），不是闸 —— 真闸
-        在写入器里，删掉这两道只会变慢，不会变错。**在线检查那道不能删**，它就是上面那条
-        写入器管不了的事。
+        「还在当前家庭」那道是纯**早退**，为的是省掉没必要的云端往返，不是闸 —— 真闸在
+        写入器里，删掉只会变慢。**「本代已对齐」那道除了早退还负责把这次需求记下来**
+        （对齐完成后由 `_drain_pending_top_ups` 补一轮）：对齐窗口里写进去的叶子会被对齐
+        的整台替换直接删掉，所以此刻不能写；但删掉这道会让窗口里上线的设备整代拿不到属性。
+        **在线检查那道也不能删**，它就是上面那条写入器管不了的事。
         """
         if not self.scope_is_aligned():
-            logger.debug("top-up: 本代还没对齐完，跳过 did=%s", did)
+            # 记下来而不是丢掉：对齐要跑一阵，期间上线的设备当初离线、不在对齐的请求名单
+            # 里，对齐自己不会给它写属性 —— 门开了没人再触发就整代只有在线标志
+            self._top_up_pending.add(did)
+            logger.debug("top-up: 本代还没对齐完，先记下 did=%s", did)
             return 0
         device = (await self._miot_proxy.devices_in_current_home()).get(did)
         if device is None:
@@ -141,6 +151,19 @@ class Manager:
             return 0
         return await self._iot_push_writer.write_pulled_props(did, values)
 
+    async def _drain_pending_top_ups(self) -> None:
+        """把对齐窗口里记下的补拉补一轮。
+
+        逐台各自兜异常：一台失败不该让其余的跟着丢。三道早退仍由 `_top_up_props` 自己
+        判 —— 这批设备可能已经掉线、搬出当前家庭或用完额度。
+        """
+        pending, self._top_up_pending = self._top_up_pending, set()
+        for did in sorted(pending):
+            try:
+                await self._top_up_props(did)
+            except Exception as e:
+                logger.error("对齐后补拉失败 did=%s: %s", did, e, exc_info=True)
+
     def deinit_iot_push(self) -> None:
         """取消补拉的待触发计时器。
 
@@ -157,6 +180,7 @@ class Manager:
         """代号 +1 并返回新值。唯一的递增入口。"""
         self._scope += 1
         self._top_up_attempts.clear()
+        self._top_up_pending.clear()
         return self._scope
 
     def mark_scope_aligned(self, scope: int) -> None:
@@ -171,7 +195,8 @@ class Manager:
         """起一轮状态对齐，跑完把这一代标成已对齐。
 
         句柄留在 state_align_task 上：下一次作用域切换必须先取消它，否则它会把旧
-        作用域的值写进刚清空重建的树。
+        作用域的值写进刚清空重建的树。**重试也跑在这一个 task 里**，所以切换和关闭
+        那两条取消路径不用各自再认一遍。
 
         初始化还没跑完时只记一条日志、不起对齐 —— 这一代因此停在「未对齐」，依赖它的
         属性订阅门是关着的，正是安全的那一侧。
@@ -183,13 +208,30 @@ class Manager:
         proxy = self._miot_proxy
 
         async def run() -> None:
-            if await align_iot_state(
-                self._state_store,
-                proxy,
-                scope=scope,
-                current_scope=self.current_scope,
-            ):
-                self.mark_scope_aligned(scope)
+            # 失败的出口只有这一个（align_iot_state 内部把一切异常都收成假），所以重试
+            # 放在这里而不是逐个失败点
+            for attempt in range(ALIGN_MAX_ATTEMPTS):
+                # 等待放在开头而不是失败之后：放后面的话最后一次失败还要白等一轮才
+                # 报错，而循环本身已经把次数限住了，不需要第二处判「用完了没有」
+                if attempt:
+                    await asyncio.sleep(ALIGN_RETRY_BASE_SEC * 2 ** (attempt - 1))
+                if await align_iot_state(
+                    self._state_store,
+                    proxy,
+                    scope=scope,
+                    current_scope=self.current_scope,
+                ):
+                    self.mark_scope_aligned(scope)
+                    await self._drain_pending_top_ups()
+                    return
+                if scope != self._scope:
+                    # 换代了，新一代自己会起对齐，这里再重试只会往旧作用域写
+                    return
+            logger.error(
+                "align: 重试 %s 次仍未成功，这一代停在未对齐 —— 属性推送和上线补拉"
+                "都关着，容器里只有在线标志会更新",
+                ALIGN_MAX_ATTEMPTS,
+            )
 
         self.state_align_task = asyncio.create_task(run())
         return self.state_align_task

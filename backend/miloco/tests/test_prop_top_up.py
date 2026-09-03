@@ -5,6 +5,9 @@
 
 启动时离线的设备只有在线标志、没有属性，而对齐一个作用域只跑一次 —— 不补的话，它在
 整个作用域代内对规则和 agent 都是「没有可读属性」的样子。
+
+文件末尾那几条管的是同一条不变量的另一面：对齐或补拉被跳过一次，不能让这一代永久
+拿不到属性。
 """
 
 from __future__ import annotations
@@ -217,6 +220,8 @@ def _wired_proxy_from(store, fake, *, home=("d1",), online=True):
     manager._scope = 0
     manager._aligned_scope = 0
     manager._top_up_attempts = {}
+    manager._top_up_pending = set()
+    manager._initialized = True
     manager._wire_iot_push()
     return proxy, manager
 
@@ -434,3 +439,146 @@ async def test_the_top_up_records_the_pull_source(store):
     await _top_up(store, proxy, "d1")
 
     assert store.get_entry("iot/device/d1/prop/2.1").source == PULL_SOURCE
+
+
+# ─── 对齐失败 / 撞上对齐窗口之后还补不补得上 ────────────────────────────────
+
+
+def _align_stub(results, store=None, leaf="iot/device/d1/prop/2.1", value=26):
+    """按 results 逐次返回真假；返回真的那次顺带写一片叶子（模拟对齐真的写了）。"""
+    calls: list[bool] = []
+
+    async def fake_align(store_, proxy_, *, scope, current_scope):
+        ok = results[len(calls)] if len(calls) < len(results) else results[-1]
+        calls.append(ok)
+        if ok:
+            store_.set(leaf, value, source="iot_align")
+        return ok
+
+    return fake_align, calls
+
+
+async def test_a_failed_alignment_is_retried(store, monkeypatch):
+    """对齐是这一代属性的唯一来源，而全仓只有启动和作用域切换两处会起它。一次云端
+    抖动就让这一代永久停在未对齐的话，属性推送全被闸丢、上线补拉全早退。"""
+    import miloco.manager as manager_module
+
+    monkeypatch.setattr(manager_module, "ALIGN_RETRY_BASE_SEC", 0.01)
+    fake_align, calls = _align_stub([False, True])
+    monkeypatch.setattr(manager_module, "align_iot_state", fake_align)
+    _, manager = _wired_proxy_from(store, _proxy([], []))
+    manager._aligned_scope = -1
+
+    await manager.start_state_alignment()
+
+    assert store.get("iot/device/d1/prop/2.1") == 26
+    assert manager.scope_is_aligned() is True
+    assert calls == [False, True]  # 钉前提：第一次真的失败了
+
+
+async def test_the_alignment_retry_stops_after_the_last_attempt(
+    store, monkeypatch, caplog
+):
+    """一直失败也不能一直打云端。用完次数就停在未对齐，并留一条 ERROR —— 那条日志是
+    「这一代只有在线标志」唯一的外部信号。"""
+    import logging
+
+    import miloco.manager as manager_module
+
+    monkeypatch.setattr(manager_module, "ALIGN_RETRY_BASE_SEC", 0.001)
+    fake_align, calls = _align_stub([False])
+    monkeypatch.setattr(manager_module, "align_iot_state", fake_align)
+    _, manager = _wired_proxy_from(store, _proxy([], []))
+    manager._aligned_scope = -1
+
+    with caplog.at_level(logging.ERROR, logger="miloco.manager"):
+        await manager.start_state_alignment()
+
+    assert len(calls) == manager_module.ALIGN_MAX_ATTEMPTS
+    assert manager.scope_is_aligned() is False
+    assert [r for r in caplog.records if "停在未对齐" in r.getMessage()]
+
+
+async def test_a_failed_alignment_is_not_retried_after_a_scope_switch(
+    store, monkeypatch
+):
+    """换代之后重试只会往旧作用域写，而新一代自己会起对齐。"""
+    import miloco.manager as manager_module
+
+    monkeypatch.setattr(manager_module, "ALIGN_RETRY_BASE_SEC", 0.001)
+    calls: list[int] = []
+
+    async def fake_align(store_, proxy_, *, scope, current_scope):
+        calls.append(scope)
+        manager.begin_scope_switch()
+        return False
+
+    monkeypatch.setattr(manager_module, "align_iot_state", fake_align)
+    _, manager = _wired_proxy_from(store, _proxy([], []))
+    manager._aligned_scope = -1
+
+    await manager.start_state_alignment()
+
+    assert len(calls) == 1
+
+
+async def test_a_device_that_came_online_during_the_alignment_is_topped_up_after_it(
+    store, monkeypatch
+):
+    """对齐要跑一阵，期间上线的设备当初离线、不在对齐的请求名单里，对齐自己不会给它
+    写属性。补拉此刻撞上未对齐必须留下痕迹，否则门开了就再也没人补。"""
+    import miloco.manager as manager_module
+
+    proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+    _, manager = _wired_proxy_from(store, proxy)
+    manager._aligned_scope = -1
+
+    await manager._top_up_props("d1")  # 对齐窗口里：早退，但记下来
+    assert proxy.calls == []  # 钉前提：这一次确实没打云端
+
+    fake_align, _ = _align_stub([True], leaf="iot/device/d1/status/online", value=True)
+    monkeypatch.setattr(manager_module, "align_iot_state", fake_align)
+    await manager.start_state_alignment()
+
+    assert store.get("iot/device/d1/prop/2.1") == 26
+
+
+async def test_the_pending_top_ups_are_dropped_on_a_scope_switch(store, monkeypatch):
+    """记下的补拉属于旧一代：新一代的对齐会自己拉一遍全量，补它等于按旧名单打云端。"""
+    import miloco.manager as manager_module
+
+    proxy = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+    _, manager = _wired_proxy_from(store, proxy)
+    manager._aligned_scope = -1
+    await manager._top_up_props("d1")
+
+    manager.begin_scope_switch()
+    fake_align, _ = _align_stub([True], leaf="iot/device/d1/status/online", value=True)
+    monkeypatch.setattr(manager_module, "align_iot_state", fake_align)
+    await manager.start_state_alignment()
+
+    assert proxy.calls == []
+
+
+async def test_the_retries_back_off(store, monkeypatch):
+    """连打云端会在云端本来就抖的时候雪上加霜。断的是「越往后等越久」这个性质，
+    不是具体秒数 —— 抄一遍公式的断言改坏公式也照样绿。"""
+    import miloco.manager as manager_module
+
+    waits: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def record_sleep(delay, *a, **k):
+        waits.append(delay)
+        return await real_sleep(0)
+
+    monkeypatch.setattr(manager_module.asyncio, "sleep", record_sleep)
+    fake_align, _ = _align_stub([False])
+    monkeypatch.setattr(manager_module, "align_iot_state", fake_align)
+    _, manager = _wired_proxy_from(store, _proxy([], []))
+    manager._aligned_scope = -1
+
+    await manager.start_state_alignment()
+
+    assert len(waits) == manager_module.ALIGN_MAX_ATTEMPTS - 1
+    assert waits == sorted(waits) and waits[0] < waits[-1]
