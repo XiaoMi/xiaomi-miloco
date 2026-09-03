@@ -165,6 +165,9 @@ class ReachabilityState:
     udp_error: str | None
     udp_local_ip: str | None = None
     udp_local_iface: str | None = None
+    # 所有同网段网卡(最具体在前)。子网重叠时 same_subnet_iface 只是其中最具体的
+    # 一块, 判"选路是否异常"要看路由接口是否落在**整个**集合里, 而非只比对首个。
+    same_subnet_ifaces: tuple[str, ...] = ()
 
     @property
     def udp_port_unreachable(self) -> bool:
@@ -214,13 +217,21 @@ def _is_virtual_iface(name: str) -> bool:
     return name in ("lo", "lo0") or name.startswith(_VIRTUAL_PREFIXES)
 
 
-def _in_same_subnet(
+def _matching_subnet_ifaces(
     interfaces: list[NetworkInterface], target_ip: str,
-) -> tuple[bool, str | None]:
+) -> list[str]:
+    """返回所有"目标落在其子网内"的物理网卡名, **按前缀长度降序**(最具体在前)。
+
+    多网卡重叠是常态而非异常: 例如 en0=192.168.18.2/16 与 en1=192.168.1.239/24
+    并存时, 192.168.1.116 同时落在两者内。内核选路用最长前缀匹配(LPM), 会走 en1;
+    若这里按遍历顺序取首个匹配(en0), 判据就与内核不一致, 于是把完全正常的选路
+    误报成"多网卡冲突"。故排序口径必须与 LPM 对齐。
+    """
     try:
         target = ipaddress.IPv4Address(target_ip)
     except (ipaddress.AddressValueError, ValueError):
-        return False, None
+        return []
+    matched: list[tuple[int, str]] = []
     for iface in interfaces:
         if iface.is_virtual:
             continue
@@ -229,8 +240,18 @@ def _in_same_subnet(
         except (ValueError, ipaddress.NetmaskValueError):
             continue
         if target in net:
-            return True, iface.name
-    return False, None
+            matched.append((net.prefixlen, iface.name))
+    # 前缀长度降序; 同长度时保持网卡枚举顺序稳定(sorted 稳定排序)。
+    matched.sort(key=lambda x: -x[0])
+    return [name for _, name in matched]
+
+
+def _in_same_subnet(
+    interfaces: list[NetworkInterface], target_ip: str,
+) -> tuple[bool, str | None]:
+    """是否与某物理网卡同网段, 以及**最具体**的那块网卡(与内核 LPM 选路一致)。"""
+    names = _matching_subnet_ifaces(interfaces, target_ip)
+    return (True, names[0]) if names else (False, None)
 
 
 # ─── Environment probing ───────────────────────────────────────────────────────
@@ -1310,7 +1331,9 @@ def probe_reachability(
     env: Environment, target_ip: str, target_label: str,
     interfaces: list[NetworkInterface],
 ) -> ReachabilityState:
-    same_subnet, same_subnet_iface = _in_same_subnet(interfaces, target_ip)
+    subnet_ifaces = _matching_subnet_ifaces(interfaces, target_ip)
+    same_subnet = bool(subnet_ifaces)
+    same_subnet_iface = subnet_ifaces[0] if subnet_ifaces else None
 
     if env.platform == "macos":
         route = _run_cmd(["route", "-n", "get", target_ip])
@@ -1348,6 +1371,7 @@ def probe_reachability(
     return ReachabilityState(
         target_ip=target_ip, target_label=target_label,
         same_subnet=same_subnet, same_subnet_iface=same_subnet_iface,
+        same_subnet_ifaces=tuple(subnet_ifaces),
         route_iface=route_iface, route_src=route_src,
         ping_ok=ping_ok, ping_rtt_ms=rtt,
         neigh_state=neigh_state, neigh_mac=neigh_mac,
@@ -1366,6 +1390,13 @@ def _udp_iface_suffix(state: ReachabilityState, t: Translator = _ZH_T) -> str:
     if state.udp_local_ip:
         return t("reach.udp.iface_suffix_ip_only", src=state.udp_local_ip)
     return ""
+
+
+def _subnet_iface_set(state: ReachabilityState) -> set[str]:
+    """同网段网卡集合; 旧构造(只给 same_subnet_iface)回落为单元素集合。"""
+    if state.same_subnet_ifaces:
+        return set(state.same_subnet_ifaces)
+    return {state.same_subnet_iface} if state.same_subnet_iface else set()
 
 
 def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list[CheckResult]:
@@ -1395,7 +1426,7 @@ def assess_reachability(state: ReachabilityState, t: Translator = _ZH_T) -> list
             status=Status.WARN,
             message=t("reach.route.none.message"),
         ))
-    elif state.same_subnet and state.route_iface != state.same_subnet_iface:
+    elif state.same_subnet and state.route_iface not in _subnet_iface_set(state):
         results.append(CheckResult(
             name=prefix + t("reach.route.mismatch.name"),
             status=Status.WARN,

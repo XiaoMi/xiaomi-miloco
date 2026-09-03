@@ -7,7 +7,9 @@
 #
 # 选项:
 #   --version <ver>     覆盖所有包的版本号
-#   --packages <list>   逗号分隔的包列表（miloco-miot,miloco,miloco-cli,openclaw,web）
+#   --packages <list>   逗号分隔的包列表（miloco-miot,miloco,miloco-cli,openclaw,web,hermes,launcher）
+#                       含 miloco 时会隐式一并打包 launcher（macOS 签名启动器是 miloco
+#                       在 mac 上运行的硬依赖，且只是给 vendored 的 app 打个 tar）
 #   -h, --help          显示帮助
 #
 # 注：每次构建前会默认清空 dist/
@@ -26,7 +28,7 @@ export COPYFILE_DISABLE=1
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DIST_DIR="$PROJECT_ROOT/dist"
-ALL_PACKAGES="miloco-miot,miloco,miloco-cli,openclaw,web,hermes"
+ALL_PACKAGES="miloco-miot,miloco,miloco-cli,openclaw,web,hermes,launcher"
 
 # ─── 工具函数 ──────────────────────────────────────────────────────────────
 
@@ -177,6 +179,22 @@ build_miloco_miot() {
 build_miloco() {
     log "构建 miloco ..."
     (cd "$PROJECT_ROOT/backend/miloco" && uv build --out-dir "$DIST_DIR")
+}
+
+build_miloco_launcher() {
+    # macOS 签名启动器：随包分发 vendored 的 miloco.app（预编译的通用二进制 +
+    # adhoc 签名，见 launcher/），部署时落到 mac 让后端作为其子进程绕过 LNP。
+    # 只是把已签好的 app 打成 tar（保留签名字节，cdhash 稳定），不编译——
+    # Linux 构建端也能做，且不能改动其字节。通用二进制 arm64+x86_64 一包通吃 darwin。
+    log "打包 macOS 签名启动器 (miloco.app) ..."
+    local app_dir="$PROJECT_ROOT/launcher/darwin/miloco.app"
+    if [[ ! -f "$app_dir/Contents/MacOS/miloco" ]]; then
+        log "  WARN: 未找到 vendored 启动器 ${app_dir}，跳过"
+        return 0
+    fi
+    tar -C "$PROJECT_ROOT/launcher/darwin" -czf \
+        "$DIST_DIR/miloco-launcher-darwin.tar.gz" miloco.app
+    log "  -> miloco-launcher-darwin.tar.gz"
 }
 
 build_miloco_cli() {
@@ -381,6 +399,17 @@ pack_platform_bundles() {
         local stage="$tmp_root/$key"
         mkdir -p "$stage"
         cp "$miloco_whl" "$cli_whl" "$miot_whl" "$tgz" "$models_tar" "$stage/"
+        # macOS 签名启动器（仅 darwin 归档需要）：release 安装时 install.py 从 bundle 里取,
+        # backend 在 mac 由 launchd→启动器→python 起以绕过 LNP。缺失则该 mac 归档起不了 backend。
+        if [[ "$key" == darwin-* ]]; then
+            local launcher_tgz
+            launcher_tgz=$(ls "$DIST_DIR"/miloco-launcher-darwin*.tar.gz 2>/dev/null | head -1)
+            if [[ -n "$launcher_tgz" ]]; then
+                cp "$launcher_tgz" "$stage/"
+            else
+                log "  WARN: 缺 macOS 签名启动器 tar，$key 归档在 mac 无法起 backend（LNP）"
+            fi
+        fi
         # Hermes 插件 tarball（可选；缺失时只 warn，不阻塞其余平台归档）
         local hermes_tgz
         hermes_tgz=$(ls "$DIST_DIR"/miloco-hermes-plugin-*.tar.gz 2>/dev/null | head -1)
@@ -543,6 +572,17 @@ main() {
     if should_build "miloco-cli";  then build_miloco_cli; fi
     if should_build "openclaw";    then build_openclaw; fi
     if should_build "hermes";     then build_hermes; fi
+    # 装 miloco 就隐式带上 launcher：签名启动器是 miloco 在 macOS 上运行的**硬依赖**
+    # （没有它 service start 直接硬失败），而 build_miloco_launcher 只是把 vendored 的
+    # miloco.app 打个 tar，成本几乎为零、无需任何工具链。
+    #
+    # 不这么做的话，主流程开头无条件 `rm -rf dist/` 会让 `--packages miloco` 这种
+    # 子集构建把上一轮的启动器 tar 一起清掉，随后 sync-to-remote.sh 装完 wheel 才发现
+    # 缺启动器并退出，留下「新 backend + 旧启动器」的半装状态 —— 而这条命令在引入
+    # 启动器之前是完整可用的。代价是 `--packages` 不再是严格的字面子集，故在此注明。
+    if should_build "launcher" || should_build "miloco"; then
+        build_miloco_launcher
+    fi
 
     # 更新 manifest
     update_manifest

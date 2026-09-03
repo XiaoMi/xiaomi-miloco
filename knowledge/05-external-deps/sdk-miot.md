@@ -8,10 +8,11 @@
 
 - **OAuth2 + 云端 API**：账号授权、设备列表、属性读写、动作触发、场景执行、App 推送通知
 - **设备能力解析（MIoT-spec）**：解析设备的 MIoT-spec 能力模型（服务 / 属性 / 动作 / 事件），标准库与设备类型目录拉取自 miot-spec.org，供上层理解设备可读写属性与可触发动作（`MIoTSpecParser`，`spec.py`）
-- **LAN 发现（OT 协议）**：UDP 广播发现局域网 MiOT 设备，维护在线/离线状态；Miloco 侧仅用于设备发现与在线判定，不承载控制写入（控制统一走 Cloud HTTP，见 [设备控制](../03-features/device-control.md)）
+- **LAN 发现（OT 协议）**：UDP 子网广播发现局域网 MiOT 设备，维护在线/离线状态；Miloco 侧仅用于设备发现与在线判定，不承载控制写入（控制走本地中枢网关或云端兜底，见 [设备控制](../03-features/device-control.md#控制优先走本地中枢云端兜底)）。注意部分设备（如小米摄像机 3 Pro）**只应答单播 probe、不应答子网广播**，因而不会出现在 LAN 表里、`lan_online` 恒为 false——这不代表设备不可达
 - **摄像头流媒体**：通过 C 动态库（`libmiot_camera_lite.so`/`.dylib`）建立 PPCS P2P 连接，接收 H.264/H.265 视频流和 Opus / G.711 音频流
 - **媒体解码**：基于 PyAV 将原始码流解码为视频帧与音频 PCM 采样
-- **mDNS 发现**：基于 zeroconf 发现局域网 MiOT Central Service 节点，用于 MQTT 本地路由
+- **mDNS 发现**：纯 Python legacy-unicast 子网定向广播发现局域网中枢网关（`mdns.py`），**不依赖 zeroconf**——macOS 上系统 mDNSResponder 独占 5353 端口，第三方库绑不上也收不到应答；改为从临时端口发查询、按 RFC 6762 legacy-unicast 规则让网关单播回应答，并逐块网卡把 socket 钉在指定网卡上（macOS `IP_BOUND_IF` / Linux `SO_BINDTODEVICE`），避免多网卡机器漏掉整个网段。发现结果用于建立本地 mTLS MQTT 连接
+- **本地中枢控制（MIPS）**：与中枢网关建 mTLS MQTT（:8883）后走 MIPS TLV RPC 做属性读写 / 动作调用与属性事件订阅（`central_hub.py` / `mips_local.py` / `cert.py`），是设备控制的首选通道，云端 HTTP 退居兜底
 - **MQTT**：通过 `MIoTMipsCloud`（`mips_cloud.py`）订阅四类推送事件——用户设备绑定 / 解绑、设备 meta 变更（含跨家庭移入）、家庭场景变更（改 / 删 / 重命名）、设备云端上线 / 离线状态。绑定与移入驱动设备欢迎，场景变更驱动场景列表刷新，上线 / 离线事件驱动缓存的摄像头在线状态刷新（事件化替代轮询），与米家保持同步
 
 ---

@@ -271,6 +271,32 @@ def _check_trace_hooks() -> Dict[str, Any]:
     }
 
 
+def _run_miloco_service_status() -> Optional[Dict[str, Any]]:
+    """跑一次 ``miloco-cli service status``，解析出 JSON dict；拿不到就 None。
+
+    调用方各自处理 subprocess 失败(PATH 缺失/超时/异常),这里只管解析。
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("miloco-cli"):
+        return None
+    result = subprocess.run(
+        ["miloco-cli", "service", "status"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    out = (result.stdout or "").strip()
+    try:
+        data = json.loads(out) if out[:1] == "{" else {}
+    except json.JSONDecodeError:
+        data = {}
+    data["_returncode"] = result.returncode
+    data["_output"] = out[:300] or (result.stderr or "").strip()[:300]
+    return data
+
+
 def _check_miloco_backend() -> Dict[str, Any]:
     """检查 miloco 后端是否在跑（调 miloco-cli service status）。"""
     import shutil
@@ -279,21 +305,54 @@ def _check_miloco_backend() -> Dict[str, Any]:
     if not shutil.which("miloco-cli"):
         return {"ok": False, "error": "miloco-cli 不在 PATH"}
     try:
-        result = subprocess.run(
-            ["miloco-cli", "service", "status"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        # 不同 miloco-cli 版本输出格式不一：宽松判 ok / running / active 之一
-        out = (result.stdout or "") + (result.stderr or "")
-        ok = result.returncode == 0 and any(
-            marker in out.lower() for marker in ("running", "active", "ok", "started")
-        )
+        # 必须解析 JSON，不能 grep 关键词：service status 不论死活都以 0 退出，
+        # 后端停止时输出就是 {"running": false}，字面含 "running" → 松 grep
+        # 恒命中，这项自检永远 ✓（同 install-hermes.sh 检查 #4 的注释、同一个坑）。
+        data = _run_miloco_service_status()
+        if data is None:
+            return {"ok": False, "error": "miloco-cli 不在 PATH"}
+        running = bool(data.get("running"))
         return {
-            "ok": ok,
-            "returncode": result.returncode,
-            "output": out.strip()[:300],
+            "ok": data["_returncode"] == 0 and running,
+            "running": running,
+            "pid": data.get("pid"),
+            "returncode": data["_returncode"],
+            "output": data["_output"],
+            "fix": "miloco-cli service start（macOS=launchd / Linux=supervisord）",
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "miloco-cli service status 超时"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _check_miloco_backend_managed() -> Dict[str, Any]:
+    """检查在跑的 miloco 后端是不是被进程管理器托管（launchd/supervisord）。
+
+    与 ``_check_miloco_backend``（在不在跑）分开报：两者修复动作不同——
+    没在跑用 ``service start``，在跑但没托管用 ``service restart``（走
+    launchd/supervisord 重新纳管），压进同一个 ok 会让 agent 给不出准确建议。
+    未在跑时这项没有独立意义，直接跟随 running 报 ok（避免"没跑"被同时报成
+    "没跑"+"没托管"两条 fail，误导成两个问题）。
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("miloco-cli"):
+        return {"ok": False, "error": "miloco-cli 不在 PATH"}
+    try:
+        data = _run_miloco_service_status()
+        if data is None:
+            return {"ok": False, "error": "miloco-cli 不在 PATH"}
+        running = bool(data.get("running"))
+        managed = bool(data.get("managed"))
+        return {
+            "ok": (not running) or managed,
+            "running": running,
+            "managed": managed,
+            "returncode": data["_returncode"],
+            "output": data["_output"],
+            "fix": "miloco-cli service restart（重新纳入 launchd/supervisord 托管）",
         }
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "miloco-cli service status 超时"}
@@ -346,6 +405,7 @@ def gather_status(ctx: Any) -> Dict[str, Any]:
         ("adapter_health", _check_adapter_health, None),
         ("cron_jobs", _check_cron_jobs, None),
         ("miloco_backend", _check_miloco_backend, None),
+        ("miloco_backend_managed", _check_miloco_backend_managed, None),
         ("skills_installed", _check_skills_installed, None),
         ("versions", _check_versions, ctx),
         ("trace_hooks", _check_trace_hooks, None),

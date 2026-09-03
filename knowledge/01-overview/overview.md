@@ -105,11 +105,11 @@ miloco/
 CLI / Agent Skill
   → POST /api/miot/devices/{did}/control
   → MiotService（scope 校验）
-  → MiotProxy → MIoTClient.http_client
-  → 小米云 HTTP API → 米家设备
+  → MiotProxy → MIoTClient（本地中枢网关优先，云端 HTTP 兜底）
+  → 米家设备
 ```
 
-> 控制写入固定走 Cloud HTTP，不走 LAN 直连（详见 [device-control](../03-features/device-control.md#控制写入固定走-cloud-http)）；LAN / mDNS 仅用于设备发现与在线状态维护。
+> 控制写入优先走局域网本地中枢网关（mTLS MQTT + MIPS RPC），云端 HTTP 为兜底；本地 RPC 超时时**不**做云端重发（指令可能已执行），详见 [device-control](../03-features/device-control.md#控制优先走本地中枢云端兜底)。LAN（OT 协议）发现仅用于设备发现与在线状态维护。
 
 ### 感知→规则→设备完整链路
 

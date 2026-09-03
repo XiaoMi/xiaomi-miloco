@@ -7,7 +7,7 @@
 #   3. 复制 miloco 插件到 ~/.hermes/plugins/miloco/（架构 #1+#2 后不再复制独立 adapter 进程,入站走 backend AgentPlatformAdapter）
 #   4. 自动 patch ${MILOCO_HOME}/config.json 的 agent 段（webhook_url + auth_bearer，备份原文件）
 #   5. 自动给 ~/.hermes/.env 补 API_SERVER_KEY（如缺失则生成；存在则复用）
-#   6. 重启 miloco-backend（supervisord 管理），确保适配器收敛到 backend AgentPlatformAdapter
+#   6. 重启 miloco-backend（进程管理器托管：Linux=supervisord / macOS=launchd），确保适配器收敛到 backend AgentPlatformAdapter
 #   7. 打印终态：后端 PID / 日志路径 / 后续唯一要做的步骤
 #
 # 幂等：再跑一次不会破坏现有配置，会重启 backend 保留同一 Bearer。
@@ -151,12 +151,21 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
 
   # 4. miloco backend 在跑
   if command -v miloco-cli >/dev/null 2>&1; then
-    ML_OUT="$(miloco-cli service status 2>&1 || true)"
-    if echo "$ML_OUT" | grep -qiE "running|active|ok|started"; then
-      # 提取 PID + 端口（如果有）
-      ML_PID="$(echo "$ML_OUT" | grep -oE 'pid[=:]?[ ]*[0-9]+' | grep -oE '[0-9]+' | head -1 || echo '')"
-      ML_PORT="$(echo "$ML_OUT" | grep -oE 'port[=:]?[ ]*[0-9]+' | grep -oE '[0-9]+' | head -1 || echo '1810')"
-      [ -n "$ML_PID" ] && diag "miloco backend 在跑" 1 "PID=$ML_PID 端口=$ML_PORT" || diag "miloco backend 在跑" 1
+    # 必须解析 JSON，不能 grep 关键词：后端停止时输出就是 {"running": false}，
+    # 字面含 "running" → 松 grep 恒命中，检查 #4 永远 ✓。与检查 #10 用同一口径，
+    # 否则 agent 会拿到 #4 ✓ / #10 ✗ 自相矛盾的验收报告（同一个坑在本文件
+    # "1.5 自动拉起 miloco backend" 那段的注释里也记了一次）。
+    ML_OUT="$(miloco-cli service status 2>/dev/null || true)"
+    ML_RUNNING="$(printf '%s' "$ML_OUT" | "$PY" -c 'import sys,json
+r=sys.stdin.read().strip()
+d=json.loads(r) if r[:1]=="{" else {}
+print("1" if d.get("running") else "0")' 2>/dev/null || echo 0)"
+    if [ "$ML_RUNNING" = "1" ]; then
+      ML_PID="$(printf '%s' "$ML_OUT" | "$PY" -c 'import sys,json
+r=sys.stdin.read().strip()
+d=json.loads(r) if r[:1]=="{" else {}
+print(d.get("pid") or "")' 2>/dev/null || echo '')"
+      [ -n "$ML_PID" ] && diag "miloco backend 在跑" 1 "PID=$ML_PID" || diag "miloco backend 在跑" 1
     else
       diag "miloco backend 在跑" 0 "upstream install 退出时 atexit 杀了 → miloco-cli service start（install-hermes.sh 会自动拉起，传 --no-start-backend 跳过）"
     fi
@@ -211,26 +220,21 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
     diag "plugin enabled" 0 "找不到 hermes CLI"
   fi
 
-  # 10. miloco-backend 在跑（supervisord 管理）
-  # 架构 #1+#2 后适配器收敛到 backend AgentPlatformAdapter，
-  # 不再需要独立 adapter 进程。
-  sv_running=0
-  if pgrep -f "supervisord.*$MILOCO_HOME" >/dev/null 2>&1; then
-    sv_running=1
+  # 10. miloco-backend 由进程管理器托管（Linux=supervisord / macOS=launchd）
+  # 架构 #1+#2 后适配器收敛到 backend AgentPlatformAdapter，不再需要独立 adapter 进程。
+  # 不直接探 supervisord（macOS 走 launchd、没有 supervisord），统一用
+  # miloco-cli service status 的 managed+running（跨平台，与真实管理器一致）。
+  backend_managed=0
+  if command -v miloco-cli >/dev/null 2>&1; then
+    backend_managed="$(miloco-cli service status 2>/dev/null | "$PY" -c 'import sys,json
+r=sys.stdin.read().strip()
+d=json.loads(r) if r[:1]=="{" else {}
+print("1" if d.get("running") and d.get("managed") else "0")' 2>/dev/null || echo 0)"
   fi
-  backend_running=0
-  if [ "$sv_running" -eq 1 ] && command -v supervisorctl >/dev/null 2>&1; then
-    st="$(SKIP_PLUGIN_CHECK=0 supervisorctl -c "$MILOCO_HOME/supervisord.conf" status miloco-backend 2>/dev/null || echo "")"
-    if [[ "$st" == *RUNNING* ]]; then
-      backend_running=1
-    fi
-  fi
-  if [ "$backend_running" -eq 1 ]; then
-    diag "miloco-backend (supervisord)" 1 "RUNNING"
-  elif [ "$sv_running" -eq 1 ]; then
-    diag "miloco-backend (supervisord)" 0 "supervisord 在跑但 miloco-backend 未启动 → 重跑 install-hermes.sh"
+  if [ "$backend_managed" = "1" ]; then
+    diag "miloco-backend 托管中" 1 "RUNNING"
   else
-    diag "miloco-backend (supervisord)" 0 "supervisord 未在跑 → 重跑 install-hermes.sh"
+    diag "miloco-backend 托管中" 0 "未由进程管理器托管 → miloco-cli service restart（macOS=launchd / Linux=supervisord）"
   fi
 
   # 11. 检查旧 launchd adapter 是否残留（旧架构遗留）
@@ -277,7 +281,7 @@ if [ "$DIAGNOSE_ONLY" -eq 1 ]; then
   else
     printf " %b通过 %d / 失败 %d%b\n" "$R" "$DIAG_OK" "$DIAG_FAIL" "$N"
     echo "═══════════════════════════════════════════════════════════════"
-    echo " 修法：按上面 ✗ 项的提示操作；不确定先看 $HERE/INSTALL_KNOWN_ISSUES.md"
+    echo " 修法：按上面 ✗ 项的提示操作；不确定先看 $HERE/README.md 与 knowledge/06-dev-guide/troubleshooting.md"
     exit 1
   fi
 fi
@@ -344,9 +348,17 @@ json.dump(cfg, open(path, 'w'), indent=2, ensure_ascii=False)
 print(f"  config.json 已创建 (python_bin={py})")
 PY
   # 启 backend 让它初始化 DB、填充 server.token
+  #
+  # elif 的匹配必须容空白：CLI 的紧凑 JSON 是 `{"running": true, …}`（output.py 的
+  # json.dumps 没传 separators，冒号后有一个空格），无空格字面量 '"running":true'
+  # 恒不匹配 —— 于是「已在运行」被误判成「起不来」并 exit 1 中止安装。触发路径：
+  # MILOCO_HOME 指到还没有 config.json 的新目录，而机器上已有旧安装的后端在跑
+  # （LaunchAgent 的 label 固定、不随 MILOCO_HOME 变），service start 打
+  # {"code": 1, "message": "already running (pid=…)"} 并 exit 1，本该由这条 elif
+  # 兜住。与本文件下方"没 jq：用严格 grep 匹配 \"running\": true"那个退化分支同口径。
   if miloco-cli service start 2>&1 | tail -3; then
     info "  backend 初始化完成"
-  elif miloco-cli service status 2>&1 | grep -q '"running":true'; then
+  elif miloco-cli service status 2>&1 | grep -qE '"running"[[:space:]]*:[[:space:]]*true'; then
     info "  backend 已在运行"
   else
     err "miloco-cli service start 失败，backend 无法启动"
@@ -524,8 +536,13 @@ mark_done 1
 # env override（用户/CI 显式 export MILOCO_HOME）也支持并原样传递，不做 symlink / 数据迁移。
 # 三个消费方拿到同一个 MILOCO_HOME 靠：
 #   1. shell rc （~/.zshrc / ~/.bashrc） — 新 shell 里 miloco-cli / hermes 都能读到
-#   2. supervisord.conf::environment — supervisord 拉起 backend 时的 env 兜底
-#   3. supervisorctl reread + update — 下次 backend 重启应用
+#   2. 进程管理器的环境快照 —— Linux: supervisord.conf::environment；
+#      macOS: LaunchAgent plist 的 EnvironmentVariables（由 miloco-cli service
+#      start/restart 每次重新生成，见 service.py::_generate_launchagent_plist）
+#   3. 重启应用新值 —— Linux: supervisorctl reread + update；
+#      macOS: 步骤 7 的 miloco-cli service restart 会重写 plist 后 bootstrap
+# 下面对 supervisord.conf / supervisorctl 的改写只在 Linux 命中（两道守卫保证
+# macOS 上安静空转），mac 上真生效的是 shell rc + plist 重新生成。
 step 1.9 "MILOCO_HOME 显式持久化 → ${MILOCO_HOME}"
 # 写用户 shell rc
 SHELL_RC_LIST=()
@@ -811,12 +828,13 @@ mark_done 6
 # Step 5 写了 agent.platform，必须重启 backend 才能加载新的 HermesAdapter（缓存刷新）。
 # 否则旧进程缓存的是 WebhookAdapter fallback → onboarding 走 webhook → 405。
 [ "$POST_INSTALL_ONLY" -eq 1 ] || step 7 "重启 backend 加载 HermesAdapter（agent.platform 刚写入）"
-info "  停止旧 backend"
-miloco-cli service stop 2>/dev/null || true
-sleep 3
-info "  启动新 backend"
-if ! START_OUTPUT=$(miloco-cli service start 2>&1); then
-  err "backend 启动失败: $START_OUTPUT"
+# 不用 stop + sleep 3 + start：固定 3s 赌不赢 launchd 卸载旧 job 的耗时（后端要收
+# 感知管线/中枢连接/在途请求，退到个位数秒都算正常），旧 job 卸得慢时 start 会
+# 撞见残留 pid 报 already-running 而失败。service restart 内部按
+# _LAUNCHD_BOOTOUT_WAIT_S 轮询等旧 job 真正卸载完再拉起新的，直接复用它。
+info "  重启 backend"
+if ! START_OUTPUT=$(miloco-cli service restart 2>&1); then
+  err "backend 重启失败: $START_OUTPUT"
   exit 1
 else
   if [ -n "$START_OUTPUT" ]; then
@@ -979,7 +997,7 @@ cat <<EOF
     hermes chat -q "把客厅灯打开" -Q
 
 [backend 状态]
-    miloco-cli service status    # 看 supervisord / backend
+    miloco-cli service status    # 看进程管理器（Linux=supervisord / macOS=launchd）与 backend 状态
     miloco-cli service logs      # tail 日志
     miloco-cli service restart   # 重启
     miloco-cli service stop      # 停
