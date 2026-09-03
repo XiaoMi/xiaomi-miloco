@@ -45,6 +45,11 @@ def _parse_json(value: str, label: str) -> Any:
         sys.exit(1)
 
 
+def _exit_error(msg: str):
+    print(json.dumps({"error": msg}, ensure_ascii=False), file=sys.stderr)
+    sys.exit(1)
+
+
 @click.group("task")
 def task_group():
     """任务操作:创建 / 关联 / 更新 / 列表 / 详情 / 启停 / 删除。"""
@@ -57,8 +62,25 @@ def task_group():
 @click.option(
     "--description", required=True, help="任务整体自然语言摘要 (≤200 字符)"
 )
+@click.option(
+    "--lifecycle",
+    "lifecycle",
+    type=click.Choice(["permanent", "temporary"]),
+    default="permanent",
+    show_default=True,
+    help="permanent 长期常驻；temporary 限时有效（到期销毁仍由 at cron 通知 Agent 执行）",
+)
+@click.option(
+    "--expires-at",
+    "expires_at",
+    default=None,
+    help=(
+        "到期时刻 ISO8601（time-compute 直出）。只对 --lifecycle temporary 生效，"
+        "配 permanent 会被拒"
+    ),
+)
 @click.option("--pretty", is_flag=True)
-def task_create(task_id, description, pretty):
+def task_create(task_id, description, lifecycle, expires_at, pretty):
     """建 task 占位行 (v2)。
 
     rule / cron / record 关联挂载由后续命令完成:
@@ -69,20 +91,64 @@ def task_create(task_id, description, pretty):
     """
     from miloco_cli.client import api_post
 
-    body = {"task_id": task_id, "description": description}
+    # 本地先拦一道: 服务端同样会拒, 但那要等一个来回, 而写命令的是 agent ——
+    # 判据只有一条, 两份不会分叉。
+    if expires_at and lifecycle != "temporary":
+        _exit_error("--expires-at 只能配 --lifecycle temporary")
+
+    body = {"task_id": task_id, "description": description, "lifecycle": lifecycle}
+    if expires_at:
+        # 与 record 的 --at 同处理: agent 习惯给 ISO 加引号, 而 exec tool 不解析
+        # shell 引号 (见 _strip_quotes)。
+        body["expires_at"] = _strip_quotes(expires_at)
     data = api_post(API_PREFIX, body)
     print_result(data, pretty)
 
 
 @task_group.command("update")
 @click.argument("task_id")
-@click.option("--description", required=True, help="新 description (≤200)")
+@click.option("--description", default=None, help="新 description (≤200)")
+@click.option(
+    "--lifecycle",
+    "lifecycle",
+    type=click.Choice(["permanent", "temporary"]),
+    default=None,
+    help="改生命周期。改成 permanent 时到期时刻要一起清 (--clear-expires-at)",
+)
+@click.option(
+    "--expires-at",
+    "expires_at",
+    default=None,
+    help="改到期时刻 ISO8601（time-compute 直出）。与销毁 cron、record 那两份取同一个值",
+)
+@click.option(
+    "--clear-expires-at",
+    "clear_expires_at",
+    is_flag=True,
+    help="清空到期时刻（限时改回长期时用）",
+)
 @click.option("--pretty", is_flag=True)
-def task_update(task_id, description, pretty):
-    """改 description。"""
+def task_update(task_id, description, lifecycle, expires_at, clear_expires_at, pretty):
+    """改 description / 生命周期 / 到期时刻。只有传了的字段会被改。"""
     from miloco_cli.client import api_patch
 
-    data = api_patch(f"{API_PREFIX}/{task_id}", {"description": description})
+    if clear_expires_at and expires_at:
+        _exit_error("--clear-expires-at 与 --expires-at 互斥")
+
+    body: dict[str, Any] = {}
+    if description is not None:
+        body["description"] = description
+    if lifecycle is not None:
+        body["lifecycle"] = lifecycle
+    if expires_at is not None:
+        body["expires_at"] = _strip_quotes(expires_at)
+    elif clear_expires_at:
+        # 显式 null 才是清空; 不传等于"这次不动它"。
+        body["expires_at"] = None
+    if not body:
+        _exit_error("至少要传一个可改字段")
+
+    data = api_patch(f"{API_PREFIX}/{task_id}", body)
     print_result(data, pretty)
 
 
@@ -120,6 +186,119 @@ def task_get(task_id, pretty):
     from miloco_cli.client import api_get
 
     data = api_get(f"{API_PREFIX}/{task_id}")
+    print_result(data, pretty)
+
+
+_ACTION_SLOTS = (
+    "on_enter_actions",
+    "on_enter_desc",
+    "on_exit_actions",
+    "on_exit_desc",
+    "on_target_actions",
+    "on_target_desc",
+)
+
+
+@task_group.command("set-actions")
+@click.argument("task_id")
+@click.option(
+    "--on-enter-action",
+    "on_enter_actions_raw",
+    multiple=True,
+    help="进入时的设备直控动作 JSON（可重复），格式同 rule create --action",
+)
+@click.option(
+    "--on-enter-desc", "on_enter_desc", default=None, help="进入时交给 Agent 的指令"
+)
+@click.option(
+    "--on-exit-action",
+    "on_exit_actions_raw",
+    multiple=True,
+    help="退出时的设备直控动作 JSON（可重复）",
+)
+@click.option(
+    "--on-exit-desc", "on_exit_desc", default=None, help="退出时交给 Agent 的指令"
+)
+@click.option(
+    "--on-target-action",
+    "on_target_actions_raw",
+    multiple=True,
+    help="达标时的设备直控动作 JSON（可重复）",
+)
+@click.option(
+    "--on-target-desc", "on_target_desc", default=None, help="达标时交给 Agent 的指令"
+)
+@click.option(
+    "--clear",
+    "clear_slots",
+    multiple=True,
+    type=click.Choice(_ACTION_SLOTS),
+    help=(
+        "清空指定槽（可重复）。与同名赋值 flag 互斥；"
+        "名下有不带动作的 enter 规则时清 on_enter 会被拒"
+    ),
+)
+@click.option("--pretty", is_flag=True)
+def task_set_actions(
+    task_id,
+    on_enter_actions_raw,
+    on_enter_desc,
+    on_exit_actions_raw,
+    on_exit_desc,
+    on_target_actions_raw,
+    on_target_desc,
+    clear_slots,
+    pretty,
+):
+    """改 task 的边界动作（进入 / 退出 / 达标）。
+
+    只有传了的槽会被改，其余保持原样；清空某个槽用 --clear。
+    多条 rule 争同一个槽时（同方向 ≥2 条），rule 侧的动作 flag 不透传到 task，
+    只能从这里改；不同方向的 rule 各写各的槽，仍可从 rule 侧装。
+    """
+    from miloco_cli.client import api_patch
+    from miloco_cli.commands.rule import _parse_actions
+
+    given = {
+        "on_enter_actions": list(on_enter_actions_raw) or None,
+        "on_enter_desc": on_enter_desc,
+        "on_exit_actions": list(on_exit_actions_raw) or None,
+        "on_exit_desc": on_exit_desc,
+        "on_target_actions": list(on_target_actions_raw) or None,
+        "on_target_desc": on_target_desc,
+    }
+    conflict = [name for name in clear_slots if given.get(name) is not None]
+    if conflict:
+        _exit_error(f"--clear 与同名赋值 flag 互斥: {', '.join(sorted(conflict))}")
+
+    for prefix in ("on_enter", "on_exit", "on_target"):
+        if (
+            given[f"{prefix}_actions"] is not None
+            and given[f"{prefix}_desc"] is not None
+        ):
+            _exit_error(
+                f"{prefix} 不能同时设 --{prefix.replace('_', '-')}-action 和 "
+                f"--{prefix.replace('_', '-')}-desc"
+            )
+
+    body: dict[str, Any] = {}
+    for name, raw in given.items():
+        if raw is None:
+            continue
+        body[name] = (
+            # 走 rule 侧同一份校验: 非幂等必带冷却、场景必须非幂等。task 侧另写
+            # 一份就等于开了一个绕过口。
+            _parse_actions(tuple(raw), f"--{name[:-8].replace('_', '-')}-action")
+            if name.endswith("_actions")
+            else raw
+        )
+    for name in clear_slots:
+        body[name] = None
+
+    if not body:
+        _exit_error("至少要传一个动作槽或 --clear")
+
+    data = api_patch(f"{API_PREFIX}/{task_id}/actions", body)
     print_result(data, pretty)
 
 

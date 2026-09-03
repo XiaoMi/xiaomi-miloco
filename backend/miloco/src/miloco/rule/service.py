@@ -16,7 +16,7 @@ Reference: rule-design.md §6.1
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from miloco.database.rule_repo import RuleLogRepo, RuleRepo
 from miloco.database.task_repo import TaskRepo
@@ -31,10 +31,21 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot.client import MiotProxy
 from miloco.miot.filter import allowed_home_ids, filter_by_home
+from miloco.rule.record_source import (
+    milestone_condition_dnf,
+    milestone_legacy_condition,
+    milestone_rule_name,
+    record_ref_of,
+)
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
+    _DIRECTION_TO_MODE,
+    _MODE_TO_DIRECTION,
     SCENE_IID,
     Rule,
+    RuleCondition,
+    RuleConditionDNF,
+    RuleDirection,
     RuleExecuteResult,
     RuleLifecycle,
     RuleLog,
@@ -43,6 +54,7 @@ from miloco.rule.schema import (
     RuleUpdate,
     TriggerOutcome,
     parse_device_iid,
+    task_rule_set_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,6 +96,11 @@ def _validate_query_phrasing(query: str) -> None:
             )
 
 
+def _validate_lifecycle(rule: Rule) -> None:
+    if rule.lifecycle == RuleLifecycle.TEMPORARY and not rule.terminate_when:
+        raise ValidationException("lifecycle=temporary requires terminate_when")
+
+
 def _validate_rule_consistency(rule: Rule) -> None:
     """Apply V3 validation matrix to a fully-formed Rule.
 
@@ -91,6 +108,13 @@ def _validate_rule_consistency(rule: Rule) -> None:
     """
     # ---- 1. condition.query 措辞 ----
     _validate_query_phrasing(rule.condition.query)
+
+    if rule.resolved_direction is RuleDirection.MILESTONE:
+        raise ValidationException(
+            "达标规则由服务端按 task 的达标动作 + duration record 自动维护, "
+            "不接受手工创建。配达标通知: "
+            'miloco-cli task set-actions <task_id> --on-target-desc "..."'
+        )
 
     # ---- 2. mode matrix（执行路径由 actions / action_descriptions 哪个非空决定）----
     if rule.mode == RuleMode.EVENT:
@@ -108,10 +132,6 @@ def _validate_rule_consistency(rule: Rule) -> None:
         if rule.actions and rule.action_descriptions:
             raise ValidationException(
                 "event mode: actions and action_descriptions are mutually exclusive"
-            )
-        if not rule.actions and not rule.action_descriptions:
-            raise ValidationException(
-                "event mode requires one of actions / action_descriptions"
             )
     else:  # state mode -- 每个方向独立按字段非空选择执行路径
         if rule.actions or rule.action_descriptions:
@@ -137,10 +157,7 @@ def _validate_rule_consistency(rule: Rule) -> None:
             )
 
     # ---- 3. lifecycle ----
-    if rule.lifecycle == RuleLifecycle.TEMPORARY and not rule.terminate_when:
-        raise ValidationException(
-            "lifecycle=temporary requires terminate_when"
-        )
+    _validate_lifecycle(rule)
 
     # ---- 4. action idempotent / cooldown 配对 ----
     # idempotent=False 的 action 不会做"读现值后判跳过"，必须靠 cooldown_minutes
@@ -199,6 +216,8 @@ async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
         sample_interval_seconds=sample_interval,
         task_record_service=task_record_service,
     )
+    attach_task_state_machine(rule_runner, rule_repo)
+
     return RuleService(
         rule_repo,
         rule_log_repo,
@@ -206,6 +225,167 @@ async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
         miot_proxy,
         task_record_service=task_record_service,
     )
+
+
+def _rule_action_slots(
+    rule: Rule, changed_fields: set[str] | None = None
+) -> dict[str, Any]:
+    """rule 的动作字段 → 它**管辖**的那些 task 槽, 按槽整体给。
+
+    管辖的单位是槽 (on_enter / on_exit / on_target) 而不是单个列。一个槽有"设备
+    直控"和"交给 Agent"两列且互斥, 所以只要管辖这个槽就把两列一起写 —— 只写填了
+    的那一列的话, 用户把动作从直控改成 Agent 文案时, task 上残留的直控列会继续赢
+    (选槽时静态优先), 这次改动静默失效。
+
+    ``changed_fields`` 是本次 PATCH 显式动过的 rule 字段名。给了就只透传被动过的
+    槽 —— 别的槽 rule 上为空不等于用户要清空: 新模型里动作的正规配法是只写 task 列、
+    rule 行一直空着, 无条件透传等于改一次触发条件就把 task 上那份清成 None, 还连带
+    把代建的达标规则 reconcile 掉。反过来, 只要这个槽真被动过就照写, 哪怕新值是空
+    —— 否则 ``rule update --clear on_enter_desc`` 会 CLI 报成功而 task 照旧执行。
+    不给 (create / 整体替换) 则只透传自己填了值的槽, 那两条路上没有"清空"可言。
+
+    单方向的 rule (enter / exit) 只有一个边沿, 动作就填在 ``actions`` /
+    ``action_descriptions`` 上, 不区分进出; 方向决定它落 on_enter 还是 on_exit。
+    多条 agent 回调描述合成一条时的编号规则必须与 runner 的选槽逻辑逐字一致。
+    """
+    direction = rule.resolved_direction
+    if direction is RuleDirection.MILESTONE:
+        # 达标动作在 task 列上, milestone rule 自己的动作字段恒空。
+        return {}
+    if direction is RuleDirection.SESSION:
+        # 达标槽 rule 侧只有 desc 一列, 静态那列恒空 —— 这正说明它管辖达标槽时
+        # task 上那列就该是空的, 不能因为"表达不了"就不写。
+        owned: tuple[tuple[str, list[Any], str | None, set[str]], ...] = (
+            (
+                "on_enter",
+                rule.on_enter_actions,
+                rule.on_enter_desc,
+                {"on_enter_actions", "on_enter_desc"},
+            ),
+            (
+                "on_exit",
+                rule.on_exit_actions,
+                rule.on_exit_desc,
+                {"on_exit_actions", "on_exit_desc"},
+            ),
+            ("on_target", [], rule.on_target_desc, {"on_target_desc"}),
+        )
+    else:
+        prefix = "on_exit" if direction is RuleDirection.EXIT else "on_enter"
+        joined = "\n".join(
+            f"{i + 1}. {d}" for i, d in enumerate(rule.action_descriptions)
+        )
+        owned = ((prefix, rule.actions, joined, {"actions", "action_descriptions"}),)
+
+    slots: dict[str, Any] = {}
+    for name, actions, desc, source_fields in owned:
+        if changed_fields is None:
+            if not (actions or desc):
+                continue
+        elif not changed_fields & source_fields:
+            continue
+        slots[f"{name}_actions"] = [a.model_dump(mode="json") for a in actions]
+        slots[f"{name}_desc"] = desc or None
+    return slots
+
+
+def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> None:
+    """建 task 状态机并把每个 task 的拓扑与边界动作登记进去。
+
+    只登记**有边界动作**的 task —— 那是 expand-contract 阶段 A 的接管判据
+    (§10.3「读 task 优先、缺失回退 rule」)。没动作的 task 走旧路径, 行为与接管前
+    逐字相同, 所以这一步对未迁移的库、以及内存里直接构造 rule 的场景是无操作。
+
+    重启一律从 ``off`` 起 (§7): 拓扑登记不恢复任何运行态。
+    """
+    from miloco.database.task_repo import TaskRepo
+    from miloco.task.state_machine import TaskStateMachine, derive_directions
+    from miloco.task.tracking import DecisionTracker
+    from miloco.utils.time_utils import now_ms
+
+    task_repo = TaskRepo()
+    tracker = DecisionTracker()
+    state_machine = TaskStateMachine(
+        is_condition_satisfied=rule_runner.is_condition_satisfied,
+        # 只有状态机自己发起动作时才会走到这里 (重新配置时强制 on_exit、手动
+        # 注入)。边沿驱动的那条路由 runner 传 dispatch=False, 动作走它自己的
+        # fire 路径。
+        dispatch_action=lambda task_id, slot, payload: rule_runner.dispatch_task_action(
+            task_id, slot.value
+        ),
+        track=lambda outcome, signal: tracker.record(
+            signal.task_id, signal.rule_id, outcome.value, now_ms()
+        ),
+        on_forget=tracker.forget,
+    )
+    rule_runner.attach_state_machine(state_machine)
+    rule_runner.attach_tracker(tracker)
+
+    rules_by_task: dict[str, list] = {}
+    for rule in rule_runner.get_all_rules():
+        rules_by_task.setdefault(rule.task_id, []).append(rule)
+
+    # 派生量 seed: 重启后按 DB 里的 task.status 重算「有效启用」(§19.9)
+    for row in task_repo.list_all():
+        rule_runner.set_task_paused(row["task_id"], row["status"] != "active")
+
+    owned = 0
+    for task_id, rules in rules_by_task.items():
+        actions = task_repo.get_boundary_actions(task_id)
+        rule_runner.set_task_actions(task_id, actions)
+        if not rule_runner.task_owns_actions(task_id):
+            continue
+        state_machine.register_task(
+            task_id,
+            derive_directions((r.id, r.resolved_direction.value) for r in rules),
+        )
+        owned += 1
+    logger.info(
+        "task state machine attached: %d/%d task(s) owned",
+        owned,
+        len(rules_by_task),
+    )
+    _seed_reached_targets(rule_runner)
+
+
+def _seed_reached_targets(rule_runner: RuleRunner, task_id: str | None = None) -> None:
+    """把"今天已经达标"的条件直接置真, 不产边沿 (§7)。
+
+    防重复的载体是条件项的值, 而它只在内存 —— 凡是把条件层状态清掉的路径事后都得
+    补一次, 否则当天的达标会重发。启动是一条 (从假起), task 停用再启用是另一条
+    (停用时按 task 清掉了)。
+
+    ``task_id`` 给了就只 seed 那个 task 名下的。
+
+    误判的是"达标了但还没发出去"那一小段窗口: 达标那一刻进程崩, 或 timer 到点时
+    task 不在 session 而退出兜底也没赶上。它比重启窄得多, 而重启本身是常态 (升级、
+    崩溃、supervisord 重拉)。
+    """
+    record_service = rule_runner._task_record_service
+    if record_service is None:
+        return
+    for rule in rule_runner.get_all_rules():
+        if task_id is not None and rule.task_id != task_id:
+            continue
+        ref = record_ref_of(rule)
+        if ref is None:
+            continue
+        try:
+            state = record_service.read_duration_target_state(ref.task_id)
+        except Exception:
+            logger.exception("启动时读 task %s 的累计失败, 不 seed", ref.task_id)
+            continue
+        if state is None:
+            continue
+        target, accumulated = state
+        if target is None or accumulated < target:
+            continue
+        rule_runner.seed_reached_target(ref.rule_id)
+        logger.info(
+            "RECORD_TARGET_SEEDED: rule=%s task=%s 已达标 "
+            "(accumulated_min=%s target_min=%s), 按已通知处理",
+            ref.rule_id, ref.task_id, accumulated, target,
+        )
 
 
 class RuleService:
@@ -231,36 +411,196 @@ class RuleService:
             task_record_service = TaskRecordService()
         self._task_record_service = task_record_service
 
-    def _validate_on_target_desc_compat(self, rule: Rule) -> None:
-        """on_target_desc 非空 → task 必须有 duration record + target_minutes。
+    def _target_record_task_id(self, rule: Rule) -> str | None:
+        """这条 rule 的达标看哪个 task 的 record —— 看不出达标就返 None。
 
-        报错按当前 record 状态分三种 case，每种附可执行的 CLI 修复命令。
+        代建的达标规则不走本校验（它是派生物, 建的时候三样已经齐备）, 所以这里
+        只管用户在 rule 上填 ``on_target_desc`` 这条旧路径。
         """
-        if not rule.on_target_desc:
+        return rule.task_id if rule.on_target_desc else None
+
+    def _validate_task_rule_set(self, rule: Rule, previous: Rule | None = None) -> None:
+        """这次变更有没有让 task 的 rule 集合变非法 (spec §9)。
+
+        已经非法的放行, 只拦这次引入的: 存量迁移和删 rule 都可能留下非法的 task,
+        一律拦住会把「改回合法」和「先停用它」这两条自救路一起堵死。
+
+        停用的 rule 照样计入: ``enabled`` 是用户意图 (§19.9), 停用一条进方向的
+        规则是正常操作, 不是配置非法。
+        """
+        if rule.resolved_direction is RuleDirection.MILESTONE:
             return
-        kind = self._task_record_service.detect_record_kind(rule.task_id)
+
+        others = list(self._repo.list_by_task(rule.task_id))
+        if previous is not None:
+            # 排除只在改一条已有 rule 时做。create 路径上 ``rule.id`` 是客户端传的,
+            # 而 repo 建行时另生 uuid —— 拿它去排除等于让请求方指定"忽略哪条兄弟"。
+            others = [r for r in others if r.id != rule.id]
+
+        sibling_directions = [r.resolved_direction for r in others]
+        after = [*sibling_directions, rule.resolved_direction]
+        before = list(sibling_directions)
+        if previous is not None and previous.task_id == rule.task_id:
+            before.append(previous.resolved_direction)
+
+        has_target = self._task_has_target_action(rule.task_id)
+        error = task_rule_set_error(after, has_target)
+        if error and task_rule_set_error(before, has_target) is None:
+            raise ValidationException(error)
+
+    def _validate_action_reachable(self, rule: Rule) -> None:
+        """新建 / 改完之后, 这条 enter rule 自己得有动作可落。
+
+        动作已归 task, rule 侧必填是 v2 遗留: 多条 enter 共用一份动作时, 第二条起
+        只能写一段被 ``sync_rule_actions_to_task`` 丢弃的文案。exit 不查 —— 无动作
+        的 exit 只推状态, 是让 task 可重入的正常配置。
+
+        只判**当前真实状态**, 不预演这次写入的后果。预演过的版本连着四轮出问题
+        (读写前视图 → 漏一条透传支路 → 支路里取数对象错 → 清空动作害到旁人), 根因
+        是校验在复刻透传的分支, 而复刻永远滞后于被复刻者。"配出来的规则会不会静默
+        不做事"改由 ``report_muted_enter_rules`` 在 ``reconfigure_task`` 里按真实的
+        写后状态诊断: 那里是所有写入路径的收敛点, 判据直接问读侧, 不需要枚举入口。
+        """
+        if rule.resolved_direction is not RuleDirection.ENTER:
+            return
+        if rule.actions or rule.action_descriptions:
+            return
+        try:
+            slots = (self._task_repo.get_full_view(rule.task_id) or {}).get(
+                "actions"
+            ) or {}
+        except Exception as e:  # noqa: BLE001
+            # 读不出来时放行等于让哑规则建成, 与达标那道闸的默认方向相反。
+            raise BusinessException(
+                f"读 task {rule.task_id} 的动作配置失败, 无法确认 enter 规则有动作可落"
+            ) from e
+
+        if not (slots.get("on_enter_actions") or slots.get("on_enter_desc")):
+            fix = (
+                f'miloco-cli task set-actions {rule.task_id} --on-enter-desc "..."'
+            )
+            if not any(slots.values()):
+                # 六个槽都空 = task 没被接管, 读侧会回退到 rule 行 —— 这时自带
+                # 动作是有效的出路。已接管的 task 不回退, 那条出路给了也走不通。
+                fix = "自己带 --action / --action-desc, 或 " + fix
+            raise ValidationException(
+                f"direction=enter 的规则没有动作可落。{fix}"
+            )
+
+    def _task_has_target_action(self, task_id: str) -> bool:
+        """task 配没配达标动作。读不出来按"没配"处理 —— 这道闸不该把 rule 写入带崩。"""
+        try:
+            slots = (self._task_repo.get_full_view(task_id) or {}).get("actions") or {}
+        except Exception:  # noqa: BLE001
+            logger.warning("读 task %s 的达标配置失败, 这次按未配达标处理", task_id)
+            return False
+        return bool(slots.get("on_target_actions") or slots.get("on_target_desc"))
+
+    def report_muted_enter_rules(self, task_id: str) -> list[str]:
+        """哪些 enter 规则此刻选不到动作 —— 条件照判、状态照推, 就是不做事。
+
+        判据不自己写: 直接问读侧那条选槽链路 (``runner._select_slot``, 它内部含
+        「task 没接管就回退 rule 行」那一步)。所以这里永远与真正执行时一致。
+        """
+        muted = [
+            rule.id
+            for rule in self._repo.list_by_task(task_id)
+            if rule.resolved_direction is RuleDirection.ENTER
+            and self._runner.selects_no_action_on_enter(rule)
+        ]
+        return muted
+
+    def report_task_config_problems(self, task_id: str) -> list[str]:
+        """这个 task 此刻有哪些「配置合法但永不执行」的毛病。
+
+        做成收敛点诊断而不是写入闸: 这类不变式的破坏入口不止一条, 而闸只守得住
+        写它时看见的那个 ——
+
+        - 哑的 enter 规则: 清进入槽、rule 换方向或改挂 task 的收尾清理、给一个没
+          接管的 task 补任意一个别的槽 (读侧从此不再回退)、同方向兄弟争槽导致
+          rule 侧动作根本没写进去
+        - 方向组合非法 (没有进路径 / session 与别人混挂 / 配了达标却没有出路径):
+          写 rule 那条路上有闸, 而 ``rule delete`` 删掉最后一条 enter 规则造成同样
+          的状态、一道校验都没有 —— 那条路上也不该有闸, 拒绝删除会把「先删掉它」
+          这条自救路堵死
+
+        判据一律复用写入侧那几份 (``task_rule_set_error`` / 读侧选槽), 不在这里
+        重写一遍: 复刻永远滞后于被复刻者, 这个 PR 已经为此改过四轮。
+        """
+        problems: list[str] = []
+
+        # 空集不用自己挡: task_rule_set_error 对「一条 rule 都还没有」是放行的
+        # (装配分步进行)。再包一层守卫就是把它的判据抄了一半。
+        error = task_rule_set_error(
+            [r.resolved_direction for r in self._repo.list_by_task(task_id)],
+            self._task_has_target_action(task_id),
+        )
+        if error:
+            problems.append(error)
+
+        muted = self.report_muted_enter_rules(task_id)
+        if muted:
+            problems.append(
+                f"这些 enter 规则选不到动作, 触发后什么都不做: {', '.join(muted)}。"
+                "给它们各自装上 rule 侧动作 (task 未接管时才生效), 或把 task 的"
+                f'进入动作配回来: miloco-cli task set-actions {task_id} '
+                '--on-enter-desc "..."'
+            )
+
+        for problem in problems:
+            logger.warning("task %s 配置有问题: %s", task_id, problem)
+        return problems
+
+    def require_exit_path_for_target(self, task_id: str) -> None:
+        """配达标动作前先确认 task 有出路径。判据与建 rule 时同一份。
+
+        名下一条 rule 都还没有时放行 —— 装配是分步的, 先配动作后建规则是正常顺序,
+        那一刻判不出形态。真装出没有出路径的组合会在建那条 rule 时被拦下。
+        """
+        directions = [r.resolved_direction for r in self._repo.list_by_task(task_id)]
+        error = task_rule_set_error(directions, has_target_action=True)
+        if error:
+            raise ValidationException(error)
+
+    def _validate_target_record(self, rule: Rule) -> None:
+        """用户在 rule 上填 ``on_target_desc`` 那条旧路径的校验。"""
+        task_id = self._target_record_task_id(rule)
+        if not task_id:
+            return
+        self.require_duration_target(task_id)
+
+    def require_duration_target(self, task_id: str) -> None:
+        """配达标动作要求这个 task 有 duration record + target_minutes。
+
+        没有阈值的达标通知永远不会触发，配成功等于留一个用户发现不了的失效项。
+        报错按当前 record 状态分三种 case，每种附可执行的 CLI 修复命令。
+
+        两条写达标动作的路径都要走: rule 上的旧 flag 和 ``task set-actions``。
+        只挡一条的话另一条就成了绕过它的口子。
+        """
+        kind = self._task_record_service.detect_record_kind(task_id)
         if kind is None:
             raise ValidationException(
-                f"on_target_desc 要求 task {rule.task_id!r} 配 duration record + "
+                f"累计达标要求 task {task_id!r} 配 duration record + "
                 f"target_minutes，但 task 当前无活跃 record。修复："
-                f"miloco-cli task record init {rule.task_id} --kind duration "
+                f"miloco-cli task record init {task_id} --kind duration "
                 f'--content \'{{"target_minutes":N,'
                 f'"recurring_pattern":{{"window":"day"}}}}\''
             )
         if kind != "duration":
             raise ValidationException(
-                f"on_target_desc 要求 task {rule.task_id!r} 配 duration record，"
+                f"累计达标要求 task {task_id!r} 配 duration record，"
                 f"当前 record kind={kind!r}（仅 duration 支持累计达标）。修复："
-                f"先 miloco-cli task delete {rule.task_id}（连带删 record），"
+                f"先 miloco-cli task delete {task_id}（连带删 record），"
                 f"再 task create + task record init --kind duration"
             )
-        state = self._task_record_service.read_duration_target_state(rule.task_id)
+        state = self._task_record_service.read_duration_target_state(task_id)
         target_minutes = state[0] if state is not None else None
         if target_minutes is None:
             raise ValidationException(
-                f"on_target_desc 要求 task {rule.task_id!r} 的 duration record "
+                f"累计达标要求 task {task_id!r} 的 duration record "
                 f"设置 target_minutes（当前为空）。修复："
-                f"miloco-cli task record update {rule.task_id} "
+                f"miloco-cli task record update {task_id} "
                 f'--patch \'{{"target_minutes":N}}\''
             )
 
@@ -276,6 +616,9 @@ class RuleService:
         valid = [device.did for device in devices]
         physical = {d.rsplit(":ch", 1)[0] for d in valid if ":ch" in d}
         return valid + sorted(physical - set(valid))
+
+    async def _validate_perceive_devices_of(self, rule: Rule) -> None:
+        await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
 
     async def _validate_perceive_device_ids(self, dids: list[str]) -> None:
         valid_dids = await self._get_valid_perceive_device_ids()
@@ -347,16 +690,15 @@ class RuleService:
         if self._repo.exists_by_name(rule.name):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
 
-        if not self._task_repo.task_exists(rule.task_id):
-            raise ResourceNotFoundException(
-                f"task_not_found: rule.task_id={rule.task_id!r} 对应 task 不存在"
-            )
+        self._require_task_exists(rule.task_id)
 
         self._fill_default_duration_ratio(rule)
 
-        await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
         _validate_rule_consistency(rule)
-        self._validate_on_target_desc_compat(rule)
+        await self._validate_perceive_devices_of(rule)
+        self._validate_target_record(rule)
+        self._validate_task_rule_set(rule)
+        self._validate_action_reachable(rule)
         await self._validate_scene_ids(rule)
 
         rule_id = self._repo.create(rule)
@@ -365,6 +707,9 @@ class RuleService:
 
         rule.id = rule_id
         self._runner.add_rule(rule)
+        # 顺序要紧: 先把动作写进 task 列, 再 reconfigure —— 后者刷的是 task 列的快照
+        self.sync_rule_actions_to_task(rule)
+        self.reconfigure_task(rule.task_id)
         logger.info("Rule created: %s", rule_id)
         return rule_id
 
@@ -377,15 +722,25 @@ class RuleService:
     async def get_all_rules(self, enabled_only: bool = False) -> list[Rule]:
         return self._repo.get_all(enabled_only)
 
+    async def get_effectively_enabled_rules(self) -> list[Rule]:
+        """「有效启用」的 rule —— 用户意图 AND 所属 task 没被停用 (§19.9)。
+
+        仍从 DB 读 ``enabled``, 与 task 停用会覆写 enabled 的旧行为同源, 只多滤
+        一层 task 停用。感知侧每 cycle 的下发闸和 admin 状态数字都得用这个:
+        只按 ``enabled`` 过滤会让停用的 task 继续下发、继续触发。
+        """
+        rules = self._repo.get_all(enabled_only=True)
+        return [r for r in rules if not self._runner.is_task_paused(r.task_id)]
+
     def notify_record_rollover(
         self,
         task_id: str,
         pre_rollover_state: tuple[int | None, int] | None = None,
     ) -> None:
         """task_record rollover 完成后由 daily job 调入，触发 rule engine 跨日
-        强制 on_exit + on_enter + 重 schedule on_target timer。pre_rollover_state
+        强制 on_exit + on_enter，并让 record 源按新一天重排。pre_rollover_state
         为 rollover_one 执行前 snapshot 的 ``(target_minutes, accumulated_minutes_today)``，
-        用于 rule engine 兜底 fire on_target（旧一天达标但 timer 还没到点的场景）。"""
+        用于兑现旧一天已达标但 timer 还没到点的场景。"""
         self._runner.force_cross_day_reset(task_id, pre_rollover_state)
 
     def get_enabled_rule_ids(self) -> list[str]:
@@ -401,21 +756,41 @@ class RuleService:
         path skipped consistency checks)."""
         if not rule.id:
             raise ValidationException("Rule ID is required")
-        if not self._repo.exists(rule.id):
+        previous = self._repo.get_by_id(rule.id)
+        if previous is None:
             raise ResourceNotFoundException(f"Rule '{rule.id}' not found")
         if self._repo.exists_by_name(rule.name, rule.id):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
 
+        # 与 create 同一道闸: task_id 是 FK, 指向不存在的 task 会让 sqlite 抛
+        # IntegrityError, 它不在 repo 那层的 except 里, 一路冒到全局处理器变成
+        # 500 —— 而这只是一个参数填错。
+        self._require_task_exists(rule.task_id)
+
         self._fill_default_duration_ratio(rule)
 
-        await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
         _validate_rule_consistency(rule)
-        self._validate_on_target_desc_compat(rule)
+        await self._validate_perceive_devices_of(rule)
+        self._validate_target_record(rule)
+        self._validate_task_rule_set(rule, previous)
+        self._validate_action_reachable(rule)
         await self._validate_scene_ids(rule)
 
         success = self._repo.update(rule)
         if success:
             self._runner.add_rule(rule)
+            # 与 PATCH 同一份收尾。整体替换同样能换方向、改挂 task, 少了这两步
+            # 旧槽里留着一份没人认领也没人读得到的动作, 旧 task 的拓扑还挂着一条
+            # 已经不属于它的 rule。
+            if (
+                previous.resolved_direction is not rule.resolved_direction
+                or previous.task_id != rule.task_id
+            ):
+                self._clear_task_slots(previous)
+            self.sync_rule_actions_to_task(rule)
+            self.reconfigure_task(rule.task_id)
+            if previous.task_id != rule.task_id:
+                self.reconfigure_task(previous.task_id)
         return success
 
     async def patch_rule(self, rule_id: str, update: RuleUpdate) -> bool:
@@ -438,6 +813,9 @@ class RuleService:
         if not existing:
             raise ResourceNotFoundException(f"Rule '{rule_id}' not found")
 
+        # 下面是就地合并, 合并完就读不到变更前的方向与归属了。
+        previous = existing.model_copy(deep=True)
+
         fields = update.model_fields_set
 
         if "name" in fields and update.name is not None:
@@ -446,10 +824,26 @@ class RuleService:
             existing.name = update.name
 
         if "task_id" in fields and update.task_id is not None:
+            self._require_task_exists(update.task_id)
             existing.task_id = update.task_id
 
-        if "mode" in fields and update.mode is not None:
-            existing.mode = update.mode
+        # mode 与 direction 是同一个语义的两种存储形态, 必须一起定。Rule 没开
+        # validate_assignment, 逐字段赋值不会重跑构造期那条一致性校验 —— 只改一个
+        # 就写出互相矛盾的行, 下次从库里构造 Rule 时校验器抛 ValidationError, 它是
+        # ValueError 子类, 正好落进各读取口的 except: 规则从所有列表里消失。
+        if {"mode", "direction"} & fields:
+            new_direction = update.direction
+            if new_direction is None and update.mode is not None:
+                new_direction = _MODE_TO_DIRECTION[update.mode.value]
+            if new_direction is not None:
+                expected_mode = _DIRECTION_TO_MODE[new_direction]
+                if update.mode is not None and update.mode is not expected_mode:
+                    raise ValidationException(
+                        f"direction={new_direction.value} 对应 "
+                        f"mode={expected_mode.value}, 收到 mode={update.mode.value}"
+                    )
+                existing.direction = new_direction
+                existing.mode = expected_mode
 
         if "lifecycle" in fields and update.lifecycle is not None:
             existing.lifecycle = update.lifecycle
@@ -522,7 +916,9 @@ class RuleService:
             existing.duration_ratio = update.duration_ratio
 
         _validate_rule_consistency(existing)
-        self._validate_on_target_desc_compat(existing)
+        self._validate_target_record(existing)
+        self._validate_task_rule_set(existing, previous)
+        self._validate_action_reachable(existing)
         # 与上面 perceive_device_ids 同口径:只校验这次 PATCH 真的动了的东西。
         # 无条件跑的话,场景被删 / 家庭被关之后连 `rule disable`(它本身就是一次
         # PATCH)都会 400 —— 规则坏掉的那一刻正好把「先关掉它」这条路堵死。
@@ -532,14 +928,44 @@ class RuleService:
         success = self._repo.update(existing)
         if success:
             self._runner.add_rule(existing)
+            moved_home = (
+                previous.resolved_direction is not existing.resolved_direction
+                or previous.task_id != existing.task_id
+            )
+            if moved_home:
+                # 换方向或改挂 task = 这份动作整体换了个家。旧的那份必须清 ——
+                # 留着就是一份没有 rule 认领、也再没人读得到的动作; 新的那份必须
+                # 写 —— 不写就是"规则照常触发、一个动作都选不到", 而 task 一旦被
+                # 接管就不会回退到 rule 列。这里不传动过的字段: 动作字段本身没变,
+                # 变的是它该落哪个槽。
+                self._clear_task_slots(previous)
+                self.sync_rule_actions_to_task(existing)
+            else:
+                # 带上这次动过的字段: 只透传被动过的槽, 别的槽保留 task 侧那份
+                self.sync_rule_actions_to_task(existing, fields)
+            self.reconfigure_task(existing.task_id)
+            if previous.task_id != existing.task_id:
+                # 原 task 少了一条 rule, 拓扑得跟着变 —— 与删 rule 同一条路径。
+                self.reconfigure_task(previous.task_id)
         return success
 
     async def delete_rule(self, rule_id: str) -> bool:
         if not self._repo.exists(rule_id):
             raise ResourceNotFoundException(f"Rule '{rule_id}' not found")
 
+        # 删之前先取归属 —— 删完就查不到了。exists 与 get_by_id 之间行可能已经
+        # 消失, 取不到就跳过重新配置而不是崩在这里。
+        existing = self._repo.get_by_id(rule_id)
+        task_id = existing.task_id if existing is not None else None
+
         success = self._repo.delete(rule_id)
         if success:
+            # 顺序要紧: 先 reconfigure。DB 行已删, 拓扑失去这条出路径、会触发 on_exit,
+            # 而 runner 内存里那条 rule 还在, 动作有 rule 可归属 (日志与冷却按
+            # rule 记)。反过来先 remove_rule, 那次 on_exit 会因为"名下已无 rule"
+            # 被跳过 —— 而这正是 §19.5 要解的那个卡死场景。
+            if task_id:
+                self.reconfigure_task(task_id)
             self._runner.remove_rule(rule_id)
             self._log_repo.delete_by_rule_id(rule_id)
         return success
@@ -550,6 +976,347 @@ class RuleService:
         双清, 但 task delete 场景 DB 由 CASCADE 走完, 只需清内存, 避免二次删表。
         """
         self._runner.remove_rule(rule_id)
+
+    def forget_task(self, task_id: str) -> None:
+        """task 被删 —— 清掉所有 per-task 的内存态。
+
+        rule 维度走 ``remove_rule_from_runner``, 它清不到按 task_id 存的那些:
+        状态机拓扑、运行态、判定跟踪、动作快照、停用标记、达标源的轮次计数。
+        record timer 不在这里撤 —— 它按 rule_id 存, 逐条清 rule 时已经撤掉了。
+
+        ``task_id`` 是用户自己起的名字, 删掉再用同名重建是正常操作 —— 不清的话新
+        task 会继承上一条的运行态(建第一条 rule 时派一次没来由的 on_exit)和停用
+        标记(有效启用恒假, 一条 rule 都不触发, 直到重启)。
+        """
+        sm = self._runner.state_machine
+        if sm is not None and sm.owns(task_id):
+            # unregister_task 内含 on_forget → 判定跟踪一并清
+            sm.unregister_task(task_id)
+        self._runner.set_task_actions(task_id, None)
+        self._runner.set_task_paused(task_id, False)
+        self._runner.record_source.forget_task(task_id)
+
+    @property
+    def decision_tracker(self):
+        """给 task 层读判定摘要用。没接管时为 None。"""
+        return self._runner.tracker
+
+    @property
+    def runner_state_machine(self):
+        """给 task 层读运行态用。没接管时为 None。"""
+        return self._runner.state_machine
+
+    # ---- 重新配置路径 (§19.5) ----
+
+    def _target_notified_today(self, rule_name: str) -> bool:
+        """今天这条达标规则的通知发出去过没有。
+
+        按名字问而不是按 id: 这条规则随阈值增删反复消失重建, 每次都是新 id。触发
+        日志按设计不跟着删, 是"到底发过没有"的唯一凭据。
+
+        成功和失败两种日志都算: 这里问的是"条件今天翻真过没有", 而这条规则只为
+        达标触发, 有日志就说明翻过。发不出去是投递的事, 与该不该重发无关 —— 条件
+        的值当时也不看投递结果。
+        """
+        from datetime import datetime
+
+        from miloco.utils.time_utils import deploy_timezone
+
+        day_start = datetime.now(deploy_timezone()).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        return (
+            self._log_repo.count_by_rule_name(
+                rule_name,
+                # 减一是因为 after_ts 是严格大于, 零点整那一条也要算进今天
+                after_ts=int(day_start.timestamp() * 1000) - 1,
+            )
+            > 0
+        )
+
+    def _require_task_exists(self, task_id: str) -> None:
+        """rule.task_id 是 FK, 指向不存在的 task 只能在写之前拦。"""
+        if not self._task_repo.task_exists(task_id):
+            raise ResourceNotFoundException(
+                f"task_not_found: rule.task_id={task_id!r} 对应 task 不存在"
+            )
+
+    def _slots_cleared_by(self, rule: Rule) -> set[str]:
+        """rule 不再管辖时会被清掉的那些槽。兄弟 rule 也管着的排掉 —— 否则会把
+        别人的动作一起抹掉。
+
+        提成只读函数是为了让「预演写后视图」的校验与真正执行清空的那段共用同一
+        份判据, 两边分叉的话校验放行的正是它没算到的那次清空。
+        """
+        stale = set(_rule_action_slots(rule))
+        if not stale:
+            return stale
+        return stale - {
+            name
+            for r in self._repo.list_by_task(rule.task_id)
+            if r.id != rule.id
+            for name in _rule_action_slots(r)
+        }
+
+    def _slots_contended_by_siblings(self, rule: Rule, slots: set[str]) -> list[str]:
+        """slots 里有哪些槽兄弟 rule 也管着 —— 争用的那些透传会整体跳过。
+
+        与 ``_slots_cleared_by`` 同一个理由: 预演写后视图的校验和真正执行透传的
+        那段必须问同一份判据, 否则校验会拦下一次根本不会发生的写入。
+        """
+        return sorted(
+            slots
+            & {
+                name
+                for r in self._repo.list_by_task(rule.task_id)
+                if r.id != rule.id
+                for name in _rule_action_slots(r)
+            }
+        )
+
+    def _clear_task_slots(self, rule: Rule) -> None:
+        """把 rule 之前管辖的槽清空。只在它不再管辖那些槽时调 (换方向 / 改挂 task)。"""
+        stale = self._slots_cleared_by(rule)
+        if not stale:
+            return
+        self._task_repo.set_boundary_actions(
+            rule.task_id,
+            **{k: ([] if k.endswith("_actions") else None) for k in stale},
+        )
+
+    def sync_rule_actions_to_task(
+        self, rule: Rule, changed_fields: set[str] | None = None
+    ) -> None:
+        """把 rule 上的动作写进它所属 task 的边界动作列。
+
+        §10.3 阶段 A 说「CLI 加新 flag，旧 flag 仍可用」——**旧 flag 仍可用意味着
+        它的写入必须落到新位置**。读侧的双路回退只解决了「读哪一份」, 写侧不透传
+        的话, 迁移后用现有 CLI 改动作会静默不生效: rule 列改了、fire 读的是 task
+        列的旧值, 而 CLI 返回成功、``rule get`` 也显示新值。
+
+        ``changed_fields`` 传 PATCH 显式动过的字段名, 决定透传哪几个槽 (见
+        ``_rule_action_slots``)。不传按"只写自己填了值的槽"处理。
+
+        多条 rule 争同一个槽时跳过并告警 —— 从一条 rule 单向覆盖会把另一条的动作
+        悄悄冲掉。不同方向的 rule 各写各的槽, 不算争。
+
+        阶段 B 动作 flag 落到 task 上之后这个函数整体删除。
+        """
+        # 代建的达标规则不算 —— 它是派生物, 用户根本看不到它。算进来的话凡是配了
+        # 达标通知的 task 都会走进下面那条跳过分支, 之后每一次改动作都只写 rule 行、
+        # 不写 task 列, 而 fire 读的正是 task 列: CLI 返回成功、rule get 显示新值、
+        # 实际行为不变。
+        slots = _rule_action_slots(rule, changed_fields)
+        if not slots:
+            return
+
+        # 只有争同一个槽才跳过。不同方向的 rule 各写各的槽 —— enter 写 on_enter、
+        # exit 写 on_exit, 本来就不冲突; 一律按"有没有兄弟"跳过的话, 非互反 task
+        # (enter + exit) 用 rule 侧 flag 建, 第二条起的动作全部静默丢失。
+        contended = self._slots_contended_by_siblings(rule, set(slots))
+        if contended:
+            logger.warning(
+                "task %s 名下有别的 rule 也管着 %s, 不把 rule %s 的动作透传到 "
+                "task 列; 请改用 task 侧的动作入口",
+                rule.task_id,
+                contended,
+                rule.id,
+            )
+            return
+        # rule 写入已经成功并且是主要效果, 不能被 task 侧同步的失败带崩。但也不能
+        # 静默 —— 同步没成功就意味着"动作只读"那个坑还在, 必须留下明显的线索。
+        try:
+            written = self._task_repo.set_boundary_actions(rule.task_id, **slots)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "把 rule %s 的动作同步到 task %s 失败: %s; "
+                "该 task 若已被状态机接管, 这次动作改动不会生效",
+                rule.id,
+                rule.task_id,
+                e,
+            )
+            return
+        if not written:
+            logger.warning(
+                "task %s 没有对应行, rule %s 的动作没同步过去", rule.task_id, rule.id
+            )
+
+    # ---- 达标规则是派生物, 不是用户建的东西 (spec §6.4 / §9) ----
+
+    def _milestone_is_wanted(self, task_id: str) -> bool | None:
+        """这个 task 该不该有达标规则。``None`` = 读不出来, 调用方按"别动"处理。
+
+        判据三样齐备: task 配了达标动作、有活跃 duration record、record 上有阈值。
+        """
+        try:
+            view = self._task_repo.get_full_view(task_id) or {}
+            slots = view.get("actions") or {}
+            if not (slots.get("on_target_actions") or slots.get("on_target_desc")):
+                return False
+            state = self._task_record_service.read_duration_target_state(task_id)
+        except Exception:
+            logger.exception("读 task %s 的达标配置失败, 这次不动达标规则", task_id)
+            return None
+        return state is not None and state[0] is not None
+
+    def _build_milestone_rule(self, task_id: str) -> Rule:
+        """代建的那条 rule 长什么样。
+
+        不带阈值: 阈值每次去 record 上现读, 存副本会在用户改目标后分叉。名字与条件
+        都取自 ``record_source`` 里那份共用形状, 迁移补建走的是同一份。
+        """
+        return Rule(
+            name=milestone_rule_name(task_id),
+            task_id=task_id,
+            # mode 是 NOT NULL 且表达不了 milestone, 存一个自洽的占位值。
+            mode=RuleMode.EVENT,
+            direction=RuleDirection.MILESTONE,
+            lifecycle=RuleLifecycle.PERMANENT,
+            condition=RuleCondition(**milestone_legacy_condition(task_id)),
+            condition_dnf=RuleConditionDNF(**milestone_condition_dnf(task_id)),
+        )
+
+    def _milestone_shape_is_current(self, rule: Rule) -> bool:
+        """这条代建规则的形状还是当前这一版吗。
+
+        比的是求值真正读的那几样: 条件项 (``record_ref_of`` 只看 source_type 与
+        spec)、旧 condition 列上的哨兵 did (填别的会让这条 rule 被当成视觉 query
+        塞进摄像头 prompt)、名字 (判重名的键)。阈值不在里面 —— 它本来就不进形状。
+        """
+        want = self._build_milestone_rule(rule.task_id)
+        return (
+            rule.name == want.name
+            and rule.condition_dnf == want.condition_dnf
+            and rule.condition.perceive_device_ids
+            == want.condition.perceive_device_ids
+        )
+
+    def reconcile_milestone_rule(self, task_id: str) -> None:
+        """让代建的达标规则跟上"该不该有"。
+
+        做成派生量而不是让用户维护成对关系, 是因为装配分步进行 —— 先配动作还是
+        先建 record, 中间态必然有一半不成立。派生量没有中间态可言, 齐备的那一刻
+        就有了。
+
+        不走 ``create_rule`` / ``delete_rule``: 那两条会再调一次重新配置, 而本函数
+        正是被它调用的。
+        """
+        wanted = self._milestone_is_wanted(task_id)
+        if wanted is None:
+            return
+
+        existing = [
+            r
+            for r in self._repo.list_by_task(task_id)
+            if r.resolved_direction is RuleDirection.MILESTONE
+        ]
+        # 齐备时留一条形状还对得上的; 多出来的、形状过期的、"不该有"的一起清掉,
+        # 下面照当前形状重建。只数个数的话, 存量里形状漂移的那条会被永久留着 ——
+        # 用户观察到的是"同样配了达标提醒, 新建的 task 会响、老的不响"。
+        current = [r for r in existing if self._milestone_shape_is_current(r)]
+        keep = current[:1] if wanted else []
+        keep_ids = {r.id for r in keep}
+        for rule in existing:
+            if not rule.id or rule.id in keep_ids:
+                continue
+            logger.info("达标规则 %s 不再需要, 删除 (task=%s)", rule.id, task_id)
+            self._repo.delete(rule.id)
+            self._runner.remove_rule(rule.id)
+            # 触发日志留着: 这条规则会随阈值增删反复消失重建, 跟着删等于用户改一次
+            # 目标就丢掉全部达标历史, 而那是查"到底发过没有"的唯一凭据。
+
+        if not wanted or keep:
+            return
+
+        rule = self._build_milestone_rule(task_id)
+        if self._repo.exists_by_name(rule.name):
+            logger.warning(
+                "task %s 的达标规则重名, 不代建; 改掉同名规则后会自动补上", task_id
+            )
+            return
+        rule_id = self._repo.create(rule)
+        if not rule_id:
+            logger.warning("task %s 的达标规则代建失败", task_id)
+            return
+        rule.id = rule_id
+        self._runner.add_rule(rule)
+        if self._target_notified_today(rule.name):
+            # 条件层状态按 rule_id 存, 重建换了 id 就等于把"今天发过了"擦掉 ——
+            # 与启动、停用再启用同一个失败模式, 只是这次丢的载体是 rule 身份。
+            # 清掉阈值再设回来就会当天重发一次。今天头一回配达标的 task 查不到
+            # 日志, 照常发。
+            self._runner.seed_reached_target(rule_id)
+        logger.info("代建达标规则 %s (task=%s)", rule_id, task_id)
+
+    def notify_record_changed(self, task_id: str) -> None:
+        """record 的 kind / 阈值变了 —— 达标规则该不该有可能跟着变。"""
+        self.reconfigure_task(task_id)
+
+    def reconfigure_task(self, task_id: str) -> None:
+        """rule 增删改、rule 单独启停、task 重新 enable 统一走这条。
+
+        做四件事: 刷新 task 动作快照 → 重算拓扑 → 失去全部出路径且当前为 on 时
+        先跑 on_exit → 清运行态从 off 起。前三件由 ``TaskStateMachine.reconfigure``
+        承担, 这里只负责把最新的拓扑与动作喂进去。
+
+        没接管该 task (没有边界动作 / 名下已无 rule) → 撤销登记, 回到旧路径。
+        不 reconfigure 而是 unregister: 前者会把没接管的 task 登记进去。
+        """
+        # 必须排在读拓扑之前: 代建 / 删掉的那条也要算进这次的拓扑。
+        self.reconcile_milestone_rule(task_id)
+
+        sm = self._runner.state_machine
+        if sm is None:
+            return
+
+        from miloco.task.state_machine import TaskRuntimeState, derive_directions
+
+        self._runner.set_task_actions(
+            task_id, self._task_repo.get_boundary_actions(task_id)
+        )
+        # 快照刚刷完 —— 此刻问读侧拿到的就是接下来 fire 时的答案。
+        self.report_task_config_problems(task_id)
+        # 从 DB 读而非内存: DB 是归属的权威源, 且删 rule 时行已落库、runner 内存
+        # 还留着那条 —— 正需要这个错位, 空拓扑触发 on_exit 时动作还有 rule 可归属。
+        rules = self._repo.list_by_task(task_id)
+        if not rules or not self._runner.task_owns_actions(task_id):
+            if sm.owns(task_id):
+                # 空拓扑先走一次 reconfigure：删掉最后一条 rule 也是「失去全部
+                # 出路径」，task 在 on 时必须先跑 on_exit，直接 unregister 会让
+                # 那次退出动作永远不执行。
+                sm.reconfigure(task_id, {})
+                sm.unregister_task(task_id)
+            return
+        sm.reconfigure(
+            task_id,
+            derive_directions((r.id, r.resolved_direction.value) for r in rules),
+        )
+        # 排 timer 只挂在「进入会话」那个边沿上, 而装配是分步的 —— 三样齐备的那
+        # 一刻可能落在会话开始之后, 那时进入边沿早过去了, 这一天的达标就只能靠
+        # 退出兜底或跨零点补发, 而这条通知的全部意义是到点提醒。已经在态内就补
+        # 排一次: arm 自带撤旧, 等于按当前累计重排, 阈值改了也一并跟上。
+        if sm.runtime_state(task_id) is TaskRuntimeState.ON:
+            self._runner.record_source.arm(task_id)
+
+    def apply_task_status(self, task_id: str, active: bool) -> None:
+        """task 启停 → 刷新派生的「有效启用」并走重新配置路径。
+
+        **不写 rule.enabled** —— 它是用户意图, task 启停覆写它会把用户手动关掉
+        的那条 rule 在 task 重新 enable 时错误地打开 (§19.9)。
+        """
+        self._runner.set_task_paused(task_id, not active)
+        if active:
+            # enable: 停用期间 rule 可能被改过, 要重新登记拓扑
+            self.reconfigure_task(task_id)
+            # 停用清掉了条件层状态, 达标那条"今天发过了"一并没了 —— 与重启同一个
+            # 失败模式、同一份修法。必须排在 reconfigure 之后: 代建的那条 rule 可能
+            # 正是它刚补上的。
+            _seed_reached_targets(self._runner, task_id)
+            return
+        self._runner.record_source.disarm(task_id)
+        sm = self._runner.state_machine
+        if sm is not None and sm.owns(task_id):
+            sm.suspend(task_id)
 
     # ---- Trigger ----
 

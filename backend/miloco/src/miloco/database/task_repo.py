@@ -12,12 +12,13 @@ cron 归属由 cron.task_id FK CASCADE 表达。task 视图数据源改成 rule 
 ``conn.commit()`` 才能让多条 INSERT 构成原子事务。
 """
 
+import json
 import logging
 import sqlite3
 from typing import Any
 
 from miloco.database.connector import get_db_connector
-from miloco.utils.time_utils import ms_to_iso_local, now_ms
+from miloco.utils.time_utils import iso_to_ms, ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +31,55 @@ class TaskNotFound(Exception):
     """404: task 不存在 (toggle / update / delete 时读到 not_found)。"""
 
 
+def _load_actions(raw: str | None) -> list[dict[str, Any]]:
+    """动作列存的是 JSON 数组。解析失败按空处理 —— 存量脏数据不该让读 task 报错。"""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _boundary_actions_of(row: Any) -> dict[str, Any]:
+    """把一行 task 的六个动作列拼成动作槽。行里必须已经 SELECT 过这几列。"""
+    return {
+        "on_enter_actions": _load_actions(row["on_enter_actions"]),
+        "on_enter_desc": row["on_enter_desc"],
+        "on_exit_actions": _load_actions(row["on_exit_actions"]),
+        "on_exit_desc": row["on_exit_desc"],
+        "on_target_actions": _load_actions(row["on_target_actions"]),
+        "on_target_desc": row["on_target_desc"],
+    }
+
+
 class TaskRepo:
     def __init__(self):
         self.db = get_db_connector()
 
-    def create_task(self, task_id: str, description: str) -> None:
+    def create_task(
+        self,
+        task_id: str,
+        description: str,
+        lifecycle: str = "permanent",
+        expires_at: str | None = None,
+    ) -> None:
         """INSERT task 行 (占位)。rule / cron 关联挂载由后续 endpoint 完成。"""
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "INSERT INTO task (task_id, description, status, created_at) "
-                    "VALUES (?, ?, 'active', ?)",
-                    (task_id, description, now_ms()),
+                    "INSERT INTO task "
+                    "(task_id, description, status, created_at, lifecycle, expires_at) "
+                    "VALUES (?, ?, 'active', ?, ?, ?)",
+                    (
+                        task_id,
+                        description,
+                        now_ms(),
+                        lifecycle,
+                        iso_to_ms(expires_at) if expires_at else None,
+                    ),
                 )
                 conn.commit()
                 logger.info("Task created (placeholder): task_id=%s", task_id)
@@ -74,7 +111,9 @@ class TaskRepo:
         """单 task 视图: task 元信息 + cron_refs (rule_briefs 由 service 层拼装)."""
         with self.db.get_connection() as conn:
             task_row = conn.execute(
-                "SELECT task_id, description, status, paused_at, created_at "
+                "SELECT task_id, description, status, paused_at, created_at, lifecycle, "
+                "expires_at, on_enter_actions, on_enter_desc, on_exit_actions, "
+                "on_exit_desc, on_target_actions, on_target_desc "
                 "FROM task WHERE task_id=?",
                 (task_id,),
             ).fetchone()
@@ -90,6 +129,9 @@ class TaskRepo:
                 "status": task_row["status"],
                 "paused_at": ms_to_iso_local(task_row["paused_at"]),
                 "created_at": ms_to_iso_local(task_row["created_at"]),
+                "lifecycle": task_row["lifecycle"],
+                "expires_at": ms_to_iso_local(task_row["expires_at"]),
+                "actions": _boundary_actions_of(task_row),
                 "cron_refs": [
                     {
                         "ref": c["cron_id"],
@@ -103,7 +145,9 @@ class TaskRepo:
         """所有 task 的聚合视图 (service 层接管 rule_briefs JOIN)."""
         with self.db.get_connection() as conn:
             tasks = conn.execute(
-                "SELECT task_id, description, status, paused_at, created_at "
+                "SELECT task_id, description, status, paused_at, created_at, "
+                "lifecycle, expires_at, on_enter_actions, on_enter_desc, "
+                "on_exit_actions, on_exit_desc, on_target_actions, on_target_desc "
                 "FROM task ORDER BY created_at DESC"
             ).fetchall()
             all_crons = conn.execute(
@@ -122,10 +166,67 @@ class TaskRepo:
                     "status": t["status"],
                     "paused_at": ms_to_iso_local(t["paused_at"]),
                     "created_at": ms_to_iso_local(t["created_at"]),
+                    "lifecycle": t["lifecycle"],
+                    "expires_at": ms_to_iso_local(t["expires_at"]),
+                    # 动作槽跟基础字段同一行, 一起 SELECT 不产生额外查询。多条 rule
+                    # 的 task 动作只存在这里 —— 列表不带的话住户界面显示成"无动作"。
+                    "actions": _boundary_actions_of(t),
                     "cron_refs": crons_by_task.get(t["task_id"], []),
                 }
                 for t in tasks
             ]
+
+    # ── 边界动作 (expand-contract 阶段 A 新增列) ──────────────────
+
+
+    def get_boundary_actions(self, task_id: str) -> dict[str, Any] | None:
+        """读 task 的三个动作槽 + lifecycle。task 不存在返回 None。
+
+        六个动作列全空 = 该 task 还没迁移过 (或就是没配动作), 调用方按
+        ``has_any_action`` 判断要不要回退到 rule 上的旧字段。
+        """
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT lifecycle, on_enter_actions, on_enter_desc, "
+                "on_exit_actions, on_exit_desc, on_target_actions, on_target_desc "
+                "FROM task WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"lifecycle": row["lifecycle"], **_boundary_actions_of(row)}
+
+    def set_boundary_actions(self, task_id: str, **slots: Any) -> bool:
+        """写动作槽。只更新传进来的键, 未传的不动。
+
+        值为 ``None`` 表示清空该槽 —— 与 ``rule update --clear`` 的语义一致,
+        传空串只会存空串。``*_actions`` 三列是 NOT NULL, 清空它们就是写空列表。
+        """
+        allowed = {
+            "on_enter_actions",
+            "on_enter_desc",
+            "on_exit_actions",
+            "on_exit_desc",
+            "on_target_actions",
+            "on_target_desc",
+        }
+        unknown = set(slots) - allowed
+        if unknown:
+            raise ValueError(f"unknown task action slot(s): {sorted(unknown)}")
+        if not slots:
+            return False
+        assignments = ", ".join(f"{k}=?" for k in slots)
+        params = [
+            json.dumps(v or []) if k.endswith("_actions") else v
+            for k, v in slots.items()
+        ]
+        with self.db.get_connection() as conn:
+            cur = conn.execute(
+                f"UPDATE task SET {assignments} WHERE task_id=?",
+                (*params, task_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     def set_status(self, task_id: str, status: str) -> str:
         """改 task.status。返回 'ok' | 'noop' | 'not_found'。"""
@@ -146,13 +247,27 @@ class TaskRepo:
             conn.commit()
             return "ok"
 
-    def update_description(self, task_id: str, description: str) -> bool:
-        """改 task.description。返回 affected>0。"""
+    def update_meta(self, task_id: str, updates: dict[str, Any]) -> bool:
+        """partial 改 task 的元信息列。返回 affected>0。
+
+        时间列入参走 ISO, 入库 int ms —— 与 ``create_task`` / task_record 同口径。
+        """
+        allowed = {"description", "lifecycle", "expires_at"}
+        unknown = set(updates) - allowed
+        if unknown:
+            raise ValueError(f"unknown task meta column(s): {sorted(unknown)}")
+        if not updates:
+            return False
+        params = [
+            iso_to_ms(v) if k == "expires_at" and v is not None else v
+            for k, v in updates.items()
+        ]
+        assignments = ", ".join(f"{k}=?" for k in updates)
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "UPDATE task SET description=? WHERE task_id=?",
-                (description, task_id),
+                f"UPDATE task SET {assignments} WHERE task_id=?",
+                (*params, task_id),
             )
             conn.commit()
             return cursor.rowcount > 0

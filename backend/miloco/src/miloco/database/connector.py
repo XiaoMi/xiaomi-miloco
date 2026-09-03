@@ -6,21 +6,30 @@ SQLite database connector
 Responsible for database initialization, connection management and basic operations
 """
 
+import json
 import logging
 import sqlite3
 import time
+import uuid
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
 from miloco.config import get_settings
+from miloco.rule.record_source import (
+    milestone_condition_dnf,
+    milestone_legacy_condition,
+    milestone_rule_name,
+)
+from miloco.rule.schema import RuleDirection, task_rule_set_error
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 # 当前 schema 版本。fresh-build 直接落到此值; 老库启动时按 _SCHEMA_MIGRATIONS
 # 步进跑到此值。历史基线 v1 (cron 挪出 task_link + rule 加 FK CASCADE 前)。
-_DB_SCHEMA_VERSION = 2
+# v3 = task 运行态重构的 expand-contract 阶段 A (只加列, 阶段 B 才删列)。
+_DB_SCHEMA_VERSION = 3
 
 
 def incremental_vacuum(
@@ -244,28 +253,27 @@ class SQLiteConnector:
                         conn.commit()
                         logger.info("All required tables already exist")
 
-                    # PRAGMA user_version 步进迁移: v1 老库跑一次 _migrate_v1_to_v2
-                    # 到 v2, 未来 v3 时补 {3: _migrate_v2_to_v3}。函数内部
-                    # 单事务原子 (业务 DML + PRAGMA user_version 同 COMMIT),
-                    # 抛异常 → backend fail-fast, 运维介入。
+                    # PRAGMA user_version 步进迁移: 逐级跑 _SCHEMA_MIGRATIONS 里
+                    # 登记的函数直到 _DB_SCHEMA_VERSION。函数内部单事务原子
+                    # (业务 DML + PRAGMA user_version 同 COMMIT), 抛异常 →
+                    # backend fail-fast, 运维介入。退代码版本时 range 为空,
+                    # 不反向重跑。
                     current_version = cursor.execute(
                         "PRAGMA user_version"
                     ).fetchone()[0]
                     if current_version == 0:
-                        # v1 老库从没显式写过 PRAGMA user_version, 但 task_link
-                        # 表必然存在 (v1 schema 包含它); 反之若既没版本号也没
-                        # task_link, 说明是"partial 缺表兜底 / fresh 后手工干预"
-                        # 场景, 直接钉到当前基线, 不跑迁移。
-                        if "task_link" in existing_tables:
-                            current_version = 1
-                            conn.execute("PRAGMA user_version = 1")
-                            conn.commit()
-                        else:
-                            conn.execute(
-                                f"PRAGMA user_version = {_DB_SCHEMA_VERSION}"
-                            )
-                            conn.commit()
-                            current_version = _DB_SCHEMA_VERSION
+                        # 版本号缺失时只能按库的形状认。不能猜 —— 猜高了后面的
+                        # 迁移整段跳过, 版本号说是最新而列根本没补, 之后哪个请求
+                        # 先读到新列就在那儿炸。
+                        current_version = _detect_schema_version(conn)
+                        conn.execute(
+                            f"PRAGMA user_version = {current_version}"
+                        )
+                        conn.commit()
+                        logger.info(
+                            "user_version 缺失, 按库的形状判定为 v%d",
+                            current_version,
+                        )
                     for target in range(
                         current_version + 1, _DB_SCHEMA_VERSION + 1
                     ):
@@ -489,9 +497,11 @@ class SQLiteConnector:
                 name TEXT NOT NULL,
                 task_id TEXT NOT NULL,
                 mode TEXT NOT NULL DEFAULT 'event',
+                direction TEXT NOT NULL DEFAULT 'enter',
                 lifecycle TEXT NOT NULL DEFAULT 'permanent',
                 enabled BOOLEAN DEFAULT 1,
                 condition TEXT NOT NULL,
+                condition_dnf TEXT,
                 actions TEXT NOT NULL DEFAULT '[]',
                 action_descriptions TEXT NOT NULL DEFAULT '[]',
                 on_enter_actions TEXT NOT NULL DEFAULT '[]',
@@ -582,7 +592,15 @@ class SQLiteConnector:
                 description TEXT NOT NULL,
                 status      TEXT NOT NULL DEFAULT 'active',
                 paused_at   INTEGER,
-                created_at  INTEGER NOT NULL
+                created_at  INTEGER NOT NULL,
+                lifecycle   TEXT NOT NULL DEFAULT 'permanent',
+                expires_at  INTEGER,
+                on_enter_actions  TEXT NOT NULL DEFAULT '[]',
+                on_enter_desc     TEXT,
+                on_exit_actions   TEXT NOT NULL DEFAULT '[]',
+                on_exit_desc      TEXT,
+                on_target_actions TEXT NOT NULL DEFAULT '[]',
+                on_target_desc    TEXT
             )
         """)
         logger.info("task table created successfully")
@@ -1244,9 +1262,489 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
         cursor.execute("PRAGMA foreign_keys=ON")
 
 
-# schema 步进迁移登记表; 未来加 v3 时新增 {3: _migrate_v2_to_v3} 条目
+# v3 新增列。SQLite 的 ALTER TABLE ADD COLUMN 就地生效、不重建表, 老代码读旧列
+# 完全不受影响 —— 这是 expand-contract 阶段 A 的全部依据。删列在阶段 B 单独做。
+# 往这里追加列的前提是 v3 尚未发布 —— 线上没有 v3 的库, 加的列一定随首次
+# v2→v3 迁移落地。版本号已经是 3 的库 (开发机 / 验证机) 拿不到新列: 步进循环
+# range(4, 4) 是空的, 形状兜底那条路也按标志列认它是 3。那种库要手工 ALTER 或
+# 重建。v3 发出去之后再加列必须开 v4。
+_V3_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("lifecycle", "TEXT NOT NULL DEFAULT 'permanent'"),
+    ("expires_at", "INTEGER"),
+    ("on_enter_actions", "TEXT NOT NULL DEFAULT '[]'"),
+    ("on_enter_desc", "TEXT"),
+    ("on_exit_actions", "TEXT NOT NULL DEFAULT '[]'"),
+    ("on_exit_desc", "TEXT"),
+    ("on_target_actions", "TEXT NOT NULL DEFAULT '[]'"),
+    ("on_target_desc", "TEXT"),
+)
+
+_V3_RULE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("direction", "TEXT NOT NULL DEFAULT 'enter'"),
+    ("condition_dnf", "TEXT"),
+)
+
+_V3_MODE_TO_DIRECTION = {"event": "enter", "state": "session"}
+
+_DEFAULT_EXIT_DEBOUNCE_SECONDS = 60
+
+
+
+def _table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
+    return {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+
+
+_SCHEMA_VERSION_MARKERS = (("rule", "direction"), ("task", "on_target_actions"))
+
+
+def _detect_schema_version(conn: sqlite3.Connection) -> int:
+    """没有 PRAGMA user_version 时, 按表与列的形状认版本。
+
+    老库从没显式写过它, 而 ``sqlite3 .dump`` 重建也不保留它 —— 一个 v2 库经 dump
+    恢复后版本号是 0 且 task_link 早被 v1→v2 删了, 光看"有没有 task_link"会把它
+    判成当前基线, v2→v3 从此不跑。所以标志按新版本真正加的那些列取。
+
+    认不出 v3 就退回 v2 让链跑一遍: 加列是幂等的, 少了的补上, 已有的跳过。
+    """
+    cursor = conn.cursor()
+    if _table_columns(cursor, "task_link"):
+        return 1
+    for table, marker in _SCHEMA_VERSION_MARKERS:
+        if marker not in _table_columns(cursor, table):
+            return 2
+    return _DB_SCHEMA_VERSION
+
+
+def _add_columns_if_missing(
+    cursor: sqlite3.Cursor, table: str, columns: tuple[tuple[str, str], ...]
+) -> list[str]:
+    """幂等加列。返回本次真正加上的列名。"""
+    existing = _table_columns(cursor, table)
+    added = []
+    for name, ddl in columns:
+        if name in existing:
+            continue
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+        added.append(name)
+    return added
+
+
+def _join_action_descriptions(raw: str | None) -> str | None:
+    """多条 agent 回调描述合成一条 —— 与 runner._select_slot 的拼接逐字一致。
+
+    单条也带 "1. " 前缀: 现状就是无条件编号。迁移只把这次拼接从执行时提到存储时,
+    改了前缀就等于改了 agent 收到的文本。
+    """
+    try:
+        descs = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(descs, list) or not descs:
+        return None
+    return "\n".join(f"{i + 1}. {d}" for i, d in enumerate(descs))
+
+
+def _condition_to_dnf(raw: str | None) -> str:
+    """旧 condition → 1×1 DNF。解析失败退化成空 query 的 omni 条件项。
+
+    不抛异常: 解析失败的是存量脏数据, 按 §10.1 丢错误条目继续跑, 由迁移后校验
+    处置受影响的 task, 而不是卡住整个启动。
+    """
+    try:
+        legacy = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        legacy = {}
+    if not isinstance(legacy, dict):
+        legacy = {}
+    item = {
+        "source_type": "omni",
+        "spec": {
+            "perceive_device_ids": legacy.get("perceive_device_ids") or [],
+            "query": legacy.get("query") or "",
+        },
+        "negate": False,
+    }
+    return json.dumps({"any_of": [[item]]}, ensure_ascii=False)
+
+
+def _rule_to_task_actions(
+    row: sqlite3.Row,
+) -> tuple[str, str | None, str, str | None]:
+    """一条 rule 的动作字段 → task 的 (on_enter_actions, on_enter_desc,
+    on_exit_actions, on_exit_desc)。
+
+    event rule 的动作全部归进方向 —— event 语义就是"发生了就做", 对应 on_enter。
+    """
+    if row["mode"] == "event":
+        return (
+            row["actions"] or "[]",
+            _join_action_descriptions(row["action_descriptions"]),
+            "[]",
+            None,
+        )
+    return (
+        row["on_enter_actions"] or "[]",
+        row["on_enter_desc"],
+        row["on_exit_actions"] or "[]",
+        row["on_exit_desc"],
+    )
+
+
+def _rule_action_fingerprint(row: sqlite3.Row) -> str:
+    """一 task 多 rule 时判断"动作是否完全一致"的比较键。
+
+    比转换后的 task 边界动作, 不比原始列: event 与 state 两种旧形态落到 task 上
+    是同一组字段, 只比原始列会把等价的两条判成不一致。
+
+    含 ``on_target_desc``: 它也是要上移到 task 的一个槽。不含的话, 两条 rule 的
+    进出动作相同而达标文案不同时指纹相等、按 created_at 静默取第一条, 第二条既不
+    生效也不进迁移报告 —— 而报告的存在意义就是让用户知道哪些配置要自己处置。
+    """
+    return json.dumps(
+        (*_rule_to_task_actions(row), row["on_target_desc"]), ensure_ascii=False
+    )
+
+
+def _active_target_minutes(cursor: sqlite3.Cursor, task_id: str) -> int | None:
+    row = cursor.execute(
+        "SELECT target_minutes FROM task_record_duration "
+        "WHERE task_id=? AND archived_at IS NULL",
+        (task_id,),
+    ).fetchone()
+    return row["target_minutes"] if row else None
+
+
+def _create_milestone_rule(cursor: sqlite3.Cursor, task_id: str, now: int) -> None:
+    """给带 on_target_desc 的 task 补一条 direction=milestone 的 rule。
+
+    形状与运行时代建共用同一份 (``milestone_condition_dnf`` 等), 不在这里抄 ——
+    本函数的执行时刻是未来某天的首次 v2→v3, 抄一份的话服务层改了形状不会有任何
+    测试红, 而升上来的老 task 会静默不响。
+    """
+    dnf = milestone_condition_dnf(task_id)
+    legacy_condition = milestone_legacy_condition(task_id)
+    cursor.execute(
+        """
+        INSERT INTO rule (
+            id, name, task_id, mode, direction, lifecycle, enabled,
+            condition, condition_dnf, created_at, updated_at
+        ) VALUES (?, ?, ?, 'event', 'milestone', 'permanent', 1, ?, ?, ?, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            milestone_rule_name(task_id),
+            task_id,
+            json.dumps(legacy_condition, ensure_ascii=False),
+            json.dumps(dnf, ensure_ascii=False),
+            now,
+            now,
+        ),
+    )
+
+
+def _migrate_v2_to_v3(conn: sqlite3.Connection) -> None:
+    """v2 → v3 schema step —— expand-contract 阶段 A: 只加列、只复制, 不删列。
+
+    与 v1→v2 的关键差别: 那一步重建表并 DROP 了列, 不可逆; 这一步全是
+    ALTER TABLE ADD COLUMN + UPDATE, 旧代码读旧列照常跑, 出问题退代码版本即可。
+
+    一次事务原子完成:
+      (a) task 加 lifecycle + 六个边界动作列; rule 加 direction + condition_dnf
+      (b) rule.mode → rule.direction; rule.condition → rule.condition_dnf(1×1 DNF);
+          非 session 的 exit_debounce_seconds 非默认值重置
+      (c) rule 动作 → 所属 task 的边界动作列。一 task 多 rule 且动作不一致 → 不写、
+          记入冲突清单 (动作原样留在 rule 列上, 用户按报告自行合并或拆分)
+      (d) rule.lifecycle → task.lifecycle (多 rule 取第一条, 其余记日志)
+      (e) rule.on_target_desc → task.on_target_desc + 补建 milestone rule;
+          查不到 duration record 的 target_minutes → 不补建、该 task 置 paused
+      (f) 暂停 task 名下被关掉的 rule.enabled 恢复成 1 (NULL 一并兜到列默认值)。
+          enabled 是纯用户意图、不再镜像 task.status, 所以只单方向恢复、从不往 0
+          改。条数见报告的 rule_enabled_restored
+      (g) 迁移后跑一遍规则组合合法性。存量表达不了 exit / milestone, 所以只可能撞
+          「session 必须独占」, 撞上的 task 记入待暂停清单
+      (h) 待暂停清单统一置 paused + paused_at。不连带写 rule.enabled=0 —— 置 paused
+          已经让派生量为假, 再写 0 会让用户按报告处置完重新启用后这批永远起不来
+      (i) PRAGMA user_version = 3 (同事务)
+      COMMIT
+
+    crash 语义同 v1→v2: COMMIT 前 crash → rollback 到 v2 重跑; COMMIT 后 crash →
+    user_version=3, 外层步进循环跳过, 不重入。
+
+    fail-soft: 单条数据无法处理时丢该条、继续跑完, 不中止启动 (§10.1)。
+    """
+    now = int(time.time() * 1000)
+    counts: dict[str, int] = {
+        "task_actions_filled": 0,
+        "rule_direction_set": 0,
+        "rule_exit_debounce_reset": 0,
+        "milestone_rule_created": 0,
+        "rule_enabled_restored": 0,
+        "lifecycle_conflict_ignored": 0,
+    }
+    conflict_tasks: list[str] = []
+    on_target_broken_tasks: list[str] = []
+    terminate_when_rules: list[sqlite3.Row] = []
+
+    cursor = conn.cursor()
+    cursor.execute("BEGIN IMMEDIATE")
+    try:
+        # ── (a) 加列 ────────────────────────────────────────────────
+        added_task = _add_columns_if_missing(cursor, "task", _V3_TASK_COLUMNS)
+        added_rule = _add_columns_if_missing(cursor, "rule", _V3_RULE_COLUMNS)
+        logger.info("v2→v3 added columns: task=%s rule=%s", added_task, added_rule)
+
+        rules = cursor.execute(
+            "SELECT * FROM rule ORDER BY task_id, created_at, id"
+        ).fetchall()
+
+        # ── (b) 逐条 rule ───────────────────────────────────────────
+        for row in rules:
+            direction = _V3_MODE_TO_DIRECTION.get(row["mode"], "enter")
+            cursor.execute(
+                "UPDATE rule SET direction=?, condition_dnf=?, updated_at=? WHERE id=?",
+                (direction, _condition_to_dnf(row["condition"]), now, row["id"]),
+            )
+            counts["rule_direction_set"] += 1
+
+            # exit_debounce 只对 session 有效。非 session 上的非默认值是存量里
+            # 被静默忽略的死值, 留着会被新校验判成非法, 重置不损失语义。
+            stale_debounce = (
+                direction != "session"
+                and row["exit_debounce_seconds"] != _DEFAULT_EXIT_DEBOUNCE_SECONDS
+            )
+            if stale_debounce:
+                logger.info(
+                    "v2→v3 reset exit_debounce_seconds %s→%s on rule %s "
+                    "(direction=%s, 该字段仅 session 有效)",
+                    row["exit_debounce_seconds"],
+                    _DEFAULT_EXIT_DEBOUNCE_SECONDS,
+                    row["id"],
+                    direction,
+                )
+                cursor.execute(
+                    "UPDATE rule SET exit_debounce_seconds=? WHERE id=?",
+                    (_DEFAULT_EXIT_DEBOUNCE_SECONDS, row["id"]),
+                )
+                counts["rule_exit_debounce_reset"] += 1
+
+        # ── (c)(d)(e) 按 task 分组 ──────────────────────────────────
+        by_task: dict[str, list[sqlite3.Row]] = {}
+        for row in rules:
+            by_task.setdefault(row["task_id"], []).append(row)
+
+        for task_id, task_rules in by_task.items():
+            first = task_rules[0]
+
+            is_conflict = len({_rule_action_fingerprint(r) for r in task_rules}) > 1
+            if is_conflict:
+                conflict_tasks.append(task_id)
+                logger.warning(
+                    "v2→v3 task %s 名下 %d 条 rule 动作不一致, 不写 task 动作列; "
+                    "置 paused, 动作原样留在 rule 列上等用户处置",
+                    task_id,
+                    len(task_rules),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE task SET on_enter_actions=?, on_enter_desc=?, "
+                    "on_exit_actions=?, on_exit_desc=? WHERE task_id=?",
+                    (*_rule_to_task_actions(first), task_id),
+                )
+                counts["task_actions_filled"] += 1
+
+            # lifecycle 上移: 多 rule 取第一条, 口径同动作
+            cursor.execute(
+                "UPDATE task SET lifecycle=? WHERE task_id=?",
+                (first["lifecycle"], task_id),
+            )
+            others = {r["lifecycle"] for r in task_rules[1:]}
+            if others - {first["lifecycle"]}:
+                logger.warning(
+                    "v2→v3 task %s 取首条 rule 的 lifecycle=%s, 忽略 %s",
+                    task_id,
+                    first["lifecycle"],
+                    sorted(others),
+                )
+                counts["lifecycle_conflict_ignored"] += 1
+
+            if is_conflict:
+                # 达标文案也是要上移的动作槽之一, 与上面那几个同一个口径: 动作不一致
+                # 就一律不写 task 列, 原样留在 rule 上等用户处置。
+                continue
+
+            on_target = next(
+                (r["on_target_desc"] for r in task_rules if r["on_target_desc"]),
+                None,
+            )
+            if not on_target:
+                continue
+            target_minutes = _active_target_minutes(cursor, task_id)
+            if target_minutes is None:
+                # on_target 动作没有达标阈值就永远不会触发。留成 active 等于留一个
+                # 永不生效的通知, 用户不会发现; 置 paused 让它出现在报告里。
+                on_target_broken_tasks.append(task_id)
+                logger.warning(
+                    "v2→v3 task %s 有 on_target_desc 但查不到 duration record 的 "
+                    "target_minutes, 不补建 milestone rule, 置 paused",
+                    task_id,
+                )
+                continue
+            cursor.execute(
+                "UPDATE task SET on_target_desc=? WHERE task_id=?",
+                (on_target, task_id),
+            )
+            _create_milestone_rule(cursor, task_id, now)
+            counts["milestone_rule_created"] += 1
+
+        # ── (f) 恢复被旧 bug 连带关掉的 rule.enabled ─────────────────
+        # §19.9 之后 enabled 是纯用户意图, 不再镜像 task.status。旧代码停用 task 时
+        # 把名下 rule 一律写 0, 不恢复就永久失效 —— 新代码重新启用 task 不回写
+        # enabled, task 显示 active、规则卡照常列出, 但再也不下发不触发。
+        # 反方向不做: 把 active task 下用户手工关掉的那条打开, 等于让他主动停掉的
+        # 自动化自己开回来、立刻对设备下指令。必须排在 (h) 之前, 否则会把 (h) 刚置
+        # paused 的 task 下那些用户关掉的 rule 一起打开。
+        # NULL 另兜: 列默认 1, 存成 NULL 是缺值不是用户关过, 而读侧把它当假。
+        restored = [
+            row["id"]
+            for row in cursor.execute("""
+                SELECT id FROM rule
+                 WHERE enabled IS NULL
+                    OR (enabled = 0 AND EXISTS(
+                            SELECT 1 FROM task t
+                             WHERE t.task_id = rule.task_id
+                               AND t.status = 'paused'
+                        ))
+            """).fetchall()
+        ]
+        if restored:
+            # 按 id 逐条改而不是重贴一遍 WHERE —— 两份判据早晚分叉, 报告里的条数
+            # 就会和实际改的行数对不上。
+            cursor.executemany(
+                "UPDATE rule SET enabled = 1 WHERE id = ?",
+                [(rule_id,) for rule_id in restored],
+            )
+            counts["rule_enabled_restored"] = len(restored)
+            logger.warning(
+                "v2→v3 restored %d rule.enabled=1: %s", len(restored), restored
+            )
+
+        # ── (g) 迁移后校验: 变非法的 task 记入待暂停清单 ──────────────
+        # 存量能撞上两条: "session 必须独占" (一 task 挂两条 mode=state → 两条
+        # session, §19.7 的永久卡死), 以及"配了达标动作就得有出路径" (存量 event
+        # 型 rule 带 on_target_desc → 迁成 enter-only + 达标, 达标一次都不会响)。
+        # 判据与建 rule 时同一份, 复制一份判据早晚会分叉。
+        with_target = {
+            row["task_id"]
+            for row in cursor.execute(
+                "SELECT task_id FROM task "
+                " WHERE COALESCE(on_target_desc, '') != ''"
+                "    OR COALESCE(on_target_actions, '[]') NOT IN ('[]', '')"
+            ).fetchall()
+        }
+        illegal_reasons: dict[str, str] = {}
+        rows_by_task: dict[str, list[str]] = {}
+        for row in cursor.execute("SELECT task_id, direction FROM rule").fetchall():
+            rows_by_task.setdefault(row["task_id"], []).append(row["direction"])
+        for task_id, directions in rows_by_task.items():
+            if task_id in conflict_tasks or task_id in on_target_broken_tasks:
+                continue
+            try:
+                parsed = [RuleDirection(d) for d in directions if d]
+            except ValueError:
+                continue
+            reason = task_rule_set_error(parsed, task_id in with_target)
+            if reason:
+                illegal_reasons[task_id] = reason
+                logger.warning(
+                    "v2→v3 task %s 迁移后不合法, 置 paused: %s", task_id, reason
+                )
+
+        # ── (h) 置 paused ───────────────────────────────────────────
+        # 只置 task.status。生效判据里 task 停用这一半已经为假, 再写 rule.enabled=0
+        # 会在用户处置完重新启用后让这批规则永远起不来 (理由同 (f))。
+        for task_id in conflict_tasks + on_target_broken_tasks + list(illegal_reasons):
+            cursor.execute(
+                "UPDATE task SET status='paused', paused_at=? WHERE task_id=?",
+                (now, task_id),
+            )
+
+        # terminate_when 只扫不动: 让用户知道这批失去了名义能力
+        terminate_when_rules = cursor.execute(
+            "SELECT id, task_id, terminate_when FROM rule "
+            "WHERE terminate_when IS NOT NULL AND terminate_when != ''"
+        ).fetchall()
+        for row in terminate_when_rules:
+            logger.warning(
+                "v2→v3 rule %s (task %s) 的 terminate_when 不再生效: %s",
+                row["id"],
+                row["task_id"],
+                row["terminate_when"],
+            )
+
+        cursor.execute("PRAGMA user_version = 3")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    _log_v3_report(
+        counts,
+        conflict_tasks,
+        on_target_broken_tasks,
+        illegal_reasons,
+        len(terminate_when_rules),
+    )
+
+
+def _log_v3_report(
+    counts: dict[str, int],
+    conflict_tasks: list[str],
+    on_target_broken_tasks: list[str],
+    illegal_reasons: dict[str, str],
+    terminate_when_count: int,
+) -> None:
+    """迁移报告。日志 + stdout 双出 —— 只写日志用户装完不会去翻。"""
+    lines = [
+        "=== miloco schema v2→v3 迁移报告 ===",
+        *(f"  {k}: {v}" for k, v in counts.items()),
+        f"  terminate_when_no_longer_effective: {terminate_when_count}",
+    ]
+    if conflict_tasks:
+        lines += [
+            "",
+            "  下列 task 名下多条 rule 的动作不一致, 已置 paused",
+            "  (动作没丢, 仍在 rule 列上):",
+            *(f"    - {t}" for t in conflict_tasks),
+            "  处置二选一 —— 合并: 把几组动作并成一组填进 task 的 on_enter/on_exit;",
+            "               拆分: 新建 task 改挂多余的 rule。注意 record 与 cron",
+            "               留在原 task, 新 task 的统计从零开始。",
+        ]
+    if on_target_broken_tasks:
+        lines += [
+            "",
+            "  下列 task 配了累计达标通知但查不到 duration record 的 target_minutes,",
+            "  未补建 milestone rule, 已置 paused:",
+            *(f"    - {t}" for t in on_target_broken_tasks),
+            "  处置: 补 task record init --kind duration --content 的 target_minutes",
+            "        后重新启用。",
+        ]
+    if illegal_reasons:
+        # 原因按 task 逐条带上校验那份文案 —— 在报告里重写一遍等于第二份文案,
+        # 改了校验不会跟着改; 而写死一种形态的话, 撞上别种的用户拿到的处置建议
+        # 照着做找不到对象。
+        lines += ["", "  下列 task 迁移后的规则组合不合法, 已置 paused:"]
+        for task_id, reason in illegal_reasons.items():
+            lines += [f"    - {task_id}:", f"        {reason}"]
+        lines += ["  按各自的原因处置完再重新启用该 task。"]
+    report = "\n".join(lines)
+    logger.warning(report)
+    print(report)
+
+
+# schema 步进迁移登记表
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v1_to_v2,
+    3: _migrate_v2_to_v3,
 }
 
 
@@ -1274,6 +1772,14 @@ def rollback_v2_to_v1() -> dict[str, int]:
         cursor.execute("PRAGMA foreign_keys=OFF")
         cursor.execute("BEGIN IMMEDIATE")
         try:
+            version = cursor.execute("PRAGMA user_version").fetchone()[0]
+            if version != 2:
+                raise RuntimeError(
+                    f"rollback_v2_to_v1 refused: db is at v{version}, not v2. "
+                    f"本函数只反向 v1↔v2 那一步; v3+ 的库先按各自的反向路径退回 "
+                    f"v2 再调本函数, 否则 v3 列会被静默丢弃。"
+                )
+
             internal_count = cursor.execute(
                 "SELECT COUNT(*) FROM cron WHERE dispatch_owner='internal'"
             ).fetchone()[0]
@@ -1332,7 +1838,19 @@ def rollback_v2_to_v1() -> dict[str, int]:
                     updated_at INTEGER NOT NULL
                 )
             """)
-            cursor.execute("INSERT INTO rule_v1 SELECT * FROM rule")
+            # 显式列名而非 SELECT *: 后者按位置匹配, rule 表加一列就静默错位
+            # (v3 加 direction / condition_dnf 时就撞过一次)。
+            _v1_rule_cols = (
+                "id, name, task_id, mode, lifecycle, enabled, condition, "
+                "actions, action_descriptions, on_enter_actions, on_enter_desc, "
+                "on_exit_actions, on_exit_desc, on_target_desc, terminate_when, "
+                "exit_debounce_seconds, duration_seconds, duration_ratio, "
+                "created_at, updated_at"
+            )
+            cursor.execute(
+                f"INSERT INTO rule_v1 ({_v1_rule_cols}) "
+                f"SELECT {_v1_rule_cols} FROM rule"
+            )
             cursor.execute("DROP TABLE rule")
             cursor.execute("ALTER TABLE rule_v1 RENAME TO rule")
             cursor.execute("CREATE INDEX idx_rule_name ON rule(name)")

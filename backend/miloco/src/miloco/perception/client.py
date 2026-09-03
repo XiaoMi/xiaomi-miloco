@@ -172,6 +172,23 @@ def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
 
+def _is_enter_rule(rule: dict) -> bool:
+    """下发闸的方向判据。
+
+    dict 来自 ``Rule.model_dump()``, ``direction`` 可能是 None（未迁移的库 / 内存
+    直接构造的 Rule）, 回退到 ``mode`` 与 ``Rule.resolved_direction`` 同源。不能直
+    接判 ``mode == "event"``: exit 型 rule 存的 mode 就是 event, 会被一起剔掉。
+    """
+    # 局部 import: 本模块不在顶层引 rule.schema（循环依赖），与文件里别处一致。
+    from miloco.rule.schema import RuleDirection, RuleMode
+
+    raw = rule.get("direction")
+    if raw:
+        return getattr(raw, "value", raw) == RuleDirection.ENTER.value
+    mode = rule.get("mode") or RuleMode.EVENT.value
+    return getattr(mode, "value", mode) == RuleMode.EVENT.value
+
+
 def _filter_completed_event_rules(
     rules: list[dict],
 ) -> tuple[list[dict], list[str]]:
@@ -183,15 +200,15 @@ def _filter_completed_event_rules(
     - progress recurring + current >= target（如每日 N 杯水当天喝够后静默）
     - duration recurring + accumulated >= target_minutes * 60
 
-    state mode 不过滤（剔除会让 ENTERED→EXITED 翻转、取消 on_exit 设备动作；
-    state 路径靠 rule engine ``_target_fired`` runtime 做周期达标静默）。
-    无 record 的 event rule 保留（维持现状）。
+    只剔 enter 型。session 剔了会让 ENTERED→EXITED 翻转、取消 on_exit 设备动作;
+    exit 剔了会让 task 收不到退出边沿、永久卡在 on; milestone 的条件来自 record
+    源, 本来就不走摄像头。无 record 的 rule 保留（维持现状）。
 
     返回 (kept_rules, skipped_task_ids)。skipped_task_ids 按 task 去重后排序，
     供调用方做去重打印。
     """
     event_task_ids = {
-        r["task_id"] for r in rules if r.get("mode") == "event" and r.get("task_id")
+        r["task_id"] for r in rules if _is_enter_rule(r) and r.get("task_id")
     }
     if not event_task_ids:
         return rules, []
@@ -210,7 +227,7 @@ def _filter_completed_event_rules(
     skipped: set[str] = set()
     for r in rules:
         tid = r.get("task_id")
-        if r.get("mode") == "event" and satisfaction_map.get(tid):
+        if _is_enter_rule(r) and satisfaction_map.get(tid):
             skipped.add(tid)
             continue
         kept.append(r)
@@ -541,8 +558,8 @@ class PerceptionEngineProxy:
                 # False」的循环放过它)。一旦漏登记，device_rule_map 仍列着它(engine/api.py 的
                 # realtime_perceive 在 run_batch_pipeline 之前构建、与整窗保护 skip 无关)→ 未命中
                 # 循环会给刚 ENTER 真 fire 的 source 喂一帧 False、白吃掉单帧抗抖预算(下次真离开
-                # 只需一帧就确认 EXIT)。故即便下面 update_state 抛异常(如 on_target 规则
-                # _schedule_target_timer_if_needed 里的裸 DB 读)，key 也必须已在 dict 里；此时
+                # 只需一帧就确认 EXIT)。故即便下面 update_state 抛异常(如条件层求值里的
+                # 裸 DB 读)，key 也必须已在 dict 里；此时
                 # value 停在 None → 该 rule 记入 incomplete、展示层标「未知」，不撒谎。
                 early_sent_rule_ids[(r.rule_id, did)] = None
                 _publish_perception_event(
@@ -691,7 +708,7 @@ class PerceptionEngineProxy:
 
             from miloco.manager import get_manager
 
-            rules = await get_manager().rule_service.get_all_rules(enabled_only=True)
+            rules = await get_manager().rule_service.get_effectively_enabled_rules()
             rules = [rule.model_dump() for rule in rules]
             rules, skipped_task_ids = _filter_completed_event_rules(rules)
 
@@ -847,8 +864,9 @@ class PerceptionEngineProxy:
         # 聚合了事：同一 rule 本周期最多一路返回 FIRED（把 rule 级状态翻 True 的那路），其余
         # 走 old==new 返回 STILL_IN；若偏偏是那一路抛了异常，FIRED 信号就永久丢失，聚合结果
         # 会是确定但偏弱的假阴性。而且**从异常本身推不出 fire 与否**，两类抛点都表现为 value
-        # 停 None：① 派发之后抛 → 其实已 fire（runner 里几处裸 read_duration_target_state 都排在
-        # _spawn_fire 之后，如 _schedule_target_timer_if_needed / _fire_target_if_reached）；
+        # 停 None：① 派发之后抛 → 其实已 fire（达标的记账读取已挪到触发决策之前、且自身
+        # 吞异常，所以这一类当前没有实例；分类保留是因为任何排在 _spawn_fire 之后新增的
+        # 裸读都会重新落进来）；
         # ② 到达 fire 决策点之前抛 → 真没 fire（如本文件早送回调里排在 update_state 之前的
         # _publish_perception_event，或 update_state 内部尚未走到派发时的任何异常）。故把这些
         # rule 记进 incomplete，展示层显式渲染「未知」而非撒谎报一个确定值。异常详情已由 pipeline

@@ -2541,3 +2541,27 @@ def test_rule_create_scene_action_string_cooldown_no_traceback(runner):
     assert "Traceback" not in combined
     assert "TypeError" not in combined
     assert result.exit_code == 0
+
+
+def test_rule_list_hides_milestone_rules_by_default(runner):
+    """达标规则是服务端维护的派生物，混在列表里会让人以为自己多建了一条。"""
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {"code": 0, "data": []}
+        runner.invoke(cli, ["rule", "list"])
+    params = mock.call_args[0][1]
+    assert params is None or "include_milestone" not in params
+
+
+def test_rule_list_show_milestone_asks_for_them(runner):
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {"code": 0, "data": []}
+        runner.invoke(cli, ["rule", "list", "--show-milestone"])
+    assert mock.call_args[0][1]["include_milestone"] == "true"
+
+
+def test_rule_create_milestone_command_is_gone(runner):
+    """只留代建一条产出路径 —— 两条就要回答「哪条说了算」。"""
+    result = runner.invoke(
+        cli, ["rule", "create-milestone", "--task-id", "t", "--name", "n"]
+    )
+    assert result.exit_code != 0

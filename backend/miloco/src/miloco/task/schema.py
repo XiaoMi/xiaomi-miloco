@@ -11,9 +11,30 @@ v2 起 task_link 表已 DROP: rule 关联走 rule.task_id FK CASCADE, cron 关�
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 _TASK_ID_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+
+
+def _validated_iso(v: str | None) -> str | None:
+    """到期时刻的格式校验 —— create 与 update 共用这一份。
+
+    入库前那步用 ``iso_to_ms``, 它抛裸 ValueError、router 不捕, 一路冒到全局兜底
+    变成 500。写命令的是 agent, 500 里没有能让它自己纠正的信息。用同一个解析器
+    保证两边口径一致。
+    """
+    if v is None:
+        return v
+    from miloco.utils.time_utils import iso_to_ms
+
+    try:
+        iso_to_ms(v)
+    except ValueError as e:
+        raise ValueError(
+            f"expires_at 不是合法的 ISO8601 时刻: {v!r} "
+            "(用 miloco-cli time-compute 产出的带偏移 ISO)"
+        ) from e
+    return v
 
 
 class TaskCreateRequest(BaseModel):
@@ -31,6 +52,22 @@ class TaskCreateRequest(BaseModel):
 
     task_id: str = Field(..., description="snake_case，[a-z0-9_]{1,32}")
     description: str = Field(..., max_length=200, description="≤200 字符")
+    lifecycle: Literal["permanent", "temporary"] = Field(
+        "permanent", description="长期常驻 / 限时有效"
+    )
+    expires_at: str | None = Field(
+        None, description="到期时刻 ISO8601（带时区偏移），仅 lifecycle=temporary"
+    )
+
+    _check_expiry = field_validator("expires_at")(_validated_iso)
+
+    @model_validator(mode="after")
+    def _expiry_needs_temporary(self):
+        """到期时刻只在限时任务上有意义。permanent 带它是自相矛盾的配置,
+        放行的话没人能判断该信哪一个。"""
+        if self.expires_at and self.lifecycle != "temporary":
+            raise ValueError("expires_at 只能配 lifecycle=temporary")
+        return self
 
     @field_validator("task_id")
     @classmethod
@@ -43,9 +80,44 @@ class TaskCreateRequest(BaseModel):
 
 
 class TaskUpdateRequest(BaseModel):
-    """`PATCH /tasks/{task_id}` 改 description。"""
+    """``PATCH /tasks/{task_id}``。
 
-    description: str = Field(..., max_length=200)
+    partial 语义: 只有出现在请求体里的字段才会被改。可清空的只有 ``expires_at``
+    (限时改回长期), 显式传 ``null`` 表示清空 —— 清掉与"这次不动它"靠
+    ``model_fields_set`` 区分。``description`` 那一列是 NOT NULL, 传 null 会被拒。
+    """
+
+    description: str | None = Field(None, max_length=200)
+    lifecycle: Literal["permanent", "temporary"] | None = None
+    expires_at: str | None = None
+
+    _check_expiry = field_validator("expires_at")(_validated_iso)
+
+
+class TaskBoundaryActions(BaseModel):
+    """task 的边界动作槽。``*_actions`` 走设备直控, ``*_desc`` 走 Agent。"""
+
+    on_enter_actions: list[dict[str, Any]] = Field(default_factory=list)
+    on_enter_desc: str | None = None
+    on_exit_actions: list[dict[str, Any]] = Field(default_factory=list)
+    on_exit_desc: str | None = None
+    on_target_actions: list[dict[str, Any]] = Field(default_factory=list)
+    on_target_desc: str | None = None
+
+
+class TaskActionsUpdateRequest(BaseModel):
+    """``PATCH /tasks/{task_id}/actions`` 入参。
+
+    partial 语义: 只有出现在请求体里的槽才会被改, 显式传 ``null`` 表示清空该槽。
+    "没传"和"传了 null"靠 ``model_fields_set`` 区分, 不能用默认值判断。
+    """
+
+    on_enter_actions: list[dict[str, Any]] | None = None
+    on_enter_desc: str | None = None
+    on_exit_actions: list[dict[str, Any]] | None = None
+    on_exit_desc: str | None = None
+    on_target_actions: list[dict[str, Any]] | None = None
+    on_target_desc: str | None = None
 
 
 class RuleBrief(BaseModel):
@@ -53,6 +125,9 @@ class RuleBrief(BaseModel):
 
     rule_id: str
     query: str
+    # enter / exit / session / milestone。enter 与 exit 的 mode 都是 event, 不带
+    # 这个字段就分不出一条 rule 是把 task 推进去还是推出来。
+    direction: str = "enter"
     actions_desc: list[str] = Field(default_factory=list)
 
 
@@ -71,8 +146,18 @@ class TaskFullView(BaseModel):
     status: Literal["active", "paused"]
     paused_at: str | None = None
     created_at: str
+    # 只读: 模式此刻开着还是关着。内存派生, 不落库 —— 重启一律从 off 起 (§4.2)
+    runtime_state: Literal["off", "on"] = "off"
+    lifecycle: Literal["permanent", "temporary"] = "permanent"
+    expires_at: str | None = None
+    # 最后一次判定的结论摘要, 回答「我的规则现在为什么不触发」(§18.5)。
+    # None = 该 task 还没被状态机接管, 或接管后一次判定都没发生过。
+    last_decision: dict | None = None
     rule_briefs: list[RuleBrief] = Field(default_factory=list)
     cron_refs: list[CronRef] = Field(default_factory=list)
+    # 多条 rule 的 task 动作只存在这里 —— rule 侧的动作 flag 按设计不透传(从一条
+    # rule 单向覆盖会冲掉另一条), 所以那种 task 的 rule_briefs.actions_desc 是空的。
+    actions: TaskBoundaryActions
 
 
 class PendingOp(BaseModel):

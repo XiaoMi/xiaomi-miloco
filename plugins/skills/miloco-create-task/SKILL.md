@@ -205,35 +205,58 @@ Rule/Schedule/Record 是子组件存在性（Y/N）；Lifecycle 是 task 整体�
 - 语气词（一声/一下/就行）
 - 活动名（看书/做饭/洗澡）
 
+判出 temporary 时装 `task create --lifecycle temporary`（permanent 是默认值，不传）；temporary 另按 §CLI 命令表 装到期销毁 cron。
+
+temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性时刻）→ 同一个 ISO 一并传 `task create --expires-at`，与销毁 cron 的 `--at-iso`、record 的 `expires_at` 取同一个值。信号 3 达标完成没有时刻，不传。
+
 ---
 
 # 第二层 · 按取值展开子维度
 
 ## Rule=Y 时填 Rule
 
-### Rule.mode（event / state）
+### Rule.direction（enter / exit / session）
 
-**核心判据**：是否需要对"进入条件"和"离开条件"**双向响应**？
-- 是 → `state`
-- 否 → `event`（触发条件含持续时长用 `duration_seconds` 修饰，不改 mode）
+一条 rule 只有一个 `condition.query`，只能表达一个观测。direction 决定这个观测成立时如何映射到 task 的进 / 出：
+
+| direction | 观测成立时 | 动作槽 |
+|---|---|---|
+| `enter` | 把 task 推进「进行中」 | on_enter |
+| `exit` | 把 task 推出「进行中」 | on_exit |
+| `session` | 成立 = 进，不成立 = 出 | 进 → on_enter，出 → on_exit |
+
+名下没有 exit / session 规则的 task 不停留在「进行中」，每次 enter 都执行一次动作。
+
+**第 0 步**：进入和退出是不是同一个观测的有 / 无？
+
+| 判据 | 装配 |
+|---|---|
+| 是（人在 / 不在、手机拿着 / 放下、画面有人 / 无人）| 单条 rule，走第 1 步 |
+| 不是（进退是两个独立观测：V 手势开灯 / 挥手关灯、开门进 / 关门出）| 两条 rule 挂同一 task，进的 `--direction enter`，出的 `--direction exit` |
+
+判「不是」时**禁止**把退出观测写进 `on-exit-*`——session 的 on_exit 触发条件是进入观测消失，不是退出观测成立。两条的建立顺序：先 enter 后 exit（task 名下没有进路径时建 exit 会被拒）。
+
+**第 1 步**（第 0 步判「是」时走）：是否需要对"进入条件"和"离开条件"**双向响应**？
+- 是 → `session`
+- 否 → `enter`（触发条件含持续时长用 `duration_seconds` 修饰，不改 direction）
 
 按顺序判，命中即停：
 
-1. **Record.kind=duration（跨次累计 record）** → `state`（on_enter 写 duration-start + on_exit 写 duration-end）
-2. **人身安全/紧急异常** → `event`
-3. **显式 state 信号** → `state`
-   - **双向状态切换**（用户明示进入做 X，退出做 Y）
+1. **Record.kind=duration（跨次累计 record）** → `session`（on_enter 写 duration-start + on_exit 写 duration-end）
+2. **人身安全/紧急异常** → `enter`
+3. **显式 session 信号** → `session`
+   - **同一观测的双向状态切换**（进入做 X、退出做 Y，进退是同一条件的有 / 无）
    - **激活/启动持续设备状态**（开灯/开空调/拉帘/播放音乐 等"开 X"动作）→ 默认补 `on_exit` 复位
    - **开始/进入持续行为态**（"开始 X" / "进入 X" 语义，仅响应入态）→ `duration_seconds` 取稳定窗（按推荐表）+ 长 `exit_debounce_seconds`（按推荐表）+ `on_exit` 留空
-4. **到达/进入类瞬时事件**（到家/到门/进门/进 X / 回家 等含强常识默认） → `state` + 长 `exit_debounce_seconds`（按推荐表）+ `on_exit` 留空
+4. **到达/进入类瞬时事件**（到家/到门/进门/进 X / 回家 等含强常识默认） → `session` + 长 `exit_debounce_seconds`（按推荐表）+ `on_exit` 留空
 5. **通知/播报类一次性动作 + 陌生主体瞬时存在态触发**（陌生人 / 任何人 来了 / 出现 等无强常识默认）**+ 无明示触发频率** → **反问 A/B**（详见 §事件触发频率反问）
-   - A 每次发生即响 → `event`
-   - B 间隔一段时间才算 → `state` + 长 `exit_debounce_seconds`（按推荐表）+ `on_exit` 留空
-6. **其他一次性判断** → `event`
+   - A 每次发生即响 → `enter`
+   - B 间隔一段时间才算 → `session` + 长 `exit_debounce_seconds`（按推荐表）+ `on_exit` 留空
+6. **其他一次性判断** → `enter`
    - **瞬时动作**（< 10s 完成的可观测动作 / 计数型 N 个 N 次离散动作 / 喝水 / 咳嗽 / 按门铃 / 仰卧起坐）
    - **关设备**（关灯 / 关空调 / 关窗帘 等单向"关 X"动作；含"X 无人后关 X"持续条件触发）
    - **持续行为 + 一次性通知**（写作业的时候告诉我 / 久坐 N 分钟提醒 / 看电视 N 分钟提醒 等；行为持续但响应是一次性 desc 通知）
-   - **触发条件含持续时长** → 用 `duration_seconds` 表达，不改 mode
+   - **触发条件含持续时长** → 用 `duration_seconds` 表达，不改 direction
 
 ### Rule.condition.query
 
@@ -252,7 +275,7 @@ Rule/Schedule/Record 是子组件存在性（Y/N）；Lifecycle 是 task 整体�
 | 命题语义 | 主语取值 |
 |---|---|
 | 人在做某事（具体姓名 / 家庭关系称谓 / 类别词如宝宝/老人 / 第一人称）| 跑 `miloco-cli person list` 解析（见下）|
-| 多个具体人物明示列举（"妈妈和爸爸" 等）| 拆 N 条 rule（同 task），每条主语 = 一位 role/name |
+| 多个具体人物明示列举（"妈妈和爸爸" 等）| 见下方「多主语拆分」 |
 | 抽象集合（家人 / 家庭成员 / 家里人 / 所有家人 / 全家）| `已注册成员` + 触发装配提示。**禁展开**为当前 person list 的具体成员 |
 | 有人 / 任何人 / 谁 | `任何人` + 触发装配提示 |
 | 陌生人 / 外人 / 非家人 | `陌生人`（命题反例排除必含"不含家庭成员"）|
@@ -265,6 +288,14 @@ Rule/Schedule/Record 是子组件存在性（Y/N）；Lifecycle 是 task 整体�
 - 1 命中 → role 非空填 role；role 为空填 name（第一人称额外触发装配提示）
 - ≥2 命中 → 反问 A. 选哪位（第一人称表述为"选哪位是自己"）/ B. 退化兜底
 
+**多主语拆分**（一条 query 只能写一个主语）：按本命题的 §Rule.direction 取值分支。
+
+| direction | 装配 |
+|---|---|
+| `session` | **拆 N 个 task**（session 必须独占 task），各自独立走全套判据 |
+| `enter` · N 人动作相同 | N 条 enter rule 挂**同一个 task**，每条主语 = 一位 role/name；动作装在 task 上（见 §动作装在哪）|
+| `enter` · N 人动作不同 | **拆 N 个 task**（一个 task 只有一份 on_enter 动作）|
+
 **动作类命题**（含动作姿态的 query）必含三段。装 `--condition` 前先按三段拆解（`- 动作姿态：...` / `- 关键物体：...` / `- 反例排除：...`），对每个具象词标注来源「用户原话 / profile 习惯描述 / 视觉常识」，profile 习惯描述 → 删词。再按结构模板机械串接三段为 query 字符串装入 `--condition`：`<主语><动作姿态><关键物体>；不含<反例1>，不含<反例2>[...]`。**串接规则**：三段所有具象词必须 1:1 保留到 query 字符串，禁止简化、抽象化或省略下位词；串接后 query 字符串必须包含拆解出的所有具象词字面字符串。query 字符串必含分号 + ≥ 2 个「不含」前缀，缺任一视为未完成；关键物体段使用近邻易混结构时缺下位词或上位类别视为未完成：
 **颗粒度总则**：每段提供视觉模型独立判别正例的最低必要信息，避免过粗（单动词 / 抽象集合）和过细（精确角度 / 品牌 / 型号）。
 
@@ -274,11 +305,12 @@ Rule/Schedule/Record 是子组件存在性（Y/N）；Lifecycle 是 task 整体�
 
 ### Rule.action
 
-每方向单独判（state mode 下 ENTERED / EXITED 独立选）：
+每方向单独判（session 下 ENTERED / EXITED 独立选）：
 
 | 动作性质 | 装配 | fire 时谁执行 |
 |---|---|---|
 | 能 100% 写死（开关固定设备、播固定文本（音箱）） | action JSON | rule engine 直接执行 |
+| 启动已有米家场景（用户原话是场景名或组合模式名） | action JSON（`iid` 固定 `scene`） | rule engine 直接触发 |
 | 需按运行时状态/上下文决定 | desc 文案（业务意图） | fire-agent 独立 turn 推理执行 |
 
 按顺序命中即停：
@@ -289,7 +321,10 @@ Rule/Schedule/Record 是子组件存在性（Y/N）；Lifecycle 是 task 整体�
    - duration on_enter 用「开始计时」/「记录起点」/「记录计时起点」；on_exit 用「结束计时」/「记录终点」
 2. 激活型动作的 on_exit + 用户没明确说退出动作 → desc（默认）
 3. 动作内容要按上下文决策 → desc
-4. 动作是固定调一个 handler（开灯/调温/拉帘 等设备控制类）→ action JSON
+4. 动作是启动已有场景 / 组合模式（场景名，或"回家 / 观影 / 离家模式"这类一句话覆盖多设备的说法）→ 跑 `scene list` 找同名：命中 → action JSON（scene 形态，见 §动作场景）；0 命中 → 往下走第 5 条
+5. 动作是固定调一个 handler（开灯/调温/拉帘 等设备控制类）→ action JSON
+
+**同一个槽只能全 action JSON 或全 desc。** 一个方向做多件事（触发场景 + 播报）→ 全部写成 action JSON（`--action` 重复传）；其中任一件需按上下文决策 → 整槽退化成 desc。
 
 通知类默认 desc；用户原话含引号台词且通道音箱 → action JSON（见例 10）。达标触发的通知按 §达标通知机制 三选一定位置。
 
@@ -320,12 +355,12 @@ on_exit 留空条件（不填任何 flag）：
 
 | 业务语义 | 触发字段 | 通知装配位置 |
 |---|---|---|
-| 连续观测达标 | `rule.duration_seconds` | `action-desc`（event）/ `on-enter-desc`（state） |
+| 连续观测达标 | `rule.duration_seconds` | `action-desc`（enter）/ `on-enter-desc`（session） |
 | 跨次累计达标 | `record.target_minutes`（duration kind） | `on-target-desc`（文案为抽象业务语义） |
 | 计数达标 | `record.target`（progress kind） | `action-desc` 末段含达标判断 |
 | 跨次累计达标 + 退出复提醒 | 用户原话明示每次退出复提醒语义 | `on-exit-desc` 附加条件通知 |
 
-state + duration record 三 desc 分工：
+session + duration record 三 desc 分工：
 - `on-enter-desc` 仅放计时起点动词短语
 - `on-exit-desc` 仅放计时终点动词短语；用户原话明示每次退出复提醒语义时附加条件通知（按 §Rule.action 通知 desc 句式）
 - `on-target-desc` 仅放业务通知文案
@@ -334,7 +369,7 @@ state + duration record 三 desc 分工：
 
 ### Rule.duration_seconds
 
-**含义**：触发条件需要持续 N 秒才算成立。mode 无关修饰符（event / state 都可配）。
+**含义**：触发条件需要持续 N 秒才算成立。direction 无关修饰符（三个方向都可配）。
 
 **单位**：CLI `--duration-seconds` 收**秒整数**。用户原话 N 分钟 → 装 `N×60`；N 小时 → 装 `N×3600`。同任务内 `record.target_minutes` 字段按分钟传，两者不混用。
 
@@ -368,18 +403,18 @@ state + duration record 三 desc 分工：
 
 ### Rule.exit_debounce_seconds
 
-state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duration_seconds 已提供抖动保护）。
+`session` 防边沿抖动 / 防重复触发；`enter` 与 `exit` 不配（duration_seconds 已提供抖动保护）。
 
-**何时必配**（state mode）：
+**何时必配**（session）：
 
 - on_exit 装了动作（desc 或 action JSON）
 - 瞬时进入事件（到达/进入/到家 等）
 
 | 场景 | 推荐 |
 |---|---|
-| state 双向边沿去重（默认） | 60 |
-| state + duration record · 离散使用型（玩手机/看电视/看书 等） | 60 |
-| state + duration record · 间断持续型（健身/做饭/打游戏/学习 等） | 180 |
+| session 双向边沿去重（默认） | 60 |
+| session + duration record · 离散使用型（玩手机/看电视/看书 等） | 60 |
+| session + duration record · 间断持续型（健身/做饭/打游戏/学习 等） | 180 |
 | 瞬时事件防重复 / 持续行为入态 · 长窗（默认） | 1800 |
 | 瞬时事件防重复 / 持续行为入态 · 长窗（用户指定 N 分钟） | N × 60（封顶 3600） |
 
@@ -480,7 +515,7 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 
 ### 事件触发频率（短窗 / 长窗）
 
-由 Rule.mode 判据第 5 条触发。按用户原话信号判：
+由 Rule.direction 判据第 5 条触发。按用户原话信号判：
 
 - 明示**即时**（"每次 / 一 X 就"等强调每发生一次都响）→ 短窗 60s，不反问
 - 明示**场景窗口**（暗示间隔一段时间后才算，如"下班/外出/出门后"）→ 长 `exit_debounce_seconds`（按推荐表），不反问
@@ -492,7 +527,7 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 > - **A. 每次发生即触发**（短时间内重复发生也响）
 > - **B. 间隔一段时间后才算一次**（默认 30 分钟以上）
 
-映射：A → `event`；B → `state` + 长 `exit_debounce_seconds`（按推荐表）+ `on_exit` 留空。
+映射：A → `enter`；B → `session` + 长 `exit_debounce_seconds`（按推荐表）+ `on_exit` 留空。
 
 
 ### 感知视角
@@ -533,7 +568,7 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 1. 已锁 `source_did[]`（非空）→ 直接当 `--source`
 2. N=0 → 反问 A. 开启摄像头感知再建 / B. 取消
 3. N≥1 → 按用户原话二分：
-   - 未指定房间 / 摄像头（含"家里" / "全屋"）→ 不传 `--source` + 触发装配提示（mode 无关，state 持续姿态触发不例外）
+   - 未指定房间 / 摄像头（含"家里" / "全屋"）→ 不传 `--source` + 触发装配提示（direction 无关，session 持续姿态触发不例外）
    - 指定房间 / 摄像头名 → 在 N 内按 `name` / `room_name` 模糊匹配：
      - 命中 1 → 用该 DID
      - 命中 ≥2 → 全部传（`--source <did1> --source <did2> ...`）+ 触发装配提示
@@ -544,6 +579,19 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 优先看 system context `## 设备目录` 段。缺失或未覆盖 → `device list --room` + `device spec <did>` 拿 iid。iid 格式为 `prop.<siid>.<piid>`（属性直控）或 `action.<siid>.<aiid>`（method call，如 TTS），从 `device spec` 输出行首列直接复制真实数字。
 
 **`cooldown_minutes` 取值**（`idempotent:false` 必配）：紧急报警 1-5 / 日常提醒 5-30 / 欢迎播报 30-60；类别内下限=低频触发，上限=高频重复触发。
+
+### 动作场景（`--action` JSON 的 scene 形态）
+
+场景不在 `## 设备目录` 里。跑 `miloco-cli scene list --pretty` 拿 `scene_name` → `scene_id`：
+
+- 命中 1 → 用该 `scene_id`
+- 命中 ≥2 → 列出让用户选
+- 命中 0 → 按具体设备动作拆（回 §Rule.action 判据第 5 条）
+
+形态：`{"did":"<scene_id>","iid":"scene","idempotent":false,"cooldown_minutes":<N>}`
+
+- `did` 放 `scene_id`；`iid` 是字面量 `scene`，不是 `prop.` / `action.`
+- `idempotent` 必须 `false`；`cooldown_minutes` 必须 ≥ 1，取值同 §动作设备
 
 **目标设备消歧**（TTS/语音播报/单点提示音/警报音/局部光效）+ 候选 ≥ 2：
 
@@ -570,26 +618,49 @@ state mode 防边沿抖动 / 防重复触发；event mode 一般不配（duratio
 
 | 维度 | CLI |
 |---|---|
-| 创建 task | `miloco-cli task create --task-id <id> --description "<描述>"` |
+| 创建 task | `miloco-cli task create --task-id <id> --description "<描述>"`（permanent 是默认值不传；temporary 加 `--lifecycle temporary`，到期时刻确定再加 `--expires-at <ISO>`）|
 | Rule=Y | `miloco-cli rule create --task-id <id> <rule-flags>` |
 | Schedule=Y | `miloco-cli cron add --task-id <id> --kind cron --name "[<id>] <描述>" --cron-expr "<expr>" --tz "<家庭时区>" --message "<业务意图>"`（backend 强制 `dispatch_owner=internal`，经 `cron.task_id` FK 直接绑 task，无需 link；cron 类必带 tz，见 §Schedule.时区） |
 | Record=Y | `miloco-cli task record init <id> --kind <progress/duration/event> --content '<JSON>'` |
 | Lifecycle=temporary | `miloco-cli cron add --task-id <id> --kind at --at-iso <expires_at> --name "[<id>] 到期销毁" --message "到期销毁 task <id>" --max-delay 0`（`<expires_at>` 由 `miloco-cli time-compute --anchor <kind>` 直出裸 ISO，`--max-delay 0` 让 termination 无限补跑） |
+
+## 动作装在哪
+
+按同一个槽有几条 rule 想写选装法：
+
+| task 形态 | 装法 |
+|---|---|
+| 单条 rule（enter / session）| rule 侧动作 flag |
+| 一条 enter + 一条 exit | 各自 rule 侧动作 flag；出方向不做事 → 该条不传动作 flag |
+| 同方向 ≥2 条 | `miloco-cli task set-actions`，rule 侧不传动作 flag |
+
+`task set-actions <task_id>`：
+
+| 槽 | 设备直控 | Agent 文案 |
+|---|---|---|
+| 进入 | `--on-enter-action '<JSON>'`（可重复）| `--on-enter-desc "<desc>"` |
+| 退出 | `--on-exit-action '<JSON>'` | `--on-exit-desc "<desc>"` |
+
+同槽 action 与 desc 互斥；清空用 `--clear <槽名>`。达标动作按 §达标通知机制 装。
+
+同方向 ≥2 条的装配顺序：`task create` → `task set-actions` → 逐条 `rule create`。
 
 ## Rule flag 映射
 
 | 维度取值 | flag |
 |---|---|
 | name（必填） | `--name "[<task_id>] <场景描述>"` |
-| `mode=event` | `--mode event` |
-| `mode=state` | `--mode state` |
+| `direction=enter` | `--direction enter` |
+| `direction=exit` | `--direction exit` |
+| `direction=session` | `--direction session` |
 | `condition.query` | `--condition "<query>"` |
-| event + action JSON | `--action '<JSON>'` |
-| event + desc | `--action-desc "<desc>"` |
-| state + on_enter action JSON | `--on-enter-action '<JSON>'` |
-| state + on_enter desc | `--on-enter-desc "<desc>"` |
-| state + on_exit action JSON | `--on-exit-action '<JSON>'` |
-| state + on_exit desc | `--on-exit-desc "<desc>"` |
+| enter / exit + action JSON | `--action '<JSON>'`（落哪个槽由 direction 定，不用 `--on-exit-*`）|
+| enter / exit + desc | `--action-desc "<desc>"` |
+| 动作装在 task 上 / 出方向不做事 | 不传动作 flag |
+| session + on_enter action JSON | `--on-enter-action '<JSON>'` |
+| session + on_enter desc | `--on-enter-desc "<desc>"` |
+| session + on_exit action JSON | `--on-exit-action '<JSON>'` |
+| session + on_exit desc | `--on-exit-desc "<desc>"` |
 | on_exit 留空 | 不传 on_exit flag |
 | `duration_seconds=N` | `--duration-seconds N` |
 | `exit_debounce_seconds=N` | `--exit-debounce-seconds N` |
@@ -632,11 +703,11 @@ cron / at / termination 均由 `miloco-cli cron add` 单步装配：`--task-id` 
 
 用户："家里有人摔倒就报警"
 
-推理：「摔倒」人身安全异常 → §Rule?=Y · §Rule.mode(人身安全)=event；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；「报警」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C)；§Rule.感知设备 N≥1 + 「家里」未指定房间 → 不传 `--source` + 触发装配提示
+推理：「摔倒」人身安全异常 → §Rule?=Y · §Rule.direction(人身安全)=enter；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；「报警」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C)；§Rule.感知设备 N≥1 + 「家里」未指定房间 → 不传 `--source` + 触发装配提示
 
 ```
 Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
-Rule.mode=event · action=desc
+Rule.direction=enter · action=desc
 通道反问 → A 音箱
 ```
 
@@ -644,7 +715,7 @@ Rule.mode=event · action=desc
 miloco-cli task create --task-id fall_alert --description "家里有人摔倒报警"
 miloco-cli rule create --task-id fall_alert \
   --name "[fall_alert] 摔倒报警" \
-  --mode event \
+  --direction enter \
   --condition "任何人身体突然失去平衡倒地，呈仰面/侧卧/俯卧姿态躺在地面；不含主动卧倒、躺床睡觉等休息姿态，不含做仰卧起坐、瑜伽下犬式/平板支撑等贴地运动" \
   --action-desc "使用音箱播报通知：有人摔倒了，立即报警"
 ```
@@ -653,18 +724,18 @@ miloco-cli rule create --task-id fall_alert \
 
 用户："起床后自动开窗帘"
 
-推理：「起床」人体可观测动作 → §Rule?=Y；「开窗帘」"开 X" 动作 → §Rule.mode(激活持续设备)=state · 默认补 on_exit 复位；现实事件触发 → §Schedule?=N；无累计/计数 → §Record?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；state 默认 → §Rule.exit_debounce_seconds=60；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
+推理：「起床」人体可观测动作 → §Rule?=Y；「开窗帘」"开 X" 动作 → §Rule.direction(激活持续设备)=session · 默认补 on_exit 复位；现实事件触发 → §Schedule?=N；无累计/计数 → §Record?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；session 默认 → §Rule.exit_debounce_seconds=60；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
 
 ```
 Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
-Rule.mode=state · 默认补 on_exit 复位 · exit_debounce_seconds=60
+Rule.direction=session · 默认补 on_exit 复位 · exit_debounce_seconds=60
 ```
 
 ```bash
 miloco-cli task create --task-id wakeup_curtain --description "起床开窗帘"
 miloco-cli rule create --task-id wakeup_curtain \
   --name "[wakeup_curtain] 起床开窗帘" \
-  --mode state \
+  --direction session \
   --condition "用户从卧床躺姿切换到坐起或离床站立姿态；不含翻身、伸懒腰等床上小动作，不含坐起喝水后躺回等短暂起身动作" \
   --exit-debounce-seconds 60 \
   --on-enter-action '{"did":"<窗帘 DID>","iid":"prop.<siid>.<piid>","value":true,"idempotent":true}' \
@@ -683,7 +754,7 @@ Rule?=N · Schedule?=Y(at) · Record?=N · Lifecycle=temporary
 
 ```bash
 AT_ISO=$(miloco-cli time-compute --anchor '{"kind":"tomorrow_at","time":"09:00:00"}')
-miloco-cli task create --task-id med_tomorrow_9am --description "明天 9 点提醒吃药"
+miloco-cli task create --task-id med_tomorrow_9am --description "明天 9 点提醒吃药" --lifecycle temporary --expires-at "$AT_ISO"
 miloco-cli cron add --task-id med_tomorrow_9am --kind at --at-iso "$AT_ISO" \
   --name "[med_tomorrow_9am] 吃药提醒" --message "提醒用户吃药"
 ```
@@ -692,21 +763,21 @@ miloco-cli cron add --task-id med_tomorrow_9am --kind at --at-iso "$AT_ISO" \
 
 用户："今天喝够 8 杯水提醒"
 
-推理：「喝水」人体可观测动作 → §Rule?=Y；「8 杯」计数达标 → §Record?=Y · §Record.kind=progress · target=8 · window=day；「今天」时间窗信号 → §Lifecycle(时间窗信号)=temporary · expires_at=今日 24:00；瞬时动作 + 计数型 → §Rule.mode(瞬时动作)=event；progress + target>0 → §Schedule?=Y(cron) · §Schedule.频率默认(progress+target>0 多时点) · N=min(8,6)=6 时点 · 无强场景均分 10-20；「提醒」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C)；句中无主体 → 主语=`用户` + 触发装配提示；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
+推理：「喝水」人体可观测动作 → §Rule?=Y；「8 杯」计数达标 → §Record?=Y · §Record.kind=progress · target=8 · window=day；「今天」时间窗信号 → §Lifecycle(时间窗信号)=temporary · expires_at=今日 24:00；瞬时动作 + 计数型 → §Rule.direction(瞬时动作)=enter；progress + target>0 → §Schedule?=Y(cron) · §Schedule.频率默认(progress+target>0 多时点) · N=min(8,6)=6 时点 · 无强场景均分 10-20；「提醒」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C)；句中无主体 → 主语=`用户` + 触发装配提示；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
 
 ```
 Rule?=Y · Schedule?=Y(cron×6 默认+装配提示) · Record?=Y · Lifecycle=temporary
-Rule.mode=event · Record.kind=progress · target=8 · window=day
+Rule.direction=enter · Record.kind=progress · target=8 · window=day
 通道反问 → B 手机
 ```
 
 ```bash
 EXPIRES_AT=$(miloco-cli time-compute --anchor '{"kind":"end_of_day"}')
-miloco-cli task create --task-id drink_8_today --description "今天喝够 8 杯水"
+miloco-cli task create --task-id drink_8_today --description "今天喝够 8 杯水" --lifecycle temporary --expires-at "$EXPIRES_AT"
 
 miloco-cli rule create --task-id drink_8_today \
   --name "[drink_8_today] 喝水计数" \
-  --mode event \
+  --direction enter \
   --condition "用户手持水杯/水瓶/茶杯/保温杯等饮品容器，杯口贴近嘴边并伴随仰头吞咽动作；不含手持牙刷/麦克风/纸盒/食物/餐盒等非饮品物品，不含举杯凑近鼻子闻、吹凉、展示等动作" \
   --action-desc "喝水次数加一；首次达标时使用手机推送通知：恭喜达标"
 
@@ -727,11 +798,11 @@ miloco-cli cron add --task-id drink_8_today --kind at --at-iso "$EXPIRES_AT" \
 
 用户："每天累计玩手机超 1 小时提醒"
 
-推理：「玩手机」人体可观测行为 → §Rule?=Y；「累计 1 小时」时长累计 → §Record?=Y · §Record.kind=duration · target_minutes=60；「每天累计 N 小时」→ §Schedule?=N；「每天」周期信号 → §Lifecycle(周期信号)=permanent · §Record.task_type=recurring · recurring_pattern={"window":"day"}；跨次累计 record(duration kind) → §Rule.mode(跨次累计 record)=state；看屏幕姿态稳定窗 → §Rule.duration_seconds=90；state + duration record 离散使用型 → §Rule.exit_debounce_seconds=60；「提醒」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C) · 跨次累计达标 → §达标通知机制 → on-target-desc；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
+推理：「玩手机」人体可观测行为 → §Rule?=Y；「累计 1 小时」时长累计 → §Record?=Y · §Record.kind=duration · target_minutes=60；「每天累计 N 小时」→ §Schedule?=N；「每天」周期信号 → §Lifecycle(周期信号)=permanent · §Record.task_type=recurring · recurring_pattern={"window":"day"}；跨次累计 record(duration kind) → §Rule.direction(跨次累计 record)=session；看屏幕姿态稳定窗 → §Rule.duration_seconds=90；session + duration record 离散使用型 → §Rule.exit_debounce_seconds=60；「提醒」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C) · 跨次累计达标 → §达标通知机制 → on-target-desc；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
 
 ```
 Rule?=Y · Schedule?=N · Record?=Y · Lifecycle=permanent
-Rule.mode=state · duration_seconds=90 · exit_debounce_seconds=60
+Rule.direction=session · duration_seconds=90 · exit_debounce_seconds=60
 通道反问 → B 手机
 Record.kind=duration · target_minutes=60 · task_type=recurring · window=day
 ```
@@ -743,7 +814,7 @@ miloco-cli task record init phone_time_daily \
   --content '{"target_minutes":60,"recurring_pattern":{"window":"day"}}'
 miloco-cli rule create --task-id phone_time_daily \
   --name "[phone_time_daily] 玩手机累计时长" \
-  --mode state \
+  --direction session \
   --condition "用户手持手机，屏幕亮起朝向脸部，目光低头注视屏幕；不含手持平板/书本/遥控器，不含手机贴耳通话" \
   --duration-seconds 90 \
   --exit-debounce-seconds 60 \
@@ -756,18 +827,18 @@ miloco-cli rule create --task-id phone_time_daily \
 
 用户："客厅没人就关灯"
 
-推理：「客厅没人」环境状态变化 → §Rule?=Y；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；"关 X" 动作 → §Rule.mode(关 X 动作)=event；持续条件「没人」需稳定观测 → §Rule.duration_seconds=300；「客厅」指定房间 → §Rule.感知设备 N 内按 room_name 匹配命中 1 台 → `--source <客厅摄像头 DID>`；「关灯」固定 handler → §Rule.action=action JSON
+推理：「客厅没人」环境状态变化 → §Rule?=Y；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；"关 X" 动作 → §Rule.direction(关 X 动作)=enter；持续条件「没人」需稳定观测 → §Rule.duration_seconds=300；「客厅」指定房间 → §Rule.感知设备 N 内按 room_name 匹配命中 1 台 → `--source <客厅摄像头 DID>`；「关灯」固定 handler → §Rule.action=action JSON
 
 ```
 Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
-Rule.mode=event · duration_seconds=300 · action=action JSON
+Rule.direction=enter · duration_seconds=300 · action=action JSON
 ```
 
 ```bash
 miloco-cli task create --task-id living_room_off --description "客厅没人关灯"
 miloco-cli rule create --task-id living_room_off \
   --name "[living_room_off] 客厅无人关灯" \
-  --mode event \
+  --direction enter \
   --condition "画面中无人" \
   --source <客厅摄像头 DID> \
   --duration-seconds 300 \
@@ -778,11 +849,11 @@ miloco-cli rule create --task-id living_room_off \
 
 用户："久坐 30 分钟提醒一下"
 
-推理：「坐」人体可观测姿态 → §Rule?=Y；「30 分钟」时长阈值 + 无跨次词 → §Record?=N · 单次连续 + 触发装配提示；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；持续行为 + 一次性通知 → §Rule.mode(持续行为+一次性通知)=event；30 分钟 → §Rule.duration_seconds=1800；「提醒」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C)；句中无主体 → 主语=`用户` + 触发装配提示；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
+推理：「坐」人体可观测姿态 → §Rule?=Y；「30 分钟」时长阈值 + 无跨次词 → §Record?=N · 单次连续 + 触发装配提示；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；持续行为 + 一次性通知 → §Rule.direction(持续行为+一次性通知)=enter；30 分钟 → §Rule.duration_seconds=1800；「提醒」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C)；句中无主体 → 主语=`用户` + 触发装配提示；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
 
 ```
 Rule?=Y(触发装配提示) · Schedule?=N · Record?=N · Lifecycle=permanent
-Rule.mode=event · duration_seconds=1800 · action=desc
+Rule.direction=enter · duration_seconds=1800 · action=desc
 通道反问 → B 手机
 ```
 
@@ -790,7 +861,7 @@ Rule.mode=event · duration_seconds=1800 · action=desc
 miloco-cli task create --task-id sit_30min --description "久坐 30 分钟提醒"
 miloco-cli rule create --task-id sit_30min \
   --name "[sit_30min] 久坐 30 分钟提醒" \
-  --mode event \
+  --direction enter \
   --condition "用户臀部接触沙发/座椅，腰背靠近椅背或半弯曲，保持坐姿；不含蹲在地面双膝弯曲但臀部未接触座面，不含半靠扶手/桌沿臀部悬空的站姿，不含跪地或跪坐臀部触脚跟未接触座面" \
   --duration-seconds 1800 \
   --action-desc "使用手机推送通知：已久坐 30 分钟，建议起身活动"
@@ -800,11 +871,11 @@ miloco-cli rule create --task-id sit_30min \
 
 用户："妈妈回家就播放欢迎曲"
 
-推理：「妈妈」具体人物 → person list 1 命中 → role/name；「回家」到达/进入类瞬时事件 → §Rule?=Y · §Rule.mode(到达/进入瞬时事件)=state · §Rule.exit_debounce_seconds=1800 · on_exit 留空；「欢迎曲」一次性 TTS → §Record?=N · §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；玄关无明示视角 → §感知视角 常识默认 + 装配提示；「玄关」隐含房间 → §Rule.感知设备 N 内按 room_name 匹配命中 1 台 → `--source <玄关摄像头 DID>`
+推理：「妈妈」具体人物 → person list 1 命中 → role/name；「回家」到达/进入类瞬时事件 → §Rule?=Y · §Rule.direction(到达/进入瞬时事件)=session · §Rule.exit_debounce_seconds=1800 · on_exit 留空；「欢迎曲」一次性 TTS → §Record?=N · §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；玄关无明示视角 → §感知视角 常识默认 + 装配提示；「玄关」隐含房间 → §Rule.感知设备 N 内按 room_name 匹配命中 1 台 → `--source <玄关摄像头 DID>`
 
 ```
 Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
-Rule.mode=state（到达事件）· on_exit 留空 · exit_debounce_seconds=1800
+Rule.direction=session（到达事件）· on_exit 留空 · exit_debounce_seconds=1800
 命题主语="妈妈"（跑 person list 唯一命中）
 感知视角：玄关/门口走 agent 常识默认 + 装配提示
 ```
@@ -813,7 +884,7 @@ Rule.mode=state（到达事件）· on_exit 留空 · exit_debounce_seconds=1800
 miloco-cli task create --task-id mom_arrival --description "妈妈回家欢迎播报"
 miloco-cli rule create --task-id mom_arrival \
   --name "[mom_arrival] 妈妈回家欢迎" \
-  --mode state \
+  --direction session \
   --condition "妈妈伴随开门动作从户外走入玄关画面，正面或侧面对镜头；不含路过门口但未开门走入的短暂停留，不含其他家庭成员或来访客人进门" \
   --source <玄关摄像头 DID> \
   --exit-debounce-seconds 1800 \
@@ -824,11 +895,11 @@ miloco-cli rule create --task-id mom_arrival \
 
 用户："提醒我每天喝 8 杯水"
 
-推理：「我」第一人称 → person list 1 命中 → role 非空填 role · 触发装配提示；「喝水」人体可观测动作 → §Rule?=Y；「8 杯」计数达标 → §Record?=Y · §Record.kind=progress · target=8 · window=day；「每天」周期信号 → §Lifecycle(周期信号)=permanent · recurring_pattern={"window":"day"}；瞬时动作 + 计数型 → §Rule.mode(瞬时动作)=event；progress+target>0 → §Schedule?=Y(cron) · §Schedule.频率默认(progress+target>0 多时点) · N=min(8,6)=6 时点 · 无强场景均分 10-20；「提醒」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C)；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
+推理：「我」第一人称 → person list 1 命中 → role 非空填 role · 触发装配提示；「喝水」人体可观测动作 → §Rule?=Y；「8 杯」计数达标 → §Record?=Y · §Record.kind=progress · target=8 · window=day；「每天」周期信号 → §Lifecycle(周期信号)=permanent · recurring_pattern={"window":"day"}；瞬时动作 + 计数型 → §Rule.direction(瞬时动作)=enter；progress+target>0 → §Schedule?=Y(cron) · §Schedule.频率默认(progress+target>0 多时点) · N=min(8,6)=6 时点 · 无强场景均分 10-20；「提醒」通知类 → §Rule.action=desc · §通道反问 触发(必反问 A/B/C)；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
 
 ```
 Rule?=Y · Schedule?=Y(cron×6 默认+装配提示) · Record?=Y · Lifecycle=permanent
-Rule.mode=event · 命题主语=<当前用户 role>（"我" → 跑 person list 1 命中 → role + 装配提示；此例假设命中 role=妈妈）· Record.kind=progress · target=8 · window=day · recurring_pattern={"window":"day"}
+Rule.direction=enter · 命题主语=<当前用户 role>（"我" → 跑 person list 1 命中 → role + 装配提示；此例假设命中 role=妈妈）· Record.kind=progress · target=8 · window=day · recurring_pattern={"window":"day"}
 通道反问 → B 手机
 ```
 
@@ -837,7 +908,7 @@ miloco-cli task create --task-id drink_8_daily --description "妈妈每天喝 8 
 
 miloco-cli rule create --task-id drink_8_daily \
   --name "[drink_8_daily] 喝水计数" \
-  --mode event \
+  --direction enter \
   --condition "妈妈手持水杯/水瓶/茶杯/保温杯等饮品容器，杯口贴近嘴边并伴随仰头吞咽动作；不含手持牙刷/麦克风/纸盒/食物/餐盒等非饮品物品，不含举杯凑近鼻子闻、吹凉、展示等动作" \
   --action-desc "喝水次数加一；首次达标时使用手机推送通知：恭喜达标"
 
@@ -855,19 +926,72 @@ miloco-cli cron add --task-id drink_8_daily --kind cron \
 
 用户："家里来陌生人就用音箱说'请注意，有陌生人进入'"
 
-推理：「陌生人」瞬时存在态触发 → §Rule?=Y；触发本属 §Rule.mode 判据第 5 条覆盖范围（陌生存在态+反问 A/B），但「进入」+「就」明示每次发生即响 → §事件触发频率(明示即时) → 跳过反问 → §Rule.mode=event；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；主语=陌生人（存在态命题，反例排除必含"不含家庭成员"）；「家里」全屋无具体摄像头/房间词 → §感知视角(路径 3 · 无单一摄像头对象，反问无对象) → 退化为存在态命题；用户原话含引号台词「请注意，有陌生人进入」→ §Rule.action=action JSON（TTS 类：`iid` 走 `action.<siid>.<aiid>` 从 device spec 输出行首列复制，`params` 按 spec in_params 列填数组，`idempotent:false`，`cooldown_minutes=5`（紧急报警上限，陌生人识别高频重复））；音箱候选 ≥ 2 且无房间词 → 默认装第一候选 + 触发装配提示；§Rule.感知设备 N≥1 + 「家里」未指定房间 → 不传 `--source` + 触发装配提示
+推理：「陌生人」瞬时存在态触发 → §Rule?=Y；触发本属 §Rule.direction 判据第 5 条覆盖范围（陌生存在态+反问 A/B），但「进入」+「就」明示每次发生即响 → §事件触发频率(明示即时) → 跳过反问 → §Rule.direction=enter；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；主语=陌生人（存在态命题，反例排除必含"不含家庭成员"）；「家里」全屋无具体摄像头/房间词 → §感知视角(路径 3 · 无单一摄像头对象，反问无对象) → 退化为存在态命题；用户原话含引号台词「请注意，有陌生人进入」→ §Rule.action=action JSON（TTS 类：`iid` 走 `action.<siid>.<aiid>` 从 device spec 输出行首列复制，`params` 按 spec in_params 列填数组，`idempotent:false`，`cooldown_minutes=5`（紧急报警上限，陌生人识别高频重复））；音箱候选 ≥ 2 且无房间词 → 默认装第一候选 + 触发装配提示；§Rule.感知设备 N≥1 + 「家里」未指定房间 → 不传 `--source` + 触发装配提示
 
 ```
 Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
-Rule.mode=event · action=action JSON（TTS 类）· 命题主语=陌生人
+Rule.direction=enter · action=action JSON（TTS 类）· 命题主语=陌生人
 ```
 
 ```bash
 miloco-cli task create --task-id stranger_alert --description "陌生人进入提醒"
 miloco-cli rule create --task-id stranger_alert \
   --name "[stranger_alert] 陌生人进入" \
-  --mode event \
+  --direction enter \
   --condition "画面中出现非家庭成员的人身影；不含家庭成员，不含快递员/物业人员等短暂停留在门外未入户的访客" \
   --action '{"did":"<默认音箱 DID>","iid":"action.<siid>.<aiid>","params":["请注意，有陌生人进入"],"idempotent":false,"cooldown_minutes":5}'
+```
+
+### 例 11
+
+用户："我做 V 手势就开客厅灯，挥手就关"
+
+推理：「V 手势」「挥手」人体可观测动作 → §Rule?=Y；进是 V 手势、出是挥手，**两个独立观测** → §Rule.direction 第 0 步判「不是」→ 两条 rule 挂同一 task，进的 enter、出的 exit；「我」第一人称 → person list 1 命中 → role + 触发装配提示；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；「开灯」「关灯」固定 handler → §Rule.action=action JSON；一条 enter + 一条 exit → §动作装在哪 = 各自 rule 侧动作 flag；「客厅」指定房间 → §Rule.感知设备 N 内按 room_name 匹配命中 1 台 → `--source <客厅摄像头 DID>`
+
+```
+Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
+Rule.direction 第 0 步=不是同一观测 → enter + exit 两条同 task
+命题主语=<当前用户 role>（"我" → 跑 person list 1 命中 → role + 装配提示；此例假设命中 role=妈妈）
+动作装在哪=各自 rule 侧（进出各占一个槽）
+```
+
+```bash
+miloco-cli task create --task-id living_room_gesture_light --description "妈妈手势控制客厅灯"
+
+miloco-cli rule create --task-id living_room_gesture_light \
+  --name "[living_room_gesture_light] V 手势开灯" \
+  --direction enter \
+  --condition "妈妈单手举至肩部以上，食指与中指伸直分开成 V 形、其余手指收拢，手掌正面朝向镜头；不含五指全张开的挥手或击掌，不含单指指向或握拳" \
+  --source <客厅摄像头 DID> \
+  --action '{"did":"<客厅灯 DID>","iid":"prop.<siid>.<piid>","value":true,"idempotent":true}'
+
+miloco-cli rule create --task-id living_room_gesture_light \
+  --name "[living_room_gesture_light] 挥手关灯" \
+  --direction exit \
+  --condition "妈妈单手举至肩部以上，五指张开、手掌正面朝向镜头并左右摆动；不含食指与中指成 V 形的手势，不含举手静止不动或伸手拿取物品" \
+  --source <客厅摄像头 DID> \
+  --action '{"did":"<客厅灯 DID>","iid":"prop.<siid>.<piid>","value":false,"idempotent":true}'
+```
+
+### 例 12
+
+用户："比耶手势就开启观影模式，并用音箱说'观影模式已就绪'"
+
+推理：「比耶手势」人体可观测动作 → §Rule?=Y；只有进、无退出观测 → §Rule.direction 第 0 步判「是」→ 第 1 步判据 6（瞬时动作）=enter；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle(无信号兜底)=permanent；「观影模式」组合动作 → §Rule.action 判据第 4 条 → 跑 `scene list` 命中 1 → action JSON（scene 形态）；用户原话含引号台词「观影模式已就绪」且明示音箱 → §Rule.action=action JSON（TTS 类）· §通道反问 跳过（已明示通道）；同槽只能全 action JSON → 场景与播报两条都装 action JSON（`cooldown_minutes=5`：日常提醒下限，手势触发低频）；句中无明示主体 → 主语=`用户` + 触发装配提示；音箱候选 ≥ 2 且无房间词 → 默认装第一候选 + 触发装配提示；§Rule.感知设备 N≥1 + 未指定房间 → 不传 `--source` + 触发装配提示
+
+```
+Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
+Rule.direction=enter · action=action JSON ×2（scene + TTS，同槽不混 desc）· 命题主语=`用户`
+scene list 命中 1 → scene_id
+```
+
+```bash
+miloco-cli task create --task-id movie_mode_gesture --description "比耶手势开启观影模式并播报"
+miloco-cli rule create --task-id movie_mode_gesture \
+  --name "[movie_mode_gesture] 比耶开观影模式" \
+  --direction enter \
+  --condition "用户单手抬至胸部以上，食指与中指伸直并拢或微分、其余手指收拢，手背或手心朝向镜头；不含五指张开的挥手，不含单指指向屏幕或握拳" \
+  --action '{"did":"<观影模式 scene_id>","iid":"scene","idempotent":false,"cooldown_minutes":5}' \
+  --action '{"did":"<默认音箱 DID>","iid":"action.<siid>.<aiid>","params":["观影模式已就绪"],"idempotent":false,"cooldown_minutes":5}'
 ```
 

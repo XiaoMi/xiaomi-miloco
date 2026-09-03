@@ -15,13 +15,19 @@ from typing import TYPE_CHECKING
 
 from miloco.database.rule_repo import RuleRepo
 from miloco.database.task_repo import TaskNotFound, TaskRepo
-from miloco.rule.schema import SCENE_IID
+from miloco.middleware.exceptions import (
+    BusinessException,
+    ValidationException,
+)
+from miloco.rule.schema import SCENE_IID, RuleDirection
 from miloco.task.schema import (
     BackendSyncResult,
     BackendSyncRuleResult,
     CronRef,
     PendingOp,
     RuleBrief,
+    TaskActionsUpdateRequest,
+    TaskBoundaryActions,
     TaskCreateRequest,
     TaskDeleteBackendSynced,
     TaskDeleteResult,
@@ -35,6 +41,22 @@ if TYPE_CHECKING:
     from miloco.rule.service import RuleService
 
 logger = logging.getLogger(__name__)
+
+_META_COLUMN_NAMES = frozenset({"description", "lifecycle", "expires_at"})
+
+# 这些列传 null 是"清空"; 其余都是 NOT NULL, 传 null 会在 UPDATE 时撞约束。
+_NULLABLE_META = frozenset({"expires_at"})
+
+_ACTION_SLOT_NAMES = frozenset(
+    {
+        "on_enter_actions",
+        "on_enter_desc",
+        "on_exit_actions",
+        "on_exit_desc",
+        "on_target_actions",
+        "on_target_desc",
+    }
+)
 
 
 def _action_desc(a) -> str:
@@ -70,14 +92,91 @@ class TaskService:
 
     def create_task(self, req: TaskCreateRequest) -> None:
         """仅插 task 占位行; rule / cron 关联挂载由后续 endpoint 完成。"""
-        self.repo.create_task(task_id=req.task_id, description=req.description)
+        self.repo.create_task(
+            task_id=req.task_id,
+            description=req.description,
+            lifecycle=req.lifecycle,
+            expires_at=req.expires_at,
+        )
 
-    def update_description(self, task_id: str, req: TaskUpdateRequest) -> bool:
-        return self.repo.update_description(task_id, req.description)
+    def update_meta(self, task_id: str, req: TaskUpdateRequest) -> bool:
+        """partial 改 description / lifecycle / 到期时刻。
+
+        约束判的是**这次改动落地之后**的组合: permanent 带到期时刻是自相矛盾的
+        配置, 而两个字段可以分两次请求改 —— 只看本次传进来的那个, 「先把 lifecycle
+        改成 permanent」和「先把到期时刻塞给一个 permanent 的 task」都能穿过去。
+        """
+        updates = {
+            name: getattr(req, name)
+            for name in req.model_fields_set
+            if name in _META_COLUMN_NAMES
+        }
+        if not updates:
+            raise ValidationException("至少要传一个可改字段")
+        # 点名 NOT NULL 的列会漏掉下一列 —— 反过来白名单可清空的那些。
+        nulled = sorted(
+            k for k, v in updates.items() if v is None and k not in _NULLABLE_META
+        )
+        if nulled:
+            raise ValidationException(f"{', '.join(nulled)} 不能清空")
+
+        current = self.repo.get_full_view(task_id)
+        if current is None:
+            return False
+        after_lifecycle = updates.get("lifecycle", current.get("lifecycle"))
+        after_expiry = (
+            updates["expires_at"] if "expires_at" in updates else current.get("expires_at")
+        )
+        if after_expiry and after_lifecycle != "temporary":
+            raise ValidationException(
+                "expires_at 只能配 lifecycle=temporary: 改成 permanent 要同时清掉"
+                "到期时刻 (--clear-expires-at)"
+            )
+        return self.repo.update_meta(task_id, updates)
 
     def get_description(self, task_id: str) -> str | None:
         """按 task_id 取任务描述（住户日志「所属任务」用）。"""
         return self.repo.get_description(task_id)
+
+    def set_boundary_actions(self, task_id: str, req: TaskActionsUpdateRequest) -> bool:
+        """写 task 的边界动作槽 —— 多 rule 的 task 唯一能改动作的路径。
+
+        rule 侧的动作 flag 在多条 rule 争同一个槽时不透传 (从一条 rule 单向覆盖会
+        冲掉另一条的动作), 那种 task 只能从这里改。
+
+        写完必须重新配置: runner 手里的动作快照是内存副本, 不刷新的话改了不生效,
+        而 CLI 已经返回成功 —— 正是"静默不生效"那种最难查的形态。
+
+        配达标动作要先有 duration record + 阈值: 达标规则是这三样齐备的派生物, 缺
+        任何一样都只是配了个永远不响的通知。
+        """
+        slots = {
+            name: getattr(req, name)
+            for name in req.model_fields_set
+            if name in _ACTION_SLOT_NAMES
+        }
+        if not slots:
+            return self.repo.get_description(task_id) is not None
+        # 槽是最小写入单位: 同槽两列互斥, 而选槽时静态优先
+        # (runner._select_task_slot)。只写传进来的那一列, 用户把动作从设备直控改成
+        # Agent 文案时残留的静态列会继续赢 —— 请求返回成功、task get 显示新文案、
+        # 实际下发的还是旧的设备动作。补全放在服务层, CLI 与 HTTP 直连同受约束。
+        for prefix in ("on_enter", "on_exit", "on_target"):
+            actions_key, desc_key = f"{prefix}_actions", f"{prefix}_desc"
+            if actions_key in slots and desc_key not in slots:
+                slots[desc_key] = None
+            elif desc_key in slots and actions_key not in slots:
+                slots[actions_key] = None
+        if slots.get("on_target_actions") or slots.get("on_target_desc"):
+            if self._rule_service is None:
+                raise BusinessException("rule service 未就绪，无法校验达标配置")
+            self._rule_service.require_duration_target(task_id)
+            self._rule_service.require_exit_path_for_target(task_id)
+        if not self.repo.set_boundary_actions(task_id, **slots):
+            return False
+        if self._rule_service is not None:
+            self._rule_service.reconfigure_task(task_id)
+        return True
 
     def get_full_view(self, task_id: str) -> TaskFullView | None:
         raw = self.repo.get_full_view(task_id)
@@ -109,10 +208,16 @@ class TaskService:
     def _to_full_view(self, raw: dict) -> TaskFullView:
         rule_briefs: list[RuleBrief] = []
         for rule in self.rule_repo.list_by_task(raw["task_id"]):
+            # 达标规则由服务端维护, 不给用户看 —— 与 GET /rules 同口径。前端把每条
+            # rule_brief 渲染成可编辑卡片、保存走 PATCH, 而 PATCH 达标规则会被拒,
+            # 露出去等于在住户界面上摆一张存不下去的卡片。
+            if rule.resolved_direction is RuleDirection.MILESTONE:
+                continue
             rule_briefs.append(
                 RuleBrief(
                     rule_id=rule.id,
                     query=rule.condition.query,
+                    direction=rule.resolved_direction.value,
                     actions_desc=self._rule_actions_desc(rule),
                 )
             )
@@ -122,14 +227,52 @@ class TaskService:
             status=raw["status"],
             paused_at=raw["paused_at"],
             created_at=raw["created_at"],
+            lifecycle=raw.get("lifecycle") or "permanent",
+            # 用 [] 不用 .get(): 少 SELECT 一列时立刻 KeyError, 而 .get() 会把
+            # "这一列没查"静默变成"这个 task 没到期时刻", 列表接口整片回 null。
+            expires_at=raw["expires_at"],
+            runtime_state=self._runtime_state(raw["task_id"]),
+            last_decision=self._last_decision(raw["task_id"]),
             rule_briefs=rule_briefs,
             cron_refs=[CronRef(**c) for c in raw["cron_refs"]],
+            # 六个槽跟基础字段同一行取出来, 恒有 —— 之前写成可选的, 前端那句
+            # if (task.actions) 就成了永真判断, 拿不到"这个 task 没配动作"这件事。
+            actions=TaskBoundaryActions(**raw["actions"]),
         )
+
+    def _runtime_state(self, task_id: str) -> str:
+        """模式此刻开着还是关着。内存派生, 取不到就按 off (§4.2 重启也从 off 起)。
+
+        rule_service 未注入 (老库启动路径 / 单测) 或该 task 未被状态机接管时都是
+        off —— 未接管的 task 本来就没有运行态这个概念。
+        """
+        if self._rule_service is None:
+            return "off"
+        try:
+            sm = self._rule_service.runner_state_machine
+        except Exception:  # noqa: BLE001
+            return "off"
+        if sm is None:
+            return "off"
+        return sm.runtime_state(task_id).value
+
+    def _last_decision(self, task_id: str) -> dict | None:
+        if self._rule_service is None:
+            return None
+        try:
+            tracker = self._rule_service.decision_tracker
+        except Exception:  # noqa: BLE001
+            return None
+        return tracker.summary(task_id) if tracker is not None else None
 
     @staticmethod
     def _rule_actions_desc(rule) -> list[str]:
-        """rule 动作摘要 — event/state 模式下各按"动作 / 描述"路径各取一份。"""
-        if rule.mode.value == "event":
+        """rule 动作摘要 — 单方向的 rule 取"动作 / 描述", session 取两个槽。
+
+        按 direction 而不是 mode 分: exit 型的 mode 也是 event, 它的动作同样填在
+        ``actions`` / ``action_descriptions`` 上。
+        """
+        if rule.resolved_direction is not RuleDirection.SESSION:
             if rule.actions:
                 return [_action_desc(a) for a in rule.actions]
             return list(rule.action_descriptions)
@@ -159,13 +302,24 @@ class TaskService:
         if meta_result == "not_found":
             raise TaskNotFound(f"task {task_id!r} not found")
 
+        # **不写 rule.enabled** —— 它是用户意图, 不是 task.status 的镜像 (§19.9)。
+        # 覆写它会让「用户手动关掉的那一条」在 task 重新 enable 时被错误打开。
+        # 生效与否由派生量「有效启用」= rule.enabled AND task 未停用 决定, 刷新
+        # 它是 rule_service 的事 —— runner 内存里那份不刷, 停用就只写了 DB、规则
+        # 会继续触发到进程重启为止 (get_enabled_rule_ids 明确不走 DB)。
+        active = target_status == "active"
         rule_results: list[BackendSyncRuleResult] = []
+        refreshed = self._rule_service is not None
+        if refreshed:
+            try:
+                self._rule_service.apply_task_status(task_id, active)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("apply_task_status failed for task=%s: %s", task_id, e)
+                refreshed = False
         for rule in self.rule_repo.list_by_task(task_id):
-            rule.enabled = target_status == "active"
-            ok = self.rule_repo.update(rule)
             rule_results.append(
                 BackendSyncRuleResult(
-                    rule_id=rule.id, result="ok" if ok else "fail"
+                    rule_id=rule.id, result="ok" if refreshed else "fail"
                 )
             )
 
@@ -292,6 +446,11 @@ class TaskService:
                     logger.warning(
                         "remove_rule_from_runner failed for rid=%s: %s", rid, e
                     )
+            # task 维度的内存态与 rule 维度是两份, 清 rule 不连带清 task
+            try:
+                self._rule_service.forget_task(task_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("forget_task failed for task=%s: %s", task_id, e)
 
         # cron 联动: internal 调 runner.remove_job 清 in-memory job; external
         # 产 agent_pending 让 skill 处理 openclaw 侧。跟 router.delete_cron 对称。

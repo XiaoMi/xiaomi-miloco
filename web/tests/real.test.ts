@@ -27,6 +27,7 @@ import {
   realEventCropMeta,
   realUpdateRuleQuery,
   realUpdateTaskDescription,
+  realListTasks,
   _resetUsageStatsCache,
 } from "@/api/real";
 
@@ -623,5 +624,77 @@ describe("任务详情就地编辑 — 写接口契约", () => {
     await expect(realUpdateRuleQuery("nope", "x")).rejects.toThrow(
       "Rule 'nope' not found",
     );
+  });
+});
+
+describe("realListTasks — summary 契约", () => {
+  const summary = (over: Record<string, unknown> = {}) => ({
+    code: 0,
+    data: [
+      {
+        task_id: "focus",
+        description: "专注模式",
+        status: "active",
+        created_at: "2026-09-01T10:00:00+08:00",
+        runtime_state: "on",
+        rule_briefs: [
+          { rule_id: "r-in", query: "比出 V 手势", direction: "enter" },
+          { rule_id: "r-out", query: "挥手", direction: "exit" },
+        ],
+        actions: {
+          on_enter_desc: "推一条消息",
+          on_exit_desc: "推一条下线",
+          on_target_actions: [{ did: "d1", iid: "prop.2.1", value: true }],
+        },
+        record: null,
+        ...over,
+      },
+    ],
+  });
+
+  it("带上 direction / runtime_state / task 级动作", async () => {
+    mockFetchByUrl({ "/api/tasks/summary": summary() });
+
+    const [task] = await realListTasks();
+
+    expect(task.runtimeState).toBe("on");
+    expect(task.ruleBriefs.map((r) => r.direction)).toEqual(["enter", "exit"]);
+    expect(task.actions?.onEnterDesc).toBe("推一条消息");
+    expect(task.actions?.onExitDesc).toBe("推一条下线");
+    // *_actions 只留条数：住户界面不渲染设备指令的原始结构
+    expect(task.actions?.onTargetActionCount).toBe(1);
+    expect(task.actions?.onEnterActionCount).toBe(0);
+  });
+
+  it("旧 backend 不返这三样时给缺省值，不崩", async () => {
+    mockFetchByUrl({
+      "/api/tasks/summary": {
+        code: 0,
+        data: [
+          {
+            task_id: "old",
+            description: "旧任务",
+            status: "active",
+            created_at: "2026-09-01T10:00:00+08:00",
+            rule_briefs: [{ rule_id: "r1", query: "有人" }],
+            record: null,
+          },
+        ],
+      },
+    });
+
+    const [task] = await realListTasks();
+
+    expect(task.runtimeState).toBe("off");
+    expect(task.ruleBriefs[0].direction).toBe("enter");
+    // 归一成"六个槽全空"而不是 null —— 调用方据此隐藏整个动作分区
+    expect(task.actions).toEqual({
+      onEnterDesc: null,
+      onExitDesc: null,
+      onTargetDesc: null,
+      onEnterActionCount: 0,
+      onExitActionCount: 0,
+      onTargetActionCount: 0,
+    });
   });
 });

@@ -46,6 +46,23 @@ def _service() -> TaskRecordService:
     return TaskRecordService()
 
 
+def _reconcile_milestone(task_id: str) -> None:
+    """record 的 kind / 阈值变了 → 达标规则该不该有可能跟着变 (spec §6.4)。
+
+    record 写入已经成功并且是主要效果, 不能被这一步的失败带崩; 但也不能静默 ——
+    没同步上就意味着达标通知这一刻是错的。
+    """
+    from miloco.manager import get_manager
+
+    try:
+        get_manager().rule_service.notify_record_changed(task_id)
+    except Exception:
+        logger.exception(
+            "task %s 的 record 变更后同步达标规则失败, 达标通知可能与配置不一致",
+            task_id,
+        )
+
+
 # ── record CRUD ──────────────────────────────────────────────────────────────
 
 
@@ -72,6 +89,7 @@ async def init_record(
         raise ConflictException(f"record_already_exists: {e}") from e
     except RecordSchemaError as e:
         raise ValidationException(f"schema_invalid: {e}") from e
+    _reconcile_milestone(task_id)
     return NormalResponse(code=0, message="Record initialized", data=view)
 
 
@@ -101,6 +119,7 @@ async def patch_record(
         raise ResourceNotFoundException(f"no_active_record: {e}") from e
     except RecordSchemaError as e:
         raise ValidationException(f"schema_invalid: {e}") from e
+    _reconcile_milestone(task_id)
     return NormalResponse(code=0, message="Record patched", data=view)
 
 

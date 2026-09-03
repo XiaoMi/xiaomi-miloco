@@ -306,8 +306,9 @@ miloco-cli device list [--room <房间>] [--category <品类>]             # 查
 miloco-cli device spec <did>                                           # 查设备 spec
 
 # 规则管理
-miloco-cli rule create --task-id <id> --name "规则描述" --mode event --condition "..."
-miloco-cli rule list --pretty
+miloco-cli rule create --task-id <id> --name "规则描述" --direction enter --condition "..."
+miloco-cli rule list --pretty                                          # 不含服务端代建的达标规则
+miloco-cli task set-actions <task_id> --on-enter-desc "..." --on-exit-desc "..."
 miloco-cli rule logs --since 1h
 
 # 任务管理（task：生命周期；record：行为统计）

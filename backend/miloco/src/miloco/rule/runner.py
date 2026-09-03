@@ -44,19 +44,28 @@ from miloco.dispatch import dispatch_event
 from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
+from miloco.rule.record_source import RECORD_SOURCE_DID, RecordSource, record_ref_of
 from miloco.rule.schema import (
     SCENE_IID,
     Rule,
     RuleAction,
     RuleActionExecuteResult,
+    RuleDirection,
     RuleEvent,
     RuleExecuteResult,
     RuleLog,
     RuleLogKind,
-    RuleMode,
     RuleTriggerCallback,
     TriggerOutcome,
     parse_device_iid,
+)
+from miloco.task.state_machine import (
+    ActionSlot,
+    SignalKind,
+    TaskSignal,
+    TaskStateMachine,
+    TransitionOutcome,
+    slot_for_edge,
 )
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
@@ -161,6 +170,76 @@ _FIRE_PREAMBLE_WITH_RECORD = """**处理流程**：（按时间序 1→2→3 执
 辅助工具：派生量历史 / 跨窗口查询用 compute <task_id> [--window all|day|week|month] [--date YYYY-MM-DD]；所有 CLI 响应自带 derived 字段直接读，禁止心算。"""
 
 
+# _select_task_slot 的第三态: None 已经表示"空槽", 需要另一个值表示"没接管"。
+_NO_TASK_ACTIONS: object = object()
+
+# 状态机判定为"该 fire"的结论。其余 (已在态内 / 被对侧条件拦住 / 不在会话中)
+# 都不 fire。
+_FIRING_OUTCOMES = frozenset(
+    {
+        TransitionOutcome.ENTERED,
+        TransitionOutcome.EXITED,
+        TransitionOutcome.EVENT_FIRED,
+        TransitionOutcome.MILESTONE_FIRED,
+    }
+)
+
+
+_EVENT_TO_SIGNAL_KIND = {
+    RuleEvent.ENTERED: SignalKind.ENTERED,
+    RuleEvent.EXITED: SignalKind.EXITED,
+}
+
+
+def _slot_for(rule: Rule, event: RuleEvent) -> ActionSlot | None:
+    """本层唯一的方向映射入口 —— 既定信号的意图, 也定动作取哪个槽。
+
+    两者必须同源: 分成两处算就会在方向改动后短暂分叉 (状态机按旧方向判状态、
+    动作按新方向取槽)。达标不是进出边沿, 直接对应达标槽。
+    """
+    if event is RuleEvent.TARGET_FIRED:
+        return ActionSlot.ON_TARGET
+    kind = _EVENT_TO_SIGNAL_KIND.get(event)
+    if kind is None:
+        return None
+    return slot_for_edge(rule.resolved_direction.value, kind)
+
+
+def _edge_timestamp(slot: ActionSlot | None, edge_at: str) -> dict[str, str]:
+    """边沿发生的墙上时刻 → agent 认得的键名。键名跟着槽走, 不跟着边沿的方向走。
+
+    ``_FIRE_PREAMBLE_WITH_RECORD`` 第 2 步按键名分派 CLI: 进入槽是 session 起点、
+    退出槽是 session 终点。exit 型 rule 的"条件刚成立"走的是 ENTERED 边沿, 按边沿
+    给键名就会塞成起点 —— agent 照着把刚该结束的计时段又开一遍, 而 session-end
+    永远等不到它那一行。达标不是 session 边界, 一个都不给。
+    """
+    if slot is ActionSlot.ON_ENTER:
+        return {"actual_started_at": edge_at}
+    if slot is ActionSlot.ON_EXIT:
+        return {"actual_exited_at": edge_at}
+    return {}
+
+
+def _is_milestone(rule: Rule) -> bool:
+    """这条 rule 是不是达标型。走 ``_slot_for`` 而不是自己判方向, 保持单一映射点。"""
+    return _slot_for(rule, RuleEvent.ENTERED) is ActionSlot.ON_TARGET
+
+
+def _has_any_action(actions: dict) -> bool:
+    """六个槽里有没有任何一个非空。全空 = 没配动作 / 还没迁移, 该回退到 rule。"""
+    return any(
+        actions.get(k)
+        for k in (
+            "on_enter_actions",
+            "on_enter_desc",
+            "on_exit_actions",
+            "on_exit_desc",
+            "on_target_actions",
+            "on_target_desc",
+        )
+    )
+
+
 @dataclass
 class PerSourceState:
     last_bool: bool = False
@@ -177,8 +256,6 @@ class RuleRuntimeState:
     duration_window: "deque[int] | None" = None
     last_duration_round: int | None = None
     state_duration_fired: bool = False
-    target_timer: "asyncio.Task | None" = None
-    target_fired: bool = False
     action_cooldown: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
@@ -216,7 +293,99 @@ class RuleRunner:
         # `sample_interval` 锁在 init，避免运行中 settings 漂移。
         self._sample_interval = sample_interval_seconds
 
+        # task 状态机。为 None 时全部走旧的「rule 自己 fire」路径 —— expand-contract
+        # 阶段 A 的回退闸, 单测与未迁移的库都走这条。attach_state_machine 接管。
+        self._state_machine: TaskStateMachine | None = None
+        # task 边界动作快照, 由接管方在登记拓扑时喂进来。runner 不查 DB:
+        # _select_slot 在 fire 路径上, 查一次 DB 就把 hot path 拖进 IO。
+        self._task_actions: dict[str, dict] = {}
+        # 停用中的 task。「有效启用」= rule.enabled AND task 不在这个集合里,
+        # 是派生量、无人直接写 (§19.9)。放内存是因为 get_enabled_rules 每个判定
+        # 周期都要走一遍, 不能查 DB。
+        self._paused_tasks: set[str] = set()
+
+        # record 源。达标判断的全部逻辑在它里面, runner 只在 session 边界通知它。
+        self._record_source = RecordSource(
+            self._task_record_service,
+            self._feed_record,
+            self._record_refs_of_task,
+        )
+
         logger.info("RuleRunner init, rules: %d", len(self._rules))
+
+    # ---- record 源接线 ----
+
+    def _record_refs_of_task(self, task_id: str):
+        """该 task 名下带 record 条件项的 rule。
+
+        不按 enabled 过滤: 停用判断在 ``update_state`` 入口, 那是唯一一处。源层
+        再判一次就是两份判据, 改一处漏一处。代价只是给停用的 rule 排一个到点空转
+        的 timer。
+        """
+        for rule in self._rules.values():
+            if rule.task_id != task_id:
+                continue
+            ref = record_ref_of(rule)
+            if ref is not None:
+                yield ref
+
+    def seed_reached_target(self, rule_id: str) -> None:
+        """把达标条件直接置真, 不走 diff、不产边沿 (§7 重启重建)。
+
+        与已删除的"退出时重置基线"不是一回事: 那个在条件为假时强行置真, 是说谎;
+        这个只在启动时确实读到"今天已经达标"才用, 说的是真话, 只是不当成一次跃迁。
+        """
+        state = self._ensure_state(rule_id)
+        self._ensure_source(rule_id, RECORD_SOURCE_DID).last_bool = True
+        state.last_rule_state = True
+
+    async def _feed_record(
+        self, rule_id: str, value: bool, metadata: dict | None = None
+    ) -> None:
+        """把 record 源算出的 bool 交给条件层。
+
+        ``skip_flicker``: record 的值来自 DB 算术不会抖, 而它每次翻转只喂一次 ——
+        留观察窗会把这一次吸收掉, 条件永久停在旧值。
+
+        ``metadata`` 是达标那笔账 (目标 / 实际累计), 由源层带过来 —— 达标文案要用
+        真实数字, 让 fire 路径再查一次 DB 就是把源层的知识复制一份。
+        """
+        await self.update_state(
+            rule_id, RECORD_SOURCE_DID, value,
+            context="record", skip_flicker=True, extra_metadata=metadata,
+        )
+
+    # ---- task 状态机接管 (expand-contract 阶段 A) ----
+
+    def attach_state_machine(self, state_machine: TaskStateMachine) -> None:
+        self._state_machine = state_machine
+
+    @property
+    def record_source(self) -> RecordSource:
+        return self._record_source
+
+    def set_task_actions(self, task_id: str, actions: dict | None) -> None:
+        """喂一份 task 边界动作快照。``None`` / 空 → 该 task 回退到 rule 上的旧字段。"""
+        if actions and _has_any_action(actions):
+            self._task_actions[task_id] = actions
+        else:
+            self._task_actions.pop(task_id, None)
+
+    def task_owns_actions(self, task_id: str) -> bool:
+        return task_id in self._task_actions
+
+    # ---- 状态机的注入点 (§15) ----
+
+    def is_condition_satisfied(self, rule_id: str) -> bool | None:
+        """该 rule 的条件现在是不是真。``None`` = 未就绪。
+
+        判"未就绪"用的是"有没有任何 source 被观测过", 而不是 last_rule_state 的
+        初值 False —— 后者分不出"观测到假"和"还没观测"。
+        """
+        state = self._state.get(rule_id)
+        if state is None or not state.sources:
+            return None
+        return state.last_rule_state
 
     # ---- Legacy field views (test / rule_tester compatibility) ----
     #
@@ -293,18 +462,6 @@ class RuleRunner:
         return {rid for rid, st in self._state.items() if st.state_duration_fired}
 
     @property
-    def _target_timers(self) -> dict[str, asyncio.Task]:
-        return {
-            rid: st.target_timer
-            for rid, st in self._state.items()
-            if st.target_timer is not None
-        }
-
-    @property
-    def _target_fired(self) -> set[str]:
-        return {rid for rid, st in self._state.items() if st.target_fired}
-
-    @property
     def _action_cooldown_state(self) -> dict[tuple[str, str, str], float]:
         return {
             (rid, did, iid): ts
@@ -317,7 +474,7 @@ class RuleRunner:
     def add_rule(self, rule: Rule) -> None:
         """Insert or replace a rule.
 
-        When replacing an existing rule whose ``mode`` or
+        When replacing an existing rule whose ``direction`` or
         ``condition.perceive_device_ids`` changed, drop the per-rule runtime
         state (last_source/rule_state, pending_exit, action_cooldown). Keeping
         stale state across a shape change can resurrect old EXIT debounces
@@ -325,7 +482,9 @@ class RuleRunner:
         """
         existing = self._rules.get(rule.id)
         if existing is not None:
-            mode_changed = existing.mode != rule.mode
+            # 判 direction 而不是 mode: enter 与 exit 的 mode 都是 event, 只看
+            # mode 的话这两者互换时状态不会清, 旧的防抖和聚合结果会留下来。
+            direction_changed = existing.resolved_direction != rule.resolved_direction
             sources_changed = set(existing.condition.perceive_device_ids) != set(
                 rule.condition.perceive_device_ids
             )
@@ -339,7 +498,7 @@ class RuleRunner:
             # 错误拦截（fired 残留 → 永远不再 fire）。
             enabled_changed = existing.enabled != rule.enabled
             if (
-                mode_changed
+                direction_changed
                 or sources_changed
                 or duration_config_changed
                 or enabled_changed
@@ -367,13 +526,14 @@ class RuleRunner:
         return src
 
     def _reset_runtime_state(self, rule_id: str) -> None:
+        # record timer 不在 state 里 (它按 rule_id 存在 record 源那边), 所以先撤,
+        # 且不受下面 state 为空的早返影响。
+        self._record_source.cancel_rule(rule_id)
         state = self._state.pop(rule_id, None)
         if state is None:
             return
         if state.exit_debounce_task is not None and not state.exit_debounce_task.done():
             state.exit_debounce_task.cancel()
-        if state.target_timer is not None and not state.target_timer.done():
-            state.target_timer.cancel()
 
     def _clear_pending_source_enter(self, rule_id: str) -> None:
         """清掉 rule 所有 source 的 pending_enter 残留。
@@ -394,8 +554,47 @@ class RuleRunner:
     def get_all_rules(self) -> list[Rule]:
         return list(self._rules.values())
 
+    def _is_effectively_enabled(self, rule: Rule) -> bool:
+        """「有效启用」= 用户意图 AND 所属 task 没被停用 (§19.9)。
+
+        ``rule.enabled`` 只表示用户想不想开, task 停用不再覆写它。所以凡是判
+        「这条规则此刻要不要参与判定」都得走这里, 只看 enabled 会让停用失效。
+        """
+        return rule.enabled and rule.task_id not in self._paused_tasks
+
     def get_enabled_rules(self) -> list[Rule]:
-        return [r for r in self._rules.values() if r.enabled]
+        """「有效启用」的 rule。"""
+        return [r for r in self._rules.values() if self._is_effectively_enabled(r)]
+
+    def set_task_paused(self, task_id: str, paused: bool) -> None:
+        """刷新派生量。task 启停的唯一入口。
+
+        停用时把名下 rule 的条件层状态一并清掉: 停用期间 ``update_state`` 在入口
+        就 return, 条件层冻在停用那一刻的值。而状态机那边 ``suspend`` 把运行态归
+        了 off —— 恢复后条件若仍成立, 与冻住的旧值一比是 old==new、产不出边沿,
+        task 就再也回不到 on, 要等条件先假一次才有救。
+        """
+        if paused:
+            self._paused_tasks.add(task_id)
+            for rule in self._rules.values():
+                if rule.task_id == task_id:
+                    self._reset_runtime_state(rule.id)
+        else:
+            self._paused_tasks.discard(task_id)
+
+    def is_task_paused(self, task_id: str) -> bool:
+        return task_id in self._paused_tasks
+
+    @property
+    def state_machine(self) -> TaskStateMachine | None:
+        return self._state_machine
+
+    def attach_tracker(self, tracker) -> None:
+        self._tracker = tracker
+
+    @property
+    def tracker(self):
+        return getattr(self, "_tracker", None)
 
     # ---- Main entry: per-frame, per-source state report ----
 
@@ -410,6 +609,8 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         cycle_source_states: Mapping[str, bool] | None = None,
+        skip_flicker: bool = False,
+        extra_metadata: dict | None = None,
     ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
@@ -428,7 +629,7 @@ class RuleRunner:
             if rule is None:
                 logger.warning("update_state: rule %s not found", rule_id)
                 return TriggerOutcome.NOT_FIRED
-            if not rule.enabled:
+            if not self._is_effectively_enabled(rule):
                 return TriggerOutcome.NOT_FIRED
 
             src = self._ensure_source(rule_id, source_did)
@@ -455,7 +656,7 @@ class RuleRunner:
                     for did, s in rule_state.sources.items()
                     if did not in observed_states
                 )
-                dur_outcome = self._evaluate_duration(
+                dur_outcome = await self._evaluate_duration(
                     rule, effective_state, source_did, context, caption, device_name
                 )
                 # out() 对 duration 规则一律取 dur_outcome，其非空由本块位置维持——静态类型
@@ -465,7 +666,11 @@ class RuleRunner:
 
             # 帧级抗抖：source 上次 True 时，单帧 False 不立即翻转 — 视为 LLM 漏识，
             # 留一帧观察窗。下一帧仍 False 才确认 EXIT；翻回 True 则吸收为抖动。
-            if prev:
+            #
+            # skip_flicker 给不会抖的源用（record 源的 bool 来自 DB 算术）。对这类源
+            # 留观察窗是有害的：它每次翻转只喂一次，第一次被吸收掉就再没有第二次，
+            # 条件会永久停在旧值。
+            if prev and not skip_flicker:
                 if not current_bool:
                     if not src.pending_exit:
                         src.pending_exit = True
@@ -481,7 +686,7 @@ class RuleRunner:
                         "rule %s source %s flicker absorbed", rule_id, source_did
                     )
                     return out(TriggerOutcome.STILL_IN)
-            elif self._state[rule_id].exit_debounce_task is not None:
+            elif not skip_flicker and self._state[rule_id].exit_debounce_task is not None:
                 # 仅在 exit_debounce 阶段，对 False → True 加对称双帧抗抖：单帧 True
                 # 视为 LLM 单帧幻觉，留一帧观察。下一帧仍 True 才确认 ENTER 并 cancel
                 # debounce；第二帧 False 则吸收幻觉、debounce 继续完成。修复 omni
@@ -526,6 +731,7 @@ class RuleRunner:
             dispatch_outcome = await self._dispatch_event(
                 rule, event, source_did, context, trigger_room, trigger_dids,
                 caption=caption, device_name=device_name,
+                extra_metadata=extra_metadata,
             )
             h.add_output(1)
             if event == RuleEvent.EXITED:
@@ -578,7 +784,7 @@ class RuleRunner:
         if rule is None:
             logger.warning("trigger_rule: rule %s not found", rule_id)
             return None
-        if not rule.enabled:
+        if not self._is_effectively_enabled(rule):
             logger.info("trigger_rule: rule %s is disabled, skipping", rule_id)
             return None
 
@@ -607,7 +813,7 @@ class RuleRunner:
 
     # ---- EVENT duration sliding-window evaluator ----
 
-    def _evaluate_duration(
+    async def _evaluate_duration(
         self,
         rule: Rule,
         new_rule_state: bool,
@@ -629,13 +835,13 @@ class RuleRunner:
           ``duration_seconds * ratio`` 就触发（如 30min * 0.8 → 24min 触发）。
         - 分母固定用 maxlen 而非 ``len(win)``：保留 ratio 间歇容忍语义，
           窗口满后允许部分漏检。
-        - STATE mode 且已 fire on_enter（``state.state_duration_fired`` 置位）
+        - session 型且已 fire on_enter（``state.state_duration_fired`` 置位）
           → 直接 return：STILL_IN 期间不重复 fire，等 _debounced_exit 真完成时
-          清标记重新累积。EVENT mode 不用本拦截，fire 后清窗口走"周期 fire"
+          清标记重新累积。单方向的 rule 不用本拦截，fire 后清窗口走"周期 fire"
           by-design。
         """
         state = self._ensure_state(rule.id)
-        if rule.mode == RuleMode.STATE and state.state_duration_fired:
+        if rule.resolved_direction is RuleDirection.SESSION and state.state_duration_fired:
             return TriggerOutcome.STILL_IN
 
         round_id = int(time.time() / self._sample_interval)
@@ -679,31 +885,46 @@ class RuleRunner:
             return TriggerOutcome.COUNTING
 
         if sum(win) / maxlen >= rule.duration_ratio:
-            # actual_started_at = 窗口里第一帧 true 的对齐时间（与 actual_exited_at 对称）。
-            # ratio<1 时比"窗口名义起点 fire_ts - duration_seconds"更准确反映用户真实开始时刻。
+            # 边沿时刻取窗口里第一帧 true 的对齐时间。ratio<1 时比"窗口名义起点
+            # fire_ts - duration_seconds"更准确反映条件真正开始成立的时刻。落成哪个
+            # 键名由槽决定 (见 _edge_timestamp), 不在这里定。
             win_list = list(win)
             first_true_offset = next(i for i, v in enumerate(win_list) if v == 1)
             first_true_round = (round_id - maxlen + 1) + first_true_offset
-            actual_started_at = ms_to_iso_local(
+            edge_at = ms_to_iso_local(
                 int(first_true_round * self._sample_interval * 1000)
             )
             logger.info(
-                "rule %s (task=%s, %s) duration met: actual_started_at=%s "
+                "rule %s (task=%s, %s) duration met: edge_at=%s "
                 "(sum=%d/maxlen=%d, ratio>=%.2f)",
                 rule.id,
                 rule.task_id,
-                rule.mode.value,
-                actual_started_at,
+                rule.resolved_direction.value,
+                edge_at,
                 sum(win),
                 maxlen,
                 rule.duration_ratio,
             )
-            if rule.mode == RuleMode.EVENT:
-                # EVENT：清窗口 → 下次 update_state 重新累积（by-design 周期 fire）
+            slot = _slot_for(rule, RuleEvent.ENTERED)
+            if slot is ActionSlot.ON_EXIT:
+                # exit 型的进入边沿就是"该退出了"。达标兜底必须排在状态机翻 off
+                # 之前 —— 翻完再喂会被"不在会话中"拦掉, 这一天的达标就丢了。与
+                # 瞬时翻转那条路同一份处理, 两条都是退出的入口。
+                await self._record_source.settle(rule.task_id)
+
+            if not self._state_machine_allows(rule, RuleEvent.ENTERED):
+                # 在清窗口 / 标记 fired 之前问闸：被吞掉时这两样都不该动，否则
+                # 白丢一次累积。
+                return TriggerOutcome.STILL_IN
+
+            if rule.resolved_direction is not RuleDirection.SESSION:
+                # 单方向：清窗口 → 下次 update_state 重新累积（by-design 周期 fire）。
+                # state_duration_fired 只由 _debounced_exit 清, 而单方向的 rule 走
+                # 不到那条路 —— 标记了就永久拦死。
                 state.duration_window = None
                 state.last_duration_round = None
             else:
-                # STATE：标记 fired 拦截 STILL_IN 重复 fire；窗口留着无害
+                # session：标记 fired 拦截 STILL_IN 重复 fire；窗口留着无害
                 # （fired 拦截了，后续 evaluate 不会用），_debounced_exit 真完成时一并清
                 state.state_duration_fired = True
             sources = self._sources_currently_true(rule.id) or [source_did]
@@ -714,12 +935,11 @@ class RuleRunner:
                 context,
                 extra_metadata={
                     "duration_seconds": rule.duration_seconds,
-                    "actual_started_at": actual_started_at,
+                    **_edge_timestamp(slot, edge_at),
                 },
                 caption=caption, device_name=device_name,
             )
-            if rule.mode == RuleMode.STATE:
-                self._schedule_target_timer_if_needed(rule, sources, context)
+            self._sync_record_source(rule, slot)
             return TriggerOutcome.FIRED
 
         return TriggerOutcome.COUNTING
@@ -736,6 +956,7 @@ class RuleRunner:
         trigger_dids: list[str] | None = None,
         caption: str = "",
         device_name: str = "",
+        extra_metadata: dict | None = None,
     ) -> TriggerOutcome:
         """Translate a diff event into an action-layer fire (with state-mode
         debounce on EXITED).
@@ -746,10 +967,10 @@ class RuleRunner:
         ``_evaluate_duration``."""
         state = self._ensure_state(rule.id)
         if event == RuleEvent.ENTERED:
-            # 进入分支瞬间锚定 wall-clock 作为 actual_started_at —— 与 actual_exited_at
-            # 镜像：fire 到达 agent 时已晚 N 秒（链路延迟），但 metadata 时间戳是过去
-            # 时刻，agent --at <actual_started_at> 不受链路延迟影响。
-            actual_started_at = ms_to_iso_local(now_ms())
+            # 进入分支瞬间锚定 wall-clock 作为边沿时刻：fire 到达 agent 时已晚 N 秒
+            # （链路延迟），但 metadata 时间戳是过去时刻，agent --at <ts> 不受影响。
+            # 落成哪个键名由槽决定（见 _edge_timestamp）。
+            edge_at = ms_to_iso_local(now_ms())
             # state mode: ENTERED cancels any pending debounced exit
             pending = state.exit_debounce_task
             state.exit_debounce_task = None
@@ -783,10 +1004,21 @@ class RuleRunner:
                 return TriggerOutcome.STILL_IN
 
             # duration_seconds 配置时：不在翻转那一刻 fire；fire 由
-            # _evaluate_duration 在窗口达比例时触发（actual_started_at 走那条路径
-            # 用滑窗里第一帧 true 的对齐时间，本路径取的 wall-clock 不用）。
+            # _evaluate_duration 在窗口达比例时触发（边沿时刻走那条路径用滑窗里
+            # 第一帧 true 的对齐时间，本路径取的 wall-clock 不用）。
             if rule.duration_seconds:
                 return TriggerOutcome.NOT_FIRED
+
+            slot = _slot_for(rule, event)
+            if slot is ActionSlot.ON_EXIT:
+                # exit 型 rule 的进入边沿就是"该退出了"。达标兜底必须排在状态机翻
+                # off 之前 —— 翻完再喂会被 NOT_IN_SESSION 拦掉, 这一天的达标就丢了。
+                await self._record_source.settle(rule.task_id)
+
+            if not self._state_machine_allows(rule, RuleEvent.ENTERED):
+                # 状态机吞掉了这次边沿（已在态内 / 被对侧条件拦住）。按 STILL_IN
+                # 上报——与帧级抖动吸收同语义：规则确实在态，只是没有新一次进入。
+                return TriggerOutcome.STILL_IN
 
             sources = self._sources_currently_true(rule.id) or [source_did]
             # Fire-and-forget: dynamic callback retry is up to 1+2+4=7s of sleep,
@@ -794,19 +1026,36 @@ class RuleRunner:
             # here would freeze the main loop for the duration of every dynamic
             # retry. The state-machine bookkeeping above is already done; the
             # fire only writes log/cooldown state, which is safe to do async.
+            # milestone rule 的进入边沿就是「达标」。按 TARGET_FIRED 记, 否则日志与
+            # 台账把达标记成一次进入, 事后分不出来。达标不是 session 边界,
+            # _edge_timestamp 对它返空。
+            if slot is ActionSlot.ON_TARGET:
+                self._spawn_fire(
+                    rule, RuleEvent.TARGET_FIRED, sources, context,
+                    trigger_room, trigger_dids,
+                    extra_metadata=dict(extra_metadata or {}),
+                    caption=caption, device_name=device_name,
+                )
+                return TriggerOutcome.FIRED
+
             self._spawn_fire(
                 rule, event, sources, context, trigger_room, trigger_dids,
-                extra_metadata={"actual_started_at": actual_started_at},
+                extra_metadata={
+                    **_edge_timestamp(slot, edge_at),
+                    **(extra_metadata or {}),
+                },
                 caption=caption, device_name=device_name,
             )
-            self._schedule_target_timer_if_needed(rule, sources, context)
+            self._sync_record_source(rule, slot)
             return TriggerOutcome.FIRED
 
         # EXITED
-        if rule.mode == RuleMode.EVENT:
-            return TriggerOutcome.NOT_FIRED  # event mode does not handle exits
+        if rule.resolved_direction is not RuleDirection.SESSION:
+            # 只有 session 的退出边沿有意义: enter / exit / milestone 都是单方向,
+            # slot_for_edge 对它们的 EXITED 返 None, 走下去也选不到槽。
+            return TriggerOutcome.NOT_FIRED
 
-        # STATE + duration 但未 fire on_enter：进入态从未被确认 → 当这次 EXITED
+        # session + duration 但未 fire on_enter：进入态从未被确认 → 当这次 EXITED
         # 没发生过。不 fire on_exit（没配对的 ENTERED），不启动 debounce，也不清
         # 窗口——窗口靠后续 evaluate 持续 append 0 自然演化，符合 duration_ratio
         # 的间歇容忍设计（用户中途短暂离开仍允许后续凑齐）。
@@ -867,12 +1116,10 @@ class RuleRunner:
             rs.state_duration_fired = False
             rs.duration_window = None
             rs.last_duration_round = None
-        # on_target timer：cancel 未触发的 timer（保留 ``rs.target_fired``，
-        # 同一天不重复 fire；清 fired 由跨日 force-reset / config reset 路径做）。
-        # 兜底：cancel 前若 accumulated 已 ≥ target，先 fire TARGET——EXIT 60s
-        # debounce 窗口内若累计跨过 target，cancel 否则会让达标信号丢失。
-        self._fire_target_if_reached(rule, sources, "exit_debounce_target_check")
-        self._cancel_target_timer(rule.id)
+        # 达标兜底必须排在状态机翻 off 之前：达标动作要求 task 还在 session 里,
+        # 翻完再喂就被 NOT_IN_SESSION 拦掉。撤 timer 反过来必须排在之后 —— 多 rule
+        # 时这次退出可能被别的条件挡住 (STILL_HELD), session 还在, 撤了就丢达标。
+        await self._record_source.settle(rule.task_id)
         # record-bound duration rule：注入今日累计 / target metadata，让 fire-agent
         # 在 on-exit-desc 含「若今日累计已达目标则使用手机推送通知...」条件通知文案时，
         # 按真实数据拼装通知（accumulated >= target 才推；文案不写死时长）。
@@ -896,6 +1143,10 @@ class RuleRunner:
                     "target_minutes": state[0],
                 }
 
+        if not self._state_machine_allows(rule, RuleEvent.EXITED):
+            return
+        self._record_source.disarm(rule.task_id)
+
         # Background-task path: swallow exceptions so they don't surface as
         # "Task exception was never retrieved" warnings.
         try:
@@ -911,6 +1162,107 @@ class RuleRunner:
 
     # ---- Fire-and-forget plumbing ----
 
+    _SLOT_TO_EVENT = {
+        "on_enter": RuleEvent.ENTERED,
+        "on_exit": RuleEvent.EXITED,
+        "on_target": RuleEvent.TARGET_FIRED,
+    }
+
+    def dispatch_task_action(self, task_id: str, slot_name: str) -> bool:
+        """状态机自己发起的动作 —— 没有上游边沿, 由本函数补出一次 fire。
+
+        用在 §19.5 重新配置时的强制 ``on_exit`` 与 §5 的手动注入。感知路径不走
+        这里 (它有自己的边沿与上下文, 状态机对它只做许可闸)。
+
+        动作在 task 行上, 但日志与冷却仍按 rule 归属, 所以要挑一条代表 rule。
+        名下无 rule 时返回 False —— 那正是"删掉最后一条 rule"的情形, 动作已经无处
+        归属, 只能记日志。
+
+        槽由本函数按名字定, 显式传给 fire —— 不能让它从代表 rule 的方向反推:
+        ``_slot_for`` 只有 session 方向才把 EXITED 映射成退出槽, enter + exit 型
+        task 的任一条代表 rule 都会返回空槽, 强制退出动作静默不执行; 反过来请求
+        进入槽而代表 rule 是 exit 型, 反推出来的是退出槽, 派的是相反的动作。
+        """
+        event = self._SLOT_TO_EVENT.get(slot_name)
+        if event is None:
+            logger.warning("unknown action slot %r for task %s", slot_name, task_id)
+            return False
+        rules = [r for r in self._rules.values() if r.task_id == task_id]
+        if not rules:
+            logger.warning(
+                "task %s 请求 %s 但名下已无 rule, 动作无处归属, 跳过",
+                task_id,
+                slot_name,
+            )
+            return False
+        rule = rules[0]
+        if event is RuleEvent.EXITED:
+            # 重新配置的强制 on_exit 与手动注入都从这里出 session。不撤的话 timer
+            # 到点会在 off 态喂真, 把条件锁死。
+            # 这条路没有"翻 off 之前"的位置可用 (状态机先改状态再派动作), 所以只撤
+            # 不兜底 —— 这两条都不是感知到的真实离开。
+            self._record_source.disarm(task_id)
+        self._spawn_fire(
+            rule,
+            event,
+            [],
+            f"task_state_machine_{slot_name}",
+            action_slot=ActionSlot(slot_name),
+        )
+        return True
+
+    def _sync_record_source(self, rule: Rule, slot: ActionSlot | None) -> None:
+        """按这条边沿把 task 推向哪边, 让 record 源跟上 session 边界。
+
+        锚点是边沿的意图而不是 rule 的 ``mode``: exit 型 rule 的"条件成立"就是
+        "该退出了", 在那儿 arm 等于在 session 结束的瞬间起达标 timer —— 而它排的
+        timer 到点会在 off 态喂真, 把条件锁死, 当天再也产不出达标边沿。
+        """
+        if slot is ActionSlot.ON_ENTER:
+            self._record_source.arm(rule.task_id)
+        elif slot is ActionSlot.ON_EXIT:
+            self._record_source.disarm(rule.task_id)
+
+    def _state_machine_allows(self, rule: Rule, event: RuleEvent) -> bool:
+        """问 task 状态机: 这次已确认的边沿该不该 fire。
+
+        未接管该 task → 恒 True, 完全是旧行为 (expand-contract 阶段 A 的回退闸)。
+
+        接管后状态机同时维护 ``runtime_state``, 所以这个调用有副作用, 每次边沿
+        只能调一次。
+
+        达标不在这里单独判: milestone rule 的进入边沿由 ``slot_for_edge`` 映射成
+        达标槽, 状态机的 ``_handle_milestone`` 做的正是"确认 task 在 on"这件事。
+        在这里再判一次就是同一条判据的两份实现。
+
+        **为什么是"许可闸"而不是"状态机代为派发"**: 各个 fire 点带着不同的
+        metadata (actual_started_at / exit_metadata / 达标数字)、不同的
+        日志与冷却上下文。把它们穿过状态机再派回来, 等于把整套执行上下文搬一遍,
+        而阶段 A 的目标是行为等价。状态机自己发起动作的两条路 (重配置时强制
+        on_exit、手动注入) 走 ``dispatch_action``, 那里本来就没有上游边沿。
+        """
+        sm = self._state_machine
+        if sm is None or not sm.owns(rule.task_id):
+            return True
+
+        kind = _EVENT_TO_SIGNAL_KIND.get(event)
+        if kind is None:
+            logger.warning(
+                "许可闸收到不是边沿的事件 %s (rule=%s), 不放行", event, rule.id
+            )
+            return False
+        slot = slot_for_edge(rule.resolved_direction.value, kind)
+        if slot is None:
+            # 这个边沿对该方向没有意义 (单方向的 rule 只有一个边沿) —— 不发信号,
+            # 也就没有动作。发出去只能让 task 层再判一次同样的事。
+            return False
+        # dispatch=False: 本调用只要结论。动作由下面的 _spawn_fire / _fire 走
+        # 原路径执行, 让状态机再派一次会重复触发。
+        outcome = sm.handle(
+            TaskSignal(rule.task_id, rule.id, kind, slot), dispatch=False
+        )
+        return outcome in _FIRING_OUTCOMES
+
     def _spawn_fire(
         self,
         rule: Rule,
@@ -922,6 +1274,7 @@ class RuleRunner:
         extra_metadata: dict | None = None,
         caption: str = "",
         device_name: str = "",
+        action_slot: ActionSlot | None = None,
     ) -> None:
         """Schedule a fire as a background task; record handle to prevent GC."""
         task = asyncio.create_task(
@@ -929,6 +1282,7 @@ class RuleRunner:
                 rule, event, sources, context, str(uuid.uuid4()),
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
+                action_slot=action_slot,
             )
         )
         self._fire_tasks.add(task)
@@ -946,166 +1300,19 @@ class RuleRunner:
         extra_metadata: dict | None = None,
         caption: str = "",
         device_name: str = "",
+        action_slot: ActionSlot | None = None,
     ) -> None:
         try:
             await self._fire(
                 rule, event, sources, context, execute_id,
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
+                action_slot=action_slot,
             )
         except Exception:
             logger.exception(
                 "Rule fire failed: rule=%s event=%s", rule.id, event.value
             )
-
-    # ---- on_target_desc 累计达标 timer（duration record 路径） ----
-
-    def _fire_target_if_reached(
-        self,
-        rule: Rule,
-        sources: list[str],
-        context: str,
-        state: tuple[int | None, int] | None = None,
-    ) -> bool:
-        """accumulated 已 ≥ target → 立即 fire TARGET 并返回 True；否则返回 False。
-        ENTERED schedule 与 EXIT cancel 路径共用此入口：保证「达标必通知」语义
-        不依赖 timer 时序——EXIT debounce 抢先于 timer 触发时，cancel 之前也要兑现。
-        state 由调用方预读时直接传入，避免重复 SQL 查询。"""
-        if not rule.on_target_desc:
-            return False
-        rs = self._ensure_state(rule.id)
-        if rs.target_fired:
-            return False
-        if state is None:
-            state = self._task_record_service.read_duration_target_state(
-                rule.task_id
-            )
-        if state is None:
-            return False
-        target_minutes, accumulated_min = state
-        if target_minutes is None:
-            return False
-        if accumulated_min < target_minutes:
-            return False
-        logger.info(
-            "TARGET_IMMEDIATE: rule=%s task=%s accumulated_min=%s target_min=%s",
-            rule.id, rule.task_id, accumulated_min, target_minutes,
-        )
-        rs.target_fired = True
-        actual_target_at = ms_to_iso_local(now_ms())
-        self._spawn_fire(
-            rule, RuleEvent.TARGET_FIRED, list(sources), context,
-            extra_metadata={
-                "target_minutes": target_minutes,
-                "actual_target_at": actual_target_at,
-                "accumulated_at_fire": accumulated_min,
-            },
-        )
-        return True
-
-    def _schedule_target_timer_if_needed(
-        self, rule: Rule, sources: list[str], context: str
-    ) -> None:
-        """ENTERED 真 fire 后调用：读 record.accumulated/target，起 timer 或立即 fire。"""
-        rs = self._ensure_state(rule.id)
-        # 取消可能残留的 timer（add_rule 重建场景 / 并发保护）
-        old = rs.target_timer
-        if old is not None and not old.done():
-            old.cancel()
-        rs.target_timer = None
-        if not rule.on_target_desc:
-            return
-        if rs.target_fired:
-            return
-        state = self._task_record_service.read_duration_target_state(rule.task_id)
-        if state is None:
-            return
-        if self._fire_target_if_reached(rule, sources, context, state=state):
-            return
-        target_minutes, accumulated_min = state
-        if target_minutes is None:
-            return
-        remaining_seconds = max(
-            0, target_minutes * 60 - accumulated_min * 60
-        )
-        task = asyncio.create_task(
-            self._await_and_fire_target(
-                rule, list(sources), context, remaining_seconds, target_minutes,
-            )
-        )
-        rs.target_timer = task
-        fires_at_ts_ms = int(time.time() * 1000) + remaining_seconds * 1000
-        logger.info(
-            "TARGET_SCHEDULED: rule=%s task=%s remaining_s=%d fires_at_ts_ms=%d "
-            "(accumulated_min=%s target_min=%s)",
-            rule.id, rule.task_id, remaining_seconds, fires_at_ts_ms,
-            accumulated_min, target_minutes,
-        )
-        self._publish_rule_event(
-            "rule_target_scheduled", rule.id,
-            {
-                "remaining_seconds": remaining_seconds,
-                "fires_at_ts_ms": fires_at_ts_ms,
-                "accumulated_minutes": accumulated_min,
-                "target_minutes": target_minutes,
-            },
-        )
-
-    async def _await_and_fire_target(
-        self, rule: Rule, sources: list[str], context: str, delay: float,
-        target_minutes: int,
-    ) -> None:
-        try:
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            return
-        rs = self._ensure_state(rule.id)
-        rs.target_timer = None
-        # 守卫 1：condition 仍真满足才 fire（抖动 / EXITED 已发生则 drop）
-        if not rs.last_rule_state:
-            logger.info(
-                "TARGET_DROPPED: rule=%s state-false-at-fire", rule.id,
-            )
-            return
-        # 守卫 2：本 session 已 fire 过（理论上不会，防御性）
-        if rs.target_fired:
-            return
-        rs.target_fired = True
-        actual_target_at = ms_to_iso_local(now_ms())
-        # fire 时刻 read 最新 accumulated（含 in-flight session）作为真实值；
-        # 异常 / record 不可读时降级为 target_minutes（恒等式：达标必 ≥ target）。
-        state = self._task_record_service.read_duration_target_state(rule.task_id)
-        accumulated_at_fire = (
-            state[1] if state is not None else target_minutes
-        )
-        try:
-            await self._fire(
-                rule, RuleEvent.TARGET_FIRED, sources, context, str(uuid.uuid4()),
-                extra_metadata={
-                    "target_minutes": target_minutes,
-                    "actual_target_at": actual_target_at,
-                    "accumulated_at_fire": accumulated_at_fire,
-                },
-            )
-        except Exception:
-            logger.exception(
-                "Rule %s on_target fire failed", rule.id
-            )
-
-    def _cancel_target_timer(self, rule_id: str) -> None:
-        """只 cancel 未触发的 timer，不动 target_fired 标记。
-
-        `target_fired` 是 record-session 维度（每天 record rollover 清零），
-        不是 rule-session 维度——同一天 EXITED 后再 ENTERED 不该重复 fire。
-        清 fired 由跨日 force-reset / config reset / rule delete 路径显式做。
-        """
-        rs = self._state.get(rule_id)
-        if rs is None:
-            return
-        t = rs.target_timer
-        rs.target_timer = None
-        if t is not None and not t.done():
-            t.cancel()
 
     def force_cross_day_reset(
         self,
@@ -1114,57 +1321,47 @@ class RuleRunner:
     ) -> None:
         """跨日 rollover 完成后调：对所有"当前在 ENTERED 态"的 task 关联 rule，
         真 fire on_exit（计入旧一天 session-end）+ 真 fire on_enter（建新一天
-        session-start）+ 重新按 accumulated=0 schedule on_target timer。
+        session-start），并让 record 源按新一天重新武装。
 
         语义上等价于"用户跨过 00:00 那一刻 EXITED → ENTERED"，但实际 condition
         没变；``state.last_rule_state`` 保持 True（避免下一次 condition tick
         再触发 ENTERED）。
 
         pre_rollover_state 为 rollover_one 执行前 snapshot 的旧一天
-        ``(target_minutes, accumulated_minutes_today)``。若旧累计已 ≥ target
-        且本 session 未 fire 过，先 fire 兑现累计达标承诺——rollover 已清旧累计，
-        read_duration_target_state 读不到这个信号，必须用 snapshot 判断。
+        ``(target_minutes, accumulated_minutes_today)``——rollover 已清旧累计，
+        record 源读不到「旧一天已达标」这个信号，必须靠 snapshot 兑现。
         """
+        # 只挑 session: 它的条件为真才等于"此刻在会话中", 强补一对进出才有意义。
+        # milestone 的条件为真是"今天发过达标了", exit 的是"该退出了", 都不表示在
+        # 态内 —— 强发进入边沿会分别多播一条达标通知、在 task 已关闭时多执行一次
+        # 退出动作, 而这条路径不经许可闸 (§5.3)。
         affected: list[Rule] = [
             r for r in self._rules.values()
             if r.task_id == task_id
+            and r.resolved_direction is RuleDirection.SESSION
             and r.id in self._state
             and self._state[r.id].last_rule_state
         ]
-        if not affected:
-            return
         for rule in affected:
             logger.info(
                 "CROSS_DAY_RESET: rule=%s task=%s force on_exit + on_enter",
                 rule.id, task_id,
             )
             sources = self._sources_currently_true(rule.id)
-            # 0) 跨日前若旧一天累计已达标且本 session 未 fire，先 fire on_target
-            #    （清 ``rs.target_fired`` 前调，让 helper 内部守卫正常工作）
-            if pre_rollover_state is not None:
-                self._fire_target_if_reached(
-                    rule, sources, "cross_day_pre_rollover_check",
-                    state=pre_rollover_state,
-                )
-            # 1) 取消未触发的 target timer + 清 fired 标记
-            #    （跨日新一天 record 重新计 accumulated，必须让 fired 状态归零，
-            #    否则新一天 ENTERED 走 _schedule_target_timer_if_needed 早返不 fire）
-            self._cancel_target_timer(rule.id)
             rs = self._ensure_state(rule.id)
-            rs.target_fired = False
-            # 2) 取消可能在跑的 exit debounce（用户真在态内，不该有，但兜底）
+            # 1) 取消可能在跑的 exit debounce（用户真在态内，不该有，但兜底）
             pending = rs.exit_debounce_task
             rs.exit_debounce_task = None
             if pending is not None and not pending.done():
                 pending.cancel()
             rs.exit_debounce_at = None
-            # 3) STATE + duration：清 fired 标记和窗口，让 on_enter 重新走累积
+            # 2) STATE + duration：清 fired 标记和窗口，让 on_enter 重新走累积
             #    （新一天计时窗口从零开始）
             if rule.duration_seconds:
                 rs.state_duration_fired = False
                 rs.duration_window = None
                 rs.last_duration_round = None
-            # 4) 强制 fire on_exit / on_enter：不注入 actual_exited_at /
+            # 3) 强制 fire on_exit / on_enter：不注入 actual_exited_at /
             #    actual_started_at。rollover_one 已切段（旧 session 落账、新 record
             #    active_session_start_at = rollover 触发时刻），agent 不该再做
             #    session 边界操作；若投 actual_exited_at=midnight，preamble 会
@@ -1176,10 +1373,14 @@ class RuleRunner:
             self._spawn_force_fire(
                 rule, RuleEvent.ENTERED, sources, "cross_day_rollover",
             )
-            # 5) 重新 schedule on_target timer（accumulated 已被 rollover 清零）
-            self._schedule_target_timer_if_needed(
-                rule, sources, "cross_day_rollover",
-            )
+
+        # record 源不看 affected：归零是 record 的事，与此刻有没有 rule 在态内无关。
+        # 不归零的话条件停在真，第二天达标产不出新边沿、通知永久消失。
+        handle = asyncio.create_task(
+            self._record_source.roll_over(task_id, pre_rollover_state)
+        )
+        self._fire_tasks.add(handle)
+        handle.add_done_callback(self._fire_tasks.discard)
 
     def _spawn_force_fire(
         self,
@@ -1252,9 +1453,10 @@ class RuleRunner:
         actual_exited_at: str | None = None,
         caption: str = "",
         device_name: str = "",
+        action_slot: ActionSlot | None = None,
     ) -> RuleExecuteResult | None:
         """Pick the slot for (mode, event), execute, write log."""
-        slot = self._select_slot(rule, event)
+        slot = self._select_slot(rule, event, action_slot)
         if slot is None:
             logger.debug(
                 "rule %s event %s: empty slot, skipping", rule.id, event.value
@@ -1264,15 +1466,17 @@ class RuleRunner:
         start_time = int(time.time() * 1000)
         kind, value = slot
 
+        direction = rule.resolved_direction.value
         logger.info(
-            "FIRE: rule=%s name=%s event=%s mode=%s slot=%s sources=%s execute_id=%s",
-            rule.id, rule.name, event.value, rule.mode.value, kind, sources, execute_id,
+            "FIRE: rule=%s name=%s event=%s direction=%s slot=%s sources=%s "
+            "execute_id=%s",
+            rule.id, rule.name, event.value, direction, kind, sources, execute_id,
         )
         self._publish_rule_event(
             "rule_fire", rule.id,
             {
                 "event": event.value,
-                "mode": rule.mode.value,
+                "direction": direction,
                 "slot": kind,
                 "sources": sources,
                 "execute_id": execute_id,
@@ -1321,16 +1525,36 @@ class RuleRunner:
         )
         return exec_result
 
-    def _select_slot(self, rule: Rule, event: RuleEvent) -> Slot:
-        """Return ``("static", actions)`` / ``("dynamic", prompt_text)`` for the
-        slot matching (mode, event), or ``None`` when the slot is empty.
+    def selects_no_action_on_enter(self, rule: Rule) -> bool:
+        """这条规则的进入边沿此刻选不到任何动作吗。
 
-        Dispatch kind is inferred from field presence: event mode looks at
-        ``actions`` vs ``action_descriptions``; state mode looks at
-        ``on_*_actions`` vs ``on_*_desc`` per direction. Validation enforces
-        these as mutually exclusive.
+        供 ``RuleService.report_muted_enter_rules`` 诊断用。走的就是 fire 时那条
+        选槽链路 —— 判据只此一份, 诊断不会与实际执行分叉。
         """
-        if rule.mode == RuleMode.EVENT:
+        return self._select_slot(rule, RuleEvent.ENTERED) is None
+
+    def _select_slot(
+        self, rule: Rule, event: RuleEvent, action_slot: ActionSlot | None = None
+    ) -> Slot:
+        """Return ``("static", actions)`` / ``("dynamic", prompt_text)`` for the
+        slot matching (direction, event), or ``None`` when the slot is empty.
+
+        Dispatch kind is inferred from field presence: 单方向的 rule 看
+        ``actions`` vs ``action_descriptions``; session 看 ``on_*_actions`` vs
+        ``on_*_desc``。Validation enforces these as mutually exclusive.
+        """
+        task_slot = self._select_task_slot(rule, event, action_slot)
+        if task_slot is not _NO_TASK_ACTIONS:
+            return task_slot
+
+        # 达标槽在方向分支之前判: milestone 走下面的单方向分支就只认 ENTERED,
+        # 达标永远选不到槽。
+        if event == RuleEvent.TARGET_FIRED:
+            if rule.on_target_desc:
+                return ("dynamic", rule.on_target_desc)
+            return None
+
+        if rule.resolved_direction is not RuleDirection.SESSION:
             if event != RuleEvent.ENTERED:
                 return None
             if rule.actions:
@@ -1342,7 +1566,7 @@ class RuleRunner:
             )
             return ("dynamic", joined)
 
-        # state mode
+        # session
         if event == RuleEvent.ENTERED:
             if rule.on_enter_actions:
                 return ("static", rule.on_enter_actions)
@@ -1355,13 +1579,38 @@ class RuleRunner:
             if rule.on_exit_desc:
                 return ("dynamic", rule.on_exit_desc)
             return None
-        if event == RuleEvent.TARGET_FIRED:
-            if rule.on_target_desc:
-                return ("dynamic", rule.on_target_desc)
-            return None
         return None
 
     # ---- 设备直控路径（V1 direct dispatch） ----
+
+    def _select_task_slot(
+        self, rule: Rule, event: RuleEvent, action_slot: ActionSlot | None = None
+    ) -> Slot:
+        """从 task 的边界动作里选槽 (expand-contract 阶段 A: 读 task 优先)。
+
+        返回 ``_NO_TASK_ACTIONS`` 表示该 task 没有动作快照 —— 调用方回退到 rule
+        上的旧字段。返回 ``None`` 表示 task 接管了但这个方向是空槽, 不再回退:
+        回退会让"用户故意留空的方向"重新捡起 rule 上的存量动作。
+        """
+        actions = self._task_actions.get(rule.task_id)
+        if actions is None:
+            return _NO_TASK_ACTIONS
+
+        # 调用方给了槽就用它 —— 状态机自己发起的动作按槽名派, 方向反推只对
+        # "由某条 rule 的边沿引起"的动作成立。回退到 rule 旧列那条路不看覆盖值:
+        # 走到那里的只有迁移前的单 rule task, 方向反推本来就是对的。
+        slot = action_slot or _slot_for(rule, event)
+        if slot is None:
+            return None
+        static_key, desc_key = f"{slot.value}_actions", f"{slot.value}_desc"
+
+        raw_actions = actions.get(static_key) or []
+        if raw_actions:
+            return ("static", [RuleAction(**a) for a in raw_actions])
+        desc = actions.get(desc_key)
+        if desc:
+            return ("dynamic", desc)
+        return None
 
     def _in_cooldown(self, rule_id: str, action: RuleAction) -> bool:
         """非幂等 action 是否还在冷却窗内。幂等 action 恒 False（走读现值比对）。"""

@@ -3,7 +3,7 @@
 
 """client._filter_completed_event_rules 单测。
 
-覆盖：event/state mode × completed/active/未绑 record 的组合，以及 batch SQL 查询的正确性。
+覆盖：四个 direction × completed/active/未绑 record 的组合，以及 batch SQL 查询的正确性。
 """
 
 from __future__ import annotations
@@ -67,8 +67,15 @@ def _insert_duration_record(task_id: str, status: str) -> None:
         conn.commit()
 
 
-def _make_rule(rule_id: str, task_id: str, mode: str = "event") -> dict:
-    return {"id": rule_id, "task_id": task_id, "mode": mode}
+def _make_rule(
+    rule_id: str, task_id: str, mode: str = "event", direction: str | None = None
+) -> dict:
+    """带 direction 的 rule dict。
+
+    direction 缺省为 None 是刻意的：未迁移的库和内存直接构造的 Rule 都是这个形态,
+    闸必须靠 mode 兜住。
+    """
+    return {"id": rule_id, "task_id": task_id, "mode": mode, "direction": direction}
 
 
 def test_event_rule_with_completed_record_filtered_out(real_db):
@@ -178,7 +185,7 @@ def test_rollover_restores_injection(real_db):
 
 # ============================================================
 # recurring + 当期达标 → 等价 completed 视作 satisfied
-# event mode 没有 _target_fired 兜底，靠 perception filter 在装载侧切断。
+# enter 型规则靠这道下发闸在装载侧切断。
 # ============================================================
 
 
@@ -310,4 +317,63 @@ def test_progress_non_recurring_active_partial_kept(real_db):
     rules = [_make_rule("r1", "t_oneshot", "event")]
     kept, skipped = _filter_completed_event_rules(rules)
     assert len(kept) == 1
+    assert skipped == []
+
+
+def test_exit_rule_with_completed_record_kept(real_db):
+    """达标后 exit 型 rule 必须继续下发。
+
+    exit 存的 mode 就是 event, 按 mode 判会把它一起剔掉 —— 而配达标通知的前提
+    (duration record + target_minutes) 正是这道闸的命中条件, 于是每个配了达标的
+    task 达标那一刻就永久失去退出边沿, 卡在 on。
+    """
+    _insert_task("t_focus")
+    _insert_duration_record("t_focus", "completed")
+
+    rules = [_make_rule("r-exit", "t_focus", "event", "exit")]
+    kept, skipped = _filter_completed_event_rules(rules)
+
+    assert [r["id"] for r in kept] == ["r-exit"]
+    assert skipped == []
+
+
+def test_enter_rule_with_completed_record_still_filtered_out(real_db):
+    """enter 型仍要剔 —— 上面那条不能靠"什么都不剔"来通过。"""
+    _insert_task("t_focus")
+    _insert_duration_record("t_focus", "completed")
+
+    rules = [_make_rule("r-enter", "t_focus", "event", "enter")]
+    kept, skipped = _filter_completed_event_rules(rules)
+
+    assert kept == []
+    assert skipped == ["t_focus"]
+
+
+def test_milestone_rule_with_completed_record_kept(real_db):
+    """达标规则的条件来自 record 源, 不走摄像头, 剔它没有意义。"""
+    _insert_task("t_focus")
+    _insert_duration_record("t_focus", "completed")
+
+    rules = [_make_rule("r-ms", "t_focus", "event", "milestone")]
+    kept, skipped = _filter_completed_event_rules(rules)
+
+    assert [r["id"] for r in kept] == ["r-ms"]
+    assert skipped == []
+
+
+def test_direction_absent_falls_back_to_mode(real_db):
+    """未迁移的库里 direction 是 NULL, 闸靠 mode 兜住, 行为与迁移前一致。"""
+    _insert_task("t_focus")
+    _insert_duration_record("t_focus", "completed")
+
+    kept, skipped = _filter_completed_event_rules(
+        [_make_rule("r-old", "t_focus", "event", None)]
+    )
+    assert kept == []
+    assert skipped == ["t_focus"]
+
+    kept, skipped = _filter_completed_event_rules(
+        [_make_rule("r-old-state", "t_focus", "state", None)]
+    )
+    assert [r["id"] for r in kept] == ["r-old-state"]
     assert skipped == []
