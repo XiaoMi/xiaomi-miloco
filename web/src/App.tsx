@@ -125,13 +125,14 @@ function MainApp() {
   const homeId: HomeId = "primary";
 
   // ── 数据加载（按当前家拉取；mock 家走 empty）─────────
-  const status = useAsync(() => getHomeStatus(homeId), [homeId], {
-    errorLabel: t("app.loadHomeStatusFail"),
-  });
+  // 不传 errorLabel：这份状态每 30s 重拉一次，后端挂着时会每 30s 弹一条警告，
+  // 而那种时候页面上其它请求各自都在报错，多这一条只是噪音。
+  const status = useAsync(() => getHomeStatus(homeId), [homeId]);
   // 定时重拉。米家授权可能在页面开着的时候失效（令牌到期 + 云端拒绝续期），
   // 而 useAsync 只在 deps 变化时拉一次、全站也没有推送通道，不轮询的话状态条
-  // 会一直停在「已连」。30s 与 PerfPage 的既有轮询同档；重拉期间 data 保留，
-  // 状态条不会闪。
+  // 会一直停在「已连」。30s 与 PerfPage 的既有轮询同档。重拉失败时 useAsync
+  // 只置 error、不清 data，因此状态条保持上一份而不是闪成「未连」——前提是
+  // 拉取真的抛错，这正是 realHomeStatus 在三路全灭时抛错的原因。
   const reloadStatus = status.reload;
   useEffect(() => {
     const id = setInterval(reloadStatus, 30_000);
