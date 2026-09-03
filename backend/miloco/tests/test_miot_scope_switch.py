@@ -91,7 +91,13 @@ async def scene():
         refresh_cameras=AsyncMock(return_value=None),
         refresh_scenes=AsyncMock(return_value=None),
         get_miot_auth_info=AsyncMock(),
-        get_devices=AsyncMock(return_value={"d1": SimpleNamespace(home_id="H1")}),
+        # 两个家庭：切到 H2 才是真切换，切到 H1（启用集里那个）是幂等点击
+        get_devices=AsyncMock(
+            return_value={
+                "d1": SimpleNamespace(home_id="H1"),
+                "d2": SimpleNamespace(home_id="H2"),
+            }
+        ),
         get_cameras=AsyncMock(return_value={}),
     )
     service = MiotService(miot_proxy=proxy)
@@ -230,11 +236,29 @@ async def test_unbinding_empties_the_container_and_starts_no_alignment(scene):
 async def test_switching_home_rebuilds_the_container(scene):
     scene.store.set("iot/device/old_home/status/online", True, source="iot_align")
 
-    await scene.service.switch_home("H1")
+    await scene.service.switch_home("H2")
     await _settle(scene.store)
 
     assert scene.store.snapshot("iot/device/old_home/**") == {}
     assert scene.manager.aligns_started == 1
+
+
+async def test_switching_to_the_current_home_leaves_the_container_alone(scene):
+    """点当前正启用的那个家是幂等操作，容器不该为此清空重建。
+
+    那几秒里 `scope_is_aligned()` 为假 —— 属性推送全被对齐闸丢掉、补拉整个跳过、
+    快照读到 MISSING，而语义上什么都没换。会话重置那边早就是「变了才重置」。
+    """
+    scene.store.set("iot/device/mine/status/online", True, source="iot_align")
+
+    await scene.service.switch_home("H1")
+    await _settle(scene.store)
+
+    assert scene.store.get("iot/device/mine/status/online") is True
+    assert scene.manager.aligns_started == 0
+    assert scene.session_resets == []
+    # 刷新不在此列：它幂等，且前端拿这一下当强制刷新（main 上就有用例钉住）
+    assert scene.proxy.refresh_cameras.await_count == 1
 
 
 async def test_the_fallback_home_selection_rebuilds_the_container(scene):

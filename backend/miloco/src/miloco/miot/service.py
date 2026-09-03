@@ -460,6 +460,23 @@ class MiotService:
         _background_tasks.add(task)
         task.add_done_callback(_background_tasks.discard)
 
+    def _schedule_cache_refresh(self) -> None:
+        """只在后台重拉三份缓存，不碰作用域。
+
+        与 `_schedule_scope_reset` 的区别是这里不推进代号、不清容器、不重跑对齐 ——
+        给「作用域没变但该刷一遍」的入口用。
+        """
+
+        async def _run() -> None:
+            try:
+                await self._refresh_all_caches()
+            except Exception as e:
+                logger.warning("后台刷新缓存失败: %s", e, exc_info=True)
+
+        task = asyncio.create_task(_run())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
     def _clear_account_scope_state(self) -> None:
         """Clear service-layer scope residue (called on account switch)."""
         self._kv_repo.delete(ScopeConfigKeys.HOME_WHITE_LIST_KEY)
@@ -1378,15 +1395,17 @@ class MiotService:
         if others:
             target_list, _ = set_homes_in_use(self._kv_repo, others, False)
 
-        # 整段编排放后台：刷新和对齐都要打云端，让 HTTP 响应等它们会卡住几秒。
-        # 设备列表/摄像头列表请求时兜底触发刷新。
-        self._schedule_scope_reset(self._refresh_all_caches)
-
         # KV 已写入，本地更新 in_use 标记后立即返回，不等待 refresh 完成。
+        # 两件事都放后台：刷新和对齐都要打云端，让 HTTP 响应等它们会卡住几秒
         allow = allowed_home_ids(self._kv_repo)
-        # 启用集真的变化了才重置会话（避免切到当前家庭白丢热上下文）。
         if allow != prev_allow:
+            self._schedule_scope_reset(self._refresh_all_caches)
             self._schedule_agent_session_reset()
+        else:
+            # 前端家庭列表里当前那个家也是可点的，点它语义上什么都没换：作用域重置会为
+            # 这一下清空整棵容器、把属性推送关在对齐闸外好几秒、还把补拉计次归零，而会话
+            # 那边会白丢热上下文。刷新不在此列 —— 它是幂等的，前端也拿这一下当强制刷新
+            self._schedule_cache_refresh()
         for h in homes:
             h["in_use"] = h["home_id"] in allow
         return homes

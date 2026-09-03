@@ -1428,6 +1428,13 @@ class MiotProxy:
         Dids containing '/' (Huami/Zepp-bridged sub-devices) are skipped:
         the '/' breaks the topic path AND the decoder regex.
         """
+        skipped = [
+            did for did in self._device_info_dict if not _is_subscribable_did(did)
+        ]
+        if skipped:
+            logger.debug(
+                "device-props: skipping %d did(s) with '/': %s", len(skipped), skipped
+            )
         await _reconcile_subscriptions(
             lambda: {
                 did for did in self._device_info_dict if _is_subscribable_did(did)

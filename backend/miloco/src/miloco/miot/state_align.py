@@ -1,10 +1,11 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""启动时把 iot 设备属性拉一遍写进状态容器。
+"""启动时把 iot 设备属性拉一遍写进状态容器，并为上线补拉提供读取端。
 
-推送只在值变化时才来，重启后容器是空的、不会自己长回来，所以要主动拉一次。这里只做
-「启动跑一次」，上线/重连那条时机还没接。
+推送只在值变化时才来，重启后容器是空的、不会自己长回来，所以要主动拉一次。这个模块管两个
+时机：启动（`align_iot_state`，整代跑一次、自己写容器）和设备转上线（`read_missing_props`，
+只读，值交给 `state_push.IotPushWriter` 去写）。重连后重新对齐那条还没接。
 
 **离线设备只写在线标志，不拉属性。** 云端给的是缓存里的最后一次上报，可能任意旧，写进去
 会把 `last_reported` 刷成当前时刻，而响应不带时间戳、消费方看不出来。整台跳过也不行 ——
