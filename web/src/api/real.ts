@@ -204,6 +204,14 @@ export async function realHomeStatus(): Promise<HomeStatus> {
     ).catch(() => null),
   ]);
 
+  // 三路全灭 = 后端不可达，不是「未绑定」也不是「未失效」。单路失败仍按原逻辑
+  // 降级（那是局部故障，其余数据还有意义）；全灭时必须抛错，让上层保留上一份
+  // 数据——否则会合成一份「成功的假状态」（未绑定、设备数 0、失效档消失），
+  // 状态条在后端重启的十几秒里退回黄色「未连」，红色失效提示也被一并吞掉。
+  if (!miot && !home && !engine) {
+    throw new Error("home status unavailable: all upstream calls failed");
+  }
+
   // areas 里偶尔混入 home_id（纯数字字符串），过滤掉
   const realAreas = (home?.data.areas ?? []).filter(
     (a) => !/^\d+$/.test(a.name),

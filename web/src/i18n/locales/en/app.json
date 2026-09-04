@@ -1,6 +1,5 @@
 {
   "app": {
-    "loadHomeStatusFail": "Couldn't load home status",
     "loadPersonsFail": "Couldn't load family list",
     "loadCamerasFail": "Couldn't load cameras",
     "loadScopeCamerasFail": "Couldn't load camera scope",
@@ -33,6 +32,7 @@
     "stopFail": "Couldn't stop, try again later",
     "miotBound": "Xiaomi Home connected",
     "miotBoundScopeKept": "Xiaomi Home reconnected — your existing homes and cameras were kept",
+    "homeStatusUnavailable": "Can't reach the backend right now, retrying…",
     "loadOnDemandLogsFail": "Failed to load on-demand logs"
   }
 }
