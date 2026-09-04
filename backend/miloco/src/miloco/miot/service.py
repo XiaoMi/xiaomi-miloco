@@ -138,6 +138,17 @@ def _request_iid(request: "DeviceControlRequest") -> str | None:
         return None  # 与 value_json 同口径:归一失败不反噬审计主体
 
 
+def _auth_state_of(miot_proxy) -> str | None:
+    """取当前米家授权状态，供台账标记。
+
+    fail-open：拿不到就留 None（老库同样是 NULL）。审计维度缺失不该拖垮控制调用。
+    """
+    try:
+        return miot_proxy.auth_health.state.value
+    except Exception:
+        return None
+
+
 async def _write_action_ledger(
     miot_proxy: MiotProxy,
     *,
@@ -206,6 +217,10 @@ async def _write_action_ledger(
                     source=source,
                     source_id=source_id,
                     home_id=home_id,
+                    # 下发当时的授权状态。降级期间控制照常下发（感知不该为授权
+                    # 问题停摆），但成功与否不再有保证——不记这一维，事后就分不清
+                    # 「设备真的没响应」和「当时授权已失效」。
+                    auth_state=_auth_state_of(miot_proxy),
                 )
             )
 

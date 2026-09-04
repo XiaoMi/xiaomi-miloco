@@ -4,8 +4,9 @@
 - 刷新失败**不再清空** ``_oauth_info``——清空会让 ``is_authenticated`` 转 False，
   连带把感知侧的相机全部断开
 - 超时 / 连接失败 / 5xx / 响应体不合法 = 瞬时故障，只累计次数，不进降级态
-- 401 与 ``error=96009`` = 凭据被云端拒绝，立刻进降级态
-- 任何一次成功都无条件回到 OK
+- 401 与响应体带 ``error`` 字段（如 96009）= 凭据被云端拒绝，立刻进降级态
+- 任何一次刷新成功、或用户重新授权成功，都无条件回到 OK
+- 同状态内的重复失败日志按间隔限频，状态迁移那条不限频
 - 定时检查对瞬时故障会退避重试；对凭据失效立刻停手
 - 降级态落 KV，进程重启后仍然可读
 """
@@ -20,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from miloco.database.kv_repo import AuthConfigKeys
 from miloco.miot.auth_state import (
+    FAILURE_LOG_INTERVAL_SECONDS,
     RETRY_BACKOFF_SECONDS,
     MiotAuthHealth,
     MiotAuthState,
@@ -95,7 +97,7 @@ def test_only_explicit_credential_rejection_is_permanent(code, permanent):
 
 def test_transient_failure_does_not_degrade():
     h = MiotAuthHealth()
-    h = h.mark_failure(permanent=False, code=None, message="timeout")
+    h, _ = h.mark_failure(permanent=False, code=None, message="timeout")
     assert h.state is MiotAuthState.OK
     assert h.consecutive_failures == 1
     assert h.since_ts is None
@@ -103,7 +105,7 @@ def test_transient_failure_does_not_degrade():
 
 def test_permanent_failure_degrades_and_records_since():
     h = MiotAuthHealth()
-    h = h.mark_failure(permanent=True, code=-10021, message="invalid refresh token")
+    h, _ = h.mark_failure(permanent=True, code=-10021, message="invalid refresh token")
     assert h.state is MiotAuthState.DEGRADED
     assert h.since_ts is not None
     assert h.error_code == -10021
@@ -111,17 +113,17 @@ def test_permanent_failure_degrades_and_records_since():
 
 def test_since_ts_is_kept_across_repeated_failures():
     """已经降级后反复失败，「自 X 时起」不能被刷新成最近一次。"""
-    h = MiotAuthHealth().mark_failure(permanent=True, code=-10021, message="x")
+    h, _ = MiotAuthHealth().mark_failure(permanent=True, code=-10021, message="x")
     first = h.since_ts
     for _ in range(3):
-        h = h.mark_failure(permanent=False, code=None, message="timeout")
+        h, _ = h.mark_failure(permanent=False, code=None, message="timeout")
     assert h.since_ts == first
     assert h.state is MiotAuthState.DEGRADED, "降级后遇到瞬时故障不应回到 OK"
     assert h.consecutive_failures == 4
 
 
 def test_success_always_recovers():
-    h = MiotAuthHealth().mark_failure(permanent=True, code=-10021, message="x")
+    h, _ = MiotAuthHealth().mark_failure(permanent=True, code=-10021, message="x")
     h = h.mark_success()
     assert h.state is MiotAuthState.OK
     assert h.since_ts is None
@@ -203,6 +205,82 @@ async def test_refresh_success_clears_degraded_state():
     assert proxy.auth_health.state is MiotAuthState.OK
 
 
+@pytest.mark.asyncio
+async def test_rebind_clears_degraded_state():
+    """重新授权成功必须当场解除降级态。
+
+    只在定时刷新成功时复位是不够的：重新绑定拿到的是刚签发的新令牌，下一次刷新
+    要等到临期前 30 分钟才触发，中间界面会一直挂着「授权已失效」——住户刚做完
+    重新绑定却看不到任何变化。
+    """
+    from miot.types import MIoTOauthInfo
+
+    degraded, _ = MiotAuthHealth().mark_failure(
+        permanent=True, code=-10021, message="invalid refresh token"
+    )
+    kv = _FakeKV({AuthConfigKeys.MIOT_AUTH_STATE_KEY: degraded.model_dump_json()})
+    proxy = _make_proxy(kv)
+    assert proxy.auth_health.is_degraded, "前置：处于降级态"
+
+    proxy._miot_client.get_access_token_async = AsyncMock(
+        return_value=MIoTOauthInfo(
+            access_token="new", refresh_token="new_rt", expires_ts=9999999999
+        )
+    )
+    proxy.reset_miot_token_info = MagicMock()
+
+    await proxy.get_miot_auth_info(code="c", state="s")
+
+    assert proxy.auth_health.state is MiotAuthState.OK
+
+
+# ─────────────── 重复失败的日志限频 ───────────────
+
+
+def test_state_transition_always_logs():
+    """状态迁移那条每次故障只出现一次，是排障要找的那条，不受限频。"""
+    _, should_log = MiotAuthHealth(
+        last_failure_log_ts=int(time.time())  # 刚打过，仍然要放行
+    ).mark_failure(permanent=True, code=-10021, message="x")
+    assert should_log is True
+
+
+def test_repeated_failure_in_same_state_is_throttled():
+    """同状态内的重复失败按间隔限频，否则每天近 300 条同义行。"""
+    now = int(time.time())
+    degraded = MiotAuthHealth(
+        state=MiotAuthState.DEGRADED, since_ts=now - 7200, last_failure_log_ts=now
+    )
+    _, should_log = degraded.mark_failure(permanent=True, code=-10021, message="x")
+    assert should_log is False, "刚打过日志，本次应被限频"
+
+
+def test_throttle_opens_again_after_interval():
+    now = int(time.time())
+    degraded = MiotAuthHealth(
+        state=MiotAuthState.DEGRADED,
+        since_ts=now - 7200,
+        last_failure_log_ts=now - FAILURE_LOG_INTERVAL_SECONDS - 1,
+    )
+    health, should_log = degraded.mark_failure(
+        permanent=True, code=-10021, message="x"
+    )
+    assert should_log is True
+    assert health.last_failure_log_ts is not None
+
+
+def test_throttle_timestamp_not_advanced_when_suppressed():
+    """被限频时不能刷新时间戳，否则窗口会被每次失败无限推后、永远不再打日志。"""
+    now = int(time.time())
+    marked = now - 10
+    degraded = MiotAuthHealth(
+        state=MiotAuthState.DEGRADED, since_ts=now - 7200, last_failure_log_ts=marked
+    )
+    health, should_log = degraded.mark_failure(permanent=True, code=-10021, message="x")
+    assert should_log is False
+    assert health.last_failure_log_ts == marked
+
+
 # ─────────────── 持久化 ───────────────
 
 
@@ -210,9 +288,10 @@ def test_degraded_state_survives_restart():
     """重启后立刻可读，否则重启到首次刷新之间界面会误报「一切正常」。"""
     kv = _FakeKV()
     proxy = _make_proxy(kv)
-    proxy._set_auth_health(
-        MiotAuthHealth().mark_failure(permanent=True, code=-10021, message="x")
+    health, _ = MiotAuthHealth().mark_failure(
+        permanent=True, code=-10021, message="x"
     )
+    proxy._set_auth_health(health)
 
     stored = json.loads(kv.get(AuthConfigKeys.MIOT_AUTH_STATE_KEY))
     assert stored["state"] == "degraded"
@@ -242,11 +321,10 @@ async def test_transient_failure_retries_with_backoff(monkeypatch):
     async def _always_transient():
         nonlocal calls
         calls += 1
-        proxy._set_auth_health(
-            proxy.auth_health.mark_failure(
-                permanent=False, code=None, message="timeout"
-            )
+        h, _ = proxy.auth_health.mark_failure(
+            permanent=False, code=None, message="timeout"
         )
+        proxy._set_auth_health(h)
         return None
 
     proxy.refresh_xiaomi_home_token_info = _always_transient
@@ -274,11 +352,10 @@ async def test_permanent_failure_stops_retrying(monkeypatch):
     async def _permanent():
         nonlocal calls
         calls += 1
-        proxy._set_auth_health(
-            proxy.auth_health.mark_failure(
-                permanent=True, code=-10021, message="invalid refresh token"
-            )
+        h, _ = proxy.auth_health.mark_failure(
+            permanent=True, code=-10021, message="invalid refresh token"
         )
+        proxy._set_auth_health(h)
         return None
 
     proxy.refresh_xiaomi_home_token_info = _permanent

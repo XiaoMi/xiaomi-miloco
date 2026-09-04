@@ -1211,6 +1211,11 @@ class MiotProxy:
             )
             logger.info("Retrieved MIoT auth info, code: %s, state: %s", code, state)
             self.reset_miot_token_info(oauth_info)
+            # 重新授权拿到的是刚从云端换来的凭据——这本身就是「授权恢复」的最强
+            # 证据，健康度必须当场回到正常态。只在定时刷新成功时复位是不够的：
+            # 新令牌刚签发，下一次刷新要等到临期前 30 分钟才会触发，中间界面会
+            # 一直挂着「授权已失效」，住户刚做完重新绑定却看不到任何变化。
+            self._set_auth_health(self._auth_health.mark_success())
             await self.refresh_miot_info()
             return oauth_info
         except Exception as e:
@@ -1281,14 +1286,13 @@ class MiotProxy:
             code = getattr(getattr(e, "code", None), "value", None)
             permanent = is_permanent_auth_error(code)
             before = self._auth_health.state
-            self._set_auth_health(
-                self._auth_health.mark_failure(
-                    permanent=permanent, code=code, message=str(e)
-                )
+            health, should_log = self._auth_health.mark_failure(
+                permanent=permanent, code=code, message=str(e)
             )
-            after = self._auth_health.state
-            if after is not before:
-                # 只在状态迁移时打 ERROR，避免每 5 分钟刷一条把日志淹掉
+            self._set_auth_health(health)
+            transitioned = health.state is not before
+            if transitioned:
+                # 状态迁移每次故障只出现一次，正是排障要找的那条，不限频
                 logger.error(
                     "Mi Home authorization rejected by cloud (code=%s): %s. "
                     "Device control will keep dispatching but is no longer "
@@ -1298,11 +1302,13 @@ class MiotProxy:
                     code,
                     e,
                 )
-            else:
+            elif should_log:
+                # 同状态内的重复失败按半小时限频：降级后定时任务仍每 300s 试一次，
+                # 不限频就是每天近 300 条无新信息的重复行。
                 logger.warning(
-                    "Token refresh failed (%s, attempt %d): %s",
+                    "Token refresh still failing (%s, %d consecutive): %s",
                     "permanent" if permanent else "transient",
-                    self._auth_health.consecutive_failures,
+                    health.consecutive_failures,
                     e,
                 )
             return None
