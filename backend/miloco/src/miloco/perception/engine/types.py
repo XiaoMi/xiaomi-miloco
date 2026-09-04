@@ -35,8 +35,8 @@ class GateTrigger:
     # 音频过能量 gate 后,silero VAD 判本窗有真人声。门控 speeches 字段:False 时
     # 下游只剥 speeches(env_sounds / 喂音频不受影响)。audio_active=False 时恒 False。
     speech_active: bool = False
-    # 本窗口由 hold 拉起(visual 不通过、距上次 visual 通过 <= hold_duration_sec)。
-    # _is_audio_only 路由判定上短路:hold=True 不降级到 audio-only,保 video 路由。
+    # 滞回拉起且本窗有帧。给 _is_audio_only 选路用:hold=True 不降级到 audio-only。
+    # 三处 hold 取值的对照见 knowledge/03-features/perception-pipeline.md 的 Gate 小节。
     hold: bool = False
 
 
@@ -70,9 +70,12 @@ class GateTiming:
     vad_ms: float = 0.0
     # silero VAD 本窗人声峰值概率(0-1);audio_active=False 时未评估、为 0。诊断 / 配阈值用。
     speech_prob: float = 0.0
-    # 本窗口是 hold 拉起的(traces_device.gate_hold_pass 落库用)。
-    # passed 属性只表示真通过,hold 不计入;下游不再依赖 passed 决定 packet 是否生成。
+    # 原始滞回判定,只看时间不看有没有帧。给 pipeline 的 HOLD_START / HOLD_EXPIRED /
+    # HOLD_RECOVERED 状态机用 —— 置假会让零帧窗口凭空触发一次 HOLD_EXPIRED。
     hold_pass: bool = False
+    # 滞回真把本窗开出来了(hold_pass 且本窗有帧)。落 traces_device.gate_hold_pass 那一列,
+    # 该列须恒等于「本窗建了包」,见 knowledge/03-features/perception-pipeline.md 的 Gate 小节。
+    hold_opened_window: bool = False
     # visual_score 拆分:窗内邻帧 max vs 跨窗(上窗末帧↔本窗首帧)的 max。
     # 诊断用:cross >> intra 持续高,基本是 ISP 长周期漂移(AGC/IR/AWB)误判 motion。
     video_intra_score: float = 0.0

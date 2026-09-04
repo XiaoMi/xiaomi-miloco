@@ -42,9 +42,10 @@ async def run_gate(
 
     Returns ``(packet | None, timing, last_checked, new_last_visual_pass_ts, new_last_audio_pass_ts)``。
 
-    Hold 滞回:hold 资格只依赖 ``last_visual_pass_ts``。本窗 visual 不通过 + 距上次 visual
-    通过 <= ``config.hold_duration_sec`` 时,即使 audio 也不通过也会生成 packet 并打
-    ``trigger.hold=True``,下游 ``_is_audio_only`` 短路保 video 路由。
+    Hold 滞回:visual 不通过 + 距上次 visual 通过 <= ``config.hold_duration_sec`` + **本窗
+    有帧** 时放行,打 ``trigger.hold=True`` 保 video 路由。``timing.hold_pass`` 是不看帧的
+    原始判定,与前者取值可能不同 —— 三处 hold 取值的对照见
+    ``knowledge/03-features/perception-pipeline.md`` 的 Gate 小节。
 
     on-demand 单次调用路径不传两 ts(默认 None),hold 自然关闭。
     """
@@ -84,17 +85,21 @@ async def run_gate(
     new_last_visual_pass_ts = now if visual_changed else last_visual_pass_ts
     new_last_audio_pass_ts = now if audio_active else last_audio_pass_ts
 
+    # 无帧时 hold 不放行:零帧包会一路走到 omni 却拼不出 video 块,模型只能照 schema 编场景。
+    hold_opens_window = hold_active and bool(input_slice.frames)
+
     timing = GateTiming(
         video_ms=video_ms, audio_ms=audio_ms,
         video_pass=visual_changed, audio_pass=audio_active,
         video_score=visual_score, audio_energy=audio_energy,
         vad_ms=vad_ms, speech_prob=speech_prob,
         hold_pass=hold_active,
+        hold_opened_window=hold_opens_window,
         video_intra_score=visual.intra_max,
         video_cross_score=visual.cross_max,
     )
 
-    if not any_pass and not hold_active:
+    if not any_pass and not hold_opens_window:
         return None, timing, last_checked, new_last_visual_pass_ts, new_last_audio_pass_ts
 
     packet = GatePacket(
@@ -107,7 +112,7 @@ async def run_gate(
             audio_active=audio_active,
             audio_energy_level=audio_energy,
             speech_active=speech_active,
-            hold=hold_active,
+            hold=hold_opens_window,
         ),
         frames=input_slice.frames,
         audio_clip=input_slice.audio_clip,

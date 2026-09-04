@@ -29,8 +29,9 @@ class GateTrace:
     # cycle 异常 fallback),写库时落 NULL,P50-P99 分布视图过滤掉。
     video_score: float | None = None
     audio_energy: float | None = None
-    # 本窗 packet 由 hold 滞回拉起(visual 不通过、距上次 visual 通过 <= hold_duration_sec)。
-    # 与 video_pass 互斥(hold 前置条件要求 visual 不通过);可与 audio_pass 共存。
+    # 滞回真把本窗开出来了(= GateTiming.hold_opened_window)。与 video_pass 互斥,可与
+    # audio_pass 共存。语义约束与消费者清单见
+    # knowledge/03-features/perception-pipeline.md 的 Gate 小节。
     hold_pass: bool = False
 
     @property
