@@ -265,3 +265,139 @@ def test_unparsable_response_falls_back_to_length_only():
 
     assert "AT_should_not_leak" not in out
     assert str(len(raw)) in out
+
+
+# ─────────────── 进日志的值与 OAuth state ───────────────
+
+
+def test_authorize_log_value_strips_newlines():
+    """进日志的用户标识必须去掉换行，否则能伪造出额外的日志行。
+
+    该值目前恒为 None（鉴权依赖成功时不返回值），但类型标注写的是 str——哪天补成
+    返回真实用户标识，这里就是真实的注入点。钉住清洗本身，不依赖「今天恰好是 None」
+    这个会变的前提。
+    """
+    # 导入实现，不复刻它——自己再算一遍的话，实现被回退测试照样绿。
+    from miloco.miot.router import _log_safe
+
+    hostile = "admin\n2026-01-01 00:00:00 - root - INFO - 伪造的日志行"
+    safe = _log_safe(hostile)
+    assert "\n" not in safe and "\r" not in safe
+    # 内容不丢，只是拼成一行——排障仍看得出发生了什么
+    assert "admin" in safe and "伪造的日志行" in safe
+    # 恒为 None 的今天也不能抛
+    assert _log_safe(None) == "None"
+
+
+def test_oauth_state_uses_sha256_and_stays_self_consistent():
+    """OAuth 回跳的防重放串改用 SHA256，且同一进程内自比对仍然成立。
+
+    这个串只在本进程内比对（发出去一份、回跳带回来一份），既不落库也不与云端约定，
+    所以换算法不影响任何已有绑定。这里走**真实构造函数**——自己再算一遍哈希再断言
+    的话，实现换回旧算法测试照样绿，那是空护栏。
+    """
+    import asyncio
+    import hashlib
+
+    from miot.cloud import MIoTOAuth2Client
+
+    async def _build():
+        return MIoTOAuth2Client(
+            redirect_uri="https://example.invalid/cb",
+            cloud_server="cn",
+            uuid="uuid-1",
+        )
+
+    c = asyncio.run(_build())
+    state = c.state if hasattr(c, "state") else c._state
+    seed = f"d={c._device_id}".encode("utf-8")
+
+    assert state == hashlib.sha256(seed).hexdigest(), "实现没在用 SHA256"
+    assert state != hashlib.sha1(seed).hexdigest(), "实现还在用 SHA1"
+    assert len(state) == 64
+    # 自比对成立：回跳带回同一个串才通过
+    assert asyncio.run(c.check_state_async(redirect_state=state)) is True
+    assert asyncio.run(c.check_state_async(redirect_state="not-it")) is False
+
+
+def test_no_unsanitized_value_reaches_the_log_in_that_router():
+    """名单上的值不许裸传进这一组日志。
+
+    守的是**一份显式名单**，不是「这个文件里所有该清洗的值」。名单之外还有别的值
+    也裸传进日志（WS 文本帧原文、若干路径与查询参数），它们在主干上即如此、本次
+    未纳入，这条护栏也不管它们——要扩大守护范围就往名单里加，别指望它自动发现。
+
+    名单上现有两个值，理由不同：**调用者标识**今天恒为 ``None``（两条鉴权依赖成功
+    时都不返回值），钉它是为了「将来补成返回真实身份」那天不必回头逐处补；**通知
+    文本**是调用方提交上来的自由字符串、只被约束非空不限字符集，是今天就真的外部
+    可控的那个，钉它是防现时回退——带服务凭据的调用方塞一个含换行的值进去，日志里
+    就多出一整行看起来完全正常的记录，按行切的采集器分不出真假。
+
+    判据按 **AST 看实参**，不按行文本匹配：同一个值在这个文件里有好几种写法
+    （占位符写法不同、单参数与多参数、单行与折行），按行匹配只覆盖其中一种。
+    位置实参与关键字实参都看，也包括第 0 个——``logger.info(f"user={x}")`` 这种
+    写法会把值拼进格式串本身。
+    """
+    import ast
+    import pathlib
+
+    import miloco.miot.router as mod
+
+    src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
+
+    def _bare_names(node: ast.expr) -> list[str]:
+        """这个实参里有哪些「必须先清洗、却没被清洗」的值。
+
+        **向下遍历整棵子树**，不只看顶层——``extra={"user": current_user}`` 会把值
+        埋进字典、f-string 会把它埋进 ``JoinedStr``，只看顶层就全漏过去了。
+        """
+        # 要守的名单。往里加名字即可扩大守护范围。
+        BARE_NAMES = {"current_user"}
+        DOTTED_NAMES = {"request.notify"}
+
+        found: list[str] = []
+
+        def visit(n: ast.AST) -> None:
+            # 已被 _log_safe(...) 包住的，整棵子树都算清洗过——不往下看。
+            # 注意不能用 ast.walk + continue：那是平铺遍历，跳过调用节点本身
+            # 之后它的实参照样会被访问到。
+            if (
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "_log_safe"
+            ):
+                return
+            # 名单判定：裸名字，以及 `对象.属性` 形式
+            if isinstance(n, ast.Name) and n.id in BARE_NAMES:
+                found.append(n.id)
+                return
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+                dotted = f"{n.value.id}.{n.attr}"
+                if dotted in DOTTED_NAMES:
+                    found.append(dotted)
+                    return
+            for child in ast.iter_child_nodes(n):
+                visit(child)
+
+        visit(node)
+        return found
+
+    leaked = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (
+            isinstance(fn, ast.Attribute)
+            and isinstance(fn.value, ast.Name)
+            and fn.value.id == "logger"
+        ):
+            continue
+        args = list(node.args) + [kw.value for kw in node.keywords]
+        for arg in args:
+            for name in _bare_names(arg):
+                leaked.append(
+                    f"L{node.lineno} [{name}]: {src.splitlines()[node.lineno - 1].strip()}"
+                )
+
+    assert not leaked, "这些日志调用还在直接用未清洗的值:\n" + "\n".join(leaked)

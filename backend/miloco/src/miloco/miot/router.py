@@ -44,6 +44,20 @@ from miloco.utils.common import escape_for_js_string
 logger = logging.getLogger(name=__name__)
 
 
+def _log_safe(value: object) -> str:
+    r"""把要进日志的值里的换行剥掉。
+
+    带 ``\r`` / ``\n`` 的值进 ``logger`` 的 ``%s`` 参数，能在日志里伪造出额外的
+    整行——读日志的人（和按行切的采集器）无从分辨哪行是真的。本文件每个接口都把
+    鉴权依赖注入的调用者标识记一行「接口被调用」，用的都是这个函数。
+
+    今天这个标识恒为 ``None``（鉴权依赖成功时不返回值），两种写法打出来都是
+    ``None``；但它的类型标注是字符串，语义上本就该是调用者身份。剥换行是为了
+    「将来补成返回真实标识」那一天不必回头逐处补——**那时才补就晚了**。
+    """
+    return str(value).replace("\r", "").replace("\n", "")
+
+
 def _truncate_ws_reason(reason: str) -> str:
     """把 WS 关闭帧的 reason 截断到协议安全长度。
 
@@ -136,7 +150,7 @@ async def authorize_miot(
     current_user: str = Depends(verify_token),
 ):
     """Exchange the authorization code (pasted by user) for an access token."""
-    logger.info("MiOT authorize API called, user: %s", current_user)
+    logger.info("MiOT authorize API called, user: %s", _log_safe(current_user))
     # data 里带回 account_changed / scope_preserved：命令行与 web 都据此决定
     # 要不要再跑一遍选家流程（它是「唯一启用」语义，会覆写家庭白名单，把后端
     # 刚保住的配置又冲掉），并据此告知住户配置是保留了还是重置了。老客户端
@@ -150,7 +164,7 @@ async def authorize_miot(
 @router.get("/status", summary="Check MiOT bind status", response_model=NormalResponse)
 async def get_miot_bind_status(current_user: str = Depends(verify_token)):
     """Check MiOT bind status"""
-    logger.info("MiOT bind status API called, user: %s", current_user)
+    logger.info("MiOT bind status API called, user: %s", _log_safe(current_user))
     result = await manager.miot_service.get_miot_bind_status()
     return NormalResponse(
         code=0, message="Bind status checked successfully", data=result
@@ -160,7 +174,7 @@ async def get_miot_bind_status(current_user: str = Depends(verify_token)):
 @router.post("/bind", summary="Bind MiOT account", response_model=NormalResponse)
 async def bind_miot(current_user: str = Depends(verify_token)):
     """Bind MiOT account: get OAuth URL for authorization"""
-    logger.info("MiOT bind API called, user: %s", current_user)
+    logger.info("MiOT bind API called, user: %s", _log_safe(current_user))
     result = await manager.miot_service.bind_miot()
     return NormalResponse(
         code=0, message="OAuth URL generated successfully", data=result
@@ -170,7 +184,7 @@ async def bind_miot(current_user: str = Depends(verify_token)):
 @router.post("/unbind", summary="Unbind MiOT account", response_model=NormalResponse)
 async def unbind_miot(current_user: str = Depends(verify_token)):
     """Unbind MiOT account: clear all MiOT state"""
-    logger.info("MiOT unbind API called, user: %s", current_user)
+    logger.info("MiOT unbind API called, user: %s", _log_safe(current_user))
     await manager.miot_service.unbind_miot()
     return NormalResponse(code=0, message="MiOT unbound successfully", data=None)
 
@@ -180,7 +194,7 @@ async def unbind_miot(current_user: str = Depends(verify_token)):
 )
 async def get_miot_login_status(current_user: str = Depends(verify_token)):
     """Check MiOT login status"""
-    logger.info("MiOT login status API called, user: %s", current_user)
+    logger.info("MiOT login status API called, user: %s", _log_safe(current_user))
 
     result = await manager.miot_service.get_miot_login_status()
 
@@ -197,7 +211,7 @@ async def get_miot_login_status(current_user: str = Depends(verify_token)):
 )
 async def get_miot_user_info(current_user: str = Depends(verify_token)):
     """Get MiOT user information"""
-    logger.info("Get MiOT user info API called, user: %s", current_user)
+    logger.info("Get MiOT user info API called, user: %s", _log_safe(current_user))
 
     user_info = await manager.miot_service.get_miot_user_info()
 
@@ -212,7 +226,7 @@ async def get_miot_user_info(current_user: str = Depends(verify_token)):
 )
 async def get_miot_camera_list(current_user: str = Depends(verify_token)):
     """Get MiOT camera list"""
-    logger.info("Get MiOT camera list API called, user: %s", current_user)
+    logger.info("Get MiOT camera list API called, user: %s", _log_safe(current_user))
 
     camera_list = await manager.miot_service.get_miot_camera_list()
 
@@ -229,7 +243,7 @@ async def get_miot_camera_list(current_user: str = Depends(verify_token)):
 )
 async def get_miot_device_list(current_user: str = Depends(verify_token)):
     """Get MiOT device list"""
-    logger.info("get miot device list, user: %s", current_user)
+    logger.info("get miot device list, user: %s", _log_safe(current_user))
     device_list = await manager.miot_service.get_miot_device_list()
     logger.info(
         "Successfully retrieved Xiaomi Home device list - Count: %s", len(device_list)
@@ -249,7 +263,7 @@ async def get_home_info(
     refresh: bool = Query(False, description="true = 先刷新云端设备/摄像头/场景"),
 ):
     """Get home info for CLI。refresh=true 触发 device refresh。"""
-    logger.info("Get home info API called, user=%s, refresh=%s", current_user, refresh)
+    logger.info("Get home info API called, user=%s, refresh=%s", _log_safe(current_user), refresh)
     data = await manager.miot_service.get_home_info(refresh=refresh)
     return NormalResponse(code=0, message="Home info retrieved successfully", data=data)
 
@@ -261,7 +275,7 @@ async def get_home_info(
 )
 async def get_device_spec(did: str, current_user: str = Depends(verify_token)):
     """Get spec for a single device (轻量，不拉全量 home_info)。"""
-    logger.info("Get device spec API called, user=%s, did=%s", current_user, did)
+    logger.info("Get device spec API called, user=%s, did=%s", _log_safe(current_user), did)
     data = await manager.miot_service.get_device_spec(did)
     return NormalResponse(code=0, message="ok", data=data)
 
@@ -279,7 +293,7 @@ async def control_device(
     """Control device: set_property / set_properties / call_action"""
     logger.info(
         "Control device API called, user: %s, did: %s, type: %s",
-        current_user,
+        _log_safe(current_user),
         did,
         request.type,
     )
@@ -315,7 +329,7 @@ async def get_device_status(
     """Get device property values. iid: comma-separated prop IIDs, e.g. prop.2.1,prop.2.2"""
     logger.info(
         "Get device status API called, user: %s, did: %s, iid: %s",
-        current_user,
+        _log_safe(current_user),
         did,
         iid,
     )
@@ -349,7 +363,7 @@ async def trigger_scene(
 ):
     """Trigger a MIoT manual scene"""
     logger.info(
-        "Trigger scene API called, user: %s, scene_id: %s", current_user, scene_id
+        "Trigger scene API called, user: %s, scene_id: %s", _log_safe(current_user), scene_id
     )
     success = await manager.miot_service.trigger_scene(scene_id)
     if not success:
@@ -364,7 +378,7 @@ async def trigger_scene(
 )
 async def refresh_miot_all_info(current_user: str = Depends(verify_token)):
     """Refresh MiOT all information"""
-    logger.info("Refresh MiOT all info API called, user: %s", current_user)
+    logger.info("Refresh MiOT all info API called, user: %s", _log_safe(current_user))
     result = await manager.miot_service.refresh_miot_all_info()
     logger.info("MiOT information refresh completed: %s", result)
     return NormalResponse(
@@ -392,7 +406,7 @@ async def refresh_camera_online(current_user: str = Depends(verify_token)):
 )
 async def refresh_miot_cameras(current_user: str = Depends(verify_token)):
     """Refresh MiOT camera information"""
-    logger.info("Refresh MiOT cameras API called, user: %s", current_user)
+    logger.info("Refresh MiOT cameras API called, user: %s", _log_safe(current_user))
 
     result = await manager.miot_service.refresh_miot_cameras()
 
@@ -409,7 +423,7 @@ async def refresh_miot_cameras(current_user: str = Depends(verify_token)):
 )
 async def refresh_miot_scenes(current_user: str = Depends(verify_token)):
     """Refresh MiOT scene information"""
-    logger.info("Refresh MiOT scenes API called, user: %s", current_user)
+    logger.info("Refresh MiOT scenes API called, user: %s", _log_safe(current_user))
 
     result = await manager.miot_service.refresh_miot_scenes()
 
@@ -426,7 +440,7 @@ async def refresh_miot_scenes(current_user: str = Depends(verify_token)):
 )
 async def refresh_miot_user_info(current_user: str = Depends(verify_token)):
     """Refresh MiOT user information"""
-    logger.info("Refresh MiOT user info API called, user: %s", current_user)
+    logger.info("Refresh MiOT user info API called, user: %s", _log_safe(current_user))
 
     result = await manager.miot_service.refresh_miot_user_info()
 
@@ -443,7 +457,7 @@ async def refresh_miot_user_info(current_user: str = Depends(verify_token)):
 )
 async def refresh_miot_devices(current_user: str = Depends(verify_token)):
     """Refresh MiOT device information"""
-    logger.info("Refresh MiOT devices API called, user: %s", current_user)
+    logger.info("Refresh MiOT devices API called, user: %s", _log_safe(current_user))
 
     result = await manager.miot_service.refresh_miot_devices()
 
@@ -476,7 +490,11 @@ async def send_notify(
 ):
     """Send notification"""
     logger.info(
-        "Send notify API called, notify: %s, user: %s", request.notify, current_user
+        # notify 是调用方 POST 上来的自由文本，schema 只约束非空、不限字符集——
+        # 这是这一行里真正外部可控的那个值，比旁边那个更需要剥换行。
+        "Send notify API called, notify: %s, user: %s",
+        _log_safe(request.notify),
+        _log_safe(current_user),
     )
     await manager.miot_service.send_notify(request.notify)
     return NormalResponse(code=0, message="Notification sent successfully", data=None)
@@ -618,7 +636,7 @@ async def record_clip(
     """
     logger.info(
         "record_clip API called, user: %s, camera: %s.%d, dur=%dms",
-        current_user, camera_id, channel, duration_ms,
+        _log_safe(current_user), camera_id, channel, duration_ms,
     )
     recorder = NalClipRecorder(duration_ms=duration_ms)
     try:
@@ -714,7 +732,7 @@ async def video_stream_websocket(
 ):
     """Video stream WebSocket."""
     logger.info(
-        "WebSocket connection request, %s, %s.%d", current_user, camera_id, channel
+        "WebSocket connection request, %s, %s.%d", _log_safe(current_user), camera_id, channel
     )
     start_time: datetime = datetime.now()
     token_hash: str = str(hash(websocket.cookies.get("access_token")))
@@ -803,7 +821,7 @@ async def audio_stream_websocket(
     """Audio stream WebSocket."""
     logger.info(
         "Audio WebSocket connection request, %s, %s.%d",
-        current_user,
+        _log_safe(current_user),
         camera_id,
         channel,
     )
