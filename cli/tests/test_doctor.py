@@ -861,8 +861,9 @@ class TestAssessBackend:
         assert account.status == Status.FAIL
         assert account.section == "miloco"
         assert "miloco-cli account bind" in account.fix_hint
-        # 说清影响范围，别让住户以为感知也停了
-        assert "感知" in account.message
+        # 说清影响范围：控制与感知都停了，别让住户以为只是控制不灵。断的是整句
+        # 而不是「感知」这个子串——子串在文案被改回「感知不受影响」时照样命中。
+        assert "设备控制与感知均已停止" in account.message
 
     def test_auth_degraded_still_fails_after_access_token_also_expires(self):
         """降级 + 未绑定同时成立时仍须判不通过——问题变严重的那一刻不该反而不报警。

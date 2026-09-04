@@ -451,15 +451,19 @@ async def test_no_refresh_when_token_still_fresh():
     proxy.refresh_xiaomi_home_token_info.assert_not_called()
 
 
-# ─────────────── 中断的刷新：重启后立刻给结论 ───────────────
+# ─────────────── 中断的刷新：重启后安排验证，不直接定论 ───────────────
 
 
-def test_interrupted_refresh_marks_degraded_on_startup():
-    """上一轮刷新死在「请求已发、结果未知」那段时，重启后直接判降级。
+def test_interrupted_refresh_schedules_verification_not_a_verdict():
+    """上一轮刷新结果未知时，重启后安排验一次，**不判永久失效**。
 
-    刷新令牌是一次性的：请求一旦抵达云端，旧令牌无论我们收没收到响应都已作废。
-    新令牌从未到达本机，救不回来——但没必要再拿这枚死令牌试满一轮退避，
-    应当立刻给住户准确结论。
+    标记是在发请求**之前**写下的，所以它只说明「这一轮结果未知」：请求抵达云端
+    之后被硬杀，旧令牌确实作废；在那之前（连接、握手、发送）被硬杀，手上这枚
+    完好无损——两种现场一模一样，判据分不开。
+
+    两侧代价严重不对称，所以只能选不定论：误判一次，住户的一次断电就换来「全停
+    且必须手动重绑」，而定时续期在临期窗口外直接早退，这个误判要等到令牌自然临期
+    才有机会纠正；而放弃提前定论，真死时也只多花一轮退避。
     """
     from miloco.database.kv_repo import AuthConfigKeys
 
@@ -470,10 +474,76 @@ def test_interrupted_refresh_marks_degraded_on_startup():
     assert kv.get(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY) is not None
 
     reborn = _make_proxy(kv)  # 新进程重新加载
-    assert reborn.auth_health.is_degraded, "中断的刷新应当在启动时被判为降级"
-    assert (
-        kv.get(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY) is None
-    ), "标记应当被消费掉，不能反复触发"
+    assert not reborn.auth_health.is_degraded, (
+        "结果未知不等于令牌已死，不该在启动时就判永久失效"
+    )
+    assert reborn._verify_token_on_start, "应当安排下一次检查立刻验一次"
+    assert kv.get(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY) is None, (
+        "标记应当被消费掉，不能反复触发"
+    )
+
+
+@pytest.mark.asyncio
+async def test_scheduled_check_verifies_immediately_after_interruption():
+    """安排了验证之后，定时检查不许因为「远未临期」早退。
+
+    早退的话这一轮就白过，而唯一能纠正误判的路径正是一次成功的续期——令牌远未
+    临期时要等好几天才会有下一次。
+    """
+    from miot.types import MIoTOauthInfo
+
+    kv = _FakeKV()
+    proxy = _make_proxy(kv, expires_in=86400 * 3)  # 远未临期
+    proxy._mark_refresh_inflight(proxy._oauth_info.refresh_token)
+    reborn = _make_proxy(kv, expires_in=86400 * 3)
+    assert reborn._verify_token_on_start, "前置：已安排验证"
+
+    refreshed: list[str] = []
+
+    async def _refresh(refresh_token, persist=None):
+        refreshed.append(refresh_token)
+        info = MIoTOauthInfo(
+            access_token="new", refresh_token="new_rt", expires_ts=9999999999
+        )
+        if persist:
+            persist(info)
+        return info
+
+    reborn._miot_client.refresh_access_token_async = _refresh
+
+    await reborn._check_and_refresh_token()
+
+    assert refreshed, "远未临期也必须验这一次"
+    assert not reborn.auth_health.is_degraded, "验证成功即视为恢复"
+    assert not reborn._verify_token_on_start, "验过一次就该落下，不必每轮都跳早退"
+
+
+@pytest.mark.asyncio
+async def test_verification_that_gets_rejected_does_degrade():
+    """反向：令牌真的已死时，这次验证要如期把它判成降级。
+
+    不定论换来的只是「慢一次往返」，不是「永远不报」。这条与上一条成对——只验
+    「不误判」，把判据改成永不降级也是绿的。
+    """
+    kv = _FakeKV()
+    proxy = _make_proxy(kv, expires_in=86400 * 3)
+    proxy._mark_refresh_inflight(proxy._oauth_info.refresh_token)
+    reborn = _make_proxy(kv, expires_in=86400 * 3)
+
+    async def _rejected(refresh_token, persist=None):
+        raise MIoTOAuth2Error(
+            "oauth/get_token rejected, error=96009",
+            MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN,
+        )
+
+    reborn._miot_client.refresh_access_token_async = _rejected
+
+    await reborn._check_and_refresh_token()
+
+    assert reborn.auth_health.is_degraded, "云端明确拒绝了，这一轮就该置降级"
+    assert reborn.auth_health.error_code == (
+        MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.value
+    )
 
 
 def test_marker_not_matching_current_token_is_not_degraded():

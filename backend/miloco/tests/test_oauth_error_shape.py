@@ -14,17 +14,20 @@ from miot.error import MIoTErrorCode
 
 
 def _classify(res_obj: dict) -> str | None:
-    """复刻 __get_token_async 里的分类逻辑，返回错误码名或 None。
+    """这份响应会不会被判成「凭据被拒绝」——**调的是生产判据**，不复刻。
 
-    直接调私有方法要连 aiohttp，成本远高于收益；这里钉的是**判据本身**，
-    与实现保持同一份形状假设即可。若实现改了形状假设，这个测试要一起改。
+    钉的是形状识别：``error`` 藏在 ``result`` 里的真实形状能不能认出来。至于
+    「认出来之后报哪个错误码」由请求体决定（续期与授权码兑换报不同的码），那条
+    分支另有用例从真实的换取入口驱动，不在这里重复。
+
+    返回码名只是为了让下面的断言读起来贴近调用方看到的东西；**不要**在这里按
+    请求体去挑码——那就又变成一份会和实现分叉的复刻件了。
     """
-    err_obj = res_obj if isinstance(res_obj, dict) else {}
-    result_obj = err_obj.get("result")
-    for holder in (err_obj, result_obj if isinstance(result_obj, dict) else {}):
-        if holder.get("error") is not None:
-            return MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.name
-    return None
+    from miot.cloud import find_oauth_error
+
+    if find_oauth_error(res_obj) is None:
+        return None
+    return MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.name
 
 
 # 实机抓到的原样响应（2026-09-01 测试机，refresh_token 改坏后云端的回复）。
@@ -256,6 +259,26 @@ def test_response_body_is_redacted_when_shape_is_invalid():
     assert "expires_in" in out and "refresh_token" in out
 
 
+def test_flat_shaped_response_is_redacted_at_the_top_level_too():
+    """令牌直接躺在顶层时也要脱敏——「没有 result」正是走进这条分支的原因。
+
+    形状识别那一侧刻意不假设 error 只在 result 里；脱敏这一侧同样不能假设令牌
+    只在 result 里。扁平响应恰恰因为缺 result 才被判成形状不合法，此时只下探
+    result 等于把两枚令牌原文写进日志。
+    """
+    from miot.cloud import _redact_response
+
+    at = "AT_flat_live_token_must_not_leak_0123456789"
+    rt = "RT_flat_live_token_must_not_leak_0123456789"
+    body = {"code": 0, "access_token": at, "refresh_token": rt}
+    out = _redact_response(body, json.dumps(body))
+
+    assert at not in out, "顶层的 access_token 原文进了异常消息"
+    assert rt not in out, "顶层的 refresh_token 原文进了异常消息"
+    # 排障需要的结构信息要留着
+    assert "access_token" in out and "refresh_token" in out
+
+
 def test_unparsable_response_falls_back_to_length_only():
     """解析不出预期结构时只报长度，不把整个响应体原样落盘。"""
     from miot.cloud import _redact_response
@@ -324,8 +347,8 @@ def test_no_unsanitized_value_reaches_the_log_in_that_router():
     """名单上的值不许裸传进这一组日志。
 
     守的是**一份显式名单**，不是「这个文件里所有该清洗的值」。名单之外还有别的值
-    也裸传进日志（WS 文本帧原文、若干路径与查询参数），它们在主干上即如此、本次
-    未纳入，这条护栏也不管它们——要扩大守护范围就往名单里加，别指望它自动发现。
+    也裸传进日志（例如 WS 文本帧原文），它们在主干上即如此、本次未纳入，这条护栏
+    也不管它们——要扩大守护范围就往名单里加，别指望它自动发现。
 
     名单上现有两个值，理由不同：**调用者标识**今天恒为 ``None``（两条鉴权依赖成功
     时都不返回值），钉它是为了「将来补成返回真实身份」那天不必回头逐处补；**通知
@@ -352,7 +375,11 @@ def test_no_unsanitized_value_reaches_the_log_in_that_router():
         埋进字典、f-string 会把它埋进 ``JoinedStr``，只看顶层就全漏过去了。
         """
         # 要守的名单。往里加名字即可扩大守护范围。
-        BARE_NAMES = {"current_user"}
+        #
+        # 路径参数是今天就真的外部可控的那几个：URL 里写 %0A，解码出来就是换行，
+        # 能在日志里伪造出整行。调用者标识今天恒为空，钉它是为了「将来补成返回
+        # 真实身份」那天不必回头逐处补。
+        BARE_NAMES = {"current_user", "camera_id", "did", "scene_id"}
         DOTTED_NAMES = {"request.notify"}
 
         found: list[str] = []

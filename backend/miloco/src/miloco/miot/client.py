@@ -387,6 +387,10 @@ class MiotProxy:
         """
         return self._oauth_info is not None and not self._auth_health.is_degraded
 
+    #: 上一轮刷新结果未知，下一次检查要跳过临期早退、立刻验一次。类级默认值是
+    #: 有意的：绕过 ``__init__`` 造实例的路径（测试）同样取得到它。
+    _verify_token_on_start: bool = False
+
     def _refuse_if_not_operational(self, what: str) -> str | None:
         """授权已被云端永久拒绝时，给出拒绝理由；仍可用则返回 ``None``。
 
@@ -1676,27 +1680,32 @@ class MiotProxy:
             return False
 
     def _apply_interrupted_refresh_on_start(self) -> None:
-        """启动时处理「上一轮刷新没走完」的情况。
+        """启动时处理「上一轮刷新没走完」的情况：安排立刻验一次，**不直接定论**。
 
-        请求一旦抵达云端，旧令牌就已作废，而新令牌没能回到本机——救不回来。
-        但没必要再拿这枚死令牌试满一轮退避（约 85 秒），直接给出结论即可。
+        标记是在**发请求之前**写下的，所以它只说明「这一轮的结果未知」，说明不了
+        「令牌已死」。请求抵达云端之后被硬杀，旧令牌确实已作废；而在那之前（DNS
+        解析、连接、TLS 握手、请求发送）被硬杀，手上这枚完好无损——两种情况留下
+        的现场一模一样，判据分不开。
+
+        **所以这里不能判永久失效。** 两侧代价严重不对称：误判一次，住户的一次
+        断电就换来「设备控制与感知全停、必须自己去重新绑定」，而且定时续期在临期
+        窗口之外直接早退，这个误判要等到令牌自然临期才有机会被纠正，量级是天；
+        而放弃提前定论的代价，只是在令牌**真的**已死时多花一轮退避才得出同一个
+        结论。改为安排下一次检查时立刻验一次、跳过临期早退：真被拒时那一轮就会
+        置降级，只慢一次往返；误判时第一次验证即成功，健康度随新令牌落库复位。
+
+        残留一处：验证跑起来之前若再被硬杀一次，这个意向就丢了（标记已消费），
+        于是要等令牌自然临期才会发起下一次续期。那仍然好过留下一个假的永久失效。
         """
         if not self._consume_interrupted_refresh():
             return
-        logger.error(
+        logger.warning(
             "Previous token refresh was interrupted before its result was "
-            "known; the refresh token in use was very likely already consumed "
-            "by the cloud and cannot be recovered. Device control and "
-            "perception have both stopped: cloud dispatch is refused, and the "
-            "camera list can no longer be fetched. "
-            "Fix: rebind in the web console, or run `miloco-cli account bind`."
+            "known; the refresh token in use may already have been consumed by "
+            "the cloud. Verifying it once at the next check instead of waiting "
+            "for the expiry window."
         )
-        health, _ = self._auth_health.mark_failure(
-            permanent=True,
-            code=None,
-            message="refresh interrupted before its result was known",
-        )
-        self._set_auth_health(health)
+        self._verify_token_on_start = True
 
     async def _do_refresh_token(self) -> MIoTOauthInfo | None:
         """实际的刷新动作。调用方须持有 ``_token_refresh_lock``。"""
@@ -2118,8 +2127,13 @@ class MiotProxy:
         current_time = int(time.time())
         expires_ts = self._oauth_info.expires_ts
 
-        # Refresh token if it expires within 30 minutes
-        if expires_ts - current_time > 1800:  # 1800 seconds = 30 minutes
+        # 上一轮刷新结果未知时不等临期，先验一次——见
+        # _apply_interrupted_refresh_on_start：那个标记只说明「结果未知」，
+        # 验一次才分得出「令牌已死」与「请求没发出去」。
+        if self._verify_token_on_start:
+            self._verify_token_on_start = False
+            logger.info("Verifying refresh token after an interrupted refresh")
+        elif expires_ts - current_time > 1800:  # 1800 seconds = 30 minutes
             return
 
         logger.info(
