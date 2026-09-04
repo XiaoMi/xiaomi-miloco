@@ -59,6 +59,16 @@ def _log_safe(value: object) -> str:
     return str(value).replace("\r", "").replace("\n", "")
 
 
+def _cam_tag(camera_id: str, channel: int) -> str:
+    """把「相机 + 通道」拼成一个可入日志的标识。
+
+    这两个值在日志里总是成对出现、指的是同一路码流，拼一次比每处都写
+    ``%s.%d`` 整齐，也让格式串少一个占位符。顺带剥掉换行：相机标识是路径参数、
+    外部可控，而拼接之后就分不出哪一段来自请求，所以在这里剥而不在各个日志点包。
+    """
+    return _log_safe(f"{camera_id}.{channel}")
+
+
 def _truncate_ws_reason(reason: str) -> str:
     """把 WS 关闭帧的 reason 截断到协议安全长度。
 
@@ -106,9 +116,9 @@ async def _first_frame_watchdog(
     if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
         return
     logger.warning(
-        "First-frame watchdog fired, %s.%d — no frame in %.0fs, camera likely "
+        "First-frame watchdog fired, %s — no frame in %.0fs, camera likely "
         "unreachable (cross-LAN / offline / PPCS relay not established)",
-        _log_safe(camera_id), channel, _FIRST_FRAME_TIMEOUT_S,
+        _cam_tag(camera_id, channel), _FIRST_FRAME_TIMEOUT_S,
     )
     try:
         # reason 是给将来按机器码分流预留的字段;前端 watch.html 当前只展示 message,
@@ -124,8 +134,8 @@ async def _first_frame_watchdog(
         # send 失败基本意味着连接已被对端关掉——再 close 也是白搭,还会再抛一条
         # error 把"连接没了"这件正常事刷成两条 ERROR。直接收尾,主流程 finally 的
         # close_connection 负责清理。降到 info,不混进真 error。
-        logger.info("watchdog send skipped (conn likely gone), %s.%d: %s",
-                    _log_safe(camera_id), channel, err)
+        logger.info("watchdog send skipped (conn likely gone), %s: %s",
+                    _cam_tag(camera_id, channel), err)
         return
     try:
         # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)
@@ -133,7 +143,7 @@ async def _first_frame_watchdog(
             code=1011, reason=_truncate_ws_reason("camera_unreachable")
         )
     except Exception as err:
-        logger.info("watchdog close failed, %s.%d: %s", _log_safe(camera_id), channel, err)
+        logger.info("watchdog close failed, %s: %s", _cam_tag(camera_id, channel), err)
 
 
 router = APIRouter(prefix="/miot", tags=["Xiaomi IoT"])
@@ -264,7 +274,11 @@ async def get_home_info(
     refresh: bool = Query(False, description="true = 先刷新云端设备/摄像头/场景"),
 ):
     """Get home info for CLI。refresh=true 触发 device refresh。"""
-    logger.info("Get home info API called, user=%s, refresh=%s", _log_safe(current_user), refresh)
+    logger.info(
+        "Get home info API called, user=%s, refresh=%s",
+        _log_safe(current_user),
+        _log_safe(refresh),
+    )
     data = await manager.miot_service.get_home_info(refresh=refresh)
     return NormalResponse(code=0, message="Home info retrieved successfully", data=data)
 
@@ -652,8 +666,8 @@ async def record_clip(
     return 504; register failures (camera not bound) return 503.
     """
     logger.info(
-        "record_clip API called, user: %s, camera: %s.%d, dur=%dms",
-        _log_safe(current_user), _log_safe(camera_id), channel, duration_ms,
+        "record_clip API called, user: %s, camera: %s, dur=%sms",
+        _log_safe(current_user), _cam_tag(camera_id, channel), _log_safe(duration_ms),
     )
     recorder = NalClipRecorder(duration_ms=duration_ms)
     try:
@@ -672,8 +686,8 @@ async def record_clip(
             mp4_bytes = await recorder.wait(timeout=timeout_s)
         except asyncio.TimeoutError:
             logger.warning(
-                "record_clip timeout, %s.%d — no keyframe within %.1fs",
-                _log_safe(camera_id), channel, timeout_s,
+                "record_clip timeout, %s — no keyframe within %.1fs",
+                _cam_tag(camera_id, channel), timeout_s,
             )
             raise HTTPException(
                 message=(
@@ -689,8 +703,8 @@ async def record_clip(
         )
 
     logger.info(
-        "record_clip OK, %s.%d, %d bytes",
-        _log_safe(camera_id), channel, len(mp4_bytes),
+        "record_clip OK, %s, %d bytes",
+        _cam_tag(camera_id, channel), len(mp4_bytes),
     )
     return Response(
         content=mp4_bytes,
@@ -749,7 +763,9 @@ async def video_stream_websocket(
 ):
     """Video stream WebSocket."""
     logger.info(
-        "WebSocket connection request, %s, %s.%d", _log_safe(current_user), _log_safe(camera_id), channel
+        "WebSocket connection request, %s, %s",
+        _log_safe(current_user),
+        _cam_tag(camera_id, channel),
     )
     start_time: datetime = datetime.now()
     token_hash: str = str(hash(websocket.cookies.get("access_token")))
@@ -795,13 +811,13 @@ async def video_stream_websocket(
             except WebSocketDisconnect:
                 # 看门狗判定连不上后主动 close,或住户关页——recv 抛 disconnect 是
                 # 预期的正常收尾,不是异常。降到 info,别跟真 error 混淆刷 ERROR 噪音。
-                logger.info("Client closed, %s.%d", _log_safe(camera_id), channel)
+                logger.info("Client closed, %s", _cam_tag(camera_id, channel))
                 break
             except Exception as err:
                 logger.error("WebSocket error: %s", err)
                 break
     except WebSocketDisconnect:
-        logger.info("Client disconnected, %s.%d", _log_safe(camera_id), channel)
+        logger.info("Client disconnected, %s", _cam_tag(camera_id, channel))
     except Exception as err:
         logger.error("WebSocket error, %s", err)
         await websocket.close(
@@ -813,10 +829,9 @@ async def video_stream_websocket(
         if watchdog is not None:
             watchdog.cancel()
         logger.info(
-            "Websocket connect duration[%.2fs], %s.%d",
+            "Websocket connect duration[%.2fs], %s",
             (datetime.now() - start_time).total_seconds(),
-            _log_safe(camera_id),
-            channel,
+            _cam_tag(camera_id, channel),
         )
         if cid:
             await miot_video_stream_manager.close_connection(
@@ -837,10 +852,9 @@ async def audio_stream_websocket(
 ):
     """Audio stream WebSocket."""
     logger.info(
-        "Audio WebSocket connection request, %s, %s.%d",
+        "Audio WebSocket connection request, %s, %s",
         _log_safe(current_user),
-        _log_safe(camera_id),
-        channel,
+        _cam_tag(camera_id, channel),
     )
     start_time: datetime = datetime.now()
     token_hash: str = str(hash(websocket.cookies.get("access_token")))
@@ -861,13 +875,13 @@ async def audio_stream_websocket(
             except WebSocketDisconnect:
                 # 住户关页是正常收尾,不是异常——跟 video 端点对齐,降到 info 避免
                 # 跟真 error 混淆刷 ERROR 噪音。
-                logger.info("Audio client closed, %s.%d", _log_safe(camera_id), channel)
+                logger.info("Audio client closed, %s", _cam_tag(camera_id, channel))
                 break
             except Exception as err:
                 logger.error("Audio WebSocket error: %s", err)
                 break
     except WebSocketDisconnect:
-        logger.info("Audio client disconnected, %s.%d", _log_safe(camera_id), channel)
+        logger.info("Audio client disconnected, %s", _cam_tag(camera_id, channel))
     except Exception as err:
         logger.error("Audio WebSocket error, %s", err)
         await websocket.close(
@@ -875,10 +889,9 @@ async def audio_stream_websocket(
         )
     finally:
         logger.info(
-            "Audio WebSocket connect duration[%.2fs], %s.%d",
+            "Audio WebSocket connect duration[%.2fs], %s",
             (datetime.now() - start_time).total_seconds(),
-            _log_safe(camera_id),
-            channel,
+            _cam_tag(camera_id, channel),
         )
         if cid:
             await miot_audio_stream_manager.close_connection(

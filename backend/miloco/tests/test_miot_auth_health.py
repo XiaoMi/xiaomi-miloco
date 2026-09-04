@@ -519,6 +519,49 @@ async def test_scheduled_check_verifies_immediately_after_interruption():
 
 
 @pytest.mark.asyncio
+async def test_all_transient_failures_keep_the_verification_intent():
+    """四次尝试全是连接失败 = 「仍然不知道」，意向位必须留着，下个周期再验。
+
+    这条与断电现场高度相关，不是两件独立的事：断电把进程硬杀，重启后光猫拨号
+    通常比机器起得慢，这一轮四次尝试（合计一轮退避）全灭是常态。若在发起验证时
+    就把意向位清掉，验证等于从未发生却被当成已完成——之后每个周期都因远未临期
+    早退，健康度停在正常，而那枚刷新令牌可能其实已被云端消费。
+    """
+    kv = _FakeKV()
+    proxy = _make_proxy(kv, expires_in=86400 * 3)
+    proxy._mark_refresh_inflight(proxy._oauth_info.refresh_token)
+    reborn = _make_proxy(kv, expires_in=86400 * 3)
+    assert reborn._verify_token_on_start, "前置：已安排验证"
+
+    tries: list[int] = []
+
+    async def _conn_error(refresh_token, persist=None):
+        tries.append(1)
+        raise MIoTOAuth2Error("connection failed", MIoTErrorCode.CODE_UNAVAILABLE)
+
+    reborn._miot_client.refresh_access_token_async = _conn_error
+    # 退避 sleep 直接跳过，用例不必真等
+    import miloco.miot.client as mc
+
+    orig_sleep = mc.asyncio.sleep
+
+    async def _no_sleep(_s):
+        return None
+
+    mc.asyncio.sleep = _no_sleep
+    try:
+        await reborn._check_and_refresh_token()
+    finally:
+        mc.asyncio.sleep = orig_sleep
+
+    assert len(tries) > 1, "前置：瞬时故障应当在本轮内退避重试"
+    assert not reborn.auth_health.is_degraded, "连接失败是瞬时故障，不该判降级"
+    assert reborn._verify_token_on_start, (
+        "本轮没拿到结论，意向位不能消费——否则验证再也不会发生"
+    )
+
+
+@pytest.mark.asyncio
 async def test_verification_that_gets_rejected_does_degrade():
     """反向：令牌真的已死时，这次验证要如期把它判成降级。
 

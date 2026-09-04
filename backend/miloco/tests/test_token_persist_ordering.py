@@ -293,6 +293,60 @@ async def test_authorize_end_to_end_rebuilds_mips():
 
 
 @pytest.mark.asyncio
+async def test_identity_failure_after_refresh_still_pushes_the_new_token():
+    """续期路径：取身份失败不许拖垮续期，新令牌照样推给下游。
+
+    落库之后那一步是一次真实的业务请求，超时与 5xx 都会抛。让它冒泡出去，下面
+    「把新令牌推给原生相机库与云端长连接」那一步就整个跳过——它们于是一直持有
+    旧访问令牌，直到下一次自然临期续期才被换掉，量级是天；而上层看到的是「续期
+    失败」，会按退避再刷几次，每次都再换一对令牌、再在同一处抛。身份缺失本身
+    无害，下一轮刷新会补上。
+    """
+    order: list[str] = []
+    c = MIoTClient.__new__(MIoTClient)
+    c._oauth_info = None
+    c._camera_client = None
+    c._mips_cloud = None
+
+    async def _setup():
+        order.append("mips")
+
+    c._setup_mips_async = _setup
+
+    async def _refresh(refresh_token):
+        return MIoTOauthInfo(
+            access_token="AT_new", refresh_token="RT_new", expires_ts=9999999999
+        )
+
+    c._oauth_client = MagicMock()
+    c._oauth_client.refresh_access_token_async = _refresh
+
+    c._http_client = MagicMock()
+    c._http_client.update_http_header = lambda **kw: order.append("http_header")
+
+    async def _user_info():
+        order.append("identity")
+        raise RuntimeError("get_user_info 5xx")
+
+    c.get_user_info_async = _user_info
+
+    persisted: list[str] = []
+
+    # 不抛：续期在语义上已经成功
+    info = await c.refresh_access_token_async(
+        refresh_token="RT_old", persist=lambda i: persisted.append(i.access_token)
+    )
+
+    assert info.access_token == "AT_new"
+    assert "identity" in order, "前置：取身份确实被调到并抛了"
+    assert order.index("http_header") < order.index("identity")
+    assert "mips" in order, (
+        "取身份抛错把「推新令牌给下游」整步跳过了——下游会一直持有旧令牌"
+    )
+    assert persisted and persisted[0] == "AT_new", "新令牌仍要落库"
+
+
+@pytest.mark.asyncio
 async def test_http_header_is_updated_before_identity_lookup_on_authorize():
     """首次/重新授权：取身份是一次真实 HTTP 请求，必须先拿到新令牌。
 

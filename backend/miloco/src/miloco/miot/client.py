@@ -1694,8 +1694,13 @@ class MiotProxy:
         结论。改为安排下一次检查时立刻验一次、跳过临期早退：真被拒时那一轮就会
         置降级，只慢一次往返；误判时第一次验证即成功，健康度随新令牌落库复位。
 
-        残留一处：验证跑起来之前若再被硬杀一次，这个意向就丢了（标记已消费），
-        于是要等令牌自然临期才会发起下一次续期。那仍然好过留下一个假的永久失效。
+        意向位只在**拿到结论**时才落下（验证成功、或云端明确拒绝），瞬时失败的
+        那一轮不消费它——断电重启时网络往往还没就绪，那一轮四次尝试全是连接失败
+        是常态，消费掉就等于验证从未发生却被当成已完成。
+
+        残留一处：验证跑起来之前若再被硬杀一次，这个意向就丢了（KV 里的标记在
+        启动时已消费），于是要等令牌自然临期才会发起下一次续期。那仍然好过留下
+        一个假的永久失效。
         """
         if not self._consume_interrupted_refresh():
             return
@@ -2131,7 +2136,11 @@ class MiotProxy:
         # _apply_interrupted_refresh_on_start：那个标记只说明「结果未知」，
         # 验一次才分得出「令牌已死」与「请求没发出去」。
         if self._verify_token_on_start:
-            self._verify_token_on_start = False
+            # **不在这里清**：清掉等于宣告「本轮验过了」，而本轮完全可能四次尝试
+            # 全是连接失败——那是「仍然不知道」，不是结论。断电重启与网络尚未就绪
+            # 高度相关（光猫拨号通常比机器起得慢），恰恰是这一轮最容易全灭的场景；
+            # 在这里清掉，验证就等于从未发生过却被当成已完成。只有下面两处拿到
+            # 结论的出口才清。
             logger.info("Verifying refresh token after an interrupted refresh")
         elif expires_ts - current_time > 1800:  # 1800 seconds = 30 minutes
             return
@@ -2143,10 +2152,13 @@ class MiotProxy:
         )
         for attempt, backoff in enumerate((*RETRY_BACKOFF_SECONDS, None)):
             if await self.refresh_xiaomi_home_token_info():
+                # 结论：令牌是好的
+                self._verify_token_on_start = False
                 logger.info("Token refresh completed successfully")
                 return
             if self._auth_health.is_degraded:
-                # 云端明确拒绝了凭据，重试无用——留给用户重新授权
+                # 结论：云端明确拒绝了凭据，重试无用——留给用户重新授权
+                self._verify_token_on_start = False
                 return
             if backoff is None:
                 break

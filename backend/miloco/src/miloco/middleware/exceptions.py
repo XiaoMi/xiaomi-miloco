@@ -68,6 +68,14 @@ class ResourceNotFoundException(BusinessException):
         super().__init__(message, code=2001)
 
 
+
+class ConflictException(BusinessException):
+    """Resource conflict exception (such as name duplication, etc.) - 2002"""
+
+    def __init__(self, message: str):
+        super().__init__(message, code=2002)
+
+
 class MiotAuthUnavailableError(BusinessException):
     """米家授权已被云端拒绝，走云端的下发一律停止 - 2003
 
@@ -77,13 +85,6 @@ class MiotAuthUnavailableError(BusinessException):
 
     def __init__(self, message: str):
         super().__init__(message, code=2003)
-
-
-class ConflictException(BusinessException):
-    """Resource conflict exception (such as name duplication, etc.) - 2002"""
-
-    def __init__(self, message: str):
-        super().__init__(message, code=2002)
 
 
 class ExternalServiceException(BusinessException):

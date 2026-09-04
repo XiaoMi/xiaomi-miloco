@@ -376,11 +376,23 @@ def test_no_unsanitized_value_reaches_the_log_in_that_router():
         """
         # 要守的名单。往里加名字即可扩大守护范围。
         #
-        # 路径参数是今天就真的外部可控的那几个：URL 里写 %0A，解码出来就是换行，
-        # 能在日志里伪造出整行。调用者标识今天恒为空，钉它是为了「将来补成返回
-        # 真实身份」那天不必回头逐处补。
-        BARE_NAMES = {"current_user", "camera_id", "did", "scene_id"}
+        # 路径与查询参数都来自请求：URL 里写 %0A，解码出来就是换行，能在日志里
+        # 伪造出整行。声明成整数、布尔的那几个today 由框架在进入函数体之前完成
+        # 校验转换、带换行的请求会被直接拒回，但类型标注是运行期承诺而非静态
+        # 保证——一并纳入，改类型时不必回头补。调用者标识今天恒为空，钉它同理。
+        BARE_NAMES = {
+            "current_user",
+            "camera_id",
+            "did",
+            "scene_id",
+            "channel",
+            "refresh",
+            "duration_ms",
+        }
         DOTTED_NAMES = {"request.notify"}
+        # 清洗包装：这些调用的整棵子树都算清洗过。_cam_tag 把「相机.通道」拼成
+        # 一个标识，拼装时已经过 _log_safe。
+        WRAPPERS = {"_log_safe", "_cam_tag"}
 
         found: list[str] = []
 
@@ -391,7 +403,7 @@ def test_no_unsanitized_value_reaches_the_log_in_that_router():
             if (
                 isinstance(n, ast.Call)
                 and isinstance(n.func, ast.Name)
-                and n.func.id == "_log_safe"
+                and n.func.id in WRAPPERS
             ):
                 return
             # 名单判定：裸名字，以及 `对象.属性` 形式
@@ -428,3 +440,65 @@ def test_no_unsanitized_value_reaches_the_log_in_that_router():
                 )
 
     assert not leaked, "这些日志调用还在直接用未清洗的值:\n" + "\n".join(leaked)
+
+
+def test_cam_tag_actually_strips_newlines():
+    """拼装函数自己必须真的剥换行——护栏是按**名字**信任它的。
+
+    裸传护栏把 ``_cam_tag(...)`` 的整棵子树当成清洗过（相机标识与通道号在那里面
+    是裸的）。这种按名字的信任只有在「名字背后的行为被钉住」时才成立：否则把它
+    内部的清洗去掉，护栏照样全绿，而外部可控的相机标识就一路裸进日志了。
+    """
+    from miloco.miot.router import _cam_tag
+
+    hostile = "cam-1\n2026-01-01 00:00:00 - root - INFO - 伪造的日志行"
+    out = _cam_tag(hostile, 0)
+
+    assert "\n" not in out and "\r" not in out, "拼装结果里还有换行"
+    # 内容不丢，只是拼成一行——排障仍看得出发生了什么
+    assert "cam-1" in out and "伪造的日志行" in out
+    assert out.endswith(".0"), "通道号仍要拼在后面"
+
+
+def test_log_format_placeholders_match_their_arguments():
+    """每个日志调用的占位符个数必须与实参个数一致。
+
+    这条守的是「改格式串时漏改实参」这一类。它值得单独存在，因为出事的方式是
+    **静默**的：``%d`` 套上字符串会让 logging 在生产环境里吞掉错误、那条日志整行
+    消失，而涉事的几条路径（录制片段、两个音视频 WebSocket 端点）没有测试覆盖，
+    不会有任何用例变红。
+
+    只检查格式串是字面量的调用；f-string 与预先拼好的消息不在此列（它们没有
+    延迟格式化，本来也不会有这个问题）。
+    """
+    import ast
+    import pathlib
+    import re
+
+    import miloco.miot.router as mod
+
+    src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
+
+    bad: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "logger"
+        ):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        fmt = node.args[0].value
+        if not isinstance(fmt, str):
+            continue
+        # %% 是转义的百分号，不占位
+        holders = len(re.findall(r"%[-+ #0-9.]*[a-zA-Z]", fmt.replace("%%", "")))
+        supplied = len(node.args) - 1
+        if holders != supplied:
+            bad.append(
+                f"L{node.lineno}: 占位 {holders} 个、实参 {supplied} 个 — {fmt[:56]!r}"
+            )
+
+    assert not bad, "日志格式串与实参个数不匹配（生产环境会静默丢掉这几行）:\n" + "\n".join(bad)
