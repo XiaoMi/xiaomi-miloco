@@ -206,6 +206,11 @@ class AuthConfigKeys:
     # 「授权已失效」这个判断在进程重启后立刻可用——否则重启到第一次刷新之间
     # (最长 5 分钟)界面会误报「一切正常」。
     MIOT_AUTH_STATE_KEY = "MIOT_AUTH_STATE_KEY"
+    # 「正在刷新」的意向标记:发请求前写、拿到结果后清。
+    # 刷新令牌是一次性的,请求一旦抵达云端,旧令牌无论我们有没有收到响应都已作废。
+    # 若在这中间崩溃,新令牌从未到达本机、无从挽回;但重启后看到这个标记还在,
+    # 就能立刻断定手上那枚很可能已经死了,直接给出结论,而不是拿着它反复重试。
+    MIOT_REFRESH_INFLIGHT_KEY = "MIOT_REFRESH_INFLIGHT_KEY"
 
 
 class SystemConfigKeys:

@@ -66,6 +66,11 @@ def _make_proxy(kv: _FakeKV, *, expires_in: int = 600):
     )
     proxy._miot_client = MagicMock()
     proxy.refresh_miot_info = AsyncMock(return_value={})
+    # 刷新串行化用的锁。真实构造在 __init__ 里建，这里绕过了 __init__，补上即可。
+    proxy._token_refresh_lock = asyncio.Lock()
+    # 与真实 __init__ 同款的启动检查：上一轮刷新若死在「请求已发、结果未知」
+    # 那段，这里会把状态判为降级。测的就是这个方法本身。
+    proxy._apply_interrupted_refresh_on_start()
     return proxy
 
 
@@ -375,3 +380,58 @@ async def test_no_refresh_when_token_still_fresh():
     await proxy._check_and_refresh_token()
 
     proxy.refresh_xiaomi_home_token_info.assert_not_called()
+
+
+# ─────────────── 中断的刷新：重启后立刻给结论 ───────────────
+
+
+def test_interrupted_refresh_marks_degraded_on_startup():
+    """上一轮刷新死在「请求已发、结果未知」那段时，重启后直接判降级。
+
+    刷新令牌是一次性的：请求一旦抵达云端，旧令牌无论我们收没收到响应都已作废。
+    新令牌从未到达本机，救不回来——但没必要再拿这枚死令牌试满一轮退避，
+    应当立刻给住户准确结论。
+    """
+    from miloco.database.kv_repo import AuthConfigKeys
+
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    # 模拟：发请求前记下了指纹，然后进程没能走完
+    proxy._mark_refresh_inflight(proxy._oauth_info.refresh_token)
+    assert kv.get(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY) is not None
+
+    reborn = _make_proxy(kv)  # 新进程重新加载
+    assert reborn.auth_health.is_degraded, "中断的刷新应当在启动时被判为降级"
+    assert (
+        kv.get(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY) is None
+    ), "标记应当被消费掉，不能反复触发"
+
+
+def test_marker_not_matching_current_token_is_not_degraded():
+    """指纹对不上说明新令牌其实存下来了，只是标记没来得及清——不该判降级。"""
+    from miot.types import MIoTOauthInfo
+
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    proxy._mark_refresh_inflight("some_other_token_that_was_replaced")
+    # 手上已经是换过的新令牌
+    proxy._oauth_info = MIoTOauthInfo(
+        access_token="at2", refresh_token="rt2", expires_ts=9999999999
+    )
+
+    reborn = _make_proxy(kv)
+    assert not reborn.auth_health.is_degraded
+
+
+def test_marker_stores_fingerprint_not_the_token():
+    """标记里不能出现凭据原文——它的用途只是比对是不是同一枚。"""
+    from miloco.database.kv_repo import AuthConfigKeys
+
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    secret = "R3_super_secret_refresh_token_value"
+    proxy._mark_refresh_inflight(secret)
+
+    raw = kv.get(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY)
+    assert secret not in raw, "标记里存了凭据原文"
+    assert "fp" in raw and "ts" in raw

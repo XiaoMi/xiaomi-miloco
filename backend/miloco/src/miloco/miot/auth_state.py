@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 #: 瞬时故障的退避序列（秒）。定时任务本身每 300s 转一圈，这里控制的是
