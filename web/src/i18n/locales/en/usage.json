@@ -58,6 +58,8 @@
     "addModel": "Add model",
     "addFormHint": "Add model config (if the same Model + Base URL exists, its Key will be updated)",
     "editFormHint": "Edit model config (leave API Key blank to keep the existing one)",
+    "providerPresetLabel": "Provider preset",
+    "providerPresetCustom": "Custom",
     "baseUrlLabel": "Base URL",
     "baseUrlPlaceholder": "e.g. https://api.xiaomimimo.com/v1",
     "apiKeyLabel": "API Key",
