@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Literal
@@ -140,6 +141,12 @@ class BackendState:
     home_name: str | None
     cameras: list[CameraSummary] = field(default_factory=list)
     version_data: dict | None = None
+    #: 米家授权已被云端拒绝，需要住户重新授权。与 account_bound 正交——令牌续期
+    #: 失败但 access_token 还没到期时 account_bound 仍是 True。老后端不返回该
+    #: 字段，取不到按 False（不误报）。
+    auth_degraded: bool = False
+    #: 进入降级态的时刻（秒级 epoch），用于在 message 里说明「自 X 时起」
+    auth_degraded_since: int | None = None
 
 
 @dataclass(frozen=True)
@@ -988,16 +995,37 @@ def probe_backend() -> BackendState:
             status_data = status_body.get("data") or {}
             is_bound = bool(status_data.get("is_bound"))
             uid = (status_data.get("user_info") or {}).get("uid")
+            auth_degraded = status_data.get("auth_state") == "degraded"
+            auth_degraded_since = status_data.get("auth_degraded_since")
 
             version_data = _fetch_backend_version(client)
 
-            if not is_bound:
+            def _state(**kw) -> BackendState:
+                """三条返回分支共用的构造点，预置与「绑定到哪一步」无关的那几项。
+
+                收成一处是有原因的：授权健康度与 ``is_bound`` 正交——续期被云端
+                永久拒绝、而访问令牌还没到期时后端报已绑定；等访问令牌也过期，
+                后端改报未绑定，而健康度**仍然**是降级。「未绑定且已失效」是后端
+                会真实发出的组合。这两个字段在 :class:`BackendState` 上有默认值，
+                某个分支忘了传不会报错，只会静默变成「未失效」，于是判定那一层
+                「失效优先于未绑定」的分支顺序在它唯一真正需要生效的场景里失效：
+                问题变严重的那一刻退出码反而从 1 掉回 0。
+                """
                 return BackendState(
-                    url=base_url, reachable=True, error=None,
+                    url=base_url,
+                    reachable=True,
+                    error=None,
+                    version_data=version_data,
+                    auth_degraded=auth_degraded,
+                    auth_degraded_since=auth_degraded_since,
+                    **kw,
+                )
+
+            if not is_bound:
+                return _state(
                     account_bound=False, account_uid=None,
                     home_enabled=False, home_id=None, home_name=None,
                     cameras=[],
-                    version_data=version_data,
                 )
 
             r_homes = client.get("/api/miot/scope/homes")
@@ -1011,12 +1039,10 @@ def probe_backend() -> BackendState:
                     homes = hb.get("data") or []
             enabled_home = next((h for h in homes if h.get("in_use")), None)
             if enabled_home is None:
-                return BackendState(
-                    url=base_url, reachable=True, error=None,
+                return _state(
                     account_bound=True, account_uid=uid,
                     home_enabled=False, home_id=None, home_name=None,
                     cameras=[],
-                    version_data=version_data,
                 )
 
             r_cams = client.get("/api/miot/camera_list")
@@ -1036,14 +1062,12 @@ def probe_backend() -> BackendState:
                             local_ip=c.get("local_ip"),
                         ))
 
-            return BackendState(
-                url=base_url, reachable=True, error=None,
+            return _state(
                 account_bound=True, account_uid=uid,
                 home_enabled=True,
                 home_id=enabled_home.get("home_id"),
                 home_name=enabled_home.get("home_name"),
                 cameras=cameras,
-                version_data=version_data,
             )
     except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as e:
         return _backend_state(
@@ -1091,6 +1115,16 @@ def _build_version_result(
     )
 
 
+def _format_epoch(ts: int | None) -> str:
+    """秒级 epoch → 本地时间字符串；拿不到时返回占位而不是空字符串。"""
+    if not ts:
+        return "-"
+    try:
+        return datetime.fromtimestamp(ts).strftime("%m-%d %H:%M")
+    except (OverflowError, OSError, ValueError):
+        return "-"
+
+
 def assess_backend(state: BackendState, t: Translator = _ZH_T) -> list[CheckResult]:
     results: list[CheckResult] = []
     if not state.reachable:
@@ -1123,6 +1157,31 @@ def assess_backend(state: BackendState, t: Translator = _ZH_T) -> list[CheckResu
     if version_result is not None:
         results.append(version_result)
 
+    # 降级判定排在「未绑定」之前：account_bound 来自一次实时的云端校验，刷新令牌
+    # 被永久拒绝之后手上的 access_token 通常还能再用几小时，那段时间它仍是 True；
+    # 等 access_token 也过期，它翻成 False。若让「未绑定」的守卫先 return，问题
+    # 恰在变严重的那一刻从 FAIL 掉回 WARN——退出码由 1 变 0，`doctor || alert`
+    # 这类巡检在最该告警时停止告警，文案也从「授权已失效」变成「账号未绑定」，
+    # 而住户明明授权过。
+    if state.auth_degraded:
+        # 授权已被云端拒绝，设备控制不再保证成功。算 FAIL 让 doctor 退出码为 1
+        # ——这是需要住户动手才能解的。
+        since = _format_epoch(state.auth_degraded_since)
+        results.append(
+            CheckResult(
+                section="miloco",
+                name=t("account.degraded.name"),
+                status=Status.FAIL,
+                message=t(
+                    "account.degraded.message",
+                    uid=state.account_uid or "unknown",
+                    since=since,
+                ),
+                fix_hint=t("account.degraded.fix"),
+            )
+        )
+        return results
+
     if not state.account_bound:
         results.append(CheckResult(
             section="miloco",
@@ -1133,6 +1192,7 @@ def assess_backend(state: BackendState, t: Translator = _ZH_T) -> list[CheckResu
         ))
         return results
 
+    # 走到这里 = 既没降级、也没未绑定，即已绑定且授权健康。
     results.append(CheckResult(
         section="miloco",
         name=t("account.bound.name"),

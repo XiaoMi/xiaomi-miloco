@@ -372,3 +372,50 @@ async def test_push_callbacks_registered_before_init_async(proxy_env):
         "scene": True,
         "listeners_live": True,
     }
+
+
+# ─────────────── 解绑要把授权关系整段清干净 ───────────────
+
+
+@pytest.mark.asyncio
+async def test_deinit_clears_auth_health_state(proxy_env):
+    """解绑必须连授权健康度一起清，否则体检会对「主动解绑」的机器误报不通过。
+
+    降级态是落库的、跨重启不消失，而体检的降级分支刻意排在「未绑定」守卫之前
+    （问题变严重时退出码不该反而从 1 掉回 0）。两者叠加，解绑后残留的降级态就会
+    赢过「未绑定」：住户明明是自己解的绑，却看到「授权已被云端拒绝」、退出码 1，
+    写成 `doctor || alert` 的巡检从此持续误报。
+    """
+    from miloco.database.kv_repo import AuthConfigKeys
+    from miloco.miot.auth_state import MiotAuthState
+
+    p, _ = proxy_env
+    kv = p._kv_repo
+
+    # 先造出「降级 + 有中断标记」的现场
+    kv.set(AuthConfigKeys.MIOT_AUTH_STATE_KEY, '{"state":"degraded","since_ts":1700000000}')
+    kv.set(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY, '{"fp":"deadbeef","ts":1700000000}')
+    p._auth_health = p._load_auth_health()
+    assert p._auth_health.is_degraded, "前置条件没造出来"
+
+    await p.deinit()
+
+    assert kv.get(AuthConfigKeys.MIOT_AUTH_STATE_KEY) is None, "降级态残留在库里"
+    assert kv.get(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY) is None, "中断标记残留在库里"
+    assert p._auth_health.state is MiotAuthState.OK, "内存里的健康度没复位"
+
+
+@pytest.mark.asyncio
+async def test_deinit_also_clears_the_original_auth_keys(proxy_env):
+    """新增的清理不能挤掉原有的——令牌与用户信息仍要被删。"""
+    from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys
+
+    p, _ = proxy_env
+    kv = p._kv_repo
+    kv.set(AuthConfigKeys.MIOT_TOKEN_INFO_KEY, "{}")
+    kv.set(DeviceInfoKeys.USER_INFO_KEY, "{}")
+
+    await p.deinit()
+
+    assert kv.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY) is None
+    assert kv.get(DeviceInfoKeys.USER_INFO_KEY) is None

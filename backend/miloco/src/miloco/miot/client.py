@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
 import time
@@ -36,6 +37,12 @@ from pydantic_core import to_jsonable_python
 
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
+from miloco.middleware.exceptions import MiotAuthUnavailableError
+from miloco.miot.auth_state import (
+    RETRY_BACKOFF_SECONDS,
+    MiotAuthHealth,
+    is_permanent_auth_error,
+)
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import (
     is_home_allowed,
@@ -210,6 +217,8 @@ class MiotProxy:
     ):
         self._kv_repo = kv_repo
         self.init_miot_info_dict()
+        self._auth_health: MiotAuthHealth = self._load_auth_health()
+        self._apply_interrupted_refresh_on_start()
         self._camera_img_managers: dict[str, CameraVisionHandler] = {}
         self._token_refresh_task: asyncio.Task | None = None
         # 后台顺带对账任务(见 _spawn_subscription_sync),deinit 时取消
@@ -224,6 +233,10 @@ class MiotProxy:
         # bind-debounce, device refresh, lazy load) can fire concurrently
         # and would otherwise race on _device_info_dict / KV / diff log.
         self._refresh_devices_lock = asyncio.Lock()
+        # 令牌刷新串行化。refresh_token 是一次性的：两条路径并发刷新时，后到的
+        # 那条会拿着已被前一条消费掉的令牌去请求，必然 96009，把一次正常刷新
+        # 变成「授权失效」。定时任务、重新授权、以及退避重试都走这把锁。
+        self._token_refresh_lock = asyncio.Lock()
         # 登录 / switch_home / unbind 可并发触发 refresh_cameras,加锁防
         # _camera_img_managers / SDK callback 状态竞争。
         self._refresh_cameras_lock = asyncio.Lock()
@@ -349,8 +362,58 @@ class MiotProxy:
 
     @property
     def is_authenticated(self) -> bool:
-        """Whether MIoT OAuth has been completed and an access token is usable."""
+        """凭据**存在**——住户完成过授权，库里有一对令牌。
+
+        注意它不表示凭据**可用**：续期已被云端永久拒绝、而访问令牌尚未到期时，
+        这里仍是真。要判「现在还能不能对云端发请求」，用 :attr:`is_operational`。
+        """
         return self._oauth_info is not None
+
+    @property
+    def is_operational(self) -> bool:
+        """凭据存在**且**未被云端永久拒绝——现在还能对云端发请求。
+
+        **瞬时故障与永久失效是两档，不要合并**：
+
+        - 一次超时、连接失败、5xx —— 健康度不变，这里仍是真。感知照跑。
+          把这类也算作不可用，一次网络抖动就会打掉整套感知。
+        - 云端明确拒绝了凭据（判定见 ``is_permanent_auth_error``）—— 健康度置为
+          降级，这里翻假。此时任何走云端的能力都已不可用：不只是设备控制，
+          **拉取账号下的相机列表本身就要有效令牌**，拿不到列表就没有相机可感知。
+          实测确认过：令牌失效后相机列表请求返回 401，感知随即完全停止。
+
+        所以降级之后不该让系统继续跑——那等于拿着一枚已判定无效的凭据空转，而
+        界面看起来还有部分功能正常。判为不可用并明确告知住户重新授权。
+        """
+        return self._oauth_info is not None and not self._auth_health.is_degraded
+
+    #: 上一轮刷新结果未知，下一次检查要跳过临期早退、立刻验一次。类级默认值是
+    #: 有意的：绕过 ``__init__`` 造实例的路径（测试）同样取得到它。
+    _verify_token_on_start: bool = False
+
+    def _refuse_if_not_operational(self, what: str) -> str | None:
+        """授权已被云端永久拒绝时，给出拒绝理由；仍可用则返回 ``None``。
+
+        闸门放在代理层而不是逐个调用方：走云端的下发有好几条入口（属性设置、
+        设备动作、场景执行、App 通知），逐个去加必然漏，而漏掉的那条会在授权
+        已失效时照常把请求发出去——住户看到的是「有的能用有的不能用」。
+
+        瞬时故障不在此列（见 :attr:`is_operational`）：一次超时就拒绝下发，会
+        把可恢复的抖动变成可见的功能中断。
+        """
+        if self.is_operational:
+            return None
+        reason = (
+            f"{what} refused: Mi Home authorization is no longer valid. "
+            "Rebind in the web console, or run `miloco-cli account bind`."
+        )
+        # 记 INFO 而不是 WARNING：失效是长期状态（要住户动手才解得开），而下发的
+        # 触发频率远高于定时续期——规则每命中一次就是一条，逐条 WARNING
+        # 会把同期真正需要看的行淹掉，与续期失败那侧的重复日志限频纪律也不一致。
+        # 「什么时候失效的」由状态迁移那条 ERROR 钉住；被拒的动作另有台账逐行留痕，
+        # 不进台账的那些则会把拒绝原样抛回调用点，住户在那里当场就看到。
+        logger.info(reason)
+        return reason
 
     @classmethod
     async def create_miot_proxy(
@@ -536,11 +599,18 @@ class MiotProxy:
         for key in [
             AuthConfigKeys.MIOT_TOKEN_INFO_KEY,
             DeviceInfoKeys.USER_INFO_KEY,
+            # 解绑 = 授权关系整体作废，降级态与中断标记都属于这段关系。留着的话
+            # 体检会对「主动解绑」的机器报「授权已被云端拒绝」、退出码 1——住户
+            # 是自己解的绑，不是被拒；而这份残留是落库的，跨重启不消失，直到
+            # 下次有人绑定成功才会被复位清掉。
+            AuthConfigKeys.MIOT_AUTH_STATE_KEY,
+            AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY,
         ]:
             self._kv_repo.delete(key)
 
         # 5. Clear in-memory state
         self._oauth_info = None
+        self._auth_health = MiotAuthHealth()
         self._camera_info_dict = {}
         self._device_info_dict = {}
         self._scene_info_dict = {}
@@ -1385,6 +1455,9 @@ class MiotProxy:
         return self._scene_info_dict
 
     async def execute_miot_scene(self, scene_id: str) -> bool:
+        # 这条的约定是返回 bool、不抛——保持不变，拒绝即返回 False。
+        if self._refuse_if_not_operational("execute scene"):
+            return False
         try:
             scene_info = self._scene_info_dict[scene_id]
             return await self._miot_client.run_manual_scene_async(scene_info=scene_info)
@@ -1393,6 +1466,9 @@ class MiotProxy:
             return False
 
     async def send_app_notify(self, app_notify_id: str) -> bool:
+        # 同上：约定返回 bool。通知也走同一枚令牌，失效后推不出去，明确拒绝。
+        if self._refuse_if_not_operational("send app notify"):
+            return False
         try:
             return await self._miot_client.send_app_notify_async(app_notify_id)
         except Exception as e:
@@ -1429,6 +1505,16 @@ class MiotProxy:
         return url
 
     async def get_miot_app_notify_id(self, content: str) -> str | None:
+        # 推一条 App 通知在云端是**两步**：先把文本存上去换回一个通知 id
+        # (``save_text``)，再拿这个 id 去推 (``send_push``)。两步都走云端，所以
+        # 闸门必须落在**第一步**——它排在 :meth:`send_app_notify` 之前，授权失效
+        # 时后面那道闸门根本走不到。
+        #
+        # 这里抛而不是按签名返回 ``None``：上层把 ``None`` 读成「通知内容不合适，
+        # 请重新输入」，住户会一遍遍改文案，而这件事需要他做的是重新授权。
+        refused = self._refuse_if_not_operational("create app notify")
+        if refused:
+            raise MiotAuthUnavailableError(refused)
         try:
             app_notify_id = await self._miot_client.http_client.create_app_notify_async(
                 content
@@ -1440,11 +1526,27 @@ class MiotProxy:
             return None
 
     async def get_miot_auth_info(self, code: str, state: str) -> MIoTOauthInfo:
+        # 与定时刷新共用同一把锁：住户重新授权时若正好有一轮退避重试在跑，两边
+        # 会各自向云端换一次令牌，后完成的那次把先完成的那枚顶掉。
+        async with self._token_refresh_lock:
+            return await self._do_authorize(code, state)
+
+    async def _do_authorize(self, code: str, state: str) -> MIoTOauthInfo:
+        """实际的授权换取。调用方须持有 ``_token_refresh_lock``。"""
         try:
             oauth_info = await self._miot_client.get_access_token_async(
-                code=code, state=state
+                code=code, state=state, persist=self.reset_miot_token_info
             )
-            logger.info("Retrieved MIoT auth info, code: %s, state: %s", code, state)
+            # 授权码只留前 8 位:够比对「两次授权用的是不是同一个码」,而完整值
+            # 落进日志即是泄露。state 不是凭据,原样保留。
+            logger.info(
+                "Retrieved MIoT auth info, code: %s, state: %s",
+                f"{code[:8]}…<{len(code)}>" if code else code,
+                state,
+            )
+            # 落盘与健康度复位都在 reset_miot_token_info 里，且 SDK 已在任何
+            # 副作用之前经 persist 回调调过一次；这里再调是重试，也覆盖旧版 SDK
+            # 不认 persist 参数的情况。
             self.reset_miot_token_info(oauth_info)
             await self.refresh_miot_info()
             return oauth_info
@@ -1452,36 +1554,224 @@ class MiotProxy:
             logger.error("Failed to get Xiaomi home token info, %s", e)
             raise e
 
+    @property
+    def auth_health(self) -> MiotAuthHealth:
+        """米家授权健康度快照（只读）。"""
+        return self._auth_health
+
+    def _load_auth_health(self) -> MiotAuthHealth:
+        raw = self._kv_repo.get(AuthConfigKeys.MIOT_AUTH_STATE_KEY)
+        if not raw:
+            return MiotAuthHealth()
+        try:
+            return MiotAuthHealth.model_validate_json(raw)
+        except Exception as e:
+            # 形状变了/内容坏了不该拖垮启动，按「健康」起步：下一次刷新会重新定性
+            logger.warning("Invalid stored auth health, falling back to ok: %s", e)
+            return MiotAuthHealth()
+
+    def _set_auth_health(self, health: MiotAuthHealth) -> None:
+        self._auth_health = health
+        try:
+            self._kv_repo.set(
+                AuthConfigKeys.MIOT_AUTH_STATE_KEY, health.model_dump_json()
+            )
+        except Exception as e:
+            # 落库失败只影响重启后的首屏判断，不该让刷新流程本身失败
+            logger.warning("Failed to persist auth health: %s", e)
+
     def reset_miot_token_info(self, miot_token_info: MIoTOauthInfo):
-        """
-        Reset persistent Mi Home token information
+        """落盘米家令牌，并把健康度一起复位。
+
+        令牌是一次性的，这个函数是「新令牌不丢」的最后一道关。内存先更新、库写
+        失败也不抛：抛出去会被上层当成「刷新失败」，反而把「已经拿到新令牌」这个
+        事实一起吞掉；而内存里那份至少还能撑到下次落盘或进程结束。写库失败按
+        ERROR 记——它意味着重启后会退回旧令牌，是需要人看到的。
+
+        **健康度必须在这里复位，不能留在换票函数返回之后。** 这个函数的前提是
+        「只有刚从云端换到新凭据才允许调它」——换票与续期都经落盘回调走到这里，
+        所以它同时也是「授权已恢复」的唯一真相点；若将来有别处要拿它去写一枚并非
+        新换来的令牌（例如启动时从库里读回的那份），健康度复位必须先拆出去。而 SDK
+        在落盘之后还有取账号身份、重连长连接这些网络步骤，其中任一步抛错都会让换票
+        函数整体抛出；复位若排在它返回之后，就会出现「新令牌已在库里且完全可用」与
+        「健康度仍是降级」并存——此时定时续期因为这枚令牌远未临期而直接早退，要等到
+        它临近过期才会有下一次刷新去纠正，量级是天；期间感知与下发一直停着，重启也
+        照样读回降级态。
+
+        复位无条件调用 :meth:`MiotAuthHealth.mark_success`，不加「仅在降级时才
+        复位」的前置判断：它同时负责把瞬时故障累计的 ``consecutive_failures``
+        归零，加了判断反而会让计数在刷新成功后留着不清。
         """
         self._oauth_info = miot_token_info
-        self._kv_repo.set(
-            AuthConfigKeys.MIOT_TOKEN_INFO_KEY, miot_token_info.model_dump_json()
-        )
+        self._set_auth_health(self._auth_health.mark_success())
+        try:
+            ok = self._kv_repo.set(
+                AuthConfigKeys.MIOT_TOKEN_INFO_KEY, miot_token_info.model_dump_json()
+            )
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            logger.error("Failed to persist Mi Home token: %s", e, exc_info=True)
+        if ok is False:
+            logger.error(
+                "Mi Home token NOT persisted; a restart would fall back to the "
+                "previous token, which the cloud has already invalidated"
+            )
+            return
         logger.info(
             "Token information updated, new expiration time: %s",
             miot_token_info.expires_ts,
         )
 
     async def refresh_xiaomi_home_token_info(self) -> MIoTOauthInfo | None:
+        """刷新访问令牌。
+
+        失败时**不再清空** ``self._oauth_info``。清空会让 ``is_operational``
+        转 False，而它是感知侧相机发现的闸门（``camera_adapter`` 拿到空集后会
+        把已连接的相机全部断开），等于让**一次瞬时故障**连带打掉整个感知链路。
+        凭据在不在、凭据还能不能用是两件事，后者记在 ``_auth_health``——云端
+        明确拒绝时感知确实要停，但那是另一档，不该由一次超时触发。
+        """
+        if not self._oauth_info:
+            logger.warning("Skip token refresh: no oauth_info on file")
+            return None
+        async with self._token_refresh_lock:
+            return await self._do_refresh_token()
+
+    def _mark_refresh_inflight(self, token: str | None) -> None:
+        """记下「正在用哪一枚令牌刷新」；``None`` 表示本轮已结束。
+
+        刷新令牌是一次性的：请求一旦抵达云端，旧令牌无论我们有没有收到响应都已
+        作废。若在这中间崩溃，新令牌从未到达本机，救不回来。但这个标记只能说明
+        「上一轮结果未知」——崩溃也可能发生在请求抵达云端之前，那时手上这枚完好，
+        而两种现场的痕迹一模一样。据它下结论的方式见
+        :meth:`_apply_interrupted_refresh_on_start`。
+        """
         try:
-            if not self._oauth_info:
-                raise ValueError("No oauth_info found")
+            if token is None:
+                self._kv_repo.delete(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY)
+            else:
+                # 只记指纹，不落原文：这个键的用途是「比对是不是同一枚」，
+                # 不需要也不应该再存一份凭据。
+                digest = hashlib.sha256(token.encode()).hexdigest()[:16]
+                self._kv_repo.set(
+                    AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY,
+                    json.dumps({"fp": digest, "ts": int(time.time())}),
+                )
+        except Exception as e:  # noqa: BLE001 - 记不上不该阻断刷新本身
+            logger.warning("Failed to mark refresh inflight: %s", e)
+
+    def _consume_interrupted_refresh(self) -> bool:
+        """启动时检查上一轮刷新有没有做完；有未完成的就清掉并返回 True。
+
+        返回 True 只意味着「上一轮的结果未知」：请求发出后进程没走完，手上这枚
+        令牌**可能**已被云端消费，也可能完好——硬杀发生在请求抵达云端之前时，它
+        完好无损，而两种现场留下的痕迹一模一样。所以这里不下结论：调用方据此安排
+        下一次检查不等临期、立刻验一次，由那次验证的真实结果定论。见
+        :meth:`_apply_interrupted_refresh_on_start`。
+        """
+        try:
+            raw = self._kv_repo.get(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY)
+            if not raw:
+                return False
+            self._kv_repo.delete(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY)
+            fp = (json.loads(raw) or {}).get("fp")
+            cur = self._oauth_info.refresh_token if self._oauth_info else None
+            cur_fp = hashlib.sha256(cur.encode()).hexdigest()[:16] if cur else None
+            # 指纹对不上说明新令牌其实存下来了（落库成功、只是标记没来得及清），
+            # 这种情况手上的令牌是好的，不该判降级。
+            return fp is not None and fp == cur_fp
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to read interrupted refresh marker: %s", e)
+            return False
+
+    def _apply_interrupted_refresh_on_start(self) -> None:
+        """启动时处理「上一轮刷新没走完」的情况：安排立刻验一次，**不直接定论**。
+
+        标记是在**发请求之前**写下的，所以它只说明「这一轮的结果未知」，说明不了
+        「令牌已死」。请求抵达云端之后被硬杀，旧令牌确实已作废；而在那之前（DNS
+        解析、连接、TLS 握手、请求发送）被硬杀，手上这枚完好无损——两种情况留下
+        的现场一模一样，判据分不开。
+
+        **所以这里不能判永久失效。** 两侧代价严重不对称：误判一次，住户的一次
+        断电就换来「设备控制与感知全停、必须自己去重新绑定」，而且定时续期在临期
+        窗口之外直接早退，这个误判要等到令牌自然临期才有机会被纠正，量级是天；
+        而放弃提前定论的代价，只是在令牌**真的**已死时多花一轮退避才得出同一个
+        结论。改为安排下一次检查时立刻验一次、跳过临期早退：真被拒时那一轮就会
+        置降级，只慢一次往返；误判时第一次验证即成功，健康度随新令牌落库复位。
+
+        意向位只在**拿到结论**时才落下（验证成功、或云端明确拒绝），瞬时失败的
+        那一轮不消费它——断电重启时网络往往还没就绪，那一轮四次尝试全是连接失败
+        是常态，消费掉就等于验证从未发生却被当成已完成。
+
+        残留一处：验证跑起来之前若再被硬杀一次，这个意向就丢了（KV 里的标记在
+        启动时已消费），于是要等令牌自然临期才会发起下一次续期。那仍然好过留下
+        一个假的永久失效。
+        """
+        if not self._consume_interrupted_refresh():
+            return
+        logger.warning(
+            "Previous token refresh was interrupted before its result was "
+            "known; the refresh token in use may already have been consumed by "
+            "the cloud. Verifying it once at the next check instead of waiting "
+            "for the expiry window."
+        )
+        self._verify_token_on_start = True
+
+    async def _do_refresh_token(self) -> MIoTOauthInfo | None:
+        """实际的刷新动作。调用方须持有 ``_token_refresh_lock``。"""
+        if not self._oauth_info:
+            return None
+        self._mark_refresh_inflight(self._oauth_info.refresh_token)
+        try:
+            # 传落盘回调：小米的 refresh_token 是一次性的，换取成功那一刻旧令牌
+            # 就已作废。SDK 会在**任何副作用之前**调它，保证「新令牌到了本机就
+            # 一定存得住」——2026-08-27 丢的正是这一步之后、落盘之前的那段。
             oauth_info = await self._miot_client.refresh_access_token_async(
-                refresh_token=self._oauth_info.refresh_token
+                refresh_token=self._oauth_info.refresh_token,
+                persist=self.reset_miot_token_info,
             )
             logger.info("Successfully refreshed Xiaomi home token info")
+            # 再存一次：SDK 里的落盘是吞异常的（那里不该因为写库失败就让刷新
+            # 整体失败），这一次相当于重试，也覆盖旧版 SDK 不认 persist 参数的情况。
+            # 健康度复位跟在落盘里，两条路径共用同一处，见 reset_miot_token_info。
             self.reset_miot_token_info(oauth_info)
             await asyncio.sleep(3)
             await self.refresh_miot_info()
             return oauth_info
         except Exception as e:
-            self._oauth_info = None
-            logger.error(
-                "Failed to refresh Xiaomi home token info: %s", e, exc_info=True
+            code = getattr(getattr(e, "code", None), "value", None)
+            permanent = is_permanent_auth_error(code)
+            before = self._auth_health.state
+            health, should_log = self._auth_health.mark_failure(
+                permanent=permanent, code=code, message=str(e)
             )
+            self._set_auth_health(health)
+            transitioned = health.state is not before
+            if transitioned:
+                # 状态迁移每次故障只出现一次，正是排障要找的那条，不限频
+                logger.error(
+                    "Mi Home authorization rejected by cloud (code=%s): %s. "
+                    "Device control and perception have both stopped: cloud "
+                    "dispatch is refused, and the camera list can no longer be "
+                    "fetched. "
+                    "Fix: rebind in the web console, or run "
+                    "`miloco-cli account bind`.",
+                    code,
+                    e,
+                )
+            elif should_log:
+                # 同状态内的重复失败按半小时限频：降级后定时任务仍每 300s 试一次，
+                # 不限频就是每天近 300 条无新信息的重复行。
+                logger.warning(
+                    "Token refresh still failing (%s, %d consecutive): %s",
+                    "permanent" if permanent else "transient",
+                    health.consecutive_failures,
+                    e,
+                )
+            return None
+        finally:
+            # 无论成败，本轮已经有了结果——不再是「中断」。
+            self._mark_refresh_inflight(None)
 
     async def _start_token_refresh_task(self):
         """
@@ -1497,6 +1787,9 @@ class MiotProxy:
 
     async def set_device_properties(self, params: list[MIoTSetPropertyParam]) -> list:
         """Set device properties via MIoT cloud API."""
+        refused = self._refuse_if_not_operational("set device properties")
+        if refused:
+            raise MiotAuthUnavailableError(refused)
         try:
             return await self.miot_client.http_client.set_props_async(params)
         except Exception as e:
@@ -1651,6 +1944,9 @@ class MiotProxy:
 
     async def call_device_action(self, param: MIoTActionParam) -> dict:
         """Call device action via MIoT cloud API."""
+        refused = self._refuse_if_not_operational("call device action")
+        if refused:
+            raise MiotAuthUnavailableError(refused)
         try:
             return await self.miot_client.http_client.action_async(param)
         except Exception as e:
@@ -1828,8 +2124,12 @@ class MiotProxy:
             return {}
 
     async def _check_and_refresh_token(self):
-        """
-        Check if token is about to expire, refresh if needed
+        """检查令牌是否临近过期，需要则刷新。
+
+        瞬时故障（超时 / 连接失败 / 5xx / 响应体不合法）会按 ``RETRY_BACKOFF_SECONDS``
+        在本轮内退避重试；只有云端明确拒绝凭据才会立刻停手并置为降级态。过去这里
+        没有任何重试，而失败又会把 ``_oauth_info`` 清空导致下一轮直接 return，
+        实际重试次数是 0——一次网络抖动就等于本进程内永久放弃。
         """
         if not self._oauth_info:
             return
@@ -1837,17 +2137,44 @@ class MiotProxy:
         current_time = int(time.time())
         expires_ts = self._oauth_info.expires_ts
 
-        # Refresh token if it expires within 30 minutes
-        if expires_ts - current_time <= 1800:  # 1800 seconds = 30 minutes
-            logger.info(
-                "Token is about to expire, starting refresh. Current time: %s, Expiration time: %s",
-                current_time,
-                expires_ts,
-            )
-            result = await self.refresh_xiaomi_home_token_info()
-            if result:
+        # 上一轮刷新结果未知时不等临期，先验一次——见
+        # _apply_interrupted_refresh_on_start：那个标记只说明「结果未知」，
+        # 验一次才分得出「令牌已死」与「请求没发出去」。
+        if self._verify_token_on_start:
+            # **不在这里清**：清掉等于宣告「本轮验过了」，而本轮完全可能四次尝试
+            # 全是连接失败——那是「仍然不知道」，不是结论。断电重启与网络尚未就绪
+            # 高度相关（光猫拨号通常比机器起得慢），恰恰是这一轮最容易全灭的场景；
+            # 在这里清掉，验证就等于从未发生过却被当成已完成。只有下面两处拿到
+            # 结论的出口才清。
+            logger.info("Verifying refresh token after an interrupted refresh")
+        elif expires_ts - current_time > 1800:  # 1800 seconds = 30 minutes
+            return
+
+        logger.info(
+            "Token is about to expire, starting refresh. Current time: %s, Expiration time: %s",
+            current_time,
+            expires_ts,
+        )
+        for attempt, backoff in enumerate((*RETRY_BACKOFF_SECONDS, None)):
+            if await self.refresh_xiaomi_home_token_info():
+                # 结论：令牌是好的
+                self._verify_token_on_start = False
                 logger.info("Token refresh completed successfully")
-            else:
-                logger.error(
-                    "Token refresh failed, re-login required: miloco-cli account bind"
-                )
+                return
+            if self._auth_health.is_degraded:
+                # 结论：云端明确拒绝了凭据，重试无用——留给用户重新授权
+                self._verify_token_on_start = False
+                return
+            if backoff is None:
+                break
+            logger.info(
+                "Token refresh attempt %d failed transiently, retrying in %ds",
+                attempt + 1,
+                backoff,
+            )
+            await asyncio.sleep(backoff)
+        logger.warning(
+            "Token refresh still failing after %d attempts; keeping existing "
+            "credentials and retrying on the next cycle",
+            len(RETRY_BACKOFF_SECONDS) + 1,
+        )

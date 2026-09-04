@@ -22,10 +22,15 @@ from miot.types import (
 )
 
 from miloco.config import get_settings
-from miloco.database.kv_repo import ScopeConfigKeys
+from miloco.database.kv_repo import (
+    AuthConfigKeys,
+    DeviceInfoKeys,
+    ScopeConfigKeys,
+)
 from miloco.database.person_repo import PersonRepo
 from miloco.middleware.exceptions import (
     BusinessException,
+    MiotAuthUnavailableError,
     MiotOAuthException,
     MiotServiceException,
     ResourceNotFoundException,
@@ -136,6 +141,19 @@ def _request_iid(request: "DeviceControlRequest") -> str | None:
         return None  # 与 value_json 同口径:归一失败不反噬审计主体
 
 
+def _auth_state_of(miot_proxy) -> str | None:
+    """取当前米家授权状态，供台账标记。
+
+    fail-open：拿不到就留 None（老库同样是 NULL）。审计维度缺失不该拖垮控制调用。
+
+    降级态下的行数不会很多——失效之后下发就被拒了，写进来的是「被拒」这一行。
+    """
+    try:
+        return miot_proxy.auth_health.state.value
+    except Exception:
+        return None
+
+
 async def _write_action_ledger(
     miot_proxy: MiotProxy,
     *,
@@ -204,6 +222,10 @@ async def _write_action_ledger(
                     source=source,
                     source_id=source_id,
                     home_id=home_id,
+                    # 下发当时的授权状态。失效后下发会被直接拒绝、请求不再发出；
+                    # 不记这一维，事后就分不清「设备真的没响应」和「当时授权已
+                    # 失效、根本没发」。
+                    auth_state=_auth_state_of(miot_proxy),
                 )
             )
 
@@ -378,21 +400,85 @@ class MiotService:
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY)
         self._lru.clear()
 
+    def _current_uid_from_kv(self) -> str | None:
+        """读当前（=授权前的旧）账号 uid，不发网络请求。
+
+        两个来源都试：``USER_INFO_KEY`` 存完整 user_info，``MIOT_TOKEN_INFO_KEY``
+        里也嵌了一份。任何异常都返回 None——拿不到 uid 时调用方会退回「无条件
+        清理」，这是安全的方向。
+        """
+        raw = self._kv_repo.get(DeviceInfoKeys.USER_INFO_KEY)
+        if raw:
+            try:
+                uid = json.loads(raw).get("uid")
+                if uid:
+                    return str(uid)
+            except Exception as e:
+                logger.warning("Failed to read uid from USER_INFO_KEY: %s", e)
+        raw = self._kv_repo.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY)
+        if raw:
+            try:
+                uid = (json.loads(raw).get("user_info") or {}).get("uid")
+                if uid:
+                    return str(uid)
+            except Exception as e:
+                logger.warning("Failed to read uid from MIOT_TOKEN_INFO_KEY: %s", e)
+        return None
+
     @property
     def miot_client(self):
         """Get the MIoTClient instance."""
         return self._miot_proxy.miot_client
 
-    async def authorize_with_code(self, code: str, state: str):
+    async def authorize_with_code(self, code: str, state: str) -> dict:
         """
         Exchange the OAuth authorization code (provided by user after redirect)
         for an access token, then refresh runtime state.
+
+        绑回**同一个**小米账号时保留每摄像头的启用 / 拾音 / 感知须知配置。
+        home_id 与 did 都是云端全局记录 id，与 token 生命周期无关，同账号重新
+        授权后语义完全有效；而清掉它们的代价很实：摄像头停用集是「默认启用」
+        语义，清空等于把用户特意关掉的相机重新打开投喂。
+
+        因此清理必须发生在**令牌交换之后**——交换之前拿不到新账号身份，无从
+        比对。旧 uid 则必须在交换**之前**读走：交换内部会覆写 USER_INFO_KEY
+        与 MIOT_TOKEN_INFO_KEY，晚一步读到的就是新 uid，判定会恒真。
+
+        Returns:
+            dict: ``{"account_changed": bool, "scope_preserved": bool}``——命令行
+            与 web 都据此决定要不要再跑一遍选家流程（它是「唯一启用」语义，会
+            覆写家庭白名单），并据此告知住户配置是保留了还是重置了。
         """
         try:
             logger.info("authorize_with_code state=%s code=%s…", state, code[:8])
 
-            self._clear_account_scope_state()
-            await self._miot_proxy.get_miot_auth_info(code=code, state=state)
+            # 必须早于交换：交换会覆写两处 uid 副本
+            prev_uid = self._current_uid_from_kv()
+            oauth_info = await self._miot_proxy.get_miot_auth_info(
+                code=code, state=state
+            )
+
+            # 只认交换本身带回来的身份。刻意**不**退回读 KV：KV 里此刻可能还是
+            # 旧 uid（refresh_miot_info 对各项是吞异常的，落库未必成功），拿它去
+            # 比对会把「新身份未知」判成「同账号」，正好是最不该出错的方向。
+            new_uid = getattr(getattr(oauth_info, "user_info", None), "uid", None)
+            new_uid = str(new_uid) if new_uid else None
+
+            # fail-closed：只有两边都拿到且相等才敢跳过清理。读不到 uid 一律照旧
+            # 全清——跨账号残留的拾音白名单若在新账号下命中，会让住户从未授权的
+            # 摄像头麦克风直接生效，这是唯一「误命中 = 隐私泄露」的键。
+            same_account = bool(prev_uid) and bool(new_uid) and prev_uid == new_uid
+            if same_account:
+                logger.info(
+                    "Re-authorized the same Mi account; keeping home / camera scope"
+                )
+            else:
+                logger.info(
+                    "Account changed (prev=%s new=%s); clearing home / camera scope",
+                    "set" if prev_uid else "unknown",
+                    "set" if new_uid else "unknown",
+                )
+                self._clear_account_scope_state()
 
             # 登录后 list_homes 兜底会自动选第一个家庭（如果启用集为空）。
             await self.list_homes()
@@ -413,6 +499,11 @@ class MiotService:
             # onboarding 邀请，无需等下次重启。fire-and-forget：邀请失败/条件
             # 不满足都不影响授权主流程（幂等判定收在 maybe_trigger 内）。
             self._kick_onboarding_trigger()
+
+            return {
+                "account_changed": not same_account,
+                "scope_preserved": same_account,
+            }
 
         except Exception as e:
             logger.error("Failed to process Xiaomi MiOT authorization code: %s", e)
@@ -554,17 +645,29 @@ class MiotService:
         """
         try:
             is_token_valid = await self._miot_proxy.check_token_valid()
+            # 授权健康度独立于 is_bound：令牌续期已被云端拒绝、但手上的 access_token
+            # 还没到期时，check_token_valid 仍会返回 True。只看 is_bound 的话，面板
+            # 会在授权其实已经失效的情况下显示「一切正常」——当晚就是这样。
+            health = self._miot_proxy.auth_health
+            auth_fields = {
+                "auth_state": health.state.value,
+                "auth_degraded_since": health.since_ts,
+                "auth_error_code": health.error_code,
+                "auth_last_success": health.last_success_ts,
+            }
             # max_enabled_cameras 随状态一并下发，作为前端「最多投喂几路」的唯一来源
             # （front 不再各自硬编码上限）。绑定与否都带，未绑时前端也能拿到上限。
             if not is_token_valid:
                 return {
                     "is_bound": False,
                     "max_enabled_cameras": MAX_ENABLED_CAMERAS,
+                    **auth_fields,
                 }
             user_info = await self._miot_proxy.get_user_info()
             result: dict = {
                 "is_bound": True,
                 "max_enabled_cameras": MAX_ENABLED_CAMERAS,
+                **auth_fields,
             }
             if user_info:
                 result["user_info"] = user_info
@@ -811,6 +914,10 @@ class MiotService:
             result = await self._miot_proxy.send_app_notify(notify_id)
             if not result:
                 raise BusinessException("Failed to send notification")
+        except MiotAuthUnavailableError:
+            # 授权失效原样上抛，不包成通用的「发送失败」——住户要看到的是
+            # 「需要重新授权」，包一层之后他只知道推送没成功，不知道该做什么。
+            raise
         except Exception as e:
             logger.error("Failed to send notification: %s", str(e))
             raise BusinessException(f"Failed to send notification: {str(e)}") from e
@@ -1063,6 +1170,19 @@ class MiotService:
 
         # 兜底：原写法 `except A, B:` 是 Python 2 语法，在 Python 3 上为 SyntaxError，
         # 会导致本模块在 3.x 解释器下整个无法加载。修正为 Python 3 规范的元组捕获语法。
+        except MiotAuthUnavailableError:
+            # 授权已失效要**原样抛出**，别包成通用的「控制失败」——包了之后住户
+            # 只看到「设备没反应」，不知道是要重新授权。留痕仍要落一行：被拒的
+            # 动作和真正失败的动作同样值得审计。
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type=getattr(request, "type", None) or "call_action",
+                did=did, iid=_request_iid(request),
+                value_json=attempted_value_json,
+                result_code=None, result_msg=None,
+                success=False, error="refused: mi home authorization no longer valid",
+            )
+            raise
         except (ValidationException, ResourceNotFoundException):
             raise
         except Exception as e:

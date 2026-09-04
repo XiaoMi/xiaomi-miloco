@@ -1,0 +1,504 @@
+"""OAuth 错误响应的形状识别。
+
+用的是**实机抓到的原样响应**，不是想象的形状。此前判据只看顶层 `error`，
+而小米把它放在 `result` 里，导致「凭据被拒绝」一路被当成可重试的未知错误——
+真实故障场景下永远不会进降级态，界面提示也就永远不出现。
+"""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+from miot.error import MIoTErrorCode
+
+
+def _classify(res_obj: dict) -> str | None:
+    """这份响应会不会被判成「凭据被拒绝」——**调的是生产判据**，不复刻。
+
+    钉的是形状识别：``error`` 藏在 ``result`` 里的真实形状能不能认出来。至于
+    「认出来之后报哪个错误码」由请求体决定（续期与授权码兑换报不同的码），那条
+    分支另有用例从真实的换取入口驱动，不在这里重复。
+
+    返回码名只是为了让下面的断言读起来贴近调用方看到的东西；**不要**在这里按
+    请求体去挑码——那就又变成一份会和实现分叉的复刻件了。
+    """
+    from miot.cloud import find_oauth_error
+
+    if find_oauth_error(res_obj) is None:
+        return None
+    return MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.name
+
+
+# 实机抓到的原样响应（2026-09-01 测试机，refresh_token 改坏后云端的回复）。
+# 直接构造 dict：手写转义 JSON 极易写错，而这里要钉的是**结构**不是字面量。
+_INNER = {
+    "error": 96009,
+    "error_description": "invalid refresh token",
+    "traceId": "327a11a9b3f9f44fda07e6f371cba835",
+}
+REAL_REJECTION = {
+    "code": -6,
+    "message": json.dumps(_INNER, ensure_ascii=False),  # 服务端把同样内容又塞了一份字符串
+    "result": dict(_INNER),
+}
+
+
+def test_nested_error_is_recognized_as_credential_rejection():
+    """error 在 result 里，不在顶层——这是真实形状。"""
+    assert REAL_REJECTION.get("error") is None, "前提：顶层确实没有 error"
+    assert REAL_REJECTION["result"]["error"] == 96009
+    assert _classify(REAL_REJECTION) == "CODE_OAUTH_INVALID_REFRESH_TOKEN"
+
+
+def test_top_level_error_also_recognized():
+    """另一种可能的形状也要认，不对响应形状做唯一假设。"""
+    assert (
+        _classify({"error": 96009, "error_description": "invalid refresh token"})
+        == "CODE_OAUTH_INVALID_REFRESH_TOKEN"
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"code": 0, "result": {"access_token": "a", "refresh_token": "r", "expires_in": 1}},
+        {"code": -1, "message": "server busy"},  # 服务端临时错误，可重试
+        {},
+        {"result": None},
+        {"result": "not-a-dict"},
+    ],
+)
+def test_non_rejection_responses_are_not_classified_as_permanent(body):
+    """只有明确带 error 的才算凭据被拒；其余一律留给可重试路径。
+
+    方向刻意 fail-open：宁可晚一点告警，也不因一次服务端抖动误报授权失效。
+    """
+    assert _classify(body) is None
+
+
+# ─────────────── 凭据不进日志 ───────────────
+
+
+def test_credentials_are_redacted_in_log_payload():
+    """出错时把请求体拼进错误消息，凭据不能是原文。
+
+    故障日志里曾经出现过完整的 refresh_token——日志一旦外发即是泄露。
+    保留前 8 位是刻意的：排障时要能比对「两次失败发的是不是同一枚」。
+    """
+    from miot.cloud import _redact
+
+    out = _redact(
+        {
+            "client_id": "2882303761520431603",
+            "redirect_uri": "https://example/login_redirect",
+            "refresh_token": "R3_GvjOY74sX6bsPW-frDN2Z71jZGJZmLFYlflDAnpd6Hmqk",
+            "code": "C3_04B1Fabcdefghijklmnop",
+        }
+    )
+
+    assert "R3_GvjOY74sX6bsPW-frDN2Z" not in out, "refresh_token 原文进了日志"
+    assert "C3_04B1Fabcdefghijklmnop" not in out, "授权码原文进了日志"
+    assert "R3_GvjOY" in out, "应保留前 8 位供比对"
+    # 非凭据字段照常保留，排障要用
+    assert "2882303761520431603" in out
+    assert "login_redirect" in out
+
+
+# ─────────────── 出错日志里的凭据 ───────────────
+
+
+def test_request_headers_are_redacted_before_logging():
+    """业务请求出错时整份请求头会进日志，其中的凭据必须先脱敏。
+
+    401 与非 200 分支原样打印请求头，而头里既有 access_token 也有 client
+    secret——等于每报一次错就把两样凭据落一次盘。留前 8 位仍能比对「两次失败
+    发的是不是同一枚」，那是排障真正需要的；完整值再无别的用处。
+    """
+    from miot.cloud import _redact_map
+
+    token = "AT_this_is_a_real_looking_access_token_value"
+    secret = "CS_this_is_the_client_secret_b64_value"
+    safe = _redact_map(
+        {
+            "Content-Type": "text/plain",
+            "Host": "api.example.com",
+            "X-Client-AppId": "app-123",
+            "X-Client-Secret": secret,
+            "Authorization": f"Bearer{token}",
+        }
+    )
+
+    rendered = str(safe)
+    assert token not in rendered, "access_token 原文进了日志"
+    assert secret not in rendered, "client secret 原文进了日志"
+    # 排障需要的那部分必须留着
+    assert safe["Host"] == "api.example.com"
+    assert safe["X-Client-AppId"] == "app-123"
+    assert safe["Content-Type"] == "text/plain"
+    # 前缀保留，足以比对是不是同一枚
+    assert safe["X-Client-Secret"].startswith(secret[:8])
+    assert str(len(secret)) in safe["X-Client-Secret"]
+
+
+def test_same_credential_stays_comparable_after_redaction():
+    """脱敏后仍要能判断两次发的是不是同一枚——这是留前缀的唯一理由。"""
+    from miot.cloud import _redact_map
+
+    a = _redact_map({"Authorization": "BearerTOKEN_AAAA_1111"})
+    b = _redact_map({"Authorization": "BearerTOKEN_AAAA_1111"})
+    c = _redact_map({"Authorization": "BearerTOKEN_BBBB_2222"})
+
+    assert a["Authorization"] == b["Authorization"], "同一枚脱敏后应当相同"
+    assert a["Authorization"] != c["Authorization"], "不同的两枚脱敏后应当可区分"
+
+
+def test_empty_and_missing_credential_values_do_not_break_redaction():
+    """空值 / 缺失不能让脱敏抛异常——它跑在错误处理路径上，二次失败最难查。"""
+    from miot.cloud import _redact_map
+
+    assert _redact_map({}) == {}
+    assert _redact_map(None) == {}
+    assert _redact_map({"Authorization": ""}) == {"Authorization": ""}
+    assert _redact_map({"Authorization": None}) == {"Authorization": None}
+
+
+# ─────────────── 两条流程的拒绝码要分开 ───────────────
+
+
+async def _reject_with(data: dict):
+    """把 data 喂给**真正的** __get_token_async，返回它抛出的异常。
+
+    只替掉 HTTP 会话（返回一份实机抓到的拒绝响应），分类逻辑跑的是真实现——
+    复刻一份判据的话，实现改了测试还会绿。
+    """
+    from miot.cloud import MIoTOAuth2Client
+    from miot.error import MIoTOAuth2Error
+
+    cli = MIoTOAuth2Client(
+        redirect_uri="https://example.invalid/cb",
+        cloud_server="cn",
+        uuid="test-uuid",
+    )
+
+    class _Res:
+        status = 200
+
+        async def text(self, encoding="utf-8"):
+            return json.dumps(REAL_REJECTION, ensure_ascii=False)
+
+    class _Session:
+        async def get(self, **kw):
+            return _Res()
+
+    cli._ensure_session = lambda: _Session()
+    try:
+        await cli._MIoTOAuth2Client__get_token_async(data)
+    except MIoTOAuth2Error as e:
+        return e
+    finally:
+        cli._session = None
+    raise AssertionError("预期抛出 MIoTOAuth2Error，实际没抛")
+
+
+
+@pytest.mark.asyncio
+async def test_refresh_rejection_reports_invalid_refresh_token():
+    """定时续期被拒 → 报「刷新令牌无效」。"""
+    from miot.error import MIoTErrorCode
+
+    err = await _reject_with({"refresh_token": "rt_value", "client_id": "x"})
+    assert err.code == MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_code_exchange_rejection_reports_unauthorized():
+    """授权码兑换被拒 → 报「未授权」，不能也报「刷新令牌无效」。
+
+    授权码同样一次性：用户在授权页面停留过久、或回调被刷第二次就会被拒。两条
+    报同一个码，日志里「续期凭据失效」和「授权码已过期」就分不开——排障的人会
+    去查续期链路，而问题其实在授权页面往返上。
+    """
+    from miot.error import MIoTErrorCode
+
+    err = await _reject_with({"code": "auth_code_value", "client_id": "x"})
+    assert err.code == MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED, (
+        "授权码兑换失败被误报成刷新令牌无效"
+    )
+
+
+@pytest.mark.asyncio
+async def test_both_rejection_codes_stay_permanent():
+    """两个码都必须留在永久失效集合里，否则会被当成瞬时故障反复重试。"""
+    from miloco.miot.auth_state import is_permanent_auth_error
+    from miot.error import MIoTErrorCode
+
+    assert is_permanent_auth_error(MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.value)
+    assert is_permanent_auth_error(MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED.value)
+
+
+def test_response_body_is_redacted_when_shape_is_invalid():
+    """响应形状不合法时，异常消息里的响应体也要脱敏。
+
+    这条分支的判据之一是「access_token 非空但 refresh_token 为空」——触发时
+    响应里完全可能带着一枚可用的令牌，而异常消息会进日志。只脱敏请求体，
+    等于把另一半原样留着。
+    """
+    from miot.cloud import _redact_response
+
+    tok = "AT_live_token_that_must_not_leak_0123456789"
+    body = {
+        "code": 0,
+        "result": {"access_token": tok, "refresh_token": "", "expires_in": 3600},
+    }
+    out = _redact_response(body, json.dumps(body))
+
+    assert tok not in out, "响应体里的 access_token 原文进了异常消息"
+    assert out.startswith("{"), "正常结构应当仍以 JSON 呈现，便于排障"
+    # 排障需要的结构信息要留着
+    assert "expires_in" in out and "refresh_token" in out
+
+
+def test_flat_shaped_response_is_redacted_at_the_top_level_too():
+    """令牌直接躺在顶层时也要脱敏——「没有 result」正是走进这条分支的原因。
+
+    形状识别那一侧刻意不假设 error 只在 result 里；脱敏这一侧同样不能假设令牌
+    只在 result 里。扁平响应恰恰因为缺 result 才被判成形状不合法，此时只下探
+    result 等于把两枚令牌原文写进日志。
+    """
+    from miot.cloud import _redact_response
+
+    at = "AT_flat_live_token_must_not_leak_0123456789"
+    rt = "RT_flat_live_token_must_not_leak_0123456789"
+    body = {"code": 0, "access_token": at, "refresh_token": rt}
+    out = _redact_response(body, json.dumps(body))
+
+    assert at not in out, "顶层的 access_token 原文进了异常消息"
+    assert rt not in out, "顶层的 refresh_token 原文进了异常消息"
+    # 排障需要的结构信息要留着
+    assert "access_token" in out and "refresh_token" in out
+
+
+def test_unparsable_response_falls_back_to_length_only():
+    """解析不出预期结构时只报长度，不把整个响应体原样落盘。"""
+    from miot.cloud import _redact_response
+
+    raw = "<html>gateway error, token=AT_should_not_leak</html>"
+    out = _redact_response(None, raw)
+
+    assert "AT_should_not_leak" not in out
+    assert str(len(raw)) in out
+
+
+# ─────────────── 进日志的值与 OAuth state ───────────────
+
+
+def test_authorize_log_value_strips_newlines():
+    """进日志的用户标识必须去掉换行，否则能伪造出额外的日志行。
+
+    该值目前恒为 None（鉴权依赖成功时不返回值），但类型标注写的是 str——哪天补成
+    返回真实用户标识，这里就是真实的注入点。钉住清洗本身，不依赖「今天恰好是 None」
+    这个会变的前提。
+    """
+    # 导入实现，不复刻它——自己再算一遍的话，实现被回退测试照样绿。
+    from miloco.miot.router import _log_safe
+
+    hostile = "admin\n2026-01-01 00:00:00 - root - INFO - 伪造的日志行"
+    safe = _log_safe(hostile)
+    assert "\n" not in safe and "\r" not in safe
+    # 内容不丢，只是拼成一行——排障仍看得出发生了什么
+    assert "admin" in safe and "伪造的日志行" in safe
+    # 恒为 None 的今天也不能抛
+    assert _log_safe(None) == "None"
+
+
+def test_oauth_state_uses_sha256_and_stays_self_consistent():
+    """OAuth 回跳的防重放串改用 SHA256，且同一进程内自比对仍然成立。
+
+    这个串只在本进程内比对（发出去一份、回跳带回来一份），既不落库也不与云端约定，
+    所以换算法不影响任何已有绑定。这里走**真实构造函数**——自己再算一遍哈希再断言
+    的话，实现换回旧算法测试照样绿，那是空护栏。
+    """
+    import asyncio
+    import hashlib
+
+    from miot.cloud import MIoTOAuth2Client
+
+    async def _build():
+        return MIoTOAuth2Client(
+            redirect_uri="https://example.invalid/cb",
+            cloud_server="cn",
+            uuid="uuid-1",
+        )
+
+    c = asyncio.run(_build())
+    state = c.state if hasattr(c, "state") else c._state
+    seed = f"d={c._device_id}".encode("utf-8")
+
+    assert state == hashlib.sha256(seed).hexdigest(), "实现没在用 SHA256"
+    assert state != hashlib.sha1(seed).hexdigest(), "实现还在用 SHA1"
+    assert len(state) == 64
+    # 自比对成立：回跳带回同一个串才通过
+    assert asyncio.run(c.check_state_async(redirect_state=state)) is True
+    assert asyncio.run(c.check_state_async(redirect_state="not-it")) is False
+
+
+def test_no_unsanitized_value_reaches_the_log_in_that_router():
+    """名单上的值不许裸传进这一组日志。
+
+    守的是**一份显式名单**，不是「这个文件里所有该清洗的值」。名单之外还有别的值
+    也裸传进日志（例如 WS 文本帧原文），它们在主干上即如此、本次未纳入，这条护栏
+    也不管它们——要扩大守护范围就往名单里加，别指望它自动发现。
+
+    名单上现有两个值，理由不同：**调用者标识**今天恒为 ``None``（两条鉴权依赖成功
+    时都不返回值），钉它是为了「将来补成返回真实身份」那天不必回头逐处补；**通知
+    文本**是调用方提交上来的自由字符串、只被约束非空不限字符集，是今天就真的外部
+    可控的那个，钉它是防现时回退——带服务凭据的调用方塞一个含换行的值进去，日志里
+    就多出一整行看起来完全正常的记录，按行切的采集器分不出真假。
+
+    判据按 **AST 看实参**，不按行文本匹配：同一个值在这个文件里有好几种写法
+    （占位符写法不同、单参数与多参数、单行与折行），按行匹配只覆盖其中一种。
+    位置实参与关键字实参都看，也包括第 0 个——``logger.info(f"user={x}")`` 这种
+    写法会把值拼进格式串本身。
+    """
+    import ast
+    import pathlib
+
+    import miloco.miot.router as mod
+
+    src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
+
+    def _bare_names(node: ast.expr) -> list[str]:
+        """这个实参里有哪些「必须先清洗、却没被清洗」的值。
+
+        **向下遍历整棵子树**，不只看顶层——``extra={"user": current_user}`` 会把值
+        埋进字典、f-string 会把它埋进 ``JoinedStr``，只看顶层就全漏过去了。
+        """
+        # 要守的名单。往里加名字即可扩大守护范围。
+        #
+        # 路径与查询参数都来自请求：URL 里写 %0A，解码出来就是换行，能在日志里
+        # 伪造出整行。声明成整数、布尔的那几个today 由框架在进入函数体之前完成
+        # 校验转换、带换行的请求会被直接拒回，但类型标注是运行期承诺而非静态
+        # 保证——一并纳入，改类型时不必回头补。调用者标识今天恒为空，钉它同理。
+        BARE_NAMES = {
+            "current_user",
+            "camera_id",
+            "did",
+            "scene_id",
+            "channel",
+            "refresh",
+            "duration_ms",
+        }
+        DOTTED_NAMES = {"request.notify"}
+        # 清洗包装：这些调用的整棵子树都算清洗过。_cam_tag 把「相机.通道」拼成
+        # 一个标识，拼装时已经过 _log_safe。
+        WRAPPERS = {"_log_safe", "_cam_tag"}
+
+        found: list[str] = []
+
+        def visit(n: ast.AST) -> None:
+            # 已被 _log_safe(...) 包住的，整棵子树都算清洗过——不往下看。
+            # 注意不能用 ast.walk + continue：那是平铺遍历，跳过调用节点本身
+            # 之后它的实参照样会被访问到。
+            if (
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id in WRAPPERS
+            ):
+                return
+            # 名单判定：裸名字，以及 `对象.属性` 形式
+            if isinstance(n, ast.Name) and n.id in BARE_NAMES:
+                found.append(n.id)
+                return
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+                dotted = f"{n.value.id}.{n.attr}"
+                if dotted in DOTTED_NAMES:
+                    found.append(dotted)
+                    return
+            for child in ast.iter_child_nodes(n):
+                visit(child)
+
+        visit(node)
+        return found
+
+    leaked = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if not (
+            isinstance(fn, ast.Attribute)
+            and isinstance(fn.value, ast.Name)
+            and fn.value.id == "logger"
+        ):
+            continue
+        args = list(node.args) + [kw.value for kw in node.keywords]
+        for arg in args:
+            for name in _bare_names(arg):
+                leaked.append(
+                    f"L{node.lineno} [{name}]: {src.splitlines()[node.lineno - 1].strip()}"
+                )
+
+    assert not leaked, "这些日志调用还在直接用未清洗的值:\n" + "\n".join(leaked)
+
+
+def test_cam_tag_actually_strips_newlines():
+    """拼装函数自己必须真的剥换行——护栏是按**名字**信任它的。
+
+    裸传护栏把 ``_cam_tag(...)`` 的整棵子树当成清洗过（相机标识与通道号在那里面
+    是裸的）。这种按名字的信任只有在「名字背后的行为被钉住」时才成立：否则把它
+    内部的清洗去掉，护栏照样全绿，而外部可控的相机标识就一路裸进日志了。
+    """
+    from miloco.miot.router import _cam_tag
+
+    hostile = "cam-1\n2026-01-01 00:00:00 - root - INFO - 伪造的日志行"
+    out = _cam_tag(hostile, 0)
+
+    assert "\n" not in out and "\r" not in out, "拼装结果里还有换行"
+    # 内容不丢，只是拼成一行——排障仍看得出发生了什么
+    assert "cam-1" in out and "伪造的日志行" in out
+    assert out.endswith(".0"), "通道号仍要拼在后面"
+
+
+def test_log_format_placeholders_match_their_arguments():
+    """每个日志调用的占位符个数必须与实参个数一致。
+
+    这条守的是「改格式串时漏改实参」这一类。它值得单独存在，因为出事的方式是
+    **静默**的：``%d`` 套上字符串会让 logging 在生产环境里吞掉错误、那条日志整行
+    消失，而涉事的几条路径（录制片段、两个音视频 WebSocket 端点）没有测试覆盖，
+    不会有任何用例变红。
+
+    只检查格式串是字面量的调用；f-string 与预先拼好的消息不在此列（它们没有
+    延迟格式化，本来也不会有这个问题）。
+    """
+    import ast
+    import pathlib
+    import re
+
+    import miloco.miot.router as mod
+
+    src = pathlib.Path(mod.__file__).read_text(encoding="utf-8")
+
+    bad: list[str] = []
+    for node in ast.walk(ast.parse(src)):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "logger"
+        ):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        fmt = node.args[0].value
+        if not isinstance(fmt, str):
+            continue
+        # %% 是转义的百分号，不占位
+        holders = len(re.findall(r"%[-+ #0-9.]*[a-zA-Z]", fmt.replace("%%", "")))
+        supplied = len(node.args) - 1
+        if holders != supplied:
+            bad.append(
+                f"L{node.lineno}: 占位 {holders} 个、实参 {supplied} 个 — {fmt[:56]!r}"
+            )
+
+    assert not bad, "日志格式串与实参个数不匹配（生产环境会静默丢掉这几行）:\n" + "\n".join(bad)

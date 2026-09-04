@@ -220,7 +220,35 @@ def test_action_ledger_columns(tmp_path):
         "id", "timestamp", "action_type", "did", "device_name", "room",
         "iid", "value_json", "result_code", "result_msg", "success",
         "error", "trace_id", "source", "source_id", "home_id",
+        "auth_state",
     }
+
+
+def test_v4_db_migrates_to_auth_state(tmp_path):
+    """v4 老库补 auth_state 列，历史行留 NULL。
+
+    NULL 表示写入时还没有这个维度，查询侧不得据此推断当时授权正常。
+    """
+    db = tmp_path / "obs.db"
+    conn = connect(db)
+    init_schema(conn)
+    # 退回 v4：删列不便，直接改版本号并模拟一行老数据
+    conn.execute("PRAGMA user_version = 4")
+    conn.execute(
+        "INSERT INTO action_ledger (id, timestamp, action_type, did, success) "
+        "VALUES ('old', 1, 'set_property', 'd1', 1)"
+    )
+    conn.close()
+
+    conn = connect(db)
+    init_schema(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(action_ledger)")}
+    assert "auth_state" in cols
+    row = conn.execute(
+        "SELECT auth_state FROM action_ledger WHERE id = 'old'"
+    ).fetchone()
+    assert row[0] is None, "历史行不该被臆测成 ok"
 
 
 def test_action_ledger_has_timestamp_index(tmp_path):

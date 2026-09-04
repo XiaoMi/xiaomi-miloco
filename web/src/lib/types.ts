@@ -19,6 +19,14 @@ export interface HomeStatus {
     userIcon?: string;
     /** 小米账号 uid（住户 AccountMenu 展示用），未绑时缺省 */
     userUid?: string;
+    /** 米家授权已被云端拒绝，需要住户重新授权。
+     *
+     *  与 `bound` 正交：令牌续期失败但 access_token 还没到期时 `bound` 仍是 true。
+     *  此时设备控制下发与感知都已停止——拉取账号下的相机列表本身就要有效令牌，
+     *  失效后那一步返回 401，感知没有相机可跑，因此一并停下。 */
+    authDegraded?: boolean;
+    /** 进入降级态的时刻（秒级 epoch），用于展示「自 X 时起」 */
+    authDegradedSince?: number;
     devicesCount: number;
     roomsCount: number;
   };
@@ -865,3 +873,11 @@ export interface UpgradeStatus {
   /** idle | starting | downloading | installing | done | failed —— 前端据此点亮步骤 / 判完成。 */
   phase: string;
 }
+
+/** 米家授权接口的返回体。老后端不返回这两个字段，消费方需自带缺省。 */
+export type MiotAuthorizeResult = {
+  /** 这次绑的是不是另一个账号。换号时后端已重置接入范围配置。 */
+  accountChanged: boolean;
+  /** 后端是否保留了原有的家庭与摄像头配置（同账号重绑时为真）。 */
+  scopePreserved: boolean;
+};
