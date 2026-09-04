@@ -201,6 +201,11 @@ class KVRepo:
 
 class AuthConfigKeys:
     MIOT_TOKEN_INFO_KEY = "MIOT_TOKEN_INFO_KEY"
+    # 米家授权健康度（MiotAuthState 的 JSON）。与 MIOT_TOKEN_INFO_KEY 分开存:
+    # 令牌本身还在、但云端已经拒绝续期,是两件事。落库而非只放内存,是为了让
+    # 「授权已失效」这个判断在进程重启后立刻可用——否则重启到第一次刷新之间
+    # (最长 5 分钟)界面会误报「一切正常」。
+    MIOT_AUTH_STATE_KEY = "MIOT_AUTH_STATE_KEY"
 
 
 class SystemConfigKeys:

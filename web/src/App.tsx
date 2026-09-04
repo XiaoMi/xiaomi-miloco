@@ -128,6 +128,15 @@ function MainApp() {
   const status = useAsync(() => getHomeStatus(homeId), [homeId], {
     errorLabel: t("app.loadHomeStatusFail"),
   });
+  // 定时重拉。米家授权可能在页面开着的时候失效（令牌到期 + 云端拒绝续期），
+  // 而 useAsync 只在 deps 变化时拉一次、全站也没有推送通道，不轮询的话状态条
+  // 会一直停在「已连」。30s 与 PerfPage 的既有轮询同档；重拉期间 data 保留，
+  // 状态条不会闪。
+  const reloadStatus = status.reload;
+  useEffect(() => {
+    const id = setInterval(reloadStatus, 30_000);
+    return () => clearInterval(id);
+  }, [reloadStatus]);
   const persons = useAsync(() => listPersons(homeId), [homeId], {
     errorLabel: t("app.loadPersonsFail"),
   });

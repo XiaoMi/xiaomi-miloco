@@ -71,6 +71,8 @@
     "miotConnected": "米家已连",
     "miotDevicesCount": "{{n}} 件设备",
     "miotNotConnected": "米家未连",
-    "miotCtaConnect": "去连一下"
+    "miotCtaConnect": "去连一下",
+    "miotAuthDegraded": "米家授权已失效 · 设备控制不保证",
+    "miotAuthDegradedHint": "感知、录像、规则仍在正常跑。受影响的只有开关灯、执行场景这类下发动作，会被记为「授权失效期间执行」。点「重新绑定」重新授权。"
   }
 }

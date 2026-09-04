@@ -1,0 +1,300 @@
+"""米家授权健康度：瞬时故障与凭据失效必须分开处理。
+
+钉住的行为（全部是过去出过事的点）：
+- 刷新失败**不再清空** ``_oauth_info``——清空会让 ``is_authenticated`` 转 False，
+  连带把感知侧的相机全部断开
+- 超时 / 连接失败 / 5xx / 响应体不合法 = 瞬时故障，只累计次数，不进降级态
+- 401 与 ``error=96009`` = 凭据被云端拒绝，立刻进降级态
+- 任何一次成功都无条件回到 OK
+- 定时检查对瞬时故障会退避重试；对凭据失效立刻停手
+- 降级态落 KV，进程重启后仍然可读
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from miloco.database.kv_repo import AuthConfigKeys
+from miloco.miot.auth_state import (
+    RETRY_BACKOFF_SECONDS,
+    MiotAuthHealth,
+    MiotAuthState,
+    is_permanent_auth_error,
+)
+from miot.error import MIoTErrorCode, MIoTOAuth2Error
+
+
+class _FakeKV:
+    """内存版 KVRepo。"""
+
+    def __init__(self, initial: dict[str, str] | None = None):
+        self._store: dict[str, str] = dict(initial or {})
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        return self._store.get(key, default)
+
+    def set(self, key: str, value: str) -> bool:
+        self._store[key] = value
+        return True
+
+    def delete(self, key: str) -> bool:
+        self._store.pop(key, None)
+        return True
+
+
+def _make_proxy(kv: _FakeKV, *, expires_in: int = 600):
+    """造一个只装了本测试关心的那几件东西的 MiotProxy。
+
+    不走 ``__init__``：真实构造要连 SDK、起后台任务，跟本测试无关。
+    """
+    from miloco.miot.client import MiotProxy
+    from miot.types import MIoTOauthInfo
+
+    proxy = MiotProxy.__new__(MiotProxy)
+    proxy._kv_repo = kv
+    proxy._auth_health = proxy._load_auth_health()
+    proxy._oauth_info = MIoTOauthInfo(
+        access_token="at",
+        refresh_token="rt",
+        expires_ts=int(time.time()) + expires_in,
+    )
+    proxy._miot_client = MagicMock()
+    proxy.refresh_miot_info = AsyncMock(return_value={})
+    return proxy
+
+
+# ─────────────── 错误分类 ───────────────
+
+
+@pytest.mark.parametrize(
+    "code,permanent",
+    [
+        (MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED.value, True),
+        (MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.value, True),
+        (MIoTErrorCode.CODE_TIMEOUT.value, False),
+        (MIoTErrorCode.CODE_UNKNOWN.value, False),
+        (MIoTErrorCode.CODE_UNAVAILABLE.value, False),
+        (None, False),
+    ],
+)
+def test_only_explicit_credential_rejection_is_permanent(code, permanent):
+    """只有云端明确拒绝凭据才算永久失败，其余一律可重试。
+
+    方向是刻意 fail-open 的：宁可晚一点告警，也不要因为一次网络故障就告诉
+    住户「授权失效了」。
+    """
+    assert is_permanent_auth_error(code) is permanent
+
+
+# ─────────────── 状态机 ───────────────
+
+
+def test_transient_failure_does_not_degrade():
+    h = MiotAuthHealth()
+    h = h.mark_failure(permanent=False, code=None, message="timeout")
+    assert h.state is MiotAuthState.OK
+    assert h.consecutive_failures == 1
+    assert h.since_ts is None
+
+
+def test_permanent_failure_degrades_and_records_since():
+    h = MiotAuthHealth()
+    h = h.mark_failure(permanent=True, code=-10021, message="invalid refresh token")
+    assert h.state is MiotAuthState.DEGRADED
+    assert h.since_ts is not None
+    assert h.error_code == -10021
+
+
+def test_since_ts_is_kept_across_repeated_failures():
+    """已经降级后反复失败，「自 X 时起」不能被刷新成最近一次。"""
+    h = MiotAuthHealth().mark_failure(permanent=True, code=-10021, message="x")
+    first = h.since_ts
+    for _ in range(3):
+        h = h.mark_failure(permanent=False, code=None, message="timeout")
+    assert h.since_ts == first
+    assert h.state is MiotAuthState.DEGRADED, "降级后遇到瞬时故障不应回到 OK"
+    assert h.consecutive_failures == 4
+
+
+def test_success_always_recovers():
+    h = MiotAuthHealth().mark_failure(permanent=True, code=-10021, message="x")
+    h = h.mark_success()
+    assert h.state is MiotAuthState.OK
+    assert h.since_ts is None
+    assert h.error_code is None
+    assert h.consecutive_failures == 0
+    assert h.last_success_ts is not None
+
+
+# ─────────────── 刷新路径 ───────────────
+
+
+@pytest.mark.asyncio
+async def test_refresh_failure_keeps_oauth_info():
+    """核心回归：刷新失败不许清空凭据。
+
+    清空会让 ``is_authenticated`` 转 False，而它是感知侧相机发现的闸门——
+    一次令牌续期失败会连带把全部摄像头断开。
+    """
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    proxy._miot_client.refresh_access_token_async = AsyncMock(
+        side_effect=TimeoutError("read timeout")
+    )
+
+    result = await proxy.refresh_xiaomi_home_token_info()
+
+    assert result is None
+    assert proxy._oauth_info is not None, "刷新失败不应清空凭据"
+    assert proxy.auth_health.state is MiotAuthState.OK, "超时是瞬时故障，不该降级"
+    assert proxy.auth_health.consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_credential_rejection_degrades():
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    proxy._miot_client.refresh_access_token_async = AsyncMock(
+        side_effect=MIoTOAuth2Error(
+            "oauth/get_token rejected, error=96009",
+            MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN,
+        )
+    )
+
+    result = await proxy.refresh_xiaomi_home_token_info()
+
+    assert result is None
+    assert proxy._oauth_info is not None, "即便凭据失效也不清空——感知要继续跑"
+    assert proxy.auth_health.state is MiotAuthState.DEGRADED
+    assert (
+        proxy.auth_health.error_code
+        == MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.value
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_success_clears_degraded_state():
+    from miot.types import MIoTOauthInfo
+
+    kv = _FakeKV(
+        {
+            AuthConfigKeys.MIOT_AUTH_STATE_KEY: MiotAuthHealth(
+                state=MiotAuthState.DEGRADED, since_ts=1, error_code=-10021
+            ).model_dump_json()
+        }
+    )
+    proxy = _make_proxy(kv)
+    assert proxy.auth_health.is_degraded, "前置：从 KV 读回降级态"
+
+    proxy._miot_client.refresh_access_token_async = AsyncMock(
+        return_value=MIoTOauthInfo(
+            access_token="new", refresh_token="new_rt", expires_ts=9999999999
+        )
+    )
+    proxy.reset_miot_token_info = MagicMock()
+
+    result = await proxy.refresh_xiaomi_home_token_info()
+
+    assert result is not None
+    assert proxy.auth_health.state is MiotAuthState.OK
+
+
+# ─────────────── 持久化 ───────────────
+
+
+def test_degraded_state_survives_restart():
+    """重启后立刻可读，否则重启到首次刷新之间界面会误报「一切正常」。"""
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    proxy._set_auth_health(
+        MiotAuthHealth().mark_failure(permanent=True, code=-10021, message="x")
+    )
+
+    stored = json.loads(kv.get(AuthConfigKeys.MIOT_AUTH_STATE_KEY))
+    assert stored["state"] == "degraded"
+
+    reborn = _make_proxy(kv)  # 模拟新进程重新加载
+    assert reborn.auth_health.is_degraded
+
+
+def test_corrupt_stored_state_falls_back_to_ok():
+    kv = _FakeKV({AuthConfigKeys.MIOT_AUTH_STATE_KEY: "not-json"})
+    proxy = _make_proxy(kv)
+    assert proxy.auth_health.state is MiotAuthState.OK
+
+
+# ─────────────── 定时检查的重试 ───────────────
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_retries_with_backoff(monkeypatch):
+    """瞬时故障要在本轮内退避重试——过去这里的实际重试次数是 0。"""
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    proxy._oauth_info.expires_ts = 0  # 强制进入刷新分支
+
+    calls = 0
+
+    async def _always_transient():
+        nonlocal calls
+        calls += 1
+        proxy._set_auth_health(
+            proxy.auth_health.mark_failure(
+                permanent=False, code=None, message="timeout"
+            )
+        )
+        return None
+
+    proxy.refresh_xiaomi_home_token_info = _always_transient
+    slept: list[float] = []
+
+    async def _fake_sleep(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    await proxy._check_and_refresh_token()
+
+    assert calls == len(RETRY_BACKOFF_SECONDS) + 1
+    assert slept == list(RETRY_BACKOFF_SECONDS)
+
+
+@pytest.mark.asyncio
+async def test_permanent_failure_stops_retrying(monkeypatch):
+    """凭据被拒绝时重试无用，必须立刻停手，别刷屏也别拖时间。"""
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    proxy._oauth_info.expires_ts = 0
+
+    calls = 0
+
+    async def _permanent():
+        nonlocal calls
+        calls += 1
+        proxy._set_auth_health(
+            proxy.auth_health.mark_failure(
+                permanent=True, code=-10021, message="invalid refresh token"
+            )
+        )
+        return None
+
+    proxy.refresh_xiaomi_home_token_info = _permanent
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+    await proxy._check_and_refresh_token()
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_no_refresh_when_token_still_fresh():
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    proxy._oauth_info.expires_ts = 2**31 - 1  # 远未到期
+    proxy.refresh_xiaomi_home_token_info = AsyncMock()
+
+    await proxy._check_and_refresh_token()
+
+    proxy.refresh_xiaomi_home_token_info.assert_not_called()

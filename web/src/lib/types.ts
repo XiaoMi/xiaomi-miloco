@@ -19,6 +19,13 @@ export interface HomeStatus {
     userIcon?: string;
     /** 小米账号 uid（住户 AccountMenu 展示用），未绑时缺省 */
     userUid?: string;
+    /** 米家授权已被云端拒绝，需要住户重新授权。
+     *
+     *  与 `bound` 正交：令牌续期失败但 access_token 还没到期时 `bound` 仍是 true。
+     *  感知、录像、规则判断都不受影响，受影响的只有设备控制下发。 */
+    authDegraded?: boolean;
+    /** 进入降级态的时刻（秒级 epoch），用于展示「自 X 时起」 */
+    authDegradedSince?: number;
     devicesCount: number;
     roomsCount: number;
   };

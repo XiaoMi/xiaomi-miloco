@@ -16,7 +16,6 @@
     "confirmUnbindBodySuffix": "断开，家里的设备列表、家庭成员都会清空。",
     "cancel": "取消",
     "unbinding": "正在解绑…",
-
     "bindTitle": "绑定米家账号",
     "payloadEmpty": "授权码为空，请从授权页复制后粘贴",
     "payloadNotBase64": "授权码格式错误（不是合法的 base64）",
@@ -42,7 +41,6 @@
     "step3Hint": "选择 miloco 要接入的家庭，后续可在「家庭切换」中更改。",
     "switching": "切换中…",
     "confirmSelect": "确认选择",
-
     "noCamera": "家里还没认到摄像头——先确认米家上的摄像头能让 miloco 看到。",
     "whichCamera": "用哪个摄像头：",
     "watchTitle": "实时画面",
@@ -58,10 +56,10 @@
     "startRecord": "开始录 {{seconds}} 秒",
     "abortRecord": "中止",
     "abortRecordTitle": "提前中止本次录制",
-
     "switchHomeOnlyOne": "当前账号下只有一个家庭",
     "switchHome": "切换家庭",
     "switch": "切换",
-    "switchHomeListLabel": "切换家庭"
+    "switchHomeListLabel": "切换家庭",
+    "authDegradedReason": "授权已失效，设备控制不保证"
   }
 }

@@ -25,6 +25,9 @@ def _make_service() -> MiotService:
         _kv_repo=SimpleNamespace(
             db_connector=SimpleNamespace(),
             delete=lambda key: True,
+            # authorize_with_code 会先读旧账号 uid 决定要不要清 scope；
+            # 本测试只关心调用顺序，读不到 uid 走「按换账号处理」即可。
+            get=lambda key, default=None: None,
         ),
         get_miot_auth_info=AsyncMock(),
         refresh_cameras=AsyncMock(),
