@@ -193,8 +193,35 @@ if [[ -n "$INSTALL_LIST" ]]; then
     if want openclaw; then
         TGZ=$(ls "$DIST"/miloco-openclaw-plugin-*.tgz 2>/dev/null | head -1)
         [[ -n "$TGZ" ]] || { echo "[remote] 缺 openclaw plugin tgz" >&2; exit 1; }
-        echo "[remote] openclaw plugins install --force $(basename "$TGZ")"
-        openclaw plugins install --force "$TGZ"
+        # openclaw >= 2026.8 引入 capability consent：带 capabilities 的插件安装需
+        # --accept-capabilities；老版本无此旗标，探测 install --help 决定是否追加。
+        # 探测必须有时间上限，否则宿主 CLI 启动挂住会卡死整条 ssh 部署。部署机是 mac，
+        # 基础系统无 GNU timeout(coreutils 装出来叫 gtimeout)，两个都没有时用 perl alarm
+        # 兜底——mac/linux 都自带 perl。
+        ACCEPT=""
+        PROBE=(openclaw plugins install --help)
+        if command -v timeout >/dev/null 2>&1; then
+            PROBE=(timeout 30 "${PROBE[@]}")
+        elif command -v gtimeout >/dev/null 2>&1; then
+            PROBE=(gtimeout 30 "${PROBE[@]}")
+        elif command -v perl >/dev/null 2>&1; then
+            PROBE=(perl -e 'alarm shift; exec @ARGV' 30 "${PROBE[@]}")
+        else
+            echo "[remote] WARN: 无 timeout/gtimeout/perl，capability 探测无超时保护" >&2
+        fi
+        # 只看输出文本判定，退出码不参与(与 install.py 语义对齐，避免 pipefail 把
+        # grep 提前退出导致的 EPIPE 非零码算成「没匹配」)；退出码仅用于识别超时并提示。
+        PROBE_OUT="$("${PROBE[@]}" 2>&1)" && PROBE_RC=0 || PROBE_RC=$?
+        if [[ "$PROBE_OUT" == *--accept-capabilities* ]]; then
+            ACCEPT="--accept-capabilities"
+        elif (( PROBE_RC == 124 || PROBE_RC == 142 )); then
+            # 124 = timeout(1) 超时；142 = perl alarm 触发的 SIGALRM
+            echo "[remote] WARN: 探测 openclaw 插件安装参数超时，将按旧版方式安装；" \
+                 "若宿主为 openclaw >= 2026.8 可能被 capability 授权拦下，届时请手动执行：" \
+                 "openclaw plugins install --force --accept-capabilities $TGZ" >&2
+        fi
+        echo "[remote] openclaw plugins install --force ${ACCEPT:+$ACCEPT }$(basename "$TGZ")"
+        openclaw plugins install --force $ACCEPT "$TGZ"
         echo "[remote] register-skill-tools.sh （把 SKILL.md tool 加进 tools.alsoAllow）"
         bash "$REMOTE_PATH/scripts/register-skill-tools.sh"
         echo "[remote] openclaw plugins registry --refresh （清 plugin tool registry stale cache）"

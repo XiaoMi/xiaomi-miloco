@@ -28,13 +28,16 @@ Miloco 的 OpenClaw 插件（`plugins/openclaw/src/index.ts`）注册五类扩�
 
 Skill 源码在 `plugins/skills/`（`miloco-` 前缀），每个 Skill 一个目录，包含 `SKILL.md`（frontmatter + 指令正文）。frontmatter 遵循 `agentskills.io/specification`，必须包含 `name`、`description`、`metadata`（`author`/`version`/`date`），可选 `openclaw.requires`（声明依赖的 bins 和 built-in tools）。
 
-`pnpm run build` 构建时通过 `scripts/sync-skills.mjs` 把 `plugins/skills/` 整体复制到插件构建产物中。修改 Skill 后须重新 `pnpm run build` + `openclaw plugins install .` 才生效。
+`pnpm run build` 构建时通过 `scripts/sync-skills.mjs` 把 `plugins/skills/` 整体复制到插件构建产物中。修改 Skill 后须重新 `pnpm run build` + `openclaw plugins install .` 才生效（`openclaw >= 2026.8` 需加 `--accept-capabilities`，见下节「版本兼容约束」）。
 
 ### 版本兼容约束
 
 - Miloco 插件依赖 `openclaw/plugin-sdk` 的 `before_prompt_build` Hook 接口
 - 插件级配置读写依赖 OpenClaw 运行时提供的配置 API
 - 插件安装需先安装 OpenClaw 框架（`openclaw`）
+- 宿主版本下限 `>=2026.5.2`，由插件清单的 `openclaw.compat.pluginApi` / `openclaw.install.minHostVersion` 在安装期硬拒；`openclaw >= 2026.8` 本地 `openclaw plugins install .` 需加 `--accept-capabilities`（capability consent），老版本无此旗标
+- 编译基线记在 `package.json#openclaw.build.openclawVersion`（当前 `2026.5.20`）：devDependency 是浮动的 `>=2026.5.2`，真实基线由 `pnpm-lock.yaml` 决定，升级 openclaw 后须同步此字段及 `tools/notify.ts` 里「按该版本 typings 编译」的 docstring（如无法静态 import `resolveDefaultAgentId` 那段论证）
+- 会话读取跨两代 runtime（`tools/notify.ts` 按能力探测选路）：`<=2026.7` 走 `resolveStorePath` + `loadSessionStore` 整文件读、投递信息在 entry 顶层 `lastTo`/`lastChannel`；`>=2026.8` 走 `listSessionEntries`（须显式传 agentId）、投递信息在 `entry.delivery.route`
 - 后端通过 `run_agent_turn`（`utils/agent_client.py`）调 OpenClaw 的 `/miloco/webhook`
 
 ### 与后端的通信契约

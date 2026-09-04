@@ -1291,8 +1291,25 @@ class Installer:
             )
         pkg = str(tgz_files[0])
 
+        # openclaw >= 2026.8 引入 capability consent：带 capabilities 的插件安装需
+        # --accept-capabilities；老版本无此旗标，探测 install --help 决定是否追加。
+        accept = []
+        try:
+            probe = subprocess.run(
+                ["openclaw", "plugins", "install", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if "--accept-capabilities" in f"{probe.stdout}\n{probe.stderr}":
+                accept = ["--accept-capabilities"]
+        except subprocess.TimeoutExpired:
+            # 只兜超时；探测正常返回但匹配不到旗标时按老版本处理。超时后以空 accept
+            # 继续安装，8.x 上会被 consent 门拒——提示实际原因免得误判成版本号问题。
+            self.ui.warn(self.ui.i18n.t("plugin.capability_probe_timeout"))
+
         self.ui.run_with_spinner(
-            ["openclaw", "plugins", "install", "--force", pkg],
+            ["openclaw", "plugins", "install", "--force", *accept, pkg],
             self.ui.i18n.t("plugin.installing"),
             text=True,
         )

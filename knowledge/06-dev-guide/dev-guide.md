@@ -39,6 +39,7 @@ cd cli && uv sync && uv tool install . --force --reinstall
 
 # OpenClaw 插件（TypeScript）
 cd plugins/openclaw && pnpm install && pnpm run build && openclaw plugins install .
+# openclaw >= 2026.8 需改为：openclaw plugins install --accept-capabilities .
 ```
 
 ---
@@ -195,6 +196,7 @@ cd plugins/openclaw
 pnpm run build                 # 构建（prebuild 钩子把 plugins/skills/ 复制进来）
 pnpm test                      # 运行测试
 openclaw plugins install .     # 安装到 OpenClaw（build 后需重装）
+# openclaw >= 2026.8 需改为：openclaw plugins install --accept-capabilities .
 
 # 家庭面板前端（web/）
 cd web
@@ -205,7 +207,7 @@ pnpm test                      # 单元测试（vitest）
 pnpm typecheck                 # 类型检查
 ```
 
-**Skill 修改**：`plugins/skills/` 是唯一源，修改 `SKILL.md` 后须重新 `pnpm run build` + `openclaw plugins install`。
+**Skill 修改**：`plugins/skills/` 是唯一源，修改 `SKILL.md` 后须重新 `pnpm run build` + `openclaw plugins install`（`openclaw >= 2026.8` 需加 `--accept-capabilities`）。
 
 **家庭面板修改**：修改 `web/src/` 后 `pnpm build` 产出到 `web/dist/`，再手动复制到 `$MILOCO_HOME/static/`，或重跑 `install.sh` 自动同步。开发期用 `pnpm dev` + Vite proxy 直接对接 backend，无需额外部署步骤。
 
@@ -262,6 +264,7 @@ miloco-cli rule trigger <rule_id>
 cd plugins/openclaw
 pnpm run build
 openclaw plugins install .
+# openclaw >= 2026.8 需改为：openclaw plugins install --accept-capabilities .
 
 # 验证 Skill 已安装
 openclaw skills list | grep miloco
@@ -333,7 +336,7 @@ CLI 会读取 `$MILOCO_HOME/config.json` 中的 `server.url`（后端 HTTP Base 
 
 1. 在 `plugins/skills/` 下新建目录，命名为 `miloco-<name>`
 2. 创建 `SKILL.md`，填写 frontmatter 和指令正文
-3. 构建并安装：`cd plugins/openclaw && pnpm run build && openclaw plugins install .`
+3. 构建并安装：`cd plugins/openclaw && pnpm run build && openclaw plugins install .`（`openclaw >= 2026.8` 需加 `--accept-capabilities`）
 4. 验证：`openclaw skills list | grep miloco-<name>`
 5. 在 Agent 对话中触发，观察日志 `$MILOCO_HOME/log/openclaw-plugin.log`
 
