@@ -60,6 +60,6 @@
     "switchHome": "切换家庭",
     "switch": "切换",
     "switchHomeListLabel": "切换家庭",
-    "authDegradedReason": "授权已失效，设备控制不保证"
+    "authDegradedReason": "授权已失效，已停止工作"
   }
 }

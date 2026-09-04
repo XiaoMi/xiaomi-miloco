@@ -68,6 +68,17 @@ class ResourceNotFoundException(BusinessException):
         super().__init__(message, code=2001)
 
 
+class MiotAuthUnavailableError(BusinessException):
+    """米家授权已被云端拒绝，走云端的下发一律停止 - 2003
+
+    与「未绑定」不同：绑定关系还在，是凭据不能再续期了。住户需要重新授权，
+    这不是重试能解决的——所以直接拒绝，而不是让请求发出去撞 401。
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message, code=2003)
+
+
 class ConflictException(BusinessException):
     """Resource conflict exception (such as name duplication, etc.) - 2002"""
 

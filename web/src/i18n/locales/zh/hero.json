@@ -19,6 +19,7 @@
     "cameraOfflineHint": "可能 backend 跟摄像头不在同一局域网,或摄像头还没开 LAN 模式。确认网络后重启 miloco 或重启摄像头试试。",
     "cameraEmpty": "家里还没有摄像头 · 接入小米米家摄像头后这里就能看了",
     "noStreaming": "还没有摄像头在感知，打开开关开启感知",
+    "noStreamingAuthDegraded": "米家授权已失效，感知已停止。重新绑定后自动恢复。",
     "benchTitle": "miloco 未感知设备",
     "benchTitleFull": "已达到上限 {{n}} 路，先关掉上方一路才能开启感知",
     "stateCloudOnline": "云端在线",
@@ -63,6 +64,7 @@
     "camPromptCancel": "取消",
     "camPromptSave": "保存",
     "watchItemWatching": "在看家",
+    "watchItemAuthStopped": "看家已停止",
     "watchItemStandby": "待机中",
     "watchItemNotReady": "还没准备好",
     "watchCtaRestart": "重启感知",
@@ -72,8 +74,8 @@
     "miotDevicesCount": "{{n}} 件设备",
     "miotNotConnected": "米家未连",
     "miotCtaConnect": "去连一下",
-    "miotAuthDegraded": "米家授权已失效 · 设备控制不保证",
-    "miotAuthDegradedHint": "感知、录像、规则仍在正常跑。受影响的只有开关灯、执行场景这类下发动作，会被记为「授权失效期间执行」。点「重新绑定」重新授权。",
-    "miotAuthDegradedSince": "感知、录像、规则仍在正常跑。受影响的只有开关灯、执行场景这类下发动作，会被记为「授权失效期间执行」。点「重新绑定」重新授权。 自 {{since}} 起失效。"
+    "miotAuthDegraded": "米家授权已失效 · 已停止工作",
+    "miotAuthDegradedHint": "设备控制与感知均已停止。授权失效后拉取相机列表也会被拒绝，感知没有相机可跑，因此一并停下而不是空转。需重新授权才能恢复——点「重新绑定」。",
+    "miotAuthDegradedSince": "设备控制与感知均已停止。授权失效后拉取相机列表也会被拒绝，感知没有相机可跑，因此一并停下而不是空转。需重新授权才能恢复——点「重新绑定」。自 {{since}} 起失效。"
   }
 }

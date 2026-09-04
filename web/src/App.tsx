@@ -28,6 +28,7 @@ import {
   switchScopeHome,
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
+import { miotTone } from "@/lib/miotTone";
 import type { Pet, Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
@@ -253,6 +254,9 @@ function MainApp() {
               miotHasCamera={devices.data.some(
                 (d) => d.category === "camera",
               )}
+              miotAuthDegraded={
+                status.data ? miotTone(status.data.miot) === "degraded" : false
+              }
               /* 投喂上限唯一来源:后端 MAX_ENABLED_CAMERAS，经 /api/miot/status 下发。
                  status 未到/出错时兜底 4，与后端默认一致。 */
               maxStreamCams={status.data?.maxEnabledCameras ?? 4}

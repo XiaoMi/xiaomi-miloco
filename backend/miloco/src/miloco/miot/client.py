@@ -36,6 +36,7 @@ from pydantic_core import to_jsonable_python
 
 from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
+from miloco.middleware.exceptions import MiotAuthUnavailableError
 from miloco.miot.auth_state import (
     RETRY_BACKOFF_SECONDS,
     MiotAuthHealth,
@@ -233,8 +234,54 @@ class MiotProxy:
 
     @property
     def is_authenticated(self) -> bool:
-        """Whether MIoT OAuth has been completed and an access token is usable."""
+        """凭据**存在**——住户完成过授权，库里有一对令牌。
+
+        注意它不表示凭据**可用**：续期已被云端永久拒绝、而访问令牌尚未到期时，
+        这里仍是真。要判「现在还能不能对云端发请求」，用 :attr:`is_operational`。
+        """
         return self._oauth_info is not None
+
+    @property
+    def is_operational(self) -> bool:
+        """凭据存在**且**未被云端永久拒绝——现在还能对云端发请求。
+
+        **瞬时故障与永久失效是两档，不要合并**：
+
+        - 一次超时、连接失败、5xx —— 健康度不变，这里仍是真。感知照跑。
+          把这类也算作不可用，一次网络抖动就会打掉整套感知。
+        - 云端明确拒绝了凭据（判定见 ``is_permanent_auth_error``）—— 健康度置为
+          降级，这里翻假。此时任何走云端的能力都已不可用：不只是设备控制，
+          **拉取账号下的相机列表本身就要有效令牌**，拿不到列表就没有相机可感知。
+          实测确认过：令牌失效后相机列表请求返回 401，感知随即完全停止。
+
+        所以降级之后不该让系统继续跑——那等于拿着一枚已判定无效的凭据空转，而
+        界面看起来还有部分功能正常。判为不可用并明确告知住户重新授权。
+        """
+        return self._oauth_info is not None and not self._auth_health.is_degraded
+
+    def _refuse_if_not_operational(self, what: str) -> str | None:
+        """授权已被云端永久拒绝时，给出拒绝理由；仍可用则返回 ``None``。
+
+        闸门放在代理层而不是逐个调用方：走云端的下发有好几条入口（属性设置、
+        设备动作、场景执行、App 通知），逐个去加必然漏，而漏掉的那条会在授权
+        已失效时照常把请求发出去——住户看到的是「有的能用有的不能用」。
+
+        瞬时故障不在此列（见 :attr:`is_operational`）：一次超时就拒绝下发，会
+        把可恢复的抖动变成可见的功能中断。
+        """
+        if self.is_operational:
+            return None
+        reason = (
+            f"{what} refused: Mi Home authorization is no longer valid. "
+            "Rebind in the web console, or run `miloco-cli account bind`."
+        )
+        # 记 INFO 而不是 WARNING：失效是长期状态（要住户动手才解得开），而下发的
+        # 触发频率远高于定时续期——规则每命中一次就是一条，逐条 WARNING
+        # 会把同期真正需要看的行淹掉，与续期失败那侧的重复日志限频纪律也不一致。
+        # 「什么时候失效的」由状态迁移那条 ERROR 钉住；被拒的动作另有台账逐行留痕，
+        # 不进台账的那些则会把拒绝原样抛回调用点，住户在那里当场就看到。
+        logger.info(reason)
+        return reason
 
     @classmethod
     async def create_miot_proxy(
@@ -1163,6 +1210,9 @@ class MiotProxy:
         return self._scene_info_dict
 
     async def execute_miot_scene(self, scene_id: str) -> bool:
+        # 这条的约定是返回 bool、不抛——保持不变，拒绝即返回 False。
+        if self._refuse_if_not_operational("execute scene"):
+            return False
         try:
             scene_info = self._scene_info_dict[scene_id]
             return await self._miot_client.run_manual_scene_async(scene_info=scene_info)
@@ -1171,6 +1221,9 @@ class MiotProxy:
             return False
 
     async def send_app_notify(self, app_notify_id: str) -> bool:
+        # 同上：约定返回 bool。通知也走同一枚令牌，失效后推不出去，明确拒绝。
+        if self._refuse_if_not_operational("send app notify"):
+            return False
         try:
             return await self._miot_client.send_app_notify_async(app_notify_id)
         except Exception as e:
@@ -1207,6 +1260,16 @@ class MiotProxy:
         return url
 
     async def get_miot_app_notify_id(self, content: str) -> str | None:
+        # 推一条 App 通知在云端是**两步**：先把文本存上去换回一个通知 id
+        # (``save_text``)，再拿这个 id 去推 (``send_push``)。两步都走云端，所以
+        # 闸门必须落在**第一步**——它排在 :meth:`send_app_notify` 之前，授权失效
+        # 时后面那道闸门根本走不到。
+        #
+        # 这里抛而不是按签名返回 ``None``：上层把 ``None`` 读成「通知内容不合适，
+        # 请重新输入」，住户会一遍遍改文案，而这件事需要他做的是重新授权。
+        refused = self._refuse_if_not_operational("create app notify")
+        if refused:
+            raise MiotAuthUnavailableError(refused)
         try:
             app_notify_id = await self._miot_client.http_client.create_app_notify_async(
                 content
@@ -1236,12 +1299,10 @@ class MiotProxy:
                 f"{code[:8]}…<{len(code)}>" if code else code,
                 state,
             )
+            # 落盘与健康度复位都在 reset_miot_token_info 里，且 SDK 已在任何
+            # 副作用之前经 persist 回调调过一次；这里再调是重试，也覆盖旧版 SDK
+            # 不认 persist 参数的情况。
             self.reset_miot_token_info(oauth_info)
-            # 重新授权拿到的是刚从云端换来的凭据——这本身就是「授权恢复」的最强
-            # 证据，健康度必须当场回到正常态。只在定时刷新成功时复位是不够的：
-            # 新令牌刚签发，下一次刷新要等到临期前 30 分钟才会触发，中间界面会
-            # 一直挂着「授权已失效」，住户刚做完重新绑定却看不到任何变化。
-            self._set_auth_health(self._auth_health.mark_success())
             await self.refresh_miot_info()
             return oauth_info
         except Exception as e:
@@ -1275,14 +1336,29 @@ class MiotProxy:
             logger.warning("Failed to persist auth health: %s", e)
 
     def reset_miot_token_info(self, miot_token_info: MIoTOauthInfo):
-        """落盘米家令牌。
+        """落盘米家令牌，并把健康度一起复位。
 
         令牌是一次性的，这个函数是「新令牌不丢」的最后一道关。内存先更新、库写
         失败也不抛：抛出去会被上层当成「刷新失败」，反而把「已经拿到新令牌」这个
         事实一起吞掉；而内存里那份至少还能撑到下次落盘或进程结束。写库失败按
         ERROR 记——它意味着重启后会退回旧令牌，是需要人看到的。
+
+        **健康度必须在这里复位，不能留在换票函数返回之后。** 这个函数的前提是
+        「只有刚从云端换到新凭据才允许调它」——换票与续期都经落盘回调走到这里，
+        所以它同时也是「授权已恢复」的唯一真相点；若将来有别处要拿它去写一枚并非
+        新换来的令牌（例如启动时从库里读回的那份），健康度复位必须先拆出去。而 SDK
+        在落盘之后还有取账号身份、重连长连接这些网络步骤，其中任一步抛错都会让换票
+        函数整体抛出；复位若排在它返回之后，就会出现「新令牌已在库里且完全可用」与
+        「健康度仍是降级」并存——此时定时续期因为这枚令牌远未临期而直接早退，要等到
+        它临近过期才会有下一次刷新去纠正，量级是天；期间感知与下发一直停着，重启也
+        照样读回降级态。
+
+        复位无条件调用 :meth:`MiotAuthHealth.mark_success`，不加「仅在降级时才
+        复位」的前置判断：它同时负责把瞬时故障累计的 ``consecutive_failures``
+        归零，加了判断反而会让计数在刷新成功后留着不清。
         """
         self._oauth_info = miot_token_info
+        self._set_auth_health(self._auth_health.mark_success())
         try:
             ok = self._kv_repo.set(
                 AuthConfigKeys.MIOT_TOKEN_INFO_KEY, miot_token_info.model_dump_json()
@@ -1304,10 +1380,11 @@ class MiotProxy:
     async def refresh_xiaomi_home_token_info(self) -> MIoTOauthInfo | None:
         """刷新访问令牌。
 
-        失败时**不再清空** ``self._oauth_info``。清空会让 ``is_authenticated``
-        转 False，而它同时是感知侧相机发现的闸门（``camera_adapter`` 拿到空集
-        后会把已连接的相机全部断开），等于让一次令牌续期失败连带打掉整个感知
-        链路。凭据在不在、凭据还能不能用是两件事，后者记在 ``_auth_health``。
+        失败时**不再清空** ``self._oauth_info``。清空会让 ``is_operational``
+        转 False，而它是感知侧相机发现的闸门（``camera_adapter`` 拿到空集后会
+        把已连接的相机全部断开），等于让**一次瞬时故障**连带打掉整个感知链路。
+        凭据在不在、凭据还能不能用是两件事，后者记在 ``_auth_health``——云端
+        明确拒绝时感知确实要停，但那是另一档，不该由一次超时触发。
         """
         if not self._oauth_info:
             logger.warning("Skip token refresh: no oauth_info on file")
@@ -1368,7 +1445,9 @@ class MiotProxy:
         logger.error(
             "Previous token refresh was interrupted before its result was "
             "known; the refresh token in use was very likely already consumed "
-            "by the cloud and cannot be recovered. Perception is unaffected. "
+            "by the cloud and cannot be recovered. Device control and "
+            "perception have both stopped: cloud dispatch is refused, and the "
+            "camera list can no longer be fetched. "
             "Fix: rebind in the web console, or run `miloco-cli account bind`."
         )
         health, _ = self._auth_health.mark_failure(
@@ -1394,8 +1473,8 @@ class MiotProxy:
             logger.info("Successfully refreshed Xiaomi home token info")
             # 再存一次：SDK 里的落盘是吞异常的（那里不该因为写库失败就让刷新
             # 整体失败），这一次相当于重试，也覆盖旧版 SDK 不认 persist 参数的情况。
+            # 健康度复位跟在落盘里，两条路径共用同一处，见 reset_miot_token_info。
             self.reset_miot_token_info(oauth_info)
-            self._set_auth_health(self._auth_health.mark_success())
             await asyncio.sleep(3)
             await self.refresh_miot_info()
             return oauth_info
@@ -1412,8 +1491,9 @@ class MiotProxy:
                 # 状态迁移每次故障只出现一次，正是排障要找的那条，不限频
                 logger.error(
                     "Mi Home authorization rejected by cloud (code=%s): %s. "
-                    "Device control will keep dispatching but is no longer "
-                    "guaranteed; perception is unaffected. "
+                    "Device control and perception have both stopped: cloud "
+                    "dispatch is refused, and the camera list can no longer be "
+                    "fetched. "
                     "Fix: rebind in the web console, or run "
                     "`miloco-cli account bind`.",
                     code,
@@ -1447,6 +1527,9 @@ class MiotProxy:
 
     async def set_device_properties(self, params: list[MIoTSetPropertyParam]) -> list:
         """Set device properties via MIoT cloud API."""
+        refused = self._refuse_if_not_operational("set device properties")
+        if refused:
+            raise MiotAuthUnavailableError(refused)
         try:
             return await self.miot_client.http_client.set_props_async(params)
         except Exception as e:
@@ -1599,6 +1682,9 @@ class MiotProxy:
 
     async def call_device_action(self, param: MIoTActionParam) -> dict:
         """Call device action via MIoT cloud API."""
+        refused = self._refuse_if_not_operational("call device action")
+        if refused:
+            raise MiotAuthUnavailableError(refused)
         try:
             return await self.miot_client.http_client.action_async(param)
         except Exception as e:

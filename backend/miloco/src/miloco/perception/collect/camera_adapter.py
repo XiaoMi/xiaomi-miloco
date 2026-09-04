@@ -128,7 +128,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         require_lan: bool = True,
         cap: bool = True,
     ) -> dict[str, PerceptionDevice]:
-        if not self._miot_proxy.is_authenticated:
+        # 判「可用」而非「存在」：授权被云端永久拒绝后，拉相机列表这一步本身就会
+        # 401，拿不到列表就没有相机可感知。与其让感知空转到访问令牌自然到期，
+        # 不如当场停下并告知住户重新授权。瞬时故障不走这条——见 is_operational。
+        if not self._miot_proxy.is_operational:
             return {}
         return self._filter_cameras_from_all(
             all_devices if all_devices else await self._miot_proxy.get_cameras(),
@@ -205,7 +208,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         相机（要救），但排除云端就离线的相机（救不活，避免它让判据永真致 refresh
         空转）。scope 内相机要么已连、要么云端离线时不触发，零额外开销。
         """
-        if all_devices is None and self._miot_proxy.is_authenticated:
+        if all_devices is None and self._miot_proxy.is_operational:
             try:
                 expected = await self.discover_devices(
                     online_only=True, require_lan=False

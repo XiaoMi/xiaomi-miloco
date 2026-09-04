@@ -12,6 +12,7 @@ import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { relativeTime } from "@/lib/relativeTime";
 import { miotTone } from "@/lib/miotTone";
+import { watchTier } from "@/lib/watchTier";
 import type { HomeStatus } from "@/lib/types";
 
 type Tone = "ok" | "info" | "warn" | "danger" | "brand";
@@ -148,17 +149,26 @@ export function StatusRibbon({
   // running=true && ready=false  → 黄,引擎跑着但缺模型/异常,可重启
   // running=false                → 蓝,主动暂停态,唤醒它
   // (backend 当前只有 stop/start 两态,没有 pausedUntil 倒计时,该字段已删)
-  const watchItem = status.perception.running ? (
-    status.perception.ready ? (
-      <StatusItem
-        tone={allCamerasOff ? "warn" : "ok"}
-        label={
-          allCamerasOff
-            ? t("hero.watchItemStandby")
-            : t("hero.watchItemWatching")
-        }
-      />
-    ) : (
+  // 分档判据抽成了共用纯函数，组件只负责渲染。授权失效那一档不带 CTA：
+  // 重新绑定的入口就在旁边那一项上，同一件事不给两个按钮。
+  const tier = watchTier({
+    miot: status.miot,
+    perception: status.perception,
+    allCamerasOff,
+  });
+  const watchItem = tier === "auth-stopped" ? (
+    <StatusItem tone="danger" label={t("hero.watchItemAuthStopped")} />
+  ) : tier === "watching" || tier === "standby" ? (
+    <StatusItem
+      tone={tier === "standby" ? "warn" : "ok"}
+      label={
+        tier === "standby"
+          ? t("hero.watchItemStandby")
+          : t("hero.watchItemWatching")
+      }
+    />
+  ) : tier === "not-ready" ? (
+    (
       <StatusItem
         tone="warn"
         // engineMessage 长度无 cap（backend 可能塞 traceback / i18n 长文）—— 截
@@ -184,7 +194,7 @@ export function StatusRibbon({
   );
 
   // ── Item 2：米家连接 3 态 ─────────────────────
-  // authDegraded           → 红，授权已失效（感知照跑，只有设备控制不保证）
+  // authDegraded           → 红，授权已失效（设备控制与感知均已停止）
   // bound                  → 绿，已连
   // 其余                    → 黄，未连
   // 失效档**独立于 bound、且优先级最高**，与命令行体检的分支顺序对齐。两者正交：

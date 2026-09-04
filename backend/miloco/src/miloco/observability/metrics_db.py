@@ -285,10 +285,10 @@ def _migrate_v4_action_home(conn: sqlite3.Connection) -> None:
 def _migrate_v5_action_auth_state(conn: sqlite3.Connection) -> None:
     """v4 → v5:给 action_ledger 补下发时的米家授权状态列 auth_state(幂等)。
 
-    授权被云端拒绝后设备控制仍会照常下发(感知不该为授权问题停摆),但成功与否
-    不再有保证。只看 success/result_code 无法区分「设备真的没响应」与「当时授权
-    已失效」——事后排查「那晚灯到底开没开」会卡在这里。老行为 NULL,表示写入时
-    还没有这个维度,查询侧不得据此推断当时授权正常。
+    授权被云端拒绝后设备控制会被直接拒绝、请求不再发出。只看 success/result_code
+    无法区分「设备真的没响应」与「当时授权已失效、根本没发」——事后排查「那晚灯
+    到底开没开」会卡在这里。老行为 NULL,表示写入时还没有这个维度,查询侧不得据此
+    推断当时授权正常。
     """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
     if "auth_state" not in cols:

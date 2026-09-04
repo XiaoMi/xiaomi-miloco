@@ -60,6 +60,6 @@
     "switchHome": "Switch home",
     "switch": "Switch",
     "switchHomeListLabel": "Switch home",
-    "authDegradedReason": "Authorization expired; device control not guaranteed"
+    "authDegradedReason": "Authorization expired; stopped"
   }
 }

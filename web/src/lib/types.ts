@@ -22,7 +22,8 @@ export interface HomeStatus {
     /** 米家授权已被云端拒绝，需要住户重新授权。
      *
      *  与 `bound` 正交：令牌续期失败但 access_token 还没到期时 `bound` 仍是 true。
-     *  感知、录像、规则判断都不受影响，受影响的只有设备控制下发。 */
+     *  此时设备控制下发与感知都已停止——拉取账号下的相机列表本身就要有效令牌，
+     *  失效后那一步返回 401，感知没有相机可跑，因此一并停下。 */
     authDegraded?: boolean;
     /** 进入降级态的时刻（秒级 epoch），用于展示「自 X 时起」 */
     authDegradedSince?: number;

@@ -28,9 +28,9 @@ export interface BackendActionRow {
   trace_id: string | null;
   /** v4:设备所属家庭;老行 / 解析失败为 null(后端按 home 过滤时对 null 放行) */
   home_id?: string | null;
-  /** v5:下发当时的米家授权状态。"degraded" = 授权已被云端拒绝，控制照常下发
-   *  但成功与否不再有保证。老行为 null——表示写入时还没有这个维度，**不能**
-   *  据此推断当时授权正常。 */
+  /** v5:下发当时的米家授权状态。"degraded" = 授权已被云端拒绝，下发被拒、请求
+   *  未发出。老行为 null——表示写入时还没有这个维度，**不能**据此推断当时授权
+   *  正常。 */
   auth_state?: "ok" | "degraded" | null;
 }
 

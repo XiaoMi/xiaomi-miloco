@@ -19,6 +19,7 @@
     "cameraOfflineHint": "The backend may not be on the same LAN as the cameras, or the cameras haven't enabled LAN mode. After checking the network, try restarting miloco or the cameras.",
     "cameraEmpty": "No cameras at home yet · Connect Xiaomi Home cameras to see them here",
     "noStreaming": "No cameras perceiving yet, enable one to start",
+    "noStreamingAuthDegraded": "Mi Home authorization expired; perception has stopped. Rebind to restore.",
     "benchTitle": "Cameras not perceiving",
     "benchTitleFull": "Maxed out at {{n}} cameras, disable one to enable another",
     "stateCloudOnline": "Cloud online",
@@ -63,6 +64,7 @@
     "camPromptCancel": "Cancel",
     "camPromptSave": "Save",
     "watchItemWatching": "Watching",
+    "watchItemAuthStopped": "Watching stopped",
     "watchItemStandby": "Standby",
     "watchItemNotReady": "Not ready yet",
     "watchCtaRestart": "Restart perception",
@@ -72,8 +74,8 @@
     "miotDevicesCount": "{{n}} devices",
     "miotNotConnected": "Xiaomi Home not connected",
     "miotCtaConnect": "Connect now",
-    "miotAuthDegraded": "Mi Home authorization expired · device control not guaranteed",
-    "miotAuthDegradedHint": "Perception, recording and rules keep running. Only outgoing actions like switching lights or running scenes are affected; they are recorded as executed during an authorization outage. Click Rebind to re-authorize.",
-    "miotAuthDegradedSince": "Perception, recording and rules keep running. Only outgoing actions like switching lights or running scenes are affected; they are recorded as executed during an authorization outage. Click Rebind to re-authorize. Invalid since {{since}}."
+    "miotAuthDegraded": "Mi Home authorization expired · stopped",
+    "miotAuthDegradedHint": "Device control and perception have both stopped. Once authorization expires the camera list request is rejected too, so perception has no cameras to work with and stops rather than spinning. Re-authorize to restore — click Rebind.",
+    "miotAuthDegradedSince": "Device control and perception have both stopped. Once authorization expires the camera list request is rejected too, so perception has no cameras to work with and stops rather than spinning. Re-authorize to restore — click Rebind. Invalid since {{since}}."
   }
 }

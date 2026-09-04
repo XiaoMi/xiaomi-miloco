@@ -30,6 +30,7 @@ from miloco.database.kv_repo import (
 from miloco.database.person_repo import PersonRepo
 from miloco.middleware.exceptions import (
     BusinessException,
+    MiotAuthUnavailableError,
     MiotOAuthException,
     MiotServiceException,
     ResourceNotFoundException,
@@ -142,6 +143,8 @@ def _auth_state_of(miot_proxy) -> str | None:
     """取当前米家授权状态，供台账标记。
 
     fail-open：拿不到就留 None（老库同样是 NULL）。审计维度缺失不该拖垮控制调用。
+
+    降级态下的行数不会很多——失效之后下发就被拒了，写进来的是「被拒」这一行。
     """
     try:
         return miot_proxy.auth_health.state.value
@@ -217,9 +220,9 @@ async def _write_action_ledger(
                     source=source,
                     source_id=source_id,
                     home_id=home_id,
-                    # 下发当时的授权状态。降级期间控制照常下发（感知不该为授权
-                    # 问题停摆），但成功与否不再有保证——不记这一维，事后就分不清
-                    # 「设备真的没响应」和「当时授权已失效」。
+                    # 下发当时的授权状态。失效后下发会被直接拒绝、请求不再发出；
+                    # 不记这一维，事后就分不清「设备真的没响应」和「当时授权已
+                    # 失效、根本没发」。
                     auth_state=_auth_state_of(miot_proxy),
                 )
             )
@@ -901,6 +904,10 @@ class MiotService:
             result = await self._miot_proxy.send_app_notify(notify_id)
             if not result:
                 raise BusinessException("Failed to send notification")
+        except MiotAuthUnavailableError:
+            # 授权失效原样上抛，不包成通用的「发送失败」——住户要看到的是
+            # 「需要重新授权」，包一层之后他只知道推送没成功，不知道该做什么。
+            raise
         except Exception as e:
             logger.error("Failed to send notification: %s", str(e))
             raise BusinessException(f"Failed to send notification: {str(e)}") from e
@@ -1153,6 +1160,19 @@ class MiotService:
 
         # 兜底：原写法 `except A, B:` 是 Python 2 语法，在 Python 3 上为 SyntaxError，
         # 会导致本模块在 3.x 解释器下整个无法加载。修正为 Python 3 规范的元组捕获语法。
+        except MiotAuthUnavailableError:
+            # 授权已失效要**原样抛出**，别包成通用的「控制失败」——包了之后住户
+            # 只看到「设备没反应」，不知道是要重新授权。留痕仍要落一行：被拒的
+            # 动作和真正失败的动作同样值得审计。
+            await _write_action_ledger(
+                self._miot_proxy,
+                action_type=getattr(request, "type", None) or "call_action",
+                did=did, iid=_request_iid(request),
+                value_json=attempted_value_json,
+                result_code=None, result_msg=None,
+                success=False, error="refused: mi home authorization no longer valid",
+            )
+            raise
         except (ValidationException, ResourceNotFoundException):
             raise
         except Exception as e:

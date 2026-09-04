@@ -1,7 +1,7 @@
 """米家授权健康度：瞬时故障与凭据失效必须分开处理。
 
 钉住的行为（全部是过去出过事的点）：
-- 刷新失败**不再清空** ``_oauth_info``——清空会让 ``is_authenticated`` 转 False，
+- 刷新失败**不再清空** ``_oauth_info``——清空会让 ``is_operational`` 转 False，
   连带把感知侧的相机全部断开
 - 超时 / 连接失败 / 5xx / 响应体不合法 = 瞬时故障，只累计次数，不进降级态
 - 401 与响应体带 ``error`` 字段（如 96009）= 凭据被云端拒绝，立刻进降级态
@@ -144,8 +144,8 @@ def test_success_always_recovers():
 async def test_refresh_failure_keeps_oauth_info():
     """核心回归：刷新失败不许清空凭据。
 
-    清空会让 ``is_authenticated`` 转 False，而它是感知侧相机发现的闸门——
-    一次令牌续期失败会连带把全部摄像头断开。
+    清空会让 ``is_operational`` 转 False，而它是感知侧相机发现的闸门——
+    一次瞬时故障会连带把全部摄像头断开。
     """
     kv = _FakeKV()
     proxy = _make_proxy(kv)
@@ -202,7 +202,8 @@ async def test_refresh_success_clears_degraded_state():
             access_token="new", refresh_token="new_rt", expires_ts=9999999999
         )
     )
-    proxy.reset_miot_token_info = MagicMock()
+    # 不桩 reset_miot_token_info：健康度复位就在它里面，桩掉等于把被测的那一处
+    # 挖走，用例会在实现坏掉时照样绿。
 
     result = await proxy.refresh_xiaomi_home_token_info()
 
@@ -211,12 +212,41 @@ async def test_refresh_success_clears_degraded_state():
 
 
 @pytest.mark.asyncio
+async def test_successful_refresh_zeroes_transient_failure_count():
+    """瞬时故障累计的次数，刷新成功后必须归零。
+
+    复位点若加上「仅在降级时才复位」这类前置判断，这条会红：state 一直是 OK、
+    判断不成立，计数却留在原处，退避节奏与排障读到的都是一个虚高的数。
+    """
+    from miot.types import MIoTOauthInfo
+
+    kv = _FakeKV()
+    proxy = _make_proxy(kv)
+    for _ in range(2):
+        health, _ = proxy._auth_health.mark_failure(
+            permanent=False, code=None, message="timeout"
+        )
+        proxy._set_auth_health(health)
+    assert proxy.auth_health.state is MiotAuthState.OK, "前置：瞬时故障不该进降级"
+    assert proxy.auth_health.consecutive_failures == 2, "前置：计数已累计"
+
+    proxy._miot_client.refresh_access_token_async = AsyncMock(
+        return_value=MIoTOauthInfo(
+            access_token="new", refresh_token="new_rt", expires_ts=9999999999
+        )
+    )
+
+    assert await proxy.refresh_xiaomi_home_token_info() is not None
+    assert proxy.auth_health.consecutive_failures == 0
+
+
+@pytest.mark.asyncio
 async def test_rebind_clears_degraded_state():
     """重新授权成功必须当场解除降级态。
 
     只在定时刷新成功时复位是不够的：重新绑定拿到的是刚签发的新令牌，下一次刷新
-    要等到临期前 30 分钟才触发，中间界面会一直挂着「授权已失效」——住户刚做完
-    重新绑定却看不到任何变化。
+    要等到它临近过期才触发，中间界面会一直挂着「授权已失效」——住户刚做完重新
+    绑定却看不到任何变化。
     """
     from miot.types import MIoTOauthInfo
 
@@ -232,11 +262,50 @@ async def test_rebind_clears_degraded_state():
             access_token="new", refresh_token="new_rt", expires_ts=9999999999
         )
     )
-    proxy.reset_miot_token_info = MagicMock()
 
     await proxy.get_miot_auth_info(code="c", state="s")
 
     assert proxy.auth_health.state is MiotAuthState.OK
+
+
+@pytest.mark.asyncio
+async def test_rebind_clears_degraded_even_if_later_step_fails():
+    """换票成功、新令牌已落库，但 SDK 后续那些网络步骤抛错——健康度也必须已复位。
+
+    换票函数内部在落库之后还要取账号身份、重连长连接，任一步失败都会让它整体
+    抛出。复位若排在它返回之后，就会留下「新令牌在库里且完全可用」与「健康度
+    仍是降级」并存：定时续期看这枚令牌远未临期便直接早退，要等它临近过期才有下
+    一次刷新去纠正，量级是天；期间感知与下发一直停着，重启也照样读回降级态。所以
+    复位点必须跟落库绑在一起。
+    """
+    from miot.error import MIoTHttpError
+    from miot.types import MIoTOauthInfo
+
+    degraded, _ = MiotAuthHealth().mark_failure(
+        permanent=True, code=-10021, message="invalid refresh token"
+    )
+    kv = _FakeKV({AuthConfigKeys.MIOT_AUTH_STATE_KEY: degraded.model_dump_json()})
+    proxy = _make_proxy(kv)
+    assert proxy.auth_health.is_degraded, "前置：处于降级态"
+
+    async def _exchange(code, state, persist=None):
+        # 与 SDK 同序：先落库，再做会抛的副作用
+        persist(
+            MIoTOauthInfo(
+                access_token="new", refresh_token="new_rt", expires_ts=9999999999
+            )
+        )
+        raise MIoTHttpError("invalid http response(user)")
+
+    proxy._miot_client.get_access_token_async = _exchange
+
+    with pytest.raises(MIoTHttpError):
+        await proxy.get_miot_auth_info(code="c", state="s")
+
+    assert proxy.auth_health.state is MiotAuthState.OK
+    assert proxy.is_operational, "令牌可用，感知与下发不该继续停着"
+    assert kv.get(AuthConfigKeys.MIOT_AUTH_STATE_KEY), "复位要落库，重启后不能读回降级"
+    assert json.loads(kv.get(AuthConfigKeys.MIOT_AUTH_STATE_KEY))["state"] == "ok"
 
 
 # ─────────────── 重复失败的日志限频 ───────────────
@@ -435,3 +504,61 @@ def test_marker_stores_fingerprint_not_the_token():
     raw = kv.get(AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY)
     assert secret not in raw, "标记里存了凭据原文"
     assert "fp" in raw and "ts" in raw
+
+
+# ─────────────── 永久失效即停，瞬时故障不停 ───────────────
+
+
+def test_is_operational_false_after_permanent_rejection():
+    """云端明确拒绝凭据后判为不可用——感知据此停下。
+
+    拉取账号下的相机列表本身就要有效令牌，拒绝之后那一步会 401、拿不到列表，
+    感知没有相机可跑。与其空转到访问令牌自然到期，不如当场停下并告知住户。
+    """
+    from miot.error import MIoTErrorCode
+
+    proxy = _make_proxy(_FakeKV())
+    assert proxy.is_operational, "前置条件：一开始应当可用"
+
+    health, _ = proxy._auth_health.mark_failure(
+        permanent=True,
+        code=MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.value,
+        message="invalid refresh token",
+    )
+    proxy._set_auth_health(health)
+
+    assert not proxy.is_operational, "永久失效后应判为不可用"
+    assert proxy.is_authenticated, "凭据仍然存在——两个判据不是一回事"
+
+
+def test_transient_failure_keeps_operational():
+    """一次超时不该打掉感知——瞬时故障与永久失效是两档。
+
+    把瞬时故障也算作不可用的话，一次网络抖动就会让整套感知停摆，而那时凭据
+    其实好好的。这一条守的正是这个边界，改判据时别把它一起改掉。
+    """
+    proxy = _make_proxy(_FakeKV())
+
+    for _ in range(3):
+        health, _ = proxy._auth_health.mark_failure(
+            permanent=False, code=None, message="timeout"
+        )
+        proxy._set_auth_health(health)
+        assert proxy.is_operational, "瞬时故障不该让感知停下"
+
+
+def test_operational_recovers_after_success():
+    """重新授权或续期成功后恢复可用。"""
+    from miot.error import MIoTErrorCode
+
+    proxy = _make_proxy(_FakeKV())
+    health, _ = proxy._auth_health.mark_failure(
+        permanent=True,
+        code=MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.value,
+        message="rejected",
+    )
+    proxy._set_auth_health(health)
+    assert not proxy.is_operational
+
+    proxy._set_auth_health(proxy._auth_health.mark_success())
+    assert proxy.is_operational, "恢复后应当重新可用"
