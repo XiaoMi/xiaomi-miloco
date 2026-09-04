@@ -10,6 +10,7 @@ import {
   setPluginConfig,
 } from "../config.js";
 import { getNotifyDedupWindowMs } from "../miloco/config.js";
+import { logger } from "../utils/logger.js";
 
 type NotifyTarget = {
   channel: string;
@@ -121,7 +122,7 @@ export function registerNotifyTool(api: OpenClawPluginApi) {
           error: "未指定 sessionKey 且当前上下文无 sessionKey",
         });
       }
-      const resolve = resolveSessionByKey(api, sessionKey);
+      const resolve = resolveSessionByKey(listSessionStore(api), sessionKey);
       if (!resolve) {
         return jsonResult({
           ok: false,
@@ -259,43 +260,181 @@ function normalizeNotifySessionKeys(
   return deduped;
 }
 
-function loadSessionStore(api: OpenClawPluginApi) {
-  const cfg = getRuntimeConfig(api);
-  const sessionCfg = (cfg as Record<string, unknown>).session as
-    | { store?: string }
+type SessionStoreEntry = Record<string, unknown>;
+
+/**
+ * Minimal shape of the plugin runtime's agent session accessor, covering both
+ * plugin-runtime generations:
+ *
+ *  - openclaw <= 2026.7.x exposes `resolveStorePath` + `loadSessionStore` (reads the
+ *    whole session store file) and persists delivery at the entry top level as
+ *    `lastTo` / `lastChannel` / `lastAccountId` / `lastThreadId`.
+ *  - openclaw >= 2026.8 removed `loadSessionStore` from `runtime.agent.session` in
+ *    favor of the entry-based `listSessionEntries` / `getSessionEntry`, made
+ *    `resolveStorePath` throw `SessionStoreAgentIdRequiredError` when the store is
+ *    empty, and moved delivery under `entry.delivery.route` (ChannelRouteRef).
+ */
+type SessionAccessor = {
+  resolveStorePath?: (store?: string) => string;
+  loadSessionStore?: (storePath: string) => Record<string, SessionStoreEntry>;
+  listSessionEntries?: (params?: { agentId?: string }) => Array<{
+    sessionKey: string;
+    entry: SessionStoreEntry;
+  }>;
+};
+
+/**
+ * Default agent whose session store to scan. openclaw >= 2026.8 scopes the store
+ * per agent and the delivery call (`subagent.run`) carries no agent scope — it runs
+ * in the default agent context — so only that agent's sessions are read. Sole agent
+ * entry when exactly one is configured, else the legacy DEFAULT_AGENT_ID "main"
+ * (which is also subagent.run's no-scope fallback). The SDK's resolveDefaultAgentId
+ * lives only in 2026.8+ (plugins build against 2026.5.20 typings), hence the
+ * config-derived resolution.
+ *
+ * Caller caveat: on a multi-agent host this returns only the default agent's
+ * sessions. `miloco_im_push` is unaffected (subagent.run cannot deliver outside the
+ * default agent anyway), but `miloco_notify_bind` validates `ctx.sessionKey` against
+ * the same table — binding from a conversation owned by a non-default agent fails.
+ * Widening the read scope requires widening subagent.run's delivery scope first.
+ */
+function resolveDefaultAgentIdFromConfig(cfg: unknown): string {
+  const agents = (cfg as {
+    agents?: { entries?: Record<string, unknown> };
+  }).agents;
+  const ids = Object.keys(agents?.entries ?? {}).filter((id) => id.trim());
+  return ids.length === 1 ? ids[0] : "main";
+}
+
+function listSessionStore(api: OpenClawPluginApi): Record<string, SessionStoreEntry> {
+  const session = api.runtime.agent.session as unknown as SessionAccessor;
+
+  // openclaw >= 2026.8: entry-based read. Must pass an agent id (listSessionEntries
+  // without it throws "Cannot resolve SQLite session scope without an agent id").
+  // Only the default agent is scanned: subagent.run takes no agent scope, so sessions
+  // of other agents could be read but not delivered to.
+  if (typeof session.listSessionEntries === "function") {
+    const agentId = resolveDefaultAgentIdFromConfig(getRuntimeConfig(api));
+    let entries: Array<{ sessionKey: string; entry: SessionStoreEntry }> = [];
+    try {
+      entries = session.listSessionEntries({ agentId }) ?? [];
+    } catch (err) {
+      // agentId 是从 config 推的猜测值(0 个或 >=2 个 agent 时退回字面量 "main")，宿主上
+      // 可能没有这个 agent；8.x 的会话作用域解析失败是抛错而非返回空。读不到会话等同
+      // 「主人从没在 IM 里说过话」，降级为空表——别把异常抛给 /miloco/webhook，那里靠
+      // no-channel(非 500)告诉 backend「未送达、不重试传输」。
+      logger.warn(
+        `listSessionEntries(agentId=${agentId}) failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return {};
+    }
+    const store: Record<string, SessionStoreEntry> = {};
+    for (const { sessionKey, entry } of entries) {
+      store[sessionKey] = entry;
+    }
+    return store;
+  }
+
+  // openclaw <= 2026.7.x: legacy whole-store file read.
+  if (
+    typeof session.resolveStorePath === "function" &&
+    typeof session.loadSessionStore === "function"
+  ) {
+    const cfg = getRuntimeConfig(api);
+    const sessionCfg = (cfg as Record<string, unknown>).session as
+      | { store?: string }
+      | undefined;
+    return session.loadSessionStore(session.resolveStorePath(sessionCfg?.store));
+  }
+
+  return {};
+}
+
+type LastDeliveryRoute = {
+  channel: string;
+  to: string | undefined;
+  accountId: string | undefined;
+  threadId: string | number | undefined;
+};
+
+type SessionDeliveryRouteShape = {
+  channel?: string;
+  accountId?: string;
+  target?: { to?: string };
+  thread?: { id?: string | number };
+};
+
+/**
+ * Read the persisted delivery route of one session entry, returning null when
+ * the entry has no usable outbound target. Understands both entry shapes:
+ *  - openclaw >= 2026.8 canonical `delivery.route` (delivery.kind === "external");
+ *  - legacy top-level `lastTo` / `lastChannel` fields (pre-2026.8 entries, and
+ *    unmigrated rows until `openclaw doctor --fix` rewrites them).
+ */
+function readLastDeliveryRoute(
+  entry: SessionStoreEntry | undefined,
+): LastDeliveryRoute | null {
+  if (!entry) return null;
+
+  const delivery = entry.delivery as
+    | { kind?: string; route?: SessionDeliveryRouteShape }
     | undefined;
-  const storePath = api.runtime.agent.session.resolveStorePath(sessionCfg?.store);
-  return api.runtime.agent.session.loadSessionStore(storePath) as Record<
-    string,
-    Record<string, unknown>
-  >;
+
+  // 有 delivery 且 kind 不是 external 时一律不投递:delivery 由宿主接管后,顶层
+  // lastTo/lastChannel 只是迁移残留,不可靠(kind=none/internal 明确不对外;未知的未来
+  // 枚举值同样不能确认可投,回退旧字段反而有错投风险)。仅两种情况回退老字段:
+  // ① kind 缺失/无 delivery 的未迁移行;② kind=external 但 route 里 channel/target.to
+  // 读不齐(惰性迁移写了一半,或宿主换了 route 形状)——此时控制流落到下方老字段分支。
+  if (delivery?.kind && delivery.kind !== "external") return null;
+
+  if (delivery?.kind === "external") {
+    const route = delivery.route;
+    const channel = route?.channel;
+    const to = route?.target?.to;
+    if (channel && to) {
+      return {
+        channel,
+        to,
+        accountId: route?.accountId,
+        threadId: route?.thread?.id,
+      };
+    }
+  }
+
+  const channel = entry.lastChannel as string | undefined;
+  const to = entry.lastTo as string | undefined;
+  if (channel && to) {
+    return {
+      channel,
+      to,
+      accountId: entry.lastAccountId as string | undefined,
+      threadId: entry.lastThreadId as string | number | undefined,
+    };
+  }
+  return null;
 }
 
 function resolveSessionByKey(
-  api: OpenClawPluginApi,
+  store: Record<string, SessionStoreEntry>,
   sessionKey: string,
 ): BoundSessionInfo | null {
-  const store = loadSessionStore(api);
-  const entry = store[sessionKey];
-  if (!entry?.lastTo || !entry?.lastChannel) return null;
-  return {
-    channel: entry.lastChannel as string,
-    to: entry.lastTo as string | undefined,
-    accountId: entry.lastAccountId as string | undefined,
-    threadId: entry.lastThreadId as string | number | undefined,
-    sessionKey,
-  };
+  const route = readLastDeliveryRoute(store[sessionKey]);
+  if (!route) return null;
+  return { ...route, sessionKey };
 }
 
 function resolveConfiguredTargets(
   api: OpenClawPluginApi,
   sessionKeys?: string[],
+  store: Record<string, SessionStoreEntry> = listSessionStore(api),
 ): { targets: NotifyTarget[]; invalidSessionKeys: string[] } {
   const keys = sessionKeys ?? normalizeNotifySessionKeys(getPluginConfig(api));
   const targets: NotifyTarget[] = [];
   const invalidSessionKeys: string[] = [];
   for (const key of keys) {
-    const target = resolveSessionByKey(api, key);
+    const target = resolveSessionByKey(store, key);
     if (target) {
       targets.push(target);
     } else {
@@ -308,8 +447,8 @@ function resolveConfiguredTargets(
 function selectMostRecentTarget(
   api: OpenClawPluginApi,
   preferredKeys?: string[],
+  store: Record<string, SessionStoreEntry> = listSessionStore(api),
 ): NotifyTarget | null {
-  const store = loadSessionStore(api);
   type TimedTarget = {
     channel: string;
     to: string | undefined;
@@ -318,38 +457,32 @@ function selectMostRecentTarget(
     sessionKey: string;
     lastInteractionAt: number;
   };
+  const toTimedTarget = (
+    sessionKey: string,
+    entry: SessionStoreEntry | undefined,
+  ): TimedTarget | null => {
+    const route = readLastDeliveryRoute(entry);
+    if (!route) return null;
+    return {
+      channel: route.channel,
+      to: route.to,
+      accountId: route.accountId,
+      threadId: route.threadId,
+      sessionKey,
+      // 排序键字段名已证实(2026-09-04 cat@mac openclaw 9.1 实测 100/100 会话顶层
+      // 都有必填 updatedAt,98/100 有可选 lastInteractionAt,未随投递迁入 delivery)。
+      lastInteractionAt: toTimestamp(
+        entry?.lastInteractionAt ?? entry?.updatedAt,
+      ),
+    };
+  };
   const candidates =
     preferredKeys && preferredKeys.length > 0
       ? preferredKeys
-          .map((key) => {
-            const entry = store[key];
-            if (!entry?.lastTo || !entry?.lastChannel) return null;
-            return {
-              channel: entry.lastChannel as string,
-              to: entry.lastTo as string | undefined,
-              accountId: entry.lastAccountId as string | undefined,
-              threadId: entry.lastThreadId as string | number | undefined,
-              sessionKey: key,
-              lastInteractionAt: toTimestamp(
-                entry.lastInteractionAt ?? entry.updatedAt,
-              ),
-            };
-          })
+          .map((key) => toTimedTarget(key, store[key]))
           .filter((v): v is TimedTarget => v !== null)
       : Object.entries(store)
-          .map(([key, entry]) => {
-            if (!entry?.lastTo || !entry?.lastChannel) return null;
-            return {
-              channel: entry.lastChannel as string,
-              to: entry.lastTo as string | undefined,
-              accountId: entry.lastAccountId as string | undefined,
-              threadId: entry.lastThreadId as string | number | undefined,
-              sessionKey: key,
-              lastInteractionAt: toTimestamp(
-                entry.lastInteractionAt ?? entry.updatedAt,
-              ),
-            };
-          })
+          .map(([key, entry]) => toTimedTarget(key, entry))
           .filter((v): v is TimedTarget => v !== null);
 
   let best: TimedTarget | null = null;
@@ -370,12 +503,15 @@ function selectMostRecentTarget(
 }
 
 export function resolveNotifyTarget(api: OpenClawPluginApi): ResolveResult {
-  const configured = resolveConfiguredTargets(api);
+  // 单次读表后透传,避免每个 bound key 各读一遍全表、且多次读间不是同一快照。
+  const store = listSessionStore(api);
+  const configured = resolveConfiguredTargets(api, undefined, store);
   if (configured.targets.length > 0) {
     return {
       target: selectMostRecentTarget(
         api,
         configured.targets.map((t) => t.sessionKey),
+        store,
       ),
       targets: configured.targets,
       needsBind: false,
@@ -384,7 +520,7 @@ export function resolveNotifyTarget(api: OpenClawPluginApi): ResolveResult {
   }
 
   const hasConfiguredKeys = normalizeNotifySessionKeys(getPluginConfig(api)).length > 0;
-  const fallback = selectMostRecentTarget(api);
+  const fallback = selectMostRecentTarget(api, undefined, store);
   const bindReason: BindReason = hasConfiguredKeys
     ? "configured_but_invalid"
     : "not_configured";

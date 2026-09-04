@@ -57,6 +57,25 @@ function makeSubagent(
   };
 }
 
+// openclaw >= 2026.8 的 runtime:agent.session 不再暴露 resolveStorePath/
+// loadSessionStore，投递信息收进 entry.delivery.route。这里只给 listSessionEntries，
+// 若实现还去碰已移除的旧方法会直接抛错 → 用例过 = 兼容路径生效。
+function makeApiV2(
+  entries: Array<{ sessionKey: string; entry: Record<string, unknown> }>,
+  subagent?: SubagentMock,
+) {
+  return {
+    runtime: {
+      agent: {
+        session: {
+          listSessionEntries: vi.fn(() => entries),
+        },
+      },
+      subagent,
+    },
+  } as any;
+}
+
 // ─── toTimestamp ─────────────────────────────────────────────────────────────
 
 describe("toTimestamp", () => {
@@ -506,5 +525,184 @@ describe("notifyOwner dedup", () => {
     const second = await notifyOwner(api, "重复也发");
     expect(second.deduped).toBeUndefined();
     expect(subagent.run).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ─── openclaw >= 2026.8 runtime 兼容（listSessionEntries / delivery.route）────
+
+describe("2026.8 runtime session API 兼容", () => {
+  const routeEntry = {
+    sessionKey: "wechat:abc",
+    entry: {
+      delivery: {
+        kind: "external",
+        route: {
+          channel: "wechat",
+          accountId: "acc1",
+          target: { to: "user123" },
+          thread: { id: "t1" },
+        },
+      },
+    },
+  };
+
+  it("已配置 + delivery.route 有效 → needsBind: false，目标为新结构字段", () => {
+    const api = makeApiV2([routeEntry]);
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["wechat:abc"] });
+
+    const result = resolveNotifyTarget(api);
+    expect(result.needsBind).toBe(false);
+    expect(result.target).toEqual({
+      channel: "wechat",
+      to: "user123",
+      accountId: "acc1",
+      threadId: "t1",
+      sessionKey: "wechat:abc",
+    });
+  });
+
+  it("delivery.kind = none/internal（无 route）→ 视为无推送目标", () => {
+    const api = makeApiV2([
+      { sessionKey: "wechat:abc", entry: { delivery: { kind: "none" } } },
+      { sessionKey: "mail:def", entry: { delivery: { kind: "internal" } } },
+    ]);
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["wechat:abc", "mail:def"] });
+
+    const result = resolveNotifyTarget(api);
+    expect(result.needsBind).toBe(true);
+    expect(result.bindReason).toBe("configured_but_invalid");
+    expect(result.invalidSessionKeys).toEqual(["wechat:abc", "mail:def"]);
+  });
+
+  it("新 runtime 读到未迁移的 legacy 顶层 lastTo → 回退识别", () => {
+    const api = makeApiV2([
+      {
+        sessionKey: "telegram:xyz",
+        entry: { lastChannel: "telegram", lastTo: "tg_user", lastInteractionAt: 1000 },
+      },
+    ]);
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({});
+
+    const result = resolveNotifyTarget(api);
+    expect(result.needsBind).toBe(true);
+    expect(result.bindReason).toBe("not_configured");
+    expect(result.target?.channel).toBe("telegram");
+    expect(result.target?.to).toBe("tg_user");
+  });
+
+  it("notifyOwner 走新 runtime 正常投递", async () => {
+    const subagent = makeSubagent({ status: "ok" });
+    const api = makeApiV2([routeEntry], subagent);
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["wechat:abc"] });
+
+    const result = await notifyOwner(api, "正文");
+    expect(result.ok).toBe(true);
+    expect(result.channel).toBe("wechat");
+    expect(subagent.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("新版路径按 config 默认 agent 传 agentId 给 listSessionEntries（默认 main）", () => {
+    const api = makeApiV2([]);
+    getRuntimeConfigMock.mockReturnValue({ session: {}, agents: { entries: { main: null } } });
+    getPluginConfigMock.mockReturnValue({});
+
+    resolveNotifyTarget(api);
+    expect(api.runtime.agent.session.listSessionEntries).toHaveBeenCalledWith({
+      agentId: "main",
+    });
+  });
+
+  it("单 agent 非 main 时用该 id", () => {
+    const api = makeApiV2([]);
+    getRuntimeConfigMock.mockReturnValue({ session: {}, agents: { entries: { alice: null } } });
+    getPluginConfigMock.mockReturnValue({});
+
+    resolveNotifyTarget(api);
+    expect(api.runtime.agent.session.listSessionEntries).toHaveBeenCalledWith({
+      agentId: "alice",
+    });
+  });
+
+  it("多 agent 配置无唯一 agent 时只扫默认 main（投递无 agent 作用域）", () => {
+    const api = makeApiV2([]);
+    getRuntimeConfigMock.mockReturnValue({
+      session: {},
+      agents: { entries: { main: null, home: null } },
+    });
+    getPluginConfigMock.mockReturnValue({});
+
+    resolveNotifyTarget(api);
+    expect(api.runtime.agent.session.listSessionEntries).toHaveBeenCalledWith({
+      agentId: "main",
+    });
+  });
+
+  it("listSessionEntries 抛错（agentId 在宿主上不存在）→ 降级为空表，不抛给调用方", () => {
+    const api = {
+      runtime: {
+        agent: {
+          session: {
+            listSessionEntries: vi.fn(() => {
+              throw new Error(
+                "Cannot resolve SQLite session scope without an agent id",
+              );
+            }),
+          },
+        },
+      },
+    } as any;
+    getRuntimeConfigMock.mockReturnValue({
+      session: {},
+      agents: { entries: { home: null, guest: null } },
+    });
+    getPluginConfigMock.mockReturnValue({});
+
+    expect(() => resolveNotifyTarget(api)).not.toThrow();
+    expect(resolveNotifyTarget(api).target).toBeNull();
+  });
+
+  it("delivery.kind = none 但残留 legacy lastTo → 仍视为无推送目标", () => {
+    const api = makeApiV2([
+      {
+        sessionKey: "wechat:abc",
+        entry: {
+          delivery: { kind: "none" },
+          lastChannel: "wechat",
+          lastTo: "user123",
+        },
+      },
+    ]);
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({ notifySessionKeys: ["wechat:abc"] });
+
+    const result = resolveNotifyTarget(api);
+    expect(result.needsBind).toBe(true);
+    expect(result.bindReason).toBe("configured_but_invalid");
+  });
+
+  it("多条 delivery.route 候选按最近活跃时间排序（不依赖枚举顺序）", () => {
+    const mk = (key: string, to: string, ts: number) => ({
+      sessionKey: key,
+      entry: {
+        delivery: {
+          kind: "external",
+          route: { channel: "wechat", target: { to } },
+        },
+        lastInteractionAt: ts,
+      },
+    });
+    const api = makeApiV2([
+      mk("wechat:new", "new_user", 2000),
+      mk("wechat:old", "old_user", 1000),
+    ]);
+    getRuntimeConfigMock.mockReturnValue({ session: {} });
+    getPluginConfigMock.mockReturnValue({});
+
+    const result = resolveNotifyTarget(api);
+    expect(result.target?.to).toBe("new_user");
   });
 });
