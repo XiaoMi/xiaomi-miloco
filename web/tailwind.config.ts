@@ -56,6 +56,17 @@ export default {
           DEFAULT: "var(--color-info)",
           bg: "var(--color-info-bg)",
         },
+
+        // 用量页图表色（业务扩展）。单列一族而不并入语义色：模态构成是分类编码，
+        // 语义色是状态编码，混用会让状态色失去保留含义。取值与理由见
+        // theme.css 的 `--color-usage-*` 注释。usage- 前缀 = 暂不对全站图表做承诺。
+        usage: {
+          text: "var(--color-usage-text)",
+          video: "var(--color-usage-video)",
+          audio: "var(--color-usage-audio)",
+          output: "var(--color-usage-output)",
+          total: "var(--color-usage-total)",
+        },
       },
       fontSize: {
         // 语义档(优先用):caption / body / title / display / display-lg

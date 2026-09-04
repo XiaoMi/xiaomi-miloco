@@ -103,8 +103,23 @@ export function SettingsDrawer({ open, onClose }: Props) {
   }, [open, t]);
 
   // 发版级开关没放开时开关不可用（同 schedulerAvailable 的降级套路）：拨动不写盘，
-  // 故置灰 + 换 hint，避免呈现「看着能动、实则后端不裁」的控件。
+  // 故置灰 + 换 hint，避免呈现「看着能动、实则**发版级闸**没开」的控件。
   // 老后端不返 smart_crop_available → undefined → 同样置灰。
+  // 注意本抽屉只覆盖三闸里的**全局两闸**：开关既亮又可点、拨到 ON 之后，某个机位仍可能
+  // 被 per-camera 闸（逐路 deny-list，`miloco-cli scope camera crop-on/crop-off` 配）
+  // 单独关掉而不裁。逐机位生效态本抽屉不透出，在 /api/miot/scope/cameras 每行的
+  // crop_effective。UI 暂无逐机位控件，故 hint 文案（i18n smartCropHint）刻意不提它。
+  // 已知该文案本身与三闸口径不一致：它把「开启」讲成充分条件，且把回退成因说成只有
+  // 「识别不到活动区域」一种——实际 _maybe_encode_adaptive 的 docstring 列了 11 项
+  // reason，其中只有 per_camera_off 由**开关**决定，其余 10 项都不由任何开关决定：
+  // 或由逐窗画面内容触发（无检测框且无显著运动块、区域退化、本窗无帧、产物过短），
+  // 或是兜底异常。注意「面积超上限 / 不足下限」虽由画面内容触发，判据本身
+  // （crop_max_area_ratio=0.49 / crop_min_area_ratio=0.10）仍是可热改的配置项——
+  // 广角机位反馈「开了没效果」而日志全是 reason=area_too_large 时，抬这个阈值就是
+  // 处置办法，别因为它不是「开关」就排除掉配置这条路。
+  // 本 PR 不改文案：改产品措辞是产品
+  // 决定，且此刻在小字里指向 CLI 会让用户去找一个界面上不存在的开关。待前端补上
+  // 逐机位控件时，与该控件一并订正这行文案。
   const smartCropAvailable = config?.smart_crop_available === true;
   const perceptionDirty =
     config != null &&

@@ -13,8 +13,8 @@
  * 显示形状。粗桶(24h/3d 视图 1h 桶)下均值线会抹平尖峰,峰值包络与 tooltip
  * 峰值行让尖峰仍可定位、与 header「峰值」对得上。
  *
- * SVG 骨架与 PerfMemoryChart 同款:viewBox 横向自适应 + HTML 浮层放轴标签和
- * tooltip,避免 SVG preserveAspectRatio 拉伸字号。
+ * SVG 骨架:viewBox 宽度取容器实测像素宽 + HTML 浮层放轴标签和 tooltip,避免 SVG
+ * preserveAspectRatio 拉伸字号。宽度为什么必须实测,见 hooks/useMeasuredWidth。
  */
 
 import { useState } from "react";
@@ -23,6 +23,7 @@ import type { TFunction } from "i18next";
 import type { AsyncState } from "@/hooks/useAsync";
 import { formatPerfTs } from "@/lib/perfBucket";
 import type { ProcSeries, PerfBucket } from "@/lib/types";
+import { useMeasuredWidth } from "@/hooks/useMeasuredWidth";
 
 interface Props {
   seriesState: AsyncState<ProcSeries>;
@@ -118,7 +119,8 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
   const PAD_R = 44; // 右 Y 轴(线程数)标签留空间
   const PAD_T = 12;
   const PAD_B = 28;
-  const SVG_W = 1000;
+  // SVG 单位 == CSS 像素,详见 useMeasuredWidth 的说明
+  const [wrapRef, SVG_W] = useMeasuredWidth(1000);
 
   // 左轴:CPU% 归一化 = cpu_pct / 总核数,量程按峰值包络挑档(见 chooseCpuYTicks)
   const cpuVals = points.map((p) => p.cpu_pct / coreCount);
@@ -166,7 +168,7 @@ function ProcChart({ points, coreCount, spanMs, t }: ChartProps) {
     .join("");
 
   return (
-    <div className="relative w-full" style={{ height: H }}>
+    <div ref={wrapRef} className="relative w-full" style={{ height: H }}>
       <svg
         viewBox={`0 0 ${SVG_W} ${H}`}
         className="w-full h-full"

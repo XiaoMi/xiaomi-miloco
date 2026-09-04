@@ -1,8 +1,6 @@
 {
   "perf": {
     "windowAria": "性能视图时间窗口",
-    "autoRefresh": "每 30s 自动刷新",
-    "manualRefresh": "手动刷新",
     "inlineTitle": "性能监测",
 
     "windowLast1h": "最近 1 小时",
@@ -175,6 +173,8 @@
     "timingTitle": "近期处理耗时",
     "timingSubtitle": "按时间段聚合 P50 / P75 / P95 / P99",
     "timingEmpty": "所选时间内暂无数据。",
-    "timingChartAria": "近期处理耗时折线图"
+    "timingChartAria": "近期处理耗时折线图",
+    "compact": "紧凑显示",
+    "compactAria": "紧凑显示：实时率与 Gate 过滤率并排"
   }
 }

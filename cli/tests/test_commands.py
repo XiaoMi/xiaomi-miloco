@@ -2067,6 +2067,49 @@ def test_scope_camera_disable(runner):
     )
 
 
+# ─── scope camera crop-on / crop-off（Smart Crop 逐机位开关，走 crop 端点）────
+
+
+def test_scope_camera_crop_off(runner):
+    """crop-off → PUT crop 端点 crop_in_use=false。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(cli, ["scope", "camera", "crop-off", "c1"])
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/crop",
+        {"items": [{"did": "c1", "crop_in_use": False}]},
+    )
+
+
+def test_scope_camera_crop_on_batch(runner):
+    """批量 did 语义与 mic-on/off 同款；合成 did 直接透传给 backend 解析。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        mock_put.return_value = _SUCCESS
+        result = runner.invoke(
+            cli, ["scope", "camera", "crop-on", "c1", "dual:ch0", "dual:ch1"]
+        )
+    assert result.exit_code == 0
+    mock_put.assert_called_once_with(
+        "/api/miot/scope/cameras/crop",
+        {
+            "items": [
+                {"did": "c1", "crop_in_use": True},
+                {"did": "dual:ch0", "crop_in_use": True},
+                {"did": "dual:ch1", "crop_in_use": True},
+            ]
+        },
+    )
+
+
+def test_scope_camera_crop_requires_did(runner):
+    """不给 did 直接报用法错（nargs=-1 + required=True）。"""
+    with patch("miloco_cli.commands.scope.api_put") as mock_put:
+        result = runner.invoke(cli, ["scope", "camera", "crop-off"])
+    assert result.exit_code != 0
+    mock_put.assert_not_called()
+
+
 # ─── scope camera mic-on / mic-off（拾音开关，走 voice 端点）──────────────────
 
 

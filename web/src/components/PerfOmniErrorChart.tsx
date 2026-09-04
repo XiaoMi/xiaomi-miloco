@@ -23,6 +23,7 @@ import {
 } from "@/lib/perfBucket";
 import { ChartGapOverlay } from "./ChartGapOverlay";
 import type { PerfBucket, PerfOmniErrorPoint } from "@/lib/types";
+import { useMeasuredWidth } from "@/hooks/useMeasuredWidth";
 
 interface Props {
   state: AsyncState<PerfOmniErrorPoint[]>;
@@ -202,7 +203,8 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
   const PAD_R = 16;
   const PAD_T = 12;
   const PAD_B = 28;
-  const SVG_W = 1000;
+  // SVG 单位 == CSS 像素,详见 useMeasuredWidth 的说明
+  const [wrapRef, SVG_W] = useMeasuredWidth(1000);
   const barGap = n > 30 ? 1 : 2;
   const barW = n > 0 ? (SVG_W - PAD_L - PAD_R - barGap * (n - 1)) / n : 0;
 
@@ -225,7 +227,7 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
   );
 
   return (
-    <div className="relative w-full" style={{ height: H }}>
+    <div ref={wrapRef} className="relative w-full" style={{ height: H }}>
       <svg
         viewBox={`0 0 ${SVG_W} ${H}`}
         className="w-full h-full"

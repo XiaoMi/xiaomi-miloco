@@ -294,6 +294,125 @@ describe("Smart Crop 参考帧契约 — realEventRefUrl / realEventCropMeta", (
   });
 });
 
+describe("realGetUsageStats — 一次取数里的时间窗只算一遍", () => {
+  // 用量卡按周期自动重取，把页面开着过夜是常态。窗口若在 await 前后各算一次，跨过本地
+  // 午夜的那一次刷新就会「查昨天、铺今天」：服务端返回昨天的桶行，而骨架起点已是今天
+  // 00:00，每行下标为负被整体丢弃 → 图表切空态说「还没有用量」，而同一次返回的行没过
+  // 骨架、直接进了合计，左栏与明细仍显示昨天一整天的数。同一张卡自相矛盾，且不报错。
+  const realTZ = process.env.TZ;
+  afterEach(() => {
+    vi.useRealTimers();
+    if (realTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = realTZ;
+  });
+
+  it("往返跨过本地午夜时，昨天的桶行仍落在骨架里", async () => {
+    process.env.TZ = "Asia/Shanghai";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-08-24T15:59:59.900Z")); // 本地 8-24 23:59:59.9
+    const noon = new Date("2026-08-24T04:00:00Z").getTime(); // 本地 8-24 12:00
+    globalThis.fetch = vi.fn(async () => {
+      // 请求发出后、响应回来前跨过本地午夜
+      vi.setSystemTime(new Date("2026-08-24T16:00:00.100Z")); // 本地 8-25 00:00:00.1
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "ok",
+          data: {
+            rows: [
+              {
+                bucket_ms: noon,
+                model: "m",
+                base_url: "https://api.example/v1",
+                type: "realtime",
+                calls: 1,
+                input_tokens: 1000,
+                output_tokens: 100,
+                cache_tokens: 0,
+                video_tokens: 0,
+                audio_tokens: 0,
+              },
+            ],
+            total: 1,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const s = await realGetUsageStats("today", 60);
+    // 画进骨架的量必须等于同一次返回算出的合计——不等就说明行掉在骨架之外了
+    const drawn = s.timeline.reduce((a, p) => a + p.tokens, 0);
+    expect(drawn).toBeGreaterThan(0);
+    expect(drawn).toBe(s.totals.input + s.totals.output);
+  });
+});
+
+describe("realGetUsageStats — 今日窗口在夏令时切换当天走日历", () => {
+  // 起点是浏览器本地 00:00，终点必须走日历取次日 00:00：带夏令时的时区里本地一天是 23
+  // 或 25 小时，加固定 24 小时会让回拨那天漏掉最后一小时、前拨那天把次日头一小时算进
+  // 今日，而查询窗与桶骨架用的是同一个数，所以两边自洽、只是整体偏了，不会报错。
+  // 盒子本身在无夏令时的时区，踩不到；踩到的是浏览器所在时区有夏令时的看板使用者。
+  const realTZ = process.env.TZ;
+  afterEach(() => {
+    vi.useRealTimers();
+    // 原本没设过就删掉：赋回 undefined 会写成字符串 "undefined"，那是个非法时区，
+    // Node 会回落到 UTC，后面用例在模块加载时按本地时区算的锚点就全对不上了
+    if (realTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = realTZ;
+  });
+
+  async function probe(nowUtcISO: string, binMinutes: number) {
+    process.env.TZ = "America/New_York";
+    // 只伪造 Date：连 setTimeout 一起伪造会让下面的 await 永远不结算
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(nowUtcISO));
+    let url = "";
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      url = typeof input === "string" ? input : input.toString();
+      return new Response(
+        JSON.stringify({ code: 0, message: "ok", data: { rows: [], total: 0 } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    const s = await realGetUsageStats("today", binMinutes);
+    const since = Number(/since=(\d+)/.exec(url)?.[1]);
+    const until = Number(/until=(\d+)/.exec(url)?.[1]);
+    return { hours: (until - since) / 3_600_000, buckets: s.timeline.length };
+  }
+
+  it("回拨那天本地一天 25 小时：查询窗与桶骨架一起变长", async () => {
+    const { hours, buckets } = await probe("2026-11-01T16:00:00Z", 15);
+    expect(hours).toBe(25);
+    expect(buckets).toBe(100);
+  });
+
+  it("前拨那天本地一天 23 小时：不把次日头一小时算进今日", async () => {
+    const { hours, buckets } = await probe("2026-03-08T16:00:00Z", 15);
+    expect(hours).toBe(23);
+    expect(buckets).toBe(92);
+  });
+
+  it("无夏令时的时区不受影响，仍是 24 小时", async () => {
+    process.env.TZ = "Asia/Shanghai";
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-01T04:00:00Z"));
+    let url = "";
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      url = typeof input === "string" ? input : input.toString();
+      return new Response(
+        JSON.stringify({ code: 0, message: "ok", data: { rows: [], total: 0 } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    const s = await realGetUsageStats("today", 15);
+    const since = Number(/since=(\d+)/.exec(url)?.[1]);
+    const until = Number(/until=(\d+)/.exec(url)?.[1]);
+    expect((until - since) / 3_600_000).toBe(24);
+    expect(s.timeline).toHaveLength(96);
+  });
+});
+
 describe("realGetUsageStats — today buckets 折算契约", () => {
   // 今天 00:00 的 ms 时间戳（桶 0，不依赖运行时刻，必在窗口内）
   const t0 = (() => {
@@ -303,10 +422,15 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
   })();
 
   // 服务端桶行（都落在桶 0 = t0），结构对齐 /token-usage/buckets 返回
-  function bkt(type: string, calls: number, inp: number, out: number, cache: number, video: number, audio: number) {
+  function bkt(
+    type: string, calls: number, inp: number, out: number,
+    cache: number, video: number, audio: number,
+    base_url = "https://api.example/v1",
+  ) {
     return {
       bucket_ms: t0,
       model: "mimo-v2.5",
+      base_url,
       type,
       calls,
       input_tokens: inp,
@@ -316,6 +440,85 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
       audio_tokens: audio,
     };
   }
+
+  it("**同模型名、不同 Base URL 必须是两行**，不能被合成一行", async () => {
+    // 模型身份是 (model, base_url)。合成一行 = 哪个 endpoint 用了多少再也分不出来，
+    // 而这正是给用量表加 base_url 的全部目的。
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [
+            bkt("realtime", 2, 1000, 100, 0, 0, 0, "https://api.example/v1"),
+            bkt("realtime", 3, 2000, 200, 0, 0, 0, "https://api.example/v1-test"),
+          ],
+          total: 2,
+        },
+      },
+    });
+
+    const s = await realGetUsageStats("today");
+    const rt = s.rows.filter((r) => r.type === "realtime");
+    expect(rt).toHaveLength(2);
+    expect(rt.map((r) => r.base_url).sort()).toEqual([
+      "https://api.example/v1",
+      "https://api.example/v1-test",
+    ]);
+    // 各自的数不许串
+    const byUrl = new Map(rt.map((r) => [r.base_url, r]));
+    expect(byUrl.get("https://api.example/v1")!.calls).toBe(2);
+    expect(byUrl.get("https://api.example/v1-test")!.calls).toBe(3);
+    expect(byUrl.get("https://api.example/v1")!.breakdown.input).toBe(1000);
+    expect(byUrl.get("https://api.example/v1-test")!.breakdown.input).toBe(2000);
+    // 总量仍是两边之和 —— 拆行不该影响合计
+    expect(s.total_tokens).toBe(1000 + 100 + 2000 + 200);
+    expect(s.calls).toBe(5);
+  });
+
+  it("补齐 realtime/on_demand 是按 (模型, endpoint) **对**补，不是只按模型名", async () => {
+    // 只按模型名补的话，两个 endpoint 会共用一次补齐，
+    // 其中一个缺失的调用类型永远不出现。
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [
+            bkt("realtime", 1, 100, 10, 0, 0, 0, "https://a/v1"),
+            bkt("on_demand", 1, 200, 20, 0, 0, 0, "https://b/v1"),
+          ],
+          total: 2,
+        },
+      },
+    });
+
+    const s = await realGetUsageStats("today");
+    // 两个 endpoint 各自都该有 realtime + on_demand 两行 = 共 4 行
+    expect(s.rows).toHaveLength(4);
+    for (const u of ["https://a/v1", "https://b/v1"]) {
+      const types = s.rows.filter((r) => r.base_url === u).map((r) => r.type).sort();
+      expect(types, u).toEqual(["on_demand", "realtime"]);
+    }
+  });
+
+  it("老数据 base_url 缺失时折成空串，不是 undefined", async () => {
+    // schema v3 之前的行没有这一列；空串是「未记录」的约定值，
+    // undefined 会让下游的 filter(Boolean) / Map key 行为漂移。
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [{ ...bkt("realtime", 1, 100, 10, 0, 0, 0), base_url: undefined }],
+          total: 1,
+        },
+      },
+    });
+
+    const s = await realGetUsageStats("today");
+    expect(s.rows.every((r) => r.base_url === "")).toBe(true);
+  });
 
   it("today：聚合 totals / by_type / rows / timeline 求和", async () => {
     mockFetchByUrl({
@@ -356,6 +559,106 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
     expect(s.timeline.length).toBeGreaterThanOrEqual(1);
     expect(s.timeline[0].tokens).toBe(6800);
     expect(s.timeline.reduce((a, b) => a + b.tokens, 0)).toBe(6800);
+  });
+
+  it("today：timeline 每桶带分模态拆分，text 是 input−video−audio 的残差", async () => {
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [
+            bkt("realtime", 2, 3000, 300, 800, 2200, 200),
+            bkt("on_demand", 1, 3000, 500, 1000, 0, 1500),
+          ],
+          total: 2,
+        },
+      },
+    });
+
+    const s = await realGetUsageStats("today");
+    const b0 = s.timeline[0];
+
+    // 残差逐行算再相加：(3000−2200−200) + (3000−0−1500) = 600 + 1500
+    expect(b0.text).toBe(2100);
+    expect(b0.video).toBe(2200);
+    expect(b0.audio).toBe(1700);
+    expect(b0.output).toBe(800);
+    expect(b0.cache).toBe(1800);
+    // 关键不变式：四个模态之和必须等于该桶总量，否则堆叠柱高会与总量对不上
+    expect(b0.text + b0.video + b0.audio + b0.output).toBe(b0.tokens);
+    // 空桶也要带齐字段（堆叠渲染直接读，不能是 undefined）
+    const empty = s.timeline.find((p) => p.tokens === 0)!;
+    expect(empty).toMatchObject({ text: 0, video: 0, audio: 0, output: 0, cache: 0 });
+    expect(empty.targets).toEqual([]);
+  });
+
+  it("周/月的日期格子走日历，不按 24 小时毫秒步长推", async () => {
+    // 带夏令时的时区下，跨过 spring-forward 那天减 24 小时会落到前一天 23:00，
+    // 归日就错一天：那天的数据查不到、被静默丢弃，整周的格子从此集体偏移。
+    // 这里只验「相邻格子恰好差一个日历日」这条不变量，不依赖运行测试的机器时区。
+    mockFetchByUrl({
+      "/api/admin/token-usage/daily": { code: 0, message: "ok", data: { rows: [], total: 0 } },
+    });
+    const s = await realGetUsageStats("week");
+    const days = s.timeline.map((p) => new Date(p.ts));
+    expect(days).toHaveLength(7);
+    for (let i = 1; i < days.length; i++) {
+      const prev = days[i - 1];
+      const cur = days[i];
+      const expected = new Date(prev);
+      expected.setDate(expected.getDate() + 1);
+      expect(cur.getFullYear()).toBe(expected.getFullYear());
+      expect(cur.getMonth()).toBe(expected.getMonth());
+      expect(cur.getDate()).toBe(expected.getDate());
+    }
+  });
+
+  it("today：每桶保留按「模型名 + endpoint」的拆分，且与桶字段恒等", async () => {
+    // 桶是跨模型合并的，只有桶级字段就回答不了「这一段是哪个 endpoint 在用」。
+    // 拆分按二元组折叠——若只按模型名合并，同名挂两个地址的用量又会粘回一起。
+    mockFetchByUrl({
+      "/api/admin/token-usage/buckets": {
+        code: 0,
+        message: "ok",
+        data: {
+          rows: [
+            bkt("realtime", 1, 3000, 300, 800, 2200, 200, "https://a/v1"),
+            bkt("on_demand", 1, 1000, 100, 0, 0, 0, "https://a/v1"),
+            bkt("realtime", 1, 5000, 500, 0, 1000, 0, "https://b/v1"),
+          ],
+          total: 3,
+        },
+      },
+    });
+
+    const b0 = (await realGetUsageStats("today")).timeline[0];
+    // 两个 endpoint 各成一个目标，同 endpoint 的两种调用类型合并
+    expect(b0.targets.map((t) => t.base_url).sort()).toEqual(["https://a/v1", "https://b/v1"]);
+    const a = b0.targets.find((t) => t.base_url === "https://a/v1")!;
+    expect(a.text).toBe(3000 - 2200 - 200 + 1000); // 残差逐行算再相加
+    expect(a.video).toBe(2200);
+    expect(a.output).toBe(400);
+
+    // 恒等式一：目标之和 == 桶的对应字段。少加一处，浮层里各来源的数就与柱高对不上
+    const sum = (k: "text" | "video" | "audio" | "output" | "cache") =>
+      b0.targets.reduce((acc, t) => acc + t[k], 0);
+    expect(sum("text")).toBe(b0.text);
+    expect(sum("video")).toBe(b0.video);
+    expect(sum("audio")).toBe(b0.audio);
+    expect(sum("output")).toBe(b0.output);
+    expect(sum("cache")).toBe(b0.cache);
+
+    // 恒等式二：各来源的**总量**之和 == 桶总量。浮层按来源列的就是这个数，口径
+    // 必须与柱高同一份（三个输入模态 + 输出；缓存是输入的子集，不计入总量）。
+    const targetTotal = (t: (typeof b0.targets)[number]) =>
+      t.text + t.video + t.audio + t.output;
+    expect(b0.targets.reduce((acc, t) => acc + targetTotal(t), 0)).toBe(b0.tokens);
+
+    // 反向：按模型名折叠会把两个 endpoint 合成一行，正是这套拆分要防的
+    const byModelOnly = new Set(b0.targets.map((t) => t.model));
+    expect(byModelOnly.size).toBe(1);
+    expect(b0.targets.length).toBe(2);
   });
 
   it("today：切换 bin 不改 totals，只影响 timeline 桶数", async () => {
@@ -443,6 +746,21 @@ describe("realGetUsageStats — week daily 折算契约", () => {
     expect(s.timeline[6].tokens).toBe(8300);
     // 早于窗口的天补 0
     expect(s.timeline[0].tokens).toBe(0);
+
+    // 同一天的多行（model × type）要聚进同一个点，并保留分模态拆分
+    const today = s.timeline[6];
+    expect(today.text).toBe(1600); // (5000−4000−200) + (2000−0−1200) = 800 + 800
+    expect(today.video).toBe(4000);
+    expect(today.audio).toBe(1400);
+    expect(today.output).toBe(1300);
+    expect(today.cache).toBe(2300);
+    expect(today.text + today.video + today.audio + today.output).toBe(today.tokens);
+    // ts 统一成 ISO（daily 的 key 是 YYYY-MM-DD，不能直接透出去）
+    expect(today.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // 近 7 天这条路也要带来源拆分：否则切到近 7 天，浮层就不知道是谁在用
+    expect(today.targets.length).toBeGreaterThan(0);
+    const sumText = today.targets.reduce((a, t) => a + t.text, 0);
+    expect(sumText).toBe(today.text);
   });
 });
 

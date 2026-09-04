@@ -715,7 +715,7 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
                   <button
                     type="button"
                     onClick={() => setDetailId(task.taskId)}
-                    className="min-w-0 flex-1 text-left rounded-md -mx-2 px-2 py-1 hover:bg-bg-tertiary/50 transition-colors"
+                    className="min-w-0 flex-1 text-left rounded-md -mx-2 px-2 py-1 hover:bg-bg-tertiary transition-colors"
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <span

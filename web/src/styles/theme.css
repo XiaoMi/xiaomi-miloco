@@ -103,8 +103,8 @@
    *   title      16px  卡片 & dialog 标题 / nav label / 列表主字
    *   display    24px  Hero 数字 / 醒目计数
    *   display-lg 32px  Usage Hero(极少用,单页一处)
-   *   page-title 20px  备用大字号(2026-05 起 TopBar 家名已切回 text-body+semibold;
-   *                    此 token 暂无引用,保留作黄金阶梯外的 20px 档备用)
+   *   page-title 20px  黄金阶梯外的 20px 档(2026-05 起 TopBar 家名已切回
+   *                    text-body+semibold; 现由 .text-section-title 与 .text-page-title 引用)
    */
   --font-size-caption:    12px;
   --font-size-body:       14px;
@@ -156,6 +156,30 @@
   --easing-default: cubic-bezier(0.4, 0, 0.2, 1);
   --easing-emphasized: cubic-bezier(0.2, 0, 0, 1);
 
+
+  /* ── 用量页图表色（业务扩展，作用域仅「用量」tab）────────────────
+   * 为什么单独一组、而不复用语义色:模态构成是 4 路**分类**编码,而语义色
+   * (brand / info / success / warning / error) 是**状态**编码,借来当序列色会
+   * 让状态色失去保留含义;且实测 brand(#FF6700) 与 warning(#D97706) 正常视力
+   * ΔE 仅 7.2、protan 下 0.3,同屏根本分不开(PerfProcChart 顶部注释也记过这
+   * 对撞色)。品牌语言 §2.5 给的「一条橙色饱和度阶梯 + 对比蓝 + 中性」本就是多系列
+   * 色序,但其前三色相邻两对 ΔE 仅 11.2 / 13.2、低于 15 下限(主↔第三 23.9 是过的,
+   * 挡不住另两对),承不住 4 路分类,故此处在 §2.5 之外扩一组,并守住 §2.6 禁区
+   * (无粉、无紫/品红、无纯红、无渐变;暖色只有 video 橙 + output 黄两种,未超
+   * 「2 种同饱和度暖色」)。
+   * 命名带 usage- 前缀 = 暂不对全站图表做承诺,将来要通用化再提升。
+   *
+   * 四色在浅/深两个主题下均通过:链式相邻 + 环形首尾回绕两种配对、CVD
+   * (protan/deutan, Machado 2009) ΔE ≥ 8、正常视力 ΔE ≥ 15。浅底 audio/output
+   * 低于 3:1,由图例直接标注名称+数值+占比兜底(relief)。
+   * total 是「不分模态」时的单序列色,带蓝灰倾向的中性(C 仅 0.034,非真蓝),
+   * 刻意不取四色之一,否则「总量」会被读成「文本」。 */
+  --color-usage-text: #2a78d6;
+  --color-usage-video: #eb6834;
+  --color-usage-audio: #1baf7a;
+  --color-usage-output: #eda100;
+  --color-usage-total: #7b879c;
+
   color-scheme: light;
 }
 
@@ -195,6 +219,13 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.6);
+
+  /* 用量页图表色 — 深色档(同四色按深色亮度带重新取步进,不是简单反转) */
+  --color-usage-text: #3987e5;
+  --color-usage-video: #d95926;
+  --color-usage-audio: #199e70;
+  --color-usage-output: #c98500;
+  --color-usage-total: #A3B0C2;
 
   color-scheme: dark;
 }
@@ -236,6 +267,12 @@
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.5);
     --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.6);
+    /* 用量页图表色 — 深色档(同四色按深色亮度带重新取步进,不是简单反转) */
+    --color-usage-text: #3987e5;
+    --color-usage-video: #d95926;
+    --color-usage-audio: #199e70;
+    --color-usage-output: #c98500;
+    --color-usage-total: #A3B0C2;
 
     color-scheme: dark;
   }

@@ -1,14 +1,15 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""v1→v2 schema 迁移测试.
+"""schema 迁移测试. 基线跟着 _DB_SCHEMA_VERSION 走, 用例里不写死版本号.
 
 覆盖:
-- fresh-build 直接落 v2 形态 (rule NOT NULL + FK, cron 表存在, 无 task_link)
-- 迁移 A/B/C/D/E 五型 orphan 各自的处置策略 (D 取 task_link 侧, A/E 删+log)
+- fresh-build 直接落当前基线形态 (rule NOT NULL + FK, cron 表存在, 无 task_link)
+- v1→v2 迁移 A/B/C/D/E 五型 orphan 各自的处置策略 (D 取 task_link 侧, A/E 删+log)
 - cron 行迁移 + cron dangling 跳过+log (不阻塞启动)
 - 迁移后三重不变量
-- rollback_v2_to_v1 反向 + internal cron 前置断言
+- 已在基线上的库再次 init 不重跑迁移
+- rollback_v2_to_v1 反向 + internal cron 前置断言 + 在高于 v2 的库上拒绝执行
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from __future__ import annotations
 import sqlite3
 
 import pytest
+from miloco.database.connector import _DB_SCHEMA_VERSION
 
 
 def _create_v1_baseline(db_path) -> None:
@@ -113,7 +115,7 @@ def v1_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def fresh_db(tmp_path, monkeypatch):
-    """空 DB, 走 fresh-build 直接建 v2 形态."""
+    """空 DB, 走 fresh-build 直接建**当前基线**形态（跟着 _DB_SCHEMA_VERSION 走）."""
     db_file = tmp_path / "fresh.db"
     monkeypatch.setenv("MILOCO_DATABASE__PATH", str(db_file))
     from miloco.config import reset_settings
@@ -128,7 +130,7 @@ def fresh_db(tmp_path, monkeypatch):
 
 
 def _run_init(db_file):
-    """触发 init_database 走 v1→v2 步进迁移."""
+    """触发 init_database 走 user_version 步进迁移(v1 → 当前基线)."""
     import miloco.database.connector as connector_module
 
     connector_module.init_database()
@@ -144,12 +146,16 @@ def _read_rule(conn, rule_id: str) -> sqlite3.Row | None:
 # ── fresh-build ───────────────────────────────────────────────────────
 
 
-def test_fresh_build_is_v2_form(fresh_db):
+def test_fresh_build_lands_on_baseline_form(fresh_db):
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
-        # user_version = 2
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # 落到**当前基线**版本。这里不写字面量：v3 起 fresh-build 会一路走到
+        # 最新版，写死数字每加一版就要改一次，而这条断言真正想说的是
+        # 「新建库不该停在中间某一版」。
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
+        )
         # task_link 表不存在
         tables = {
             row["name"]
@@ -447,7 +453,7 @@ def test_migrate_cron_dangling_skipped_with_log(v1_db, caplog):
 
 
 def test_migrate_final_invariants(v1_db):
-    """迁移完成后: user_version=2, task_link DROP, FK 干净, rule.task_id 无 NULL."""
+    """迁移完成后: user_version=当前基线, task_link DROP, FK 干净, rule.task_id 无 NULL."""
     conn = sqlite3.connect(str(v1_db))
     cursor = conn.cursor()
     _insert_task(cursor, "task-1")
@@ -464,7 +470,9 @@ def test_migrate_final_invariants(v1_db):
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
+        )
         tables = {
             r["name"]
             for r in conn.execute(
@@ -485,8 +493,8 @@ def test_migrate_final_invariants(v1_db):
         )
 
 
-def test_migrate_is_skipped_on_v2_db(fresh_db):
-    """已经是 v2 (fresh-build) 的库再次 init 不重跑迁移, 数据无变化."""
+def test_migrate_is_skipped_on_baseline_db(fresh_db):
+    """已经在当前基线 (fresh-build) 的库再次 init 不重跑迁移, 数据无变化."""
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
@@ -506,10 +514,26 @@ def test_migrate_is_skipped_on_v2_db(fresh_db):
             ).fetchone()[0]
             == 1
         )
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+        # fresh-build 出来就是基线版本，第二次 init 时步进循环无级可跑；
+        # 这里比基线而不是写死的数，加 v4 时这条不用改。
+        assert (
+            conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
+        )
 
 
 # ── rollback ──────────────────────────────────────────────────────────
+
+
+def _pin_user_version_to_2(db_file) -> None:
+    """把库钉回 v2 —— rollback_v2_to_v1 只处理这一级，它不认识更高版本的 schema。
+
+    启动路径会把库一路推到当前基线（现在是 v3），而这个反向迁移只回退 v2 引入的那些
+    变化。真实场景里它面对的就是一个停在 v2 的库，故用例显式把版本钉回去。
+    """
+    c = sqlite3.connect(str(db_file))
+    c.execute("PRAGMA user_version = 2")
+    c.commit()
+    c.close()
 
 
 def test_rollback_reverses_v2_to_v1(v1_db):
@@ -522,7 +546,8 @@ def test_rollback_reverses_v2_to_v1(v1_db):
     conn.commit()
     conn.close()
 
-    _run_init(v1_db)  # v1 → v2
+    _run_init(v1_db)  # v1 → 当前基线
+    _pin_user_version_to_2(v1_db)  # rollback 只处理 v2 → v1 这一级
 
     from miloco.database.connector import get_db_connector, rollback_v2_to_v1
 
@@ -563,7 +588,8 @@ def test_rollback_reverses_v2_to_v1(v1_db):
 
 def test_rollback_refuses_when_internal_cron_present(v1_db):
     """rollback 前置断言: internal cron 未清空 → raise."""
-    _run_init(v1_db)  # v1 → v2 (无数据)
+    _run_init(v1_db)  # v1 → 当前基线 (无数据)
+    _pin_user_version_to_2(v1_db)  # 同上：先满足 rollback 的版本前置条件
 
     from miloco.database.connector import get_db_connector, rollback_v2_to_v1
 
@@ -579,4 +605,19 @@ def test_rollback_refuses_when_internal_cron_present(v1_db):
         conn.commit()
 
     with pytest.raises(RuntimeError, match="internal cron"):
+        rollback_v2_to_v1()
+
+
+def test_rollback_refuses_on_newer_schema(v1_db):
+    """库已经在 v2 之上时，rollback_v2_to_v1 必须拒绝而不是把版本号盖成 1。
+
+    它只回退 v2 引入的那些变化，不认识 v3 的 token_usage.base_url 与日表四元组主键。
+    盖了版本号却不动表形态，下次启动会从 v1 重跑一遍步进 —— 与其猜一个中间状态，
+    不如直接拒绝。
+    """
+    _run_init(v1_db)  # 一路推到当前基线（> 2）
+
+    from miloco.database.connector import rollback_v2_to_v1
+
+    with pytest.raises(RuntimeError, match="expected 2"):
         rollback_v2_to_v1()

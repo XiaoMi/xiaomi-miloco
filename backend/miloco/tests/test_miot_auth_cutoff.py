@@ -323,24 +323,34 @@ MUST_NOT_BE_GATED = {
     "refresh_devices": "拉设备列表",
     "refresh_scenes": "拉场景列表",
     "_get_camera_instance": "建相机实例",
+    "_create_camera_img_manager": "建相机图片管理器",
     "_sync_meta_subscriptions": "同步设备元信息订阅",
-    "_sync_camera_state_subscriptions": "同步设备状态订阅",
+    "_sync_device_state_subscriptions": "同步设备状态订阅",
     "_sync_scene_subscriptions": "同步场景订阅",
+    "_on_user_bind_event": "转发绑定与解绑推送，并据此补订退订",
     "init": "初始化与回调注册",
     "deinit": "反初始化",
 }
 
 
 def _reaches_cloud(fn: ast.AST) -> bool:
-    """这个方法体里有没有对 ``self.(_)miot_client...`` 的调用。
+    """这个方法体里有没有碰到 ``self.(_)miot_client`` 下面的东西。
 
     按结构判而不按名字判：名字判会漏掉 ``get_miot_app_notify_id`` 这种「叫
     get_、其实往云端写」的。
+
+    只要**引用**到就算，不要求它在这里被调用——SDK 的方法可以当可调用对象传给
+    别处再调（订阅同步就是这么写的），只认 ``Call`` 节点的话，
+    ``f = self._miot_client.http_client.set_props_async`` 紧跟 ``await f(...)``
+    这种写法会整个漏过去。宁可把「引用了但没调」的也算进来、多问一次归类。
+
+    要的是「引用到客户端的**成员**」，从 ``node.value`` 起判即要求至少一层成员
+    访问：单纯持有或原样返回客户端（构造函数里赋值、属性取值器）不算碰云端。
     """
     for node in ast.walk(fn):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        if not isinstance(node, ast.Attribute):
             continue
-        probe = node.func.value
+        probe = node.value
         while isinstance(probe, ast.Attribute):
             if (
                 isinstance(probe.value, ast.Name)
@@ -362,7 +372,12 @@ def _has_gate(fn: ast.AST) -> bool:
 
 
 def _cloud_facing_methods() -> dict[str, bool]:
-    """``{方法名: 有没有闸门}``，只收会打到云端的那些。"""
+    """``{方法名: 有没有闸门}``，只收会打到云端的那些。
+
+    扫的范围是代理类自己。这道守卫成立的前提是「走云端的下发都汇到代理层」——
+    若哪天有条下发绕开代理直接打云端，它落在本守卫的视野之外，得靠把下发收回
+    代理层来维持，而不是靠扩大这里的扫描面。
+    """
     src = Path(inspect.getsourcefile(MiotProxy)).read_text()
     cls = next(
         n

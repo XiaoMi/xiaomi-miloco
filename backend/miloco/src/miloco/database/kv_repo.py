@@ -245,6 +245,19 @@ class ScopeConfigKeys:
     # 改动下一窗即生效、不重启。用途：给模型补充该机位的环境描述 / 关注点 / 忽略项，
     # 消除固定误识（如门口机位把公共走廊电梯门误当自家入户门）。读取失败按「无自定义」处理。
     CAMERA_PROMPT_MAP_KEY = "CAMERA_PROMPT_MAP_KEY"
+    # 已**关闭** Smart Crop（智能裁切增强）的摄像头 did 列表（deny-list，默认开启）；
+    # 不在此集 = 该机位允许裁切。JSON array，空集 / NULL = 全部机位都开。
+    # 键口径同 CAMERA_PROMPT_MAP_KEY：按**合成 did**（``did:ch{n}``，多通道相机逐路），
+    # 因为"该不该裁"取决于该路镜头的视野（门口窄视野收益小、客厅广角收益大），逐路不同；
+    # 与按整台走的 CAMERA_BLACK_LIST_KEY / CAMERA_VOICE_ALLOW_LIST_KEY 不同口径。
+    # 与全局双闸（perception.engine.crop_enhance.enabled / user_enabled）**相与**：
+    # 全局关则本集无意义，全局开时才逐机位看本集。引擎每感知窗实时读取，改动下一窗即生效、
+    # 不重启（见 perception/engine/api.py 的 _crop_denied_dids）。
+    # 读取失败按**空集**处理（fail-open = 继续裁）：本项只影响视频编码构图、不涉隐私，
+    # 且"默认开启"的语义本就是"缺信息即为开"；反向 fail-closed 会让一次 KV 抖动静默关掉
+    # 全家 Smart Crop，是更难发现的失效态。与 CAMERA_VOICE_ALLOW_LIST_KEY 的 fail-closed
+    # 相反正是因为那项涉隐私。
+    CAMERA_CROP_DENY_LIST_KEY = "CAMERA_CROP_DENY_LIST_KEY"
 
 class OnboardingKeys:
     """主动 onboarding 邀请的一次性标记。

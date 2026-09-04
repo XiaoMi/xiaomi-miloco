@@ -10,8 +10,9 @@
  * 内存分区 / python_heap 段独立 `?.` 判空 —— 分区不可用时图表 + 表格降级文案；
  * python_heap 缺时类型表降级。
  *
- * SVG 模式参照 PerfRtfChart：viewBox 横向自适应 + HTML 浮层放轴标签和 tooltip，
- * 避免 SVG preserveAspectRatio 拉伸字号。
+ * SVG 模式：viewBox 宽度取容器实测像素宽 + HTML 浮层放轴标签和 tooltip，避免 SVG
+ * preserveAspectRatio 拉伸字号。宽度为什么必须实测而不能用归一化常量，见
+ * hooks/useMeasuredWidth 的说明。
  */
 
 import { useState } from "react";
@@ -20,6 +21,7 @@ import type { TFunction } from "i18next";
 import type { AsyncState } from "@/hooks/useAsync";
 import { formatPerfTs } from "@/lib/perfBucket";
 import type { MemorySeries, MemorySnapshot, PerfBucket } from "@/lib/types";
+import { useMeasuredWidth } from "@/hooks/useMeasuredWidth";
 
 interface Props {
   seriesState: AsyncState<MemorySeries>;
@@ -145,7 +147,8 @@ function MemoryChart({ series, spanMs, t }: ChartProps) {
   const PAD_R = 16;
   const PAD_T = 12;
   const PAD_B = 28;
-  const SVG_W = 1000;
+  // SVG 单位 == CSS 像素,详见 useMeasuredWidth 的说明
+  const [wrapRef, SVG_W] = useMeasuredWidth(1000);
 
   const rssVals = points.map((p) => p.rss_kb / 1024);
   const dataMax = Math.max(1, ...rssVals);
@@ -176,7 +179,7 @@ function MemoryChart({ series, spanMs, t }: ChartProps) {
     .join("");
 
   return (
-    <div className="relative w-full" style={{ height: H }}>
+    <div ref={wrapRef} className="relative w-full" style={{ height: H }}>
       <svg
         viewBox={`0 0 ${SVG_W} ${H}`}
         className="w-full h-full"

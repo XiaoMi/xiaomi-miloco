@@ -1,8 +1,6 @@
 {
   "perf": {
     "windowAria": "Performance view time window",
-    "autoRefresh": "Auto-refresh every 30s",
-    "manualRefresh": "Refresh",
     "inlineTitle": "Performance",
 
     "windowLast1h": "Last 1 hour",
@@ -175,6 +173,8 @@
     "timingTitle": "Recent latency",
     "timingSubtitle": "P50 / P75 / P95 / P99 aggregated by time bucket",
     "timingEmpty": "No data in the selected period.",
-    "timingChartAria": "Recent latency line chart"
+    "timingChartAria": "Recent latency line chart",
+    "compact": "Compact",
+    "compactAria": "Compact: real-time rate and gate filter rate side by side"
   }
 }

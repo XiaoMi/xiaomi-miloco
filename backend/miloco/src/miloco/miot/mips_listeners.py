@@ -1,16 +1,18 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""MIPS push-event listeners (bind / device-meta / scene).
+"""MIPS push-event listeners (bind / device-meta / scene / camera-state).
 
-All three share one shape: a trailing-edge debounce that, once it settles,
+All four share one shape: a trailing-edge debounce that, once it settles,
 refreshes the authoritative cloud state and acts on it. They differ only in:
 
-  * the debounce KEY — bind debounces per-did (independent timers); meta and
-    scene use a single global timer (any event refreshes the whole list);
+  * the debounce KEY — bind debounces per-did (independent timers); meta,
+    scene and camera-state use a single global timer (any event refreshes the
+    whole list);
   * the settled ACTION — bind decides bind-vs-unbind and delegates the
     greeting; meta refreshes devices+cameras+scenes (and greets move-ins);
-    scene refreshes the scene list.
+    scene refreshes the scene list; camera-state re-fetches the camera online
+    status.
 
 The shared debounce skeleton lives in ``_TrailingDebounce``; each listener is
 a thin subclass. The welcome ACTION itself lives in
@@ -52,7 +54,8 @@ SCENE_DEBOUNCE_SEC: float = 5.0
 # via _schedule).
 CAMERA_STATE_DEBOUNCE_SEC: float = 60.0
 
-# Single key used by the global (non-per-did) debouncers (meta / scene).
+# Single key used by the global (non-per-did) debouncers (meta / scene /
+# camera-state).
 _GLOBAL_KEY = "_global"
 
 
@@ -357,15 +360,10 @@ class SceneEventListener(_TrailingDebounce):
 
 
 class CameraStateEventListener(_TrailingDebounce):
-    """Global debounce for `device/{did}/state/{online,offline}`.
+    """`device/{did}/state/*` 事件的全局防抖,批量落定后重拉相机状态。
 
-    Each state event already updated the cached `online` field directly (in
-    MiotProxy._on_camera_state_changed_event) — this listener is the trailing
-    reconciliation: once the burst settles it re-fetches the authoritative
-    cloud camera status once, so a missed or stale event can't strand a
-    camera. refresh_camera_online_status is lightweight (metadata only, no
-    stream disturbance). Any state event (any did) re-arms the single global
-    timer.
+    Camera 事件总能重新武装;非相机事件也会到达(proxy 只拦能确定非相机的),
+    别假定 msg.did 一定是相机。
     """
 
     def __init__(

@@ -333,7 +333,7 @@ export type HomeId = string;
 // ── 用量统计（📊 用量 tab）─────────────────────────────────────
 // 数据来自 backend admin token-usage 接口（仅 omni/MiMo 调用有计费）：
 //   today      → GET /api/admin/token-usage/buckets  （服务端按桶聚合）
-//   week/month → GET /api/admin/token-usage/daily     （按 date/model/type 聚合）
+//   week/month → GET /api/admin/token-usage/daily     （按 date/model/base_url/type 聚合）
 // 客户端在 src/api/real.ts::realGetUsageStats 里折算成下面的结构。
 // 注意：video/audio/cache 都是 input 的子集（不叠加）；总量 = input + output。
 
@@ -366,9 +366,17 @@ export interface UsageGroup {
   breakdown: TokenBreakdown;
 }
 
-/** 明细表的一行：model × type 组合。 */
+/** 明细表的一行：模型名 × endpoint × 调用类型。同名模型挂两个 endpoint 会各占一行。 */
 export interface UsageRow {
   model: string;
+  /**
+   * 该行用量所用的 endpoint，**完整 URL 原文**。
+   *
+   * 模型身份 = (model, base_url)：同一个模型名可以同时挂在两个 endpoint 上，
+   * 只看模型名分不出哪个 endpoint 用了多少。空串 = 该行早于用量表记录此列（DB schema v3 之前），
+   * 来源无从得知——展示侧直说「旧版本数据未记录 URL」，不做任何推断或回填。
+   */
+  base_url: string;
   type: UsageCallType;
   calls: number;
   /** input + output。 */
@@ -386,13 +394,67 @@ export interface UsageStats {
   totals: TokenBreakdown;
   /** 按调用类型聚合（realtime / on_demand），按 tokens 降序。 */
   by_type: UsageGroup[];
-  /** model × type 明细行，按 tokens 降序。 */
+  /** 明细行，键为「模型名 + endpoint + 调用类型」，按模型名与 endpoint 排序。 */
   rows: UsageRow[];
   /**
-   * 时间序列。today 桶数随 bin 粒度变化（10分=144 / 1时=24 / 3小时=8，默认 1 时）且铺满整天；
+   * 时间序列。today 桶数随 bin 粒度变化（15分=96 / 1时=24 / 3小时=8，默认 1 时）且铺满整天；
    * week=7 天，month=30 天。ts 是 ISO 8601。
    */
-  timeline: { ts: string; tokens: number }[];
+  timeline: UsageTimelinePoint[];
+  /**
+   * 日聚合表里已有的最早 / 最新日期（YYYY-MM-DD）；表为空或接口未给时为 null。
+   *
+   * 清除确认窗据此判断「清到某一天会不会连带删掉那天更早的记录」——日表按整天删，
+   * 但只有边界那天真的落在日表已有的日期区间里才谈得上连带。两头各挡一类落空，
+   * 见 usageTokens.dailyCaveatApplies。
+   */
+  daily_earliest_date: string | null;
+  daily_latest_date: string | null;
+}
+
+/**
+ * 一个桶里、某个「模型名 + endpoint」的用量拆分。
+ *
+ * 桶本身是跨模型合并的，只看桶级字段就回答不了「这一段是哪个 endpoint 在用」。
+ * 模型身份是 (模型名, endpoint) 而不是模型名，所以拆分也按这个二元组折叠——**若**
+ * 只按模型名合并，同名挂在两个地址上的用量就又粘回一起，等于把后端刚拆开的东西
+ * 在前端重新合上。各项之和恒等于桶的对应字段（见 accPoint）。
+ */
+export interface UsageTimelineTarget {
+  model: string;
+  /** 完整 URL 原文；'' = 老数据未记录。 */
+  base_url: string;
+  /** input − video − audio 的残差（含图片、系统提示，非纯文本）。 */
+  text: number;
+  video: number;
+  audio: number;
+  output: number;
+  cache: number;
+}
+
+/**
+ * 时间序列的一个桶。除总量外还带**分模态拆分**，供时间分布图按模态堆叠——
+ * 后端的 bucket / daily 行本来就带 video / audio / cache 列，这里只是别在
+ * 前端把它们加成一个总数就丢掉。
+ *
+ * 口径与 TokenBreakdown 一致：video / audio / cache 都是 input 的子集，
+ * `text` 是 `input − video − audio` 的**残差**——它不只有文本，还含图片
+ * （gallery / 参考帧的 image 块，后端未单列该模态）与系统提示。
+ * 总量口径 tokens = (text + video + audio) + output = input + output。
+ */
+export interface UsageTimelinePoint {
+  ts: string;
+  /** input + output。 */
+  tokens: number;
+  /** input − video − audio 的残差（含图片、系统提示，非纯文本）。 */
+  text: number;
+  video: number;
+  audio: number;
+  output: number;
+  /** 命中缓存的 prompt token（⊆ text + video + audio）。 */
+  cache: number;
+  /** 本桶按「模型名 + endpoint」的拆分。各项之和 == 桶的对应字段。 */
+  targets: UsageTimelineTarget[];
 }
 
 // ── omni 模型配置（在「模型」页内读/写，支持多档案切换） ──────────────
@@ -643,6 +705,11 @@ export interface PerfTraceRow {
   cycle_error_msg: string | null;
   /** traces_v 视图派生:EXISTS(SELECT 1 FROM agent_runs WHERE trace_id=t.trace_id)。 */
   has_agent_turn: number;
+  /**
+   * traces_v 视图派生的「耗时/窗口跨度」比值族。明细表用「实时率」一列显示
+   * rtf_e2e ?? rtf、超过 1 标红,那一行「有没有跟上」就看它;rtf_pipeline /
+   * rtf_stream_e2e / rtf_omni 表上没有对应列,留给调用方按需取。
+   */
   rtf: number | null;
   rtf_pipeline: number | null;
   rtf_e2e: number | null;

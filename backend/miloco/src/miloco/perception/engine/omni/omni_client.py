@@ -152,10 +152,19 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
     from miloco.config import get_settings
 
     o = get_settings().model.omni
+    # 地址在这里去尾斜杠,而不是只在保存档案那个入口做:写入口有四条(上面列的那些),
+    # 只有 web PUT 那条归一化过,而这一处是所有来路的必经收口、也是唯一决定「这次调用
+    # 记到哪个身份名下」的地方。base_url 自 schema v3 起是模型身份的一半,同一个 endpoint
+    # 多一个尾斜杠就是两个身份:用量明细裂成两行、合计对半分,「只清这一项」按精确相等
+    # 匹配只清得掉其中一行,而两者在日表里是两条独立主键行、滚存删掉源行后再也合不回来。
+    # 整个过程没有任何报错信号——凭证层与探活判「URL 变没变」比的都是去尾斜杠后的值,
+    # 旧 key 照常沿用、一次调用都不会失败。堵在这里对已经带着斜杠躺在配置里的存量值同样
+    # 生效,并顺带修掉 endpoint() 拼出 `//chat/completions` 的问题。
+    base_url = (o.base_url or "").strip().rstrip("/")
     resolved = replace(
         base,
         model=o.model,
-        base_url=o.base_url,
+        base_url=base_url,
         api_key=o.api_key or base.api_key,
     )
     _maybe_reset_breaker_on_config_change(resolved)
@@ -263,7 +272,7 @@ async def call_omni(
                 )
                 raise OmniError(f"omni response is not a dict (got {raw_cls})")
             await cb.record_success()
-            fire_record(config.model, raw.get("usage", {}), type)
+            fire_record(config.model, config.base_url, raw.get("usage") or {}, type)
         return raw
     except CircuitOpenError as ce:
         short_circuited = True
@@ -493,7 +502,7 @@ async def call_omni_stream(
     finally:
         # generator close (正常 / 异常 / 消费方提前 break) 时统一上报一次
         if raw_usage_seen is not None:
-            fire_record(config.model, raw_usage_seen, type)
+            fire_record(config.model, config.base_url, raw_usage_seen, type)
         # stream 路径没有原生 raw response,只能用累积的 chunks + usage 拼一份伪 raw
         # 让 push_omni_trace 用同一 _pick_response_fields 路径抽 content/usage.
         # error 路径 raw_for_trace 仍传 (拼出 content="" usage={}),让 trace 行包含

@@ -28,6 +28,7 @@ import {
   splitClosedPending,
 } from "@/lib/perfBucket";
 import type { PerfBucket, PerfRtfPoint } from "@/lib/types";
+import { useMeasuredWidth } from "@/hooks/useMeasuredWidth";
 import { ChartGapOverlay } from "./ChartGapOverlay";
 
 interface Props {
@@ -199,11 +200,11 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
   const ticks = chooseYTicks(dataMax);
   const yMax = ticks[ticks.length - 1];
 
-  // x 轴标签密度:最多展示 7 个标签
+  // x 轴标签密度:步长按 ceil(n/7) 取(≤7 个),末点无条件补标 → 合计最多 8 个
   const labelStep = Math.max(1, Math.ceil(n / 7));
 
-  // SVG 坐标(用归一化 1000 宽,等比缩放后宽度会跟容器走)
-  const SVG_W = 1000;
+  // SVG 单位 == CSS 像素,详见 useMeasuredWidth 的说明
+  const [wrapRef, SVG_W] = useMeasuredWidth(1000);
   const pctOfSvg = (px: number) => (px / SVG_W) * 100;
 
   // 百分比定位(0~100%),让 HTML 浮层和 SVG 都按容器宽缩放
@@ -257,7 +258,7 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
   }
 
   return (
-    <div className="relative w-full" style={{ height: H }}>
+    <div ref={wrapRef} className="relative w-full" style={{ height: H }}>
       <svg
         viewBox={`0 0 ${SVG_W} ${H}`}
         className="w-full h-full"

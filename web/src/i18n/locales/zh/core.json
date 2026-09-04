@@ -9,6 +9,7 @@
     "toDark": "切换为暗色"
   },
   "common": {
+    "refresh": "刷新",
     "retry": "重试",
     "loading": "加载中…",
     "switchFailed": "切换失败，稍后再试",

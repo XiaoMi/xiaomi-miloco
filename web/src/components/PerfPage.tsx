@@ -17,7 +17,7 @@
  * 直接接 backend observability 真接口,不走 mock。空数据时各子区块自行降级显示。
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   getProcSeries,
@@ -60,12 +60,15 @@ import { PerfGateScoreTable } from "./PerfGateScoreTable";
 import { PerfStageTable } from "./PerfStageTable";
 import { PerfTraceList } from "./PerfTraceList";
 import { PerfTraceTimingChart } from "./PerfTraceTimingChart";
+import { RefreshIntervalInput } from "./RefreshIntervalInput";
+import { useRefreshInterval } from "@/hooks/useRefreshInterval";
 
 export function PerfPage() {
   const { t, i18n } = useTranslation();
   // 窗口选项随语言重算;memo 在 i18n.language 不变时保持引用稳定。
   const windows = useMemo(() => perfWindows(), [i18n.language]);
   const [windowKey, setWindow] = useState<PerfWindow>("1h");
+  const { sec: refreshSec, setSec: setRefreshSec } = useRefreshInterval();
   const bucket = defaultBucket(windowKey);
   const windowMs = WINDOW_MS[windowKey];
 
@@ -146,6 +149,11 @@ export function PerfPage() {
     getUname().then(setUname).catch(() => {});
   }, []);
 
+  // 用 ref 持住最新那份：reloadAll 每次渲染都是新函数，而下面的 effect 只跟窗口与周期
+  // 走（否则定时器逐帧重建）。直接闭包引用的话，定时器与可视性回调都会一直调首帧那份
+  // ——眼下各 reload 的依赖都由 windowKey 派生、行为恰好一致，但那是条没写下来的前提，
+  // 而性能小卡那侧本来就是 ref 写法，两页同一个问题不该两套解法。
+  const reloadAllRef = useRef<() => void>(() => {});
   const reloadAll = () => {
     summary.reload();
     rtf.reload();
@@ -161,13 +169,28 @@ export function PerfPage() {
     memSeries.reload();
     procSeries.reload();
   };
+  reloadAllRef.current = reloadAll;
 
-  // 30s 自动刷新。窗口切换会重置 timer。
+  // 自动刷新周期由住户设定，与「模型」页共用同一个值（见 useRefreshInterval：一处改、
+  // 两处生效，跨标签页也同步）。此前这里写死 30 秒，于是那个设置对这一整页不起作用——
+  // 设成 5 秒这里仍是 30 秒，设成十分钟这里照旧每 30 秒打十余个接口。窗口切换或周期变化
+  // 都重置 timer。
   useEffect(() => {
-    const id = setInterval(reloadAll, 30_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => reloadAllRef.current(), refreshSec * 1000);
+    // 切回前台补刷一次，与用量卡、性能小卡同一个理由：后台标签页的定时器会被浏览器
+    // 节流乃至冻结，切回来时不补就要等下一个周期到点。周期从写死 30 秒改成可设（上限
+    // 24 小时）之后这条才真正要紧——原先最多慢几十秒，现在可能长时间停在旧数，而这
+    // 一页十几张图正是用来判断感知跟不跟得上的。
+    const onVisible = () => {
+      if (document.visibilityState === "visible") reloadAllRef.current();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [windowKey]);
+  }, [windowKey, refreshSec]);
 
   return (
     <div className="space-y-6">
@@ -198,13 +221,13 @@ export function PerfPage() {
           })}
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-caption text-text-tertiary">{t("perf.autoRefresh")}</span>
+          <RefreshIntervalInput sec={refreshSec} onChange={setRefreshSec} />
           <button
             type="button"
             onClick={reloadAll}
             className="text-caption px-3 py-1.5 rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
           >
-            {t("perf.manualRefresh")}
+            {t("common.refresh")}
           </button>
         </div>
       </section>
