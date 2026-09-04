@@ -13,10 +13,10 @@ import onnxruntime as ort
 
 _LOGGER = logging.getLogger(__name__)
 
-# Empirically tested: 4 threads gives the best balance of throughput and
-# tail-latency stability on real workloads.  Higher counts look faster on
-# synthetic benchmarks but suffer from scheduling jitter on real frames
-# (e.g. 8 threads: avg 62ms but max 410ms vs 4 threads: avg 48ms, max 58ms).
+# 固定线程数控尾延迟。实测(真实帧):8 线程 avg 62ms/max 410ms,远差于 4 线程的
+# avg 48ms/max 58ms——synthetic bench 上更高线程更快,但真实帧受调度抖动拖累。
+# detector/reid 走此值;dedup/vad 用 TINY_MODEL_THREADS(见 perception/inference/tuning.py,
+# 特意不放这里:本模块 module 级 import onnxruntime,只放常量会拖着 ORT 一起被引)。
 _DEFAULT_NUM_THREADS = 4
 
 # Apple Silicon 上 CPU EP 默认走 ArmKleidiAI::MlasConv,每次 Conv 推理分配
@@ -56,6 +56,21 @@ def _ort_version_ge(major: int, minor: int) -> bool:
         return (int(parts[0]), int(parts[1])) >= (major, minor)
     except (ValueError, IndexError):
         return False
+
+
+def apply_kleidiai_opt_out(opts: "ort.SessionOptions") -> None:
+    """onnxruntime >= 1.25 起关闭 ArmKleidiAI(PR #27136 引入的 opt-out)。
+
+    Apple Silicon / ARM 的 CPU EP 默认走 ArmKleidiAI::MlasConv,每次 Conv 推理分配的
+    native workspace 不归还 → 长跑 RSS 单调上涨(issue #429 同源)。1.27 上游已根治,
+    此 opt-out 是防御层:覆盖 CoreML 不支持算子回落 CPU EP 的部分,以及非 Apple Silicon
+    的 ARM 平台(如 Linux ARM 部署)。
+
+    **单一来源**:所有自建 ONNX session(make_session 工厂 + speech_vad 等直建 session)
+    统一调本函数,避免版本门槛(1.25)与 config key 字符串在多处各存一份、改一处漏一处。
+    """
+    if _ort_version_ge(1, 25):
+        opts.add_session_config_entry("mlas.disable_kleidiai", "1")
 
 
 def _hash_model_file(model_path: str) -> str:
@@ -198,11 +213,9 @@ def make_session(
     opts.intra_op_num_threads = threads
     opts.inter_op_num_threads = threads
 
-    # 兜底层: onnxruntime >= 1.25 加 PR #27136 引入的 opt-out。CoreML 不支持
-    # 的算子会 fallback 到 CPU EP,默认仍走 ArmKleidiAI 继续小幅泄漏;另外覆盖
-    # 非 Apple Silicon ARM 平台 (如 Linux ARM 部署)。
-    if _ort_version_ge(1, 25):
-        opts.add_session_config_entry("mlas.disable_kleidiai", "1")
+    # 兜底层:关闭 KleidiAI(见 apply_kleidiai_opt_out)。CoreML 不支持的算子会
+    # fallback 到 CPU EP、默认仍走 ArmKleidiAI 小幅泄漏,故 CoreML 路径也补这条。
+    apply_kleidiai_opt_out(opts)
 
     _LOGGER.info("ORT session providers=%s for %s", providers, model_path)
     return ort.InferenceSession(model_path, sess_options=opts, providers=providers)

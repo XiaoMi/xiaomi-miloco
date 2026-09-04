@@ -44,6 +44,7 @@ from miloco.perception.snapshot_context import (
     event_artifacts_scope,
 )
 from miloco.perception.types import (
+    URGENCY_RANK,
     CaptionEntry,
     MatchedRule,
     OnDemandPerceptionResult,
@@ -70,8 +71,54 @@ def _publish_perception_event(event_type: str, source: str, payload: dict) -> No
     client.publish_event(event_type=event_type, source=source, payload=payload)
 
 
+def _filter_suggestions_by_min_urgency(
+    suggestions: list[Suggestion],
+) -> tuple[list[Suggestion], list[Suggestion], str]:
+    """按 ``settings.perception.min_suggestion_urgency`` 拆分 (kept, dropped, threshold)。
+
+    threshold=low(默认)时 dropped 恒空——URGENCY_RANK 里 low 是最低分,任何合法档位
+    都 >= 它,不引入过滤开销。settings 字段是 Literal["low","medium","high"],pydantic
+    ValidationError 已挡脏值,故 URGENCY_RANK[threshold] 直接下标;s.urgency 是 str
+    需保留 .get 兜底(模型偶发输出未定义档时退化为 low 分)。
+    result.suggestions 由调用方保留不动,本函数只切分派发对象。
+    """
+    threshold = get_settings().perception.min_suggestion_urgency
+    cutoff = URGENCY_RANK[threshold]
+    kept: list[Suggestion] = []
+    dropped: list[Suggestion] = []
+    for s in suggestions:
+        if URGENCY_RANK.get(s.urgency, 0) >= cutoff:
+            kept.append(s)
+        else:
+            dropped.append(s)
+    return kept, dropped, threshold
+
+
+def _log_dropped_suggestions(
+    dropped: list[Suggestion], threshold: str, phase: str
+) -> None:
+    """把本 cycle 被 min_urgency 拦下的 suggestion 汇总打一行 info log。
+
+    刻意不逐条打:threshold=high 时家庭场景每天可拦几千条 low,逐条会淹没其它 info。
+    汇总带前 5 条摘要,足够肉眼 grep 出分布;要看全量走 debug 或复现场景。
+    phase 区分早送(``early``)与合批(``merged``)路径。
+    """
+    if not dropped:
+        return
+    # event 是模型自由文本,理论上可能含换行——把换行折成空格保住"每 cycle 一行"grep 契约。
+    preview = ", ".join(
+        f"{s.event.replace(chr(10), ' ')}({s.urgency})" for s in dropped[:5]
+    )
+    more = f" (+{len(dropped) - 5} more)" if len(dropped) > 5 else ""
+    logger.info(
+        "[urgency-filter] dropped %d suggestion(s) phase=%s threshold=%s: %s%s",
+        len(dropped), phase, threshold, preview, more,
+    )
+
+
 if TYPE_CHECKING:
     from miloco.perception.types import BatchedSnapshot
+    from miloco.rule.schema import TriggerOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -420,22 +467,30 @@ class PerceptionEngineProxy:
         convert_ms: float,
         main_loop: asyncio.AbstractEventLoop,
         skipped_task_ids: list[str],
-    ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int]]:
+    ) -> tuple[
+        RealtimePerceptionResult | None,
+        set[str],
+        dict[tuple[str, str], TriggerOutcome | None],
+        set[int],
+    ]:
         """Actual realtime perceive logic — runs in the inference thread.
 
         Receives an already-converted BatchedSnapshot (numpy-only) so this
         thread never touches PyAV frame objects owned by the main thread.
 
         Returns (result, early_sent_contents, early_sent_rule_ids, early_sent_sugg_ids)
-        where each set tracks items already dispatched via streaming callbacks.
-        early_sent_rule_ids 装 (rule_id, did) 对——per-device 状态机粒度,同一 rule 在
-        cam_A early 命中后,cam_B 终态又命中应当照常打 True(不同桶),所以去重必须带 did。
+        where each tracks items already dispatched via streaming callbacks.
+        early_sent_rule_ids 是 {(rule_id, did): TriggerOutcome | None}——key 是 per-device
+        状态机粒度的已早送 pair（同一 rule 在 cam_A early 命中后,cam_B 终态又命中应当照常打
+        True(不同桶),故去重必须带 did）；value 是该 pair 本 cycle 的触发结论,update_state 抛
+        异常时留 None(判定未完成 → 该 rule 记入 incomplete_rule_ids、展示层显式标「未知」,
+        不回落到跨 cycle 的记账表旧值;只有本 cycle 完全没处理到的规则才省略整行)。
         early_sent_sugg_ids 记 per-omni 早送过的 suggestion 事件链 id：merge 已把这些新链
         保留进 result.suggestions（供 dump/上下文），发送侧据此跳过、防对 Agent 重发。
         """
         assert self.perception_engine is not None
         early_sent_contents: set[str] = set()
-        early_sent_rule_ids: set[tuple[str, str]] = set()
+        early_sent_rule_ids: dict[tuple[str, str], "TriggerOutcome | None"] = {}
         early_sent_sugg_ids: set[int] = set()
 
         # 当 self._inference_worker is not None 时，本协程跑在 inference 线程
@@ -478,14 +533,23 @@ class PerceptionEngineProxy:
 
             svc = get_manager().rule_service
             for r in rules:
-                # source_did 取真 did(pipeline.py:321 注入,单元素列表);异常态空列表
+                # source_did 取真 did(pipeline 的 _run_device 注入,单元素列表);异常态空列表
                 # 兜底 "perception",保留 fallback 行为不抛 IndexError。
                 did = r.source_device_ids[0] if r.source_device_ids else "perception"
-                early_sent_rule_ids.add((r.rule_id, did))
+                # key 必须无条件、排在 update_state 之前登记(值先占 None)：pair 承担①去重
+                # (终态主循环见到就跳过)与②抑制终态推退(key 并进 matched_pairs，让「未命中喂
+                # False」的循环放过它)。一旦漏登记，device_rule_map 仍列着它(engine/api.py 的
+                # realtime_perceive 在 run_batch_pipeline 之前构建、与整窗保护 skip 无关)→ 未命中
+                # 循环会给刚 ENTER 真 fire 的 source 喂一帧 False、白吃掉单帧抗抖预算(下次真离开
+                # 只需一帧就确认 EXIT)。故即便下面 update_state 抛异常(如 on_target 规则
+                # _schedule_target_timer_if_needed 里的裸 DB 读)，key 也必须已在 dict 里；此时
+                # value 停在 None → 该 rule 记入 incomplete、展示层标「未知」，不撒谎。
+                early_sent_rule_ids[(r.rule_id, did)] = None
                 _publish_perception_event(
                     "rule_match", r.rule_id, {"reason": r.reason},
                 )
-                await svc.update_state(
+                # 成功后把本 cycle 的触发结论写回 value；终态直接读它、不回读引擎记账表。
+                early_sent_rule_ids[(r.rule_id, did)] = await svc.update_state(
                     r.rule_id, did, True, r.reason,
                     trigger_room=r.room_name,
                     trigger_dids=r.source_device_ids,
@@ -499,14 +563,23 @@ class PerceptionEngineProxy:
             # 剔除 engine 内部字段（id）后外发。
             for s in suggestions:
                 if s.id is not None:
-                    early_sent_sugg_ids.add(s.id)  # 终态 merge 会把同一新链保留进 result，发送侧据此跳过
+                    # early_sent_sugg_ids 记「已早处理」(不论是否过 min_urgency 过滤);
+                    # merged 路径据此跳过同一新链,避免对 Agent 重发或重复打拦截 log。
+                    early_sent_sugg_ids.add(s.id)
                 _publish_perception_event(
                     "suggestion", s.event, {"action": s.action},
                 )
+            # urgency 过滤只影响 agent 派发通路:_publish 与 early_sent_sugg_ids 已按
+            # 全量执行,dispatch_event 仅拿到 kept 子集,保证 result.suggestions 完整、
+            # timeline 不受影响。
+            kept, dropped, threshold = _filter_suggestions_by_min_urgency(suggestions)
+            _log_dropped_suggestions(dropped, threshold, phase="early")
+            if not kept:
+                return
             # B2 单源真值:文本构造延迟到 drainer；urgency 仅作淘汰用的条目级优先级
             await dispatch_event(
-                "suggestion", suggestions, build_suggestions_text,
-                intra_priority=suggestion_intra_priority(suggestions),
+                "suggestion", kept, build_suggestions_text,
+                intra_priority=suggestion_intra_priority(kept),
             )
 
         # --- Pipeline timing ---
@@ -594,7 +667,12 @@ class PerceptionEngineProxy:
     async def realtime_perceive(
         self, batch: PerceptionBatch,
         artifacts: OmniEventArtifacts | None = None,
-    ) -> tuple[RealtimePerceptionResult | None, set[str], set[tuple[str, str]], set[int]]:
+    ) -> tuple[
+        RealtimePerceptionResult | None,
+        set[str],
+        dict[tuple[str, str], TriggerOutcome | None],
+        set[int],
+    ]:
         """Run full engine pipeline — offloaded to inference thread.
 
         Returns (result, early_sent_contents, early_sent_rule_ids, early_sent_sugg_ids)
@@ -609,7 +687,7 @@ class PerceptionEngineProxy:
         async with get_monitor().track_async(NodeName.ENGINE, "perceive") as _eng_h, self._engine_lock:
             if not self.ready:
                 _eng_h.skip_rolling()
-                return None, set(), set(), set()
+                return None, set(), {}, set()
 
             from miloco.manager import get_manager
 
@@ -628,7 +706,7 @@ class PerceptionEngineProxy:
 
             if batched_snapshot is None:
                 _eng_h.skip_rolling()
-                return None, set(), set(), set()
+                return None, set(), {}, set()
 
             if batch.end_timestamp and batch.start_timestamp:
                 _eng_h.add_window_ms(batch.end_timestamp - batch.start_timestamp)
@@ -681,9 +759,14 @@ class PerceptionEngineProxy:
             )
 
     async def on_demand_perceive(
-        self, batch: PerceptionBatch, query: str
+        self, batch: PerceptionBatch, query: str,
+        artifacts: OmniEventArtifacts,
     ) -> OnDemandPerceptionResult | None:
-        """Run on-demand query pipeline — offloaded to inference thread."""
+        """Run on-demand query pipeline — offloaded to inference thread.
+
+        artifacts: omni 内部产出的 clip 字节和 trace 会写入
+        artifacts.clips / artifacts.trace（同 realtime_perceive 语义）。
+        """
         async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h, self._engine_lock:
             if not self.ready:
                 _eng_h.skip_rolling()
@@ -705,16 +788,18 @@ class PerceptionEngineProxy:
                     _run_with_trace_id(
                         trace_id,
                         self._on_demand_perceive_impl(batched_snapshot, query),
+                        artifacts=artifacts,
                     )
                 )
 
-            return await self._on_demand_perceive_impl(batched_snapshot, query)
+            with event_artifacts_scope(artifacts):
+                return await self._on_demand_perceive_impl(batched_snapshot, query)
 
     async def handle_realtime_perception_result(
         self,
         result: RealtimePerceptionResult,
         early_sent_contents: set[str] | None = None,
-        early_sent_rule_ids: set[tuple[str, str]] | None = None,
+        early_sent_rule_ids: dict[tuple[str, str], "TriggerOutcome | None"] | None = None,
         early_sent_sugg_ids: set[int] | None = None,
         device_ids: list[str] | None = None,
         artifacts: OmniEventArtifacts | None = None,
@@ -731,22 +816,6 @@ class PerceptionEngineProxy:
         """
         if result.skipped:
             return
-
-        # T6: meaningful_events 后台异步持久化 — 不阻塞下面 webhook 主路径(B4 / B11).
-        # 失败仅 log,不抛.classify / device_ids 空 / artifacts 空等所有
-        # 降级路径都在 _persist 内自处理.
-        # 任务必须挂 _PERSIST_BG_TASKS 强引用,否则 asyncio 弱引用模型下 GC 可能在
-        # 任务完成前回收 → 偶发"INSERT 没落库 / SSE 不推" 难复现.
-        if artifacts is not None:
-            task = asyncio.create_task(
-                _persist_meaningful_event(
-                    result=result,
-                    device_ids=device_ids or [],
-                    artifacts=artifacts,
-                )
-            )
-            _PERSIST_BG_TASKS.add(task)
-            task.add_done_callback(_PERSIST_BG_TASKS.discard)
 
         from miloco.manager import get_manager
 
@@ -769,53 +838,125 @@ class PerceptionEngineProxy:
             for rule_id, did in early_sent_rule_ids:
                 cycle_source_states_by_rule.setdefault(rule_id, {})[did] = True
 
-        for matched_rule in result.matched_rules:
-            did = matched_rule.source_device_ids[0] if matched_rule.source_device_ids else "perception"
-            if early_sent_rule_ids and (matched_rule.rule_id, did) in early_sent_rule_ids:
-                continue
-            _publish_perception_event(
-                "rule_match", matched_rule.rule_id, {"reason": matched_rule.reason},
-            )
-            await svc.update_state(
-                matched_rule.rule_id, did, True, matched_rule.reason,
-                trigger_room=matched_rule.room_name,
-                trigger_dids=matched_rule.source_device_ids,
-                caption=caption_for_dids(result.caption, matched_rule.source_device_ids),
-                device_name=matched_rule.device_name,
-                cycle_source_states=cycle_source_states_by_rule.get(
-                    matched_rule.rule_id
-                ),
-            )
+        # 触发状态就地累积：两条来源都拿本 cycle 的真值，不回读引擎记账表（记账表跨 cycle
+        # 不清理，回读会把上一 cycle 旧结论当本周期的）。主循环命中的规则收 update_state 的
+        # 返回值；早送路径的结论由 _on_early_matched_rules 在调用 update_state 时就写进
+        # early_sent_rule_ids 的 value（update_state 抛异常则留 None）。
+        #
+        # value 为 None ⇒ 该 (rule, 相机) 本周期**判定未完成**，此时不能只拿兄弟相机的结论
+        # 聚合了事：同一 rule 本周期最多一路返回 FIRED（把 rule 级状态翻 True 的那路），其余
+        # 走 old==new 返回 STILL_IN；若偏偏是那一路抛了异常，FIRED 信号就永久丢失，聚合结果
+        # 会是确定但偏弱的假阴性。而且**从异常本身推不出 fire 与否**，两类抛点都表现为 value
+        # 停 None：① 派发之后抛 → 其实已 fire（runner 里几处裸 read_duration_target_state 都排在
+        # _spawn_fire 之后，如 _schedule_target_timer_if_needed / _fire_target_if_reached）；
+        # ② 到达 fire 决策点之前抛 → 真没 fire（如本文件早送回调里排在 update_state 之前的
+        # _publish_perception_event，或 update_state 内部尚未走到派发时的任何异常）。故把这些
+        # rule 记进 incomplete，展示层显式渲染「未知」而非撒谎报一个确定值。异常详情已由 pipeline
+        # 整窗保护写进 backend log（带 room/device + exc_info），住户日志只需诚实标注未知。
+        outcomes_by_rule: dict[str, list[TriggerOutcome]] = {}
+        incomplete_rule_ids: set[str] = set()
+        for (_rid, _did), _o in (early_sent_rule_ids or {}).items():
+            if _o is None:
+                incomplete_rule_ids.add(_rid)
+            else:
+                outcomes_by_rule.setdefault(_rid, []).append(_o)
 
-        # 对本 batch 实际下发过、但未命中的 (rule_id, did) 喂 update_state(False)。
-        # frame-driven 模式:runner 帧级抗抖(_pending_source_exit)需要"持续 F"才能完成
-        # 第二帧确认,所以未命中也要每 cycle 喂 F,不能 edge-driven 只在 matched→unmatched
-        # 翻转时调一次。
-        # per-device 精确广播:device_rule_map[did] 就是该 device 实际进过 omni prompt 的
-        # rule 列表 — 只对这些组合喂 False。rule 绑 cam_A 时若本 batch 只有 cam_B,
-        # rule 根本没下发 → 不会出现在 device_rule_map 任何 did 的列表里 → 状态保持上一帧。
-        # device_rule_map 空(OmniError 兜底)→ 本 cycle 不做任何状态机推退。
-        matched_pairs: set[tuple[str, str]] = {
-            (r.rule_id, r.source_device_ids[0] if r.source_device_ids else "perception")
-            for r in result.matched_rules
-        }
-        if early_sent_rule_ids:
-            matched_pairs |= early_sent_rule_ids
+        # 主循环与早送同口径「先占位、成功后摘掉」：update_state 抛异常时该 rule 停在 pending
+        # 里 → 与早送 value=None 同归 incomplete、展示层标「未知」。否则同一份证据缺口两条路
+        # 结果相反：早送标「未知」，主循环整行消失——而「整行消失」的既有语义是「本周期完全
+        # 没处理到」，把一条真 fire 过的规则静默降级成「没这回事」。
+        # 用独立集合而非直接 add/discard incomplete_rule_ids：同 rule「早送某相机残缺 + 主循环
+        # 另一相机成功」时，discard 会误清掉早送侧已登记的残缺。
+        # 占位点排在 _publish_perception_event 之后、update_state 之前：publish 是**派发前**
+        # 抛点(状态机压根没跑)，那种情况缺席才是诚实的，不该标「未知」。
+        main_loop_pending: set[str] = set()
 
-        enabled_set = set(svc.get_enabled_rule_ids())
-        for did, rule_ids in result.device_rule_map.items():
-            for rule_id in rule_ids:
-                if (rule_id, did) in matched_pairs:
+        # 两个 update_state 循环包在 try 里、落库块放 finally：既保证在循环之后取到
+        # 触发状态快照，又保留「循环抛异常本 cycle 仍能落库」的原有韧性——finally 里
+        # spawn 后异常照常上抛，与「persist 领先循环」时的传播语义一致。
+        try:
+            for matched_rule in result.matched_rules:
+                did = matched_rule.source_device_ids[0] if matched_rule.source_device_ids else "perception"
+                if early_sent_rule_ids and (matched_rule.rule_id, did) in early_sent_rule_ids:
                     continue
-                # 防 race:下发后 rule 在 cycle 内被 disable
-                if rule_id not in enabled_set:
-                    continue
-                await svc.update_state(
-                    rule_id,
-                    did,
-                    False,
-                    cycle_source_states=cycle_source_states_by_rule.get(rule_id),
+                _publish_perception_event(
+                    "rule_match", matched_rule.rule_id, {"reason": matched_rule.reason},
                 )
+                main_loop_pending.add(matched_rule.rule_id)
+                outcome = await svc.update_state(
+                    matched_rule.rule_id, did, True, matched_rule.reason,
+                    trigger_room=matched_rule.room_name,
+                    trigger_dids=matched_rule.source_device_ids,
+                    caption=caption_for_dids(result.caption, matched_rule.source_device_ids),
+                    device_name=matched_rule.device_name,
+                    cycle_source_states=cycle_source_states_by_rule.get(
+                        matched_rule.rule_id
+                    ),
+                )
+                main_loop_pending.discard(matched_rule.rule_id)
+                outcomes_by_rule.setdefault(matched_rule.rule_id, []).append(outcome)
+
+            # 对本 batch 实际下发过、但未命中的 (rule_id, did) 喂 update_state(False)。
+            # frame-driven 模式:runner 帧级抗抖(_pending_source_exit)需要"持续 F"才能完成
+            # 第二帧确认,所以未命中也要每 cycle 喂 F,不能 edge-driven 只在 matched→unmatched
+            # 翻转时调一次。
+            # per-device 精确广播:device_rule_map[did] 就是该 device 实际进过 omni prompt 的
+            # rule 列表 — 只对这些组合喂 False。rule 绑 cam_A 时若本 batch 只有 cam_B,
+            # rule 根本没下发 → 不会出现在 device_rule_map 任何 did 的列表里 → 状态保持上一帧。
+            # device_rule_map 空(OmniError 兜底)→ 本 cycle 不做任何状态机推退。
+            matched_pairs: set[tuple[str, str]] = {
+                (r.rule_id, r.source_device_ids[0] if r.source_device_ids else "perception")
+                for r in result.matched_rules
+            }
+            if early_sent_rule_ids:
+                matched_pairs |= early_sent_rule_ids.keys()
+
+            enabled_set = set(svc.get_enabled_rule_ids())
+            for did, rule_ids in result.device_rule_map.items():
+                for rule_id in rule_ids:
+                    if (rule_id, did) in matched_pairs:
+                        continue
+                    # 防 race:下发后 rule 在 cycle 内被 disable
+                    if rule_id not in enabled_set:
+                        continue
+                    await svc.update_state(
+                        rule_id,
+                        did,
+                        False,
+                        cycle_source_states=cycle_source_states_by_rule.get(rule_id),
+                    )
+        finally:
+            # 主循环里判定未完成的 rule 并入证据残缺（与早送 value=None 同归「未知」）。
+            incomplete_rule_ids |= main_loop_pending
+            # T6: meaningful_events 后台异步持久化 — 不阻塞 webhook 主路径(B4/B11)。
+            # 放 finally:循环之后取到就地累积的触发状态快照（outcomes_by_rule），随 event 落库；
+            # 循环即使抛异常也仍落库。两路快照都只含本周期真值——主循环靠 update_state 返回值，
+            # 早送靠 early_sent_rule_ids 的 value；任一路判定未完成（主循环停在 pending / 早送
+            # value 留 None）的规则进 incomplete_rule_ids、展示层显式标「未知」；只有本 cycle
+            # 完全没处理到的规则才省略整行。失败仅 log、不抛（降级路径都在 _persist 内自处理）。
+            # 任务挂 _PERSIST_BG_TASKS 强引用，防 asyncio 弱引用模型下 GC 在完成前回收。
+            if artifacts is not None:
+                from miloco.rule.schema import aggregate_outcomes
+
+                # 同 rule 多摄像头取最强信号（FIRED > COUNTING > STILL_IN > NOT_FIRED）。
+                # 只传中性枚举, 中文标签由展示层 event_text_builder 映射。
+                rule_statuses = {
+                    rid: agg
+                    for rid, outs in outcomes_by_rule.items()
+                    if (agg := aggregate_outcomes(outs)) is not None
+                }
+
+                task = asyncio.create_task(
+                    _persist_meaningful_event(
+                        result=result,
+                        device_ids=device_ids or [],
+                        artifacts=artifacts,
+                        rule_statuses=rule_statuses,
+                        incomplete_rule_ids=incomplete_rule_ids,
+                    )
+                )
+                _PERSIST_BG_TASKS.add(task)
+                task.add_done_callback(_PERSIST_BG_TASKS.discard)
 
         # result.suggestions 含本窗全部「新链」（dump/上下文已完整）。per-omni 下这些新链
         # 已在 _on_early_suggestions 逐相机早送过（id 记入 early_sent_sugg_ids）——此处据此
@@ -830,11 +971,19 @@ class PerceptionEngineProxy:
                 _publish_perception_event(
                     "suggestion", s.event, {"action": s.action},
                 )
-            # B2 单源真值:文本构造延迟到 drainer；urgency 仅作淘汰用的条目级优先级
-            await dispatch_event(
-                "suggestion", pending_suggestions, build_suggestions_text,
-                intra_priority=suggestion_intra_priority(pending_suggestions),
+            # urgency 过滤:见 _on_early_suggestions 同名段落。batch 模式下这里是唯一
+            # 派发点;per-omni 模式下早送已把新链 id 记入 early_sent_sugg_ids,pending
+            # 通常为空,不会重复打拦截 log。
+            kept, dropped, threshold = _filter_suggestions_by_min_urgency(
+                pending_suggestions,
             )
+            _log_dropped_suggestions(dropped, threshold, phase="merged")
+            if kept:
+                # B2 单源真值:文本构造延迟到 drainer；urgency 仅作淘汰用的条目级优先级
+                await dispatch_event(
+                    "suggestion", kept, build_suggestions_text,
+                    intra_priority=suggestion_intra_priority(kept),
+                )
 
         # handle speeches (skip those already sent via streaming early callback)
         speeches: list[Speech] = []
@@ -889,6 +1038,8 @@ async def _persist_meaningful_event(
     result: RealtimePerceptionResult,
     device_ids: list[str],
     artifacts: OmniEventArtifacts,
+    rule_statuses: dict[str, TriggerOutcome] | None = None,
+    incomplete_rule_ids: set[str] | None = None,
 ) -> None:
     """后台异步入 meaningful_events 表 + 落 event artifacts + 推 SSE.
 
@@ -898,8 +1049,9 @@ async def _persist_meaningful_event(
       1. classify(result) → 任一 has_* 为真才入表(纯 caption / 仅闲聊不入表)
       2. 反查 rule_names(rule_service 查 name;rule 已删 / 异常跳过该条)
       3. INSERT meaningful_events(snapshot_count=0)
-      4. 落盘 artifacts(clip + omni_trace,写前预检磁盘 < snapshot_min_free_disk_mb 跳过)→
-         update_snapshot_count(成功 device 数,trace 不计入)
+      4. 落盘 artifacts(clip + omni_trace + gallery + Smart Crop 参考帧 ref.jpg,
+         写前预检磁盘 < snapshot_min_free_disk_mb 跳过)→
+         update_snapshot_count(成功 clip 的 device 数;trace / gallery / ref 均不计入)
       5. _publish_meaningful_event(B13:metadata-only 也推 SSE)
 
     clip 字节是 omni 内部 push 出来的字节级 mp4(零重编),video 路径 H264+AAC,
@@ -912,6 +1064,7 @@ async def _persist_meaningful_event(
     from miloco.manager import get_manager
     from miloco.perception.event_classifier import classify
     from miloco.perception.event_text_builder import build_agent_text
+    from miloco.perception.events_service import probe_has_ref
     from miloco.perception.snapshot_writer import (
         check_disk_space,
         get_snapshot_root,
@@ -945,6 +1098,8 @@ async def _persist_meaningful_event(
         # (没找到 rule_name 时 fallback 用 rule_id).
         rule_names: dict[str, str] = {}
         rule_queries: dict[str, str] = {}
+        task_descs: dict[str, str] = {}  # rule_id → 所属任务 task.description
+        _desc_cache: dict[str, str | None] = {}  # task_id → description（同任务去重查询）
         if result.matched_rules:
             for mr in result.matched_rules:
                 try:
@@ -953,22 +1108,42 @@ async def _persist_meaningful_event(
                         if rule.name:
                             rule_names[mr.rule_id] = rule.name
                         rule_queries[mr.rule_id] = rule.condition.query
+                        tid = rule.task_id
+                        if tid:
+                            if tid not in _desc_cache:
+                                _desc_cache[tid] = mgr.task_service.get_description(tid)
+                            if _desc_cache[tid]:
+                                task_descs[mr.rule_id] = _desc_cache[tid]
                 except Exception:  # noqa: BLE001
                     pass
 
-        text = build_agent_text(result, rule_names=rule_names, rule_queries=rule_queries)
+        text = build_agent_text(
+            result,
+            rule_names=rule_names,
+            rule_queries=rule_queries,
+            task_descs=task_descs,
+            rule_statuses=rule_statuses,
+            incomplete_rule_ids=incomplete_rule_ids,
+        )
 
         # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
-        # 否则 device_ids 和 artifacts.clips 必须同步收窄——两者分别驱动"日志展示哪些
-        # 摄像头"和"落盘哪些摄像头的 clip",不同步会导致不相关摄像头的 clip 被落盘、
-        # snapshot_count 与 device_ids 长度对不上(save_event_artifacts 文档的
-        # "0 ~ len(artifacts.clips)"不变量)。trace / gallery 不是按事件相关性归属的
-        # 产物,不参与收窄。
+        # 否则 device_ids、artifacts.clips 与 artifacts.ref_frames 必须同步收窄——都是
+        # 按 device 归属的产物:device_ids 驱动"日志展示哪些摄像头",clips 驱动"落盘哪些
+        # 摄像头的 clip",ref_frames 驱动"落盘哪些摄像头的全景参考帧"。不同步会导致不相关
+        # 摄像头的 clip / ref.jpg 被落盘,而其 device_id 已不在 device_ids 内 → ref 经
+        # locate_ref 的 device_ids 校验取不到(404)、也不进 feedback pack,纯占
+        # snapshot_max_disk_mb 配额;snapshot_count 亦与 device_ids 长度对不上
+        # (save_event_artifacts 返回的 clip_dids 必是 artifacts.clips 的子集)。
+        # trace / gallery / crop_meta 不是按事件相关性归属的产物,不参与收窄。
         relevant_device_ids = _collect_relevant_device_ids(result)
         if relevant_device_ids:
             device_ids = [did for did in device_ids if did in relevant_device_ids]
             artifacts.clips = {
                 did: payload for did, payload in artifacts.clips.items()
+                if did in relevant_device_ids
+            }
+            artifacts.ref_frames = {
+                did: jpeg for did, jpeg in artifacts.ref_frames.items()
                 if did in relevant_device_ids
             }
 
@@ -992,7 +1167,12 @@ async def _persist_meaningful_event(
         # 此时 count 保持 0;不论哪种降级,row 都已 INSERT,SSE 应该推(否则前端
         # 实时收不到 metadata-only 事件).
         count = 0
-        if artifacts.clips or artifacts.trace is not None or artifacts.gallery:
+        if (
+            artifacts.clips
+            or artifacts.trace is not None
+            or artifacts.gallery
+            or artifacts.ref_frames
+        ):
             settings = get_settings()
             snapshot_root = get_snapshot_root()
             if not check_disk_space(
@@ -1005,7 +1185,8 @@ async def _persist_meaningful_event(
                 )
                 # count 留 0,继续走 publish
             else:
-                count = save_event_artifacts(event_id, artifacts)
+                clip_dids = save_event_artifacts(event_id, artifacts)
+                count = len(clip_dids)
                 if count > 0:
                     dao.update_snapshot_count(event_id, count)
         else:
@@ -1021,7 +1202,10 @@ async def _persist_meaningful_event(
 
         # B13 SSE 推送:只要 row 入表了就推,不论 count==0 还是 >0.
         # 落盘完成后 publish,snapshot_count 是真实值,clip_kind 帮 UI 区分 🎬/🎤.
+        # has_ref 与 list 通路(events_service._row_to_event)同用 probe_has_ref,
+        # 口径一致 —— 否则实时插入的 Smart Crop 事件在刷新前 has_ref 恒 false.
         has_trace = (get_snapshot_root() / event_id / "omni_trace.json.gz").exists()
+        has_ref = probe_has_ref(get_snapshot_root(), event_id, device_ids)
 
         try:
             _publish_meaningful_event(
@@ -1036,6 +1220,7 @@ async def _persist_meaningful_event(
                 rule_names=rule_names,
                 clip_kind=clip_kind,
                 has_trace=has_trace,
+                has_ref=has_ref,
             )
         except Exception as e:  # noqa: BLE001
             logger.error("SSE publish failed for event %s: %s", event_id, e)
@@ -1057,6 +1242,7 @@ def _publish_meaningful_event(
     rule_names: dict[str, str] | None = None,
     clip_kind: str | None = None,
     has_trace: bool = False,
+    has_ref: bool = False,
 ) -> None:
     """通过 processor._publish 推送 meaningful_event SSE 帧.
 
@@ -1084,5 +1270,6 @@ def _publish_meaningful_event(
         "rule_names": rule_names or {},
         "clip_kind": clip_kind,
         "has_trace": has_trace,
+        "has_ref": has_ref,
     }
     processor._publish("meaningful_event", payload)

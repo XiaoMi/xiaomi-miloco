@@ -10,6 +10,8 @@
     "loadActivityFail": "今天的事件加载失败",
     "loadHomeEntriesFail": "家庭档案加载失败",
     "loadTasksFail": "家庭任务加载失败",
+    "loadPetsFail": "宠物列表加载失败",
+    "loadFeaturesFail": "功能开关加载失败",
     "tabHomeError": "加载首页失败：{{msg}}",
     "tabHomeLoading": "正在看家里此刻…",
     "tabDevicesError": "加载设备列表失败：{{msg}}",
@@ -29,6 +31,7 @@
     "engineStoppedWakeManually": "引擎已停下，请手动唤醒：{{msg}}",
     "engineStoppedWakeManuallyNoMsg": "引擎已停下，请手动唤醒",
     "stopFail": "停止失败，稍后再试",
-    "miotBound": "米家已绑定"
+    "miotBound": "米家已绑定",
+    "loadOnDemandLogsFail": "加载主动查询日志失败"
   }
 }

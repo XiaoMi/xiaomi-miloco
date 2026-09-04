@@ -22,6 +22,7 @@ tidy and lets PATCH-style partial updates merge with the persisted Rule before
 validation.
 """
 
+from collections.abc import Iterable
 from enum import Enum
 from typing import Any
 
@@ -55,10 +56,85 @@ class RuleEvent(str, Enum):
     TARGET_FIRED = "TARGET_FIRED"
 
 
+class TriggerOutcome(str, Enum):
+    """一次 ``update_state`` 判定的「触发结论」——供住户日志展示「本周期是否真触发」。
+
+    反映的是**状态机是否派发了一次触发**，不含 agent / 设备下游执行成败。中性枚举：
+    不含住户可见文案（中文标签由展示层 event_text_builder 映射）。
+    """
+
+    # 注：FIRED 严格是「决策层到达 fire 点」，**不保证住户那边有任何可感知的结果**——下游
+    # 有三种情形会让它落空，都在本枚举语义之外（也判不出，故不在展示层区分）：
+    #   ① 该方向 slot 为空（exit-only 规则的进入方向）：slot 空要到异步 _fire 才发现；
+    #   ② 动作被冷却 / 幂等压制：**仅静态直控 slot**——_execute_action 走 skipped 分支、
+    #      设备不动作（dynamic agent 回调那条路 _execute_dynamic 没有 cooldown，不受本条影响）；
+    #   ③ agent / 设备执行失败：合批 + agent 不回报，miloco 侧拿不到结果。
+    # 故「空 slot」归 FIRED、不归 NOT_FIRED。
+    FIRED = "FIRED"          # 本周期到达 fire 决策点（ENTER 边沿 / 计时达标；含空 slot）
+    STILL_IN = "STILL_IN"    # 已在态内、条件持续满足，不重复触发（含吸收伪退出/抖动）
+    COUNTING = "COUNTING"    # duration 规则累积中：窗口未满 / 比例未达 / 同 round 去重
+    NOT_FIRED = "NOT_FIRED"  # 抗抖观察 / 其它未触发
+
+
+# 聚合优先级 FIRED > COUNTING > STILL_IN > NOT_FIRED。模块级常量，避免每次访问重建字典。
+_OUTCOME_PRIORITY: dict[TriggerOutcome, int] = {
+    TriggerOutcome.FIRED: 3,
+    TriggerOutcome.COUNTING: 2,
+    TriggerOutcome.STILL_IN: 1,
+    TriggerOutcome.NOT_FIRED: 0,
+}
+
+
+def aggregate_outcomes(outcomes: Iterable[TriggerOutcome]) -> TriggerOutcome | None:
+    """同一 rule 本周期多摄像头的结论聚合：取「最强」信号
+    （FIRED > COUNTING > STILL_IN > NOT_FIRED）。空输入返回 None。
+
+    未在 ``_OUTCOME_PRIORITY`` 里映射的成员按最弱（-1）处理、不抛 KeyError：本函数在感知
+    client 的 ``finally`` 落库路径上被调用，抛异常会顶替掉 ``try`` 里的原始异常、并打掉
+    「循环抛异常本 cycle 仍能落库」那条韧性设计。缺映射成员**单独**出现时聚合原样返回它，
+    由展示层 ``_OUTCOME_LABEL.get(outcome, "")`` 兜底成空串 → 省略整行；但同 rule 另有已
+    映射成员时，缺映射成员会因 -1 落选，日志展示的是那个**已映射（更弱）**的标签而非省略。
+    故新增枚举成员必须同步补进 ``_OUTCOME_PRIORITY`` 与 ``_OUTCOME_LABEL``——两张表的覆盖度
+    由 test_rule.py / test_event_text_builder.py 的完整性测试在 CI 拦住（fail-safe 的代价是
+    漏补映射运行时不再报错，只能靠那两条测试暴露）。
+    """
+    return max(outcomes, key=lambda o: _OUTCOME_PRIORITY.get(o, -1), default=None)
+
+
+SCENE_IID = "scene"
+"""``iid`` 哨兵值：这条 action 触发一个米家场景，``did`` 位置放 scene_id。
+
+场景没有 siid/aiid 可拆，也读不到现值，所以既不能走 ``prop.``/``action.`` 的
+iid 解析，也没法做幂等比对——只能靠冷却去重。``did`` 借位放 scene_id 与
+``MiotService.trigger_scene`` 落台账的既有做法一致，同时让冷却键
+``(did, iid)`` 能按场景隔离；``did`` 若留空，同一条规则的多个场景会共用一个
+冷却槽、互相把对方压掉。
+"""
+
+
+def parse_device_iid(iid: str) -> tuple[bool, int, int] | None:
+    """拆 ``prop.<siid>.<piid>`` / ``action.<siid>.<aiid>``。
+
+    返回 ``(是否属性, siid, piid/aiid)``；不是这两种形态（含 ``scene`` 和
+    ``prop.2`` 这类缺段写法）返回 ``None``。CRUD 校验和执行分流共用这一份,
+    两侧判定不会漂移。
+    """
+    is_prop = iid.startswith("prop.")
+    if not is_prop and not iid.startswith("action."):
+        return None
+    parts = iid.split(".")
+    if len(parts) != 3:
+        return None
+    try:
+        return is_prop, int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+
+
 class RuleAction(BaseModel):
     """V3 action format (per latest v3-system-overview.md §6.3 / §5.5 Step 4c).
 
-    Two shapes share the same model:
+    Three shapes share the same model:
 
     - **Device control** (idempotent, e.g. light on / set temperature)::
 
@@ -70,19 +146,29 @@ class RuleAction(BaseModel):
           {"did": "<id>", "iid": "action.<siid>.<aiid>", "params": ["<text>"],
            "idempotent": false, "cooldown_minutes": 10}
 
-    The two shapes are distinguished by ``iid`` prefix (``prop.`` vs
-    ``action.``) and by which payload field is set (``value`` vs ``params``).
-    There is no ``type`` field on RuleAction itself.
+    - **Scene trigger** (non-idempotent, must declare a cooldown)::
 
-    Validation note: ``idempotent=False`` requires ``cooldown_minutes``.
-    Service / cli layers enforce this; the schema keeps both fields optional
-    so PATCH-style partial updates are not blocked when only one is sent.
+          {"did": "<scene_id>", "iid": "scene",
+           "idempotent": false, "cooldown_minutes": 5}
+
+    The shapes are distinguished by ``iid`` (``prop.`` / ``action.`` prefix, or
+    the bare ``scene`` sentinel) and by which payload field is set (``value`` /
+    ``params`` / neither). There is no ``type`` field on RuleAction itself.
+
+    Validation note: ``idempotent=False`` requires ``cooldown_minutes``, and
+    ``iid=scene`` requires ``idempotent=False``. Service / cli layers enforce
+    both; the schema keeps the fields optional so PATCH-style partial updates
+    are not blocked when only one is sent.
     """
 
-    did: str = Field(..., description="Device ID")
+    did: str = Field(
+        ..., description="Device ID; scene_id when iid is 'scene'"
+    )
     iid: str = Field(
         ...,
-        description="Property/action iid: prop.{siid}.{piid} or action.{siid}.{aiid}",
+        description=(
+            "prop.{siid}.{piid} / action.{siid}.{aiid} / 'scene' (did=scene_id)"
+        ),
     )
     value: Any = Field(None, description="Property value (for prop.* iid)")
     params: list[Any] | None = Field(

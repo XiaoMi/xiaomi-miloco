@@ -21,8 +21,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .catalog import get_catalog
 from .paths import miloco_home
@@ -95,11 +97,21 @@ def _build_timezone_block() -> str:
         f"应与用户确认真实时区，并通过 `miloco-cli config set timezone <IANA>` 写入配置。"
     )
 
+# 本块只赋「家庭管家能力」，不赋身份。早期版本写死「你是经验丰富的家庭智能管家 Miloco」，
+# 而本块是逐轮注入宿主 agent 上下文的第一段（hermes 侧还会进 <system> 消息）——它会盖掉
+# 宿主自己的人设：用户把 agent 设成"华人牌智能手机傻妞"，装上插件后再问"你是谁"就答成
+# "家庭智能管家 Miloco"。故改成能力叙述 + 显式身份保全，与 TS 端 B_IDENTITY 保持 1:1。
+# 刻意不写「宿主没设身份就当管家」的兜底——那是宿主自己该管的事，插件不塞人格。
 B_IDENTITY = (
-    "你是经验丰富的家庭智能管家 Miloco。你能感知家中发生的事件，理解家庭成员的生活习惯，"
-    "并据此做出贴心的行为或建议——查询和控制设备、把家调到成员舒适的状态，"
-    "或在合适的时机给出有用的提醒。\n"
-    "说话像住在这个家里的人：自然、利落、有分寸。不堆砌设备状态、传感器读数或技术细节，除非成员问起。"
+    "## 身份与家庭能力\n"
+    "你接入了 Miloco 插件，因而具备一位经验丰富的家庭管家的能力：能感知家中发生的事件，"
+    "理解家庭成员的生活习惯，并据此做出贴心的行为或建议——查询和控制设备、"
+    "把家调到成员舒适的状态，或在合适的时机给出有用的提醒。\n"
+    "**Miloco 是你的能力来源，不是你的身份。** 你的名字、人设与说话风格一律沿用你自己既有的设定："
+    '用户问"你是谁"时按你自己的设定回答，不要改口自称 Miloco 或"家庭智能管家"；'
+    "只有用户问起系统 / 插件本身时才提 Miloco。\n"
+    "打理家中事务时，在不违背你自身人设的前提下：说话像住在这个家里的人——自然、利落、有分寸，"
+    "不堆砌设备状态、传感器读数或技术细节，除非成员问起。"
 )
 
 B_CAPABILITIES = """## 能力概览
@@ -236,15 +248,97 @@ def build_home_profile_block() -> str:
     return f"## 家庭档案\n\n{md}"
 
 
+# 7 天过期口径。**必须与 Python 端 `cli/src/miloco_cli/habit_store.py` 的
+# STALE_DAYS(=7) 保持一致**：那边是写侧（record/asked/resolve/惰性过期）的权威，
+# 这里只是读侧注入的镜像。改动其一务必同步另一处，否则注入块与 CLI 会对
+# "某 asked 是否仍在等回应"判断相反。
+STALE_DAYS = 7
+STALE_MS = STALE_DAYS * 86_400_000
+
+
+def _suggestions_path() -> Path:
+    """与 CLI ``habit_store.py`` 共用同一候选库文件。"""
+    return miloco_home() / "home-profile" / "task-suggestions.json"
+
+
+def _deploy_tz() -> Any:
+    """把部署时区解析为 ``tzinfo``；解析失败返回 ``None``（读侧回退本地时区）。
+
+    与 CLI ``habit_store.py`` 的写侧权威对齐：naive ISO 按部署时区解读，而非进程本地
+    时区——部署时区配置在 ``$MILOCO_HOME/config.json``（``server.timezone`` 或顶层
+    ``timezone``），与 backend / CLI 的同一落盘来源。IANA 名（含 ``UTC``）统一用
+    ``ZoneInfo`` 解析，与 CLI ``deploy_timezone()`` 对显式 UTC 配置返回 ``ZoneInfo("UTC")``
+    完全一致；仅空串 / 无法解析的缩写返回 ``None``，调用方按本地时区兜底。
+    """
+    name = _deploy_timezone().strip()
+    if not name:
+        return None
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+def _to_timestamp(v: Any, tz: Any = None) -> int:
+    """把 ISO 字符串或数字转成毫秒时间戳；解析失败返回 0。
+
+    naive（无时区后缀）ISO 优先按部署时区解读（``tz`` 由调用方传入，缺省按本地兜底），
+    与写侧权威 CLI ``habit_store.py`` 语义一致；带偏移的 ISO 直接按时区偏移解析。
+    """
+    if isinstance(v, (int, float)):
+        return int(v)
+    if isinstance(v, str):
+        try:
+            dt = datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return 0
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz) if tz is not None else dt.astimezone()
+        return int(dt.timestamp() * 1000)
+    return 0
+
+
+def _elapsed_ms(from_iso: str, now_iso: str, tz: Any = None) -> int:
+    return _to_timestamp(now_iso, tz) - _to_timestamp(from_iso, tz)
+
+
+def load_open_questions(now_iso: Optional[str] = None) -> List[Dict[str, Any]]:
+    """未过期的待回应（``asked``）条目；不写盘，作废留给下次 miloco-cli 调用持久化。
+
+    读 ``task-suggestions.json``（与 CLI ``habit_store.py`` 写侧共用），过滤
+    ``status == "asked"`` 且 ``asked_at`` 未超 7 天。文件缺失 / 损坏 / 空返回 ``[]``。
+    导出仅供单测注入 ``now_iso`` 精确验证 7 天边界；生产由
+    ``build_pending_suggestion_block`` 用真实 now。
+    """
+    now = now_iso or datetime.now().astimezone().isoformat()
+    tz = _deploy_tz()
+    try:
+        text = _suggestions_path().read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        store = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    entries = store.get("entries") if isinstance(store, dict) else None
+    if not isinstance(entries, list):
+        return []
+    return [
+        e for e in entries
+        if e.get("status") == "asked"
+        and e.get("key")
+        and e.get("asked_at")
+        and _elapsed_ms(e["asked_at"], now, tz) <= STALE_MS
+    ]
+
+
 def build_pending_suggestion_block() -> str:
     """待回应习惯建议的注入块。
 
     移植自 ``home-profile/injection.ts`` 的 ``buildPendingSuggestionBlock``。
     仅在确有未作废 ``asked`` 条目时返回，否则空串（正常日子完全静默）。
     """
-    # 延迟导入避免循环依赖（tools_habit 也会 import 本模块）。
     try:
-        from .tools_habit import load_open_questions
         open_items = load_open_questions()
     except Exception as exc:  # noqa: BLE001
         logger.debug("load_open_questions failed: %s", exc)
@@ -259,8 +353,8 @@ def build_pending_suggestion_block() -> str:
         f"{items}\n\n"
         "**如何处理用户这条消息：**\n"
         "- 若是肯定/选择/否定语气（\"好/可以/行/就第一个/不用了/不要\"等）且**没有**其它明确意图 → 这就是对上面建议的答复：\n"
-        '  - 同意 → **先用一句话复述命中的是哪条**，再加载 miloco-create-task skill 据该 suggestion 建任务；**建成、拿到 task_id 后** `miloco_habit_suggest(action="resolve", key, outcome="created", task_id="<新任务id>")`。若 create-task 当轮以反问/中断结束、未建成 → 先不 resolve，条目留待用户补答后再落地（勿凭空 resolve）。\n'
-        '  - 拒绝 → `miloco_habit_suggest(action="resolve", key="<对应 key>", outcome="rejected")`，简短回应即可，**之后不再就这条打扰**。\n'
+        '  - 同意 → **先用一句话复述命中的是哪条**，再加载 miloco-create-task skill 据该 suggestion 建任务；**建成、拿到 task_id 后** `miloco-cli habit resolve --key <对应 key> --outcome created --task-id <新任务id>`。若 create-task 当轮以反问/中断结束、未建成 → 先不 resolve，条目留待用户补答后再落地（勿凭空 resolve）。\n'
+        '  - 拒绝 → `miloco-cli habit resolve --key <对应 key> --outcome rejected`，简短回应即可，**之后不再就这条打扰**。\n'
         '- 多条待回应时按用户指代（"第一个/那个喝水的"）定位对应 key。\n'
         "- 若用户这条消息**与这些建议无关**（在说别的事）→ **忽略本段，照常处理，不要调用 resolve**。"
     )

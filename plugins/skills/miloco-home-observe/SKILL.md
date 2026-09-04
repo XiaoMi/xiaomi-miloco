@@ -98,9 +98,10 @@ subject 的人物身份**只能照搬记忆里明确写出的**——记忆说�
 **宠物与家庭构成归类（避免误入 family）：**
 
 - `family` 仅指"全家共同遵守的规则/约定"，**不是**任何家庭相关信息的兜底类。
-- 宠物视为一个非人成员主体：相关信息按维度归入对应 `member_*` 类型，`subject_name` = 宠物名（如"旺财"），`subject_id` 留空（宠物不在身份库）。
+- 宠物视为一个非人成员主体：相关信息按维度归入对应 `member_*` 类型，`subject_name` = 宠物名（如"旺财"）；`subject_id` **先查开关** `miloco-cli config get features.pet_recognition --value-only`（输出 `True` / `False`）分流——**关** → 一律**留空**（即使花名册里有同名也别填 `pet_id`：填了会被软关闭隐藏；留空即纯家庭事实、一直可见）；**开** → 该宠物已在**宠物花名册**（`miloco-cli pet list`）则填其 `pet_id`，否则留空（commit 时按名收敛回 pet_id）。观察路径**不主动建花名册**，登记由用户在 web / 对话中确认。
   - "养了一只小狗旺财" → `member_persona`，subject_name="旺财"
   - "旺财每天傍晚要遛" → `member_routine`，subject_name="旺财"
+- 观察到**宠物外观**（颜色/花纹/体型/显著标记等可见细节）时，凝成一句规范化外观句写入 `member_persona`（如"一只橘白相间的短毛猫，左耳尖有缺口"），供感知在画面中区分与称呼。
 - 家庭构成/成员关系（家里几口人、谁是谁的什么人）→ `member_persona`，subject_name 为对应成员；全家整体构成事实可用 subject_name="shared"。
 
 ## ③ 和已有知识什么关系（写入规则）

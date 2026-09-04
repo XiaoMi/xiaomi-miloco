@@ -17,7 +17,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import yaml
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
@@ -307,10 +307,19 @@ class PerceptionSettings(BaseModel):
     """感知管线相关配置。"""
 
     log_ttl: int = Field(default=30, description="感知日志保留天数")
+    min_suggestion_urgency: Literal["low", "medium", "high"] = Field(
+        default="low",
+        description=(
+            "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃;"
+            "low = 不过滤(默认,向后兼容),medium = 丢弃 low,high = 只保留 high。"
+            "result.suggestions 保留完整,timeline/dump/上下文不受影响,仅 agent 派发受限。"
+        ),
+    )
     event_ttl_days: int = Field(
         default=7,
         description=(
-            "meaningful_events 表保留天数;_log_cleanup_loop 24h 周期按 created_at 删旧行."
+            "meaningful_events / on_demand_log 表保留天数;"
+            "_log_cleanup_loop 24h 周期按 created_at / timestamp 删旧行."
             "产品决策:近 7 天数据足够回看,不保留更长元数据."
             "LRU 触发(磁盘满 5GB)时 clip 可能先于 row 被清,API 返 410,前端"
             "ClipPlayer/AudioClipPlayer onError 触发降级占位('🎬 已过期'/'🎤 音频已过期')."
@@ -322,7 +331,11 @@ class PerceptionSettings(BaseModel):
     )
     snapshot_max_disk_mb: int = Field(
         default=5000,
-        description="截图磁盘配额上限(MB);超出按 mtime 升序 LRU 删",
+        description=(
+            "snapshot 目录总大小上限(MB),超限按 mtime LRU 淘汰最旧事件目录。"
+            "注意实时事件 clip 与主动查询 clip 共享这一份配额:主动查询目录总是最新的,"
+            "永远排在存活侧,高频查询会把历史事件 clip 提前挤出配额"
+        ),
     )
     snapshot_min_free_disk_mb: int = Field(
         default=500,
@@ -412,6 +425,45 @@ _DEFAULT_PERF_FIELD_LABELS: dict[str, str] = {
     "cycle_total": "周期总耗时",
     "pipeline_total": "推理管线总耗时",
 }
+
+
+class FeaturesSettings(BaseModel):
+    """产品级实验性功能开关（默认关，住户在 web 显式开启）。"""
+
+    pet_recognition: bool = Field(
+        default=False,
+        description=(
+            "宠物识别（实验性）总开关：开启后启用「宠物作为家庭成员」的注册与基于"
+            "外观描述的命名识别（注入 caption prompt）。默认关；关闭时前端隐藏宠物入口、"
+            "后端不注入宠物命名规则，已录入的宠物数据保留不删。"
+        ),
+    )
+    pet_head_grounding: bool = Field(
+        default=True,
+        description=(
+            "宠物头像头部定位子开关（默认开）：开启后注册时让 omni 输出宠物头部区域"
+            "坐标作为头像默认裁剪框；关闭时用全身 crop 作头像、不在观察 prompt 中加入"
+            "grounding 段。仅在 pet_recognition 开启时有意义。内部调优参数，一般无需改动。"
+        ),
+    )
+    pet_body_grounding: bool = Field(
+        default=True,
+        description=(
+            "宠物本体定位子开关（默认开）：仅作用于「检测器框不到猫/狗」的回退路径"
+            "——开启后让 omni 在整幅画面中输出目标动物本体坐标，裁本体作参考 crop"
+            "（兼容兔/鸟/仓鼠等非猫狗物种也能有参考图）；关闭时回退路径不产参考 crop。"
+            "仅在 pet_recognition 开启时有意义。内部调优参数，一般无需改动。"
+        ),
+    )
+    pet_reid_diverse: bool = Field(
+        default=True,
+        description=(
+            "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 嵌入的特征距离，在同一只"
+            "候选里贪心选出最不相似的 ≤3 张多姿态参考图（第 1 张仍取质量分最高，第 2/3 张依次"
+            "选特征距离最远者）；关闭或模型不可用时回退感知哈希（dHash）多样性。仅在 "
+            "pet_recognition 开启时有意义。内部调优参数，一般无需改动。"
+        ),
+    )
 
 
 class DirectorySettings(BaseModel):
@@ -614,6 +666,10 @@ class MilocoSettings(BaseSettings):
         default_factory=PerfSettings,
         description="性能指标总开关与报告参数",
     )
+    features: FeaturesSettings = Field(
+        default_factory=FeaturesSettings,
+        description="产品级实验性功能开关（默认关）",
+    )
     schedule: ScheduleSettings = Field(
         default_factory=ScheduleSettings,
         description="cron 调度总开关与相关参数",
@@ -790,6 +846,7 @@ __all__ = [
     "DatabaseSettings",
     "DirectorySettings",
     "DispatcherSettings",
+    "FeaturesSettings",
     "MilocoSettings",
     "MiotSettings",
     "ModelSettings",

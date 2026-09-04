@@ -42,6 +42,19 @@ def _unit(i: int, dim: int = 128) -> np.ndarray:
     return v
 
 
+def _vec_with_sim(s: float, dim: int = 128) -> np.ndarray:
+    """构造单位向量，使其与 ``_unit(0)`` 的余弦相似度恰为 ``s``。
+
+    漂移自检把「与上一窗逐字节相同的 sim」视为无新证据、不计不清，所以需要制造
+    「窗与窗之间 sim 不同但都低于阈值」的场景，不能靠换一个正交基向量（那样 sim
+    仍是 0.0、会被正确判成同一份证据）。
+    """
+    v = np.zeros(dim, dtype=np.float32)
+    v[0] = s
+    v[1] = float(np.sqrt(max(0.0, 1.0 - s * s)))
+    return v
+
+
 def _write_npy(path: Path, vec: np.ndarray) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     np.save(str(path), vec.astype(np.float32))
@@ -94,6 +107,12 @@ class TestDriftCheckConfig:
         assert cfg.drift_check.threshold == 0.55
         assert cfg.drift_check.recency_sec == 900.0
         assert cfg.drift_check.consecutive_windows == 2
+
+    # 这里曾有一条用例，按配置算「证据指纹判据当前会不会被走到」。它读的是部署现场
+    # 配置（会叠本机 config.json），于是持续集成上没有那份文件、断言基本恒绿，而在调过
+    # 参的机器上又会因与那人改动无关的原因变红——两头都不成立，已移除。
+    # 这类跨模块关系值得有个集中的校验落点，但「配置热更之后由谁重新校验」需要单独
+    # 设计，不在本次改动范围内。
 
 
 # =============================================================================
@@ -224,6 +243,10 @@ class TestRunDriftCheck:
         return IdentityLibrary(tmp_path / "identity_lib")
 
     def _make_engine(self, lib: IdentityLibrary, mode: str, track_vec, n_emb) -> IdentityEngine:
+        return self._make_engine_with_pool(lib, mode, _FakePool(track_vec, n_emb))
+
+    def _make_engine_with_pool(self, lib: IdentityLibrary, mode: str, pool) -> IdentityEngine:
+        """同 _make_engine，但由调用方持有 pool 引用（用例需中途改质心时用）。"""
         config = IdentityEngineConfig()
         config.drift_check.mode = mode
         config.drift_check.threshold = 0.5
@@ -237,7 +260,7 @@ class TestRunDriftCheck:
             scope_label=_CAM,
             device_id=_CAM,
             engine_fps=1.0,
-            tier_u_pool=_FakePool(track_vec, n_emb),
+            tier_u_pool=pool,
         )
         return eng
 
@@ -256,10 +279,12 @@ class TestRunDriftCheck:
 
     def test_observe_increments_but_no_revoke(self, lib):
         _write_tier_c(lib, _PID, _CAM, _NOW - 10, _unit(0))
-        eng = self._make_engine(lib, "observe", _unit(1), 5)  # sim=0 < 0.5
+        pool = _FakePool(_unit(1), 5)                        # sim=0 < 0.5
+        eng = self._make_engine_with_pool(lib, "observe", pool)
         st = self._confirmed_state(eng, 7, _PID)
         eng._run_drift_check({7}, _NOW, {})
         assert st.drift_consec_low == 1
+        pool.centroid = _vec_with_sim(0.3)       # 第 2 窗:各自独立的低相似度证据
         eng._run_drift_check({7}, _NOW, {})
         assert st.drift_consec_low == 2          # 已达阈但 observe 不撤
         assert st.status == "confirmed"
@@ -284,13 +309,45 @@ class TestRunDriftCheck:
         eng._run_drift_check({7}, _NOW, {})
         assert st.drift_consec_low == 0
 
+    def test_same_evidence_votes_only_once(self, lib):
+        """同一份证据只投一票：sim 与上一窗逐字节相同 ⟹ 两端都没有新证据，不计不清。
+
+        不加这道判断时：第 1 窗记 1 票，第 2 窗（质心与参考都没变、sim 完全相同）又记
+        1 票 → 达到 consecutive_windows=2 → 身份被撤回，而真实证据只有一窗。
+
+        判据刻意不用「本帧是否真检测命中」：那是末帧快照，而这里比的是整窗累积的质心，
+        出厂窗长大于 track 存活上限，末帧漏检的窗照样有新证据（见 engine 侧注释）。
+        """
+        _write_tier_c(lib, _PID, _CAM, _NOW - 10, _unit(0))
+        pool = _FakePool(_unit(1), 5)                          # sim=0 < 0.5,持续偏离
+        eng = self._make_engine_with_pool(lib, "enforce", pool)
+        st = self._confirmed_state(eng, 7, _PID)
+
+        eng._run_drift_check({7}, _NOW, {})
+        assert st.drift_consec_low == 1                        # 第 1 窗:新证据,记一票
+
+        eng._run_drift_check({7}, _NOW, {})                    # 第 2 窗:输入一动不动
+        assert st.drift_consec_low == 1, "同一份证据不该再投一票"
+        assert st.status == "confirmed"                        # 未达阈,身份保持
+        assert st.committed_person_id == _PID
+
+        # 第 3 窗:质心变了(track 侧有了新外观证据),sim 随之不同但仍低于阈值
+        pool.centroid = _vec_with_sim(0.3)
+        eng._run_drift_check({7}, _NOW, {})
+        # 攒满两窗**各自独立**的低相似度证据,此时才撤(撤回顺带清零,故只断言撤回结果)
+        assert st.status == "pending"
+        assert st.committed_person_id is None
+        assert st.drift_last_sim is None, "撤回时证据指纹应一并清空"
+
     def test_enforce_revokes_after_m_windows(self, lib):
         _write_tier_c(lib, _PID, _CAM, _NOW - 10, _unit(0))
-        eng = self._make_engine(lib, "enforce", _unit(1), 5)  # 持续偏离
+        pool = _FakePool(_unit(1), 5)                        # 持续偏离
+        eng = self._make_engine_with_pool(lib, "enforce", pool)
         st = self._confirmed_state(eng, 7, _PID)
         eng._run_drift_check({7}, _NOW, {})
         assert st.drift_consec_low == 1
         assert st.committed_person_id == _PID       # 第 1 窗不撤
+        pool.centroid = _vec_with_sim(0.3)          # 第 2 窗:各自独立的低相似度证据
         eng._run_drift_check({7}, _NOW, {})
         # 第 2 窗达阈 → 撤回
         assert st.status == "pending"
@@ -303,9 +360,11 @@ class TestRunDriftCheck:
     def test_reconfirm_same_pid_suppressed(self, lib):
         """撤回后 omni 复认回同一 person → 不再 body 二次撤(防震荡)。"""
         _write_tier_c(lib, _PID, _CAM, _NOW - 10, _unit(0))
-        eng = self._make_engine(lib, "enforce", _unit(1), 5)
+        pool = _FakePool(_unit(1), 5)
+        eng = self._make_engine_with_pool(lib, "enforce", pool)
         st = self._confirmed_state(eng, 7, _PID)
         eng._run_drift_check({7}, _NOW, {})
+        pool.centroid = _vec_with_sim(0.3)          # 各窗独立证据
         eng._run_drift_check({7}, _NOW, {})         # 撤回, drift_suppressed_pid=_PID
         assert st.drift_suppressed_pid == _PID
         # 模拟 omni 复认回 _PID

@@ -9,6 +9,8 @@
 Endpoints:
 - `GET /api/events`                              — list_events
 - `GET /api/events/{event_id}/clip/{device_id}`  — locate_clip + FileResponse(Range/206)
+- `GET /api/events/{event_id}/ref/{device_id}`   — locate_ref + FileResponse(全景参考帧)
+- `GET /api/events/{event_id}/crop/{device_id}`  — read_crop_meta(crop 区域坐标,画框用)
 - `GET /api/events/stream`                       — SSE
 """
 
@@ -102,30 +104,93 @@ async def get_event_clip(
         event_id, device_id
     )
     if status == "found":
-        # 类型收窄
         assert path is not None and media_type is not None and timestamp_ms is not None
-        # 下载文件名按事件部署时区时间命名:用户保存后一眼能看出"哪天发生的什么事件"
-        # (比 event_id 前 8 位 UUID 字符串友好得多).格式 `clip-YYYY-MM-DD-HH-MM-SS.ext`:
-        # - 全连字符避免 `:` 在 Windows 文件名非法
-        # - 同毫秒多事件只发生在落盘冲突时(单 device 同 event 只一个文件,不冲突)
-        # - 走 deploy_timezone() 与感知推送「时间」字段同源,host TZ≠部署时区时不错标
-        # content_disposition_type="inline":页面 <audio>/<video> 仍 inline 播放,
-        # 浏览器"另存为"时把这个 filename 当默认下载名.
-        from datetime import datetime
+        from miloco.perception.snapshot_writer import clip_download_name
 
-        from miloco.utils.time_utils import deploy_timezone
-        local_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=deploy_timezone())
-        download_name = (
-            f"clip-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}.{path.suffix[1:]}"
-        )
         return FileResponse(
             path=path,
             media_type=media_type,
-            filename=download_name,
+            filename=clip_download_name(timestamp_ms, path.suffix[1:]),
             content_disposition_type="inline",
         )
     if status == "gone":
         raise HTTPException(message="clip expired", status_code=410)
+    raise HTTPException(message="not found", status_code=404)
+
+
+@router.get(
+    "/{event_id}/ref/{device_id}",
+    summary="Get event 全景参考帧(Smart Crop:crop 视频同附的整帧上下文)",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def get_event_ref(
+    event_id: str,
+    device_id: str,
+    svc: EventsService = Depends(get_events_service),
+) -> FileResponse:
+    """拉取指定 event × device 的全景参考帧 ref.jpg(image/jpeg,inline 展示).
+
+    仅 Smart Crop 事件落有此文件(字节级 = omni 收到的参考帧);前端应据 list 的
+    has_ref 门控请求.用 FileResponse 走 sendfile,不把 JPEG 读进内存.
+
+    返回:
+    - 200:ref.jpg 存在
+    - 404:event 不存在 / device_id 不在 device_ids 内
+    - 410:event 合法但无 ref.jpg(非 crop 事件 / 已被 cleanup 清)
+    """
+    status, path, timestamp_ms = await svc.locate_ref(event_id, device_id)
+    if status == "found":
+        assert path is not None and timestamp_ms is not None
+        # filename 与 clip 端点**共用同一个** clip_download_name(只换前缀),不是各写一份
+        # strftime:不设时"另存为"会拿 URL 末段 device_id 当名字、且没后缀;设了才能一眼
+        # 看出是哪天哪个事件的参考帧。
+        from miloco.perception.snapshot_writer import clip_download_name
+
+        return FileResponse(
+            path=path,
+            media_type="image/jpeg",
+            filename=clip_download_name(timestamp_ms, "jpg", prefix="ref"),
+            content_disposition_type="inline",
+        )
+    if status == "gone":
+        raise HTTPException(message="ref frame not available", status_code=410)
+    raise HTTPException(message="not found", status_code=404)
+
+
+@router.get(
+    "/{event_id}/crop/{device_id}",
+    summary="Get event Smart Crop 元数据(crop 区域在全景帧中的位置)",
+    response_model=NormalResponse,
+    dependencies=[Depends(verify_token)],
+)
+async def get_event_crop_meta(
+    event_id: str,
+    device_id: str,
+    svc: EventsService = Depends(get_events_service),
+):
+    """拉取指定 event × device 的 crop 区域坐标,供前端在参考帧上画框.
+
+    坐标源自 omni_trace(calls[].crop),与 ref.jpg 同一全景像素空间.
+
+    返回:
+    - 200:{region_xyxy, frame_size_wh, crop_short_edge}
+    - 404:event 不存在 / device_id 不在 device_ids 内
+    - 410:这台 device 确定没裁切(盘上无 ref.jpg:非 crop 事件 / 落到全景兜底 /
+      整个事件目录已被 cleanup 清)—— 前端据此不渲染参考卡
+    - 500:裁过(ref.jpg 在盘上)但坐标读不出来(trace 缺失 / 损坏 / crop 字段形状或坐标值
+      不合法:长度、类型不对,或 x2<=x1 / y2<=y1 / 帧尺寸非正 / 框越出帧外)——
+      前端保留参考卡、只是不画框.这一档**不能并进 410**:410 会让整张卡消失,
+      而 ref.jpg 明明在,丢的信息远多于少画一个框.
+    """
+    status, crop = await svc.read_crop_meta(event_id, device_id)
+    if status == "found":
+        assert crop is not None
+        return NormalResponse(code=0, message="ok", data=crop)
+    if status == "gone":
+        raise HTTPException(message="crop meta not available", status_code=410)
+    if status == "unreadable":
+        # 不是 503:trace 已经落盘、内容坏了,重试不会变好,不该让前端/网关按瞬时故障退避重试.
+        raise HTTPException(message="crop meta unreadable", status_code=500)
     raise HTTPException(message="not found", status_code=404)
 
 

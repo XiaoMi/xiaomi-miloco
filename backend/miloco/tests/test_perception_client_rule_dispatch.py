@@ -7,7 +7,7 @@
 跟 test_perception_client.py 的 main-loop dispatch 测试职责分开,本文件专注:
 - update_state 第二参 source_did 用 matched_rule.source_device_ids[0],不再硬编码 "perception"
 - EXITED false 广播按 result.device_rule_map 精确推退,不再用 get_enabled_rule_ids 全集
-- early_sent_rule_ids 改为 set[tuple[str, str]],去重粒度从 rule_id 改为 (rule_id, did)
+- early_sent_rule_ids 是 dict[(rule_id, did), TriggerOutcome | None],去重粒度带 did
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.types import MatchedRule, RealtimePerceptionResult
+from miloco.rule.schema import TriggerOutcome
 
 
 @pytest.fixture
@@ -179,7 +180,7 @@ async def test_early_sent_dedup_per_rule_did_pair(proxy):
     with patch("miloco.manager.get_manager", return_value=_fake_mgr(["rule_X"], capture)):
         await proxy.handle_realtime_perception_result(
             result,
-            early_sent_rule_ids={("rule_X", "cam_A")},  # cam_A 已 early 上报
+            early_sent_rule_ids={("rule_X", "cam_A"): TriggerOutcome.FIRED},  # cam_A 已 early 上报
             artifacts=None,
         )
 
@@ -189,6 +190,46 @@ async def test_early_sent_dedup_per_rule_did_pair(proxy):
     assert len(a_true) == 0, "cam_A early 已上报,终态应去重不重打"
     assert len(b_true) == 1, "cam_B 终态应正常 update_state(True)"
     assert not any(c[2] is False for c in calls)
+
+
+async def test_early_sent_pair_suppresses_false_pushdown(proxy):
+    """消费侧:early_sent pair 必须并进 matched_pairs、抑制「未命中喂 False」推退。
+
+    对应产生侧 test_early_send_registers_pair_even_if_update_state_raises,钉住同一条
+    invariant 的另一半。生产上早送命中的相机若 update_state 抛异常被整窗保护吞掉,该相机
+    会从 merge 丢弃(不进 result.matched_rules),但 device_rule_map 仍列着它(pipeline 前
+    构建)。此时唯有 handle_realtime_perception_result 里的
+    `matched_pairs |= early_sent_rule_ids.keys()` 覆盖它,才不会
+    在终态给这个刚 ENTER 真 fire 的 source 喂一帧 False、白吃单帧抗抖预算。
+    删掉那行 `|=` 时本用例应转红。
+    """
+    result = RealtimePerceptionResult(
+        skipped=False,
+        matched_rules=[],  # cam_A 早送命中但异常被吞 → 从 merge 丢弃,不在 matched_rules
+        # cam_A→rule_X 被 early_sent 覆盖;cam_B→rule_Y 作正面对照:未覆盖、应被喂 False
+        device_rule_map={"cam_A": ["rule_X"], "cam_B": ["rule_Y"]},
+    )
+    capture, calls = _capture_calls()
+    mgr = _fake_mgr(["rule_X", "rule_Y"], capture)
+    with patch("miloco.manager.get_manager", return_value=mgr):
+        await proxy.handle_realtime_perception_result(
+            result,
+            early_sent_rule_ids={("rule_X", "cam_A"): TriggerOutcome.FIRED},  # 只有 rule_X@cam_A 早送登记
+            artifacts=None,
+        )
+
+    triples = [c[:3] for c in calls]
+    # 被 early_sent 覆盖的 pair:不应被喂 False —— 唯一拦住它的就是 |= 折入 matched_pairs。
+    assert ("rule_X", "cam_A", False) not in triples, (
+        "early_sent pair 未并进 matched_pairs → 终态未命中循环给刚 ENTER 真 fire 的 "
+        "source 喂了一帧 False,白吃单帧抗抖预算(见 handle_realtime_perception_result 里的 `|=`)"
+    )
+    # 正面对照:未被覆盖的 rule_Y@cam_B 必被喂 False —— 证明未命中循环确实执行了,否则
+    # 上面的否定断言可能因循环压根没跑到(如日后 device_rule_map 字段被重命名、kwarg 被
+    # pydantic 静默丢弃)而退化成恒真。有它,否定断言才有判别力。
+    assert ("rule_Y", "cam_B", False) in triples, (
+        "未覆盖的 pair 没被喂 False —— 未命中循环没跑到,上面的否定断言已退化成恒真"
+    )
 
 
 async def test_omni_error_empty_map_no_state_change(proxy):

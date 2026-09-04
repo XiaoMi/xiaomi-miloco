@@ -2,8 +2,9 @@
 
 打包内容:
   - metadata.json         事件元数据 + 用户反馈 + 版本 + 数据完整性记录
-  - omni_trace.json.gz    omni 调用记录(prompt + response + 推理参数)
+  - omni_trace.json.gz    omni 调用记录(prompt + response + 推理参数;Smart Crop 事件含 crop 坐标)
   - clips/{device}/clip.* 视频/音频(零重编,omni 原始输入)
+  - clips/{device}/ref.jpg 全景参考帧(仅 Smart Crop 事件;crop 视频同附的整帧上下文)
   - gallery/*.{jpg,png}   画廊合成图(可选,用户勾选时包含)
 
 个人信息脱敏: 对 omni_trace 文本做正则替换(手机号/IP/身份证号 → ***).
@@ -23,7 +24,11 @@ from datetime import datetime
 from importlib.metadata import version as _get_pkg_version
 from pathlib import Path
 
-from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+from miloco.perception.snapshot_writer import (
+    CLIP_CANDIDATES,
+    get_snapshot_root,
+    region_slug,
+)
 from miloco.utils.paths import miloco_home
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
@@ -149,6 +154,7 @@ def build_feedback_pack(
         "omni_trace_found": False,
         "clips_found": [],
         "clips_missing": [],
+        "refs_found": [],
         "gallery_included": False,
     }
 
@@ -163,13 +169,16 @@ def build_feedback_pack(
         slug = region_slug(did)
         clip_dir = event_dir / slug
         found = False
-        for ext in ("mp4", "m4a"):
-            if (clip_dir / f"clip.{ext}").exists():
-                components["clips_found"].append(f"{slug}/clip.{ext}")
+        for candidate in CLIP_CANDIDATES:
+            if (clip_dir / candidate).exists():
+                components["clips_found"].append(f"{slug}/{candidate}")
                 found = True
                 break
         if not found:
             components["clips_missing"].append(slug)
+        # Smart Crop 参考帧(与 clip 同目录);非 crop 事件无此文件,静默跳过
+        if (clip_dir / "ref.jpg").exists():
+            components["refs_found"].append(f"{slug}/ref.jpg")
 
     gallery_dir = event_dir / "gallery"
     has_gallery = gallery_dir.is_dir() and any(gallery_dir.iterdir())
@@ -181,6 +190,7 @@ def build_feedback_pack(
 
     metadata = {
         "event_id": event_id,
+        "type": "event",
         "uid": uid,
         "timestamp": event.get("timestamp"),
         "text": _sanitize_pii(event.get("text", "")),
@@ -192,6 +202,7 @@ def build_feedback_pack(
         "omni_trace_found": components["omni_trace_found"],
         "clips_found": components["clips_found"],
         "clips_missing": components["clips_missing"],
+        "refs_found": components["refs_found"],
         "gallery_included": include_gallery and has_gallery,
     }
 
@@ -227,11 +238,130 @@ def build_feedback_pack(
                 if clip_path.exists():
                     tar.add(clip_path, arcname=f"clips/{clip_rel}")
 
+            for ref_rel in components["refs_found"]:
+                ref_path = event_dir / ref_rel
+                if ref_path.exists():
+                    tar.add(ref_path, arcname=f"clips/{ref_rel}")
+
             if include_gallery and has_gallery:
                 for img in gallery_dir.iterdir():
                     if img.suffix in (".jpg", ".png") and img.is_file():
                         tar.add(img, arcname=f"gallery/{img.name}")
                 components["gallery_included"] = True
+
+        shutil.move(str(tar_tmp), final_path)
+
+    size_bytes = final_path.stat().st_size
+    _cleanup_by_total_size(packs_dir)
+
+    return {
+        "path": final_path.as_posix(),
+        "size_bytes": size_bytes,
+        "components": components,
+    }
+
+
+def build_on_demand_feedback_pack(
+    *,
+    log_id: str,
+    row: dict,
+    error_types: list[str],
+    feedback_text: str,
+    uid: str = "",
+) -> dict:
+    """打包 on-demand query 反馈数据 -> tar.gz.
+
+    与 build_feedback_pack 结构一致,但数据来源是 on_demand_log 而非 meaningful_events;
+    查询路径不产画廊,故 components 无 gallery_included 键.
+
+    Returns:
+        {path, size_bytes, components} — 与 build_feedback_pack 同形状;
+        components 是完整性记录 {omni_trace_found, clips_found, clips_missing},
+        端点(perception/router.py::submit_on_demand_feedback)需原样回给前端.
+    """
+    snapshot_root = get_snapshot_root()
+    event_dir = snapshot_root / log_id
+
+    components: dict = {
+        "omni_trace_found": False,
+        "clips_found": [],
+        "clips_missing": [],
+    }
+
+    trace_path = event_dir / "omni_trace.json.gz"
+    sanitized_trace: bytes | None = None
+    if trace_path.exists():
+        sanitized_trace = _sanitize_trace(trace_path.read_bytes())
+    components["omni_trace_found"] = sanitized_trace is not None
+
+    clip_dids: list[str] = row.get("clip_dids", [])
+    for did in clip_dids:
+        slug = region_slug(did)
+        clip_dir = event_dir / slug
+        found = False
+        for candidate in CLIP_CANDIDATES:
+            if (clip_dir / candidate).exists():
+                components["clips_found"].append(f"{slug}/{candidate}")
+                found = True
+                break
+        if not found:
+            components["clips_missing"].append(slug)
+
+    try:
+        miloco_version = _get_pkg_version("miloco")
+    except Exception:
+        miloco_version = "unknown"
+
+    metadata = {
+        "log_id": log_id,
+        "type": "on_demand",
+        "uid": uid,
+        "timestamp": row.get("timestamp"),
+        "query": _sanitize_pii(row.get("query", "")),
+        "answer": _sanitize_pii(row.get("answer", "")),
+        "sources": row.get("sources", []),
+        "latency_ms": row.get("latency_ms"),
+        "error_types": [_ERROR_TYPE_LABELS.get(k, k) for k in error_types],
+        "user_feedback": _sanitize_pii(feedback_text),
+        "created_at": ms_to_iso_local(now_ms()),
+        "miloco_version": miloco_version,
+        "omni_trace_found": components["omni_trace_found"],
+        "clips_found": components["clips_found"],
+        "clips_missing": components["clips_missing"],
+        "clips_missing_basis": "clip_dids",
+    }
+
+    packs_dir = _packs_dir()
+    packs_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    short_id = _uuid.uuid4().hex[:6]
+    pack_dir = packs_dir / f"{stamp}-{short_id}"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    uid_slug = uid if uid else "anonymous"
+    final_path = pack_dir / f"{_PACK_PREFIX}{uid_slug}-od-{log_id}-{stamp}{_PACK_SUFFIX}"
+
+    with tempfile.TemporaryDirectory() as tmp_root:
+        tmp_root_p = Path(tmp_root)
+        with tempfile.NamedTemporaryFile(
+            suffix=_PACK_SUFFIX, dir=tmp_root_p, delete=False
+        ) as tf:
+            tar_tmp = Path(tf.name)
+
+        with tarfile.open(tar_tmp, "w:gz") as tar:
+            meta_bytes = json.dumps(metadata, ensure_ascii=False, indent=2).encode()
+            info = tarfile.TarInfo(name="metadata.json")
+            info.size = len(meta_bytes)
+            tar.addfile(info, io.BytesIO(meta_bytes))
+
+            if sanitized_trace is not None:
+                info = tarfile.TarInfo(name="omni_trace.json.gz")
+                info.size = len(sanitized_trace)
+                tar.addfile(info, io.BytesIO(sanitized_trace))
+
+            for clip_rel in components["clips_found"]:
+                clip_path = event_dir / clip_rel
+                if clip_path.exists():
+                    tar.add(clip_path, arcname=f"clips/{clip_rel}")
 
         shutil.move(str(tar_tmp), final_path)
 

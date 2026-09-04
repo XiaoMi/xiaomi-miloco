@@ -7,6 +7,8 @@
 - per-device clip: `{snapshot_root}/{event_id}/{device_id_slug}/clip.{mp4|m4a}`
   (一次推理 1 行 event,参与的每个摄像头各落 1 个;字节级 = omni 上传给 LLM 的内容,
    零重编;`device_id_slug` 通过 region_slug 做 URL-safe 化)
+- per-device 参考帧: `{snapshot_root}/{event_id}/{device_id_slug}/ref.jpg`
+  (仅 Smart Crop 模式;与 crop 视频同附上送 LLM 的整帧上下文,字节级 = omni 所见)
 - 事件级 trace: `{snapshot_root}/{event_id}/omni_trace.json.gz`
   (prompt + response + latency + usage + error 的 gzip JSON,用于复盘 LLM 决策)
 
@@ -14,7 +16,7 @@
 - `region_slug(s)` — URL-safe 化 device_id / 区域名
 - `get_snapshot_root()` — 优先 settings.perception.snapshot_root,fallback DirectorySettings.snapshot_dir
 - `check_disk_space(root, min_free_mb)` — 写前预检(B6a)
-- `save_event_artifacts(event_id, artifacts)` — 落盘核心(clip + trace 一次完成)
+- `save_event_artifacts(event_id, artifacts)` — 落盘核心(clip + trace + gallery + 参考帧一次完成)
 - `cleanup_snapshots(ttl_days, max_disk_mb)` — 24h cleanup loop 调用(目录结构不变,
   老 jpeg 路径下的事件也能正常按 mtime 清理)
 """
@@ -57,6 +59,32 @@ def region_slug(s: str) -> str:
     return slug or "_"
 
 
+# 视频路径产物 clip.mp4 (H264+AAC);audio-only 路径产物 clip.m4a (仅 AAC,ipod muxer).
+# 探测顺序:先 mp4 后 m4a,先找到的优先返回。
+# 落盘/事件 clip 端点/主动查询 clip 端点/反馈打包四处同源;加新容器改这里 + ClipKind。
+CLIP_CANDIDATES: tuple[str, ...] = ("clip.mp4", "clip.m4a")
+MEDIA_TYPE_BY_SUFFIX: dict[str, str] = {".mp4": "video/mp4", ".m4a": "audio/mp4"}
+
+
+def locate_clip_file(device_dir: Path) -> tuple[Path, str] | None:
+    for filename in CLIP_CANDIDATES:
+        path = device_dir / filename
+        if path.exists():
+            return path, MEDIA_TYPE_BY_SUFFIX[path.suffix]
+    return None
+
+
+def clip_download_name(timestamp_ms: int, suffix: str, prefix: str = "clip") -> str:
+    # prefix 参数化是为让参考帧端点(ref-*.jpg)复用同一时间格式,而不是各写一份 strftime
+    # ——两处下载名要么一起改、要么一起不改,不能只改一处让用户导出的 clip 与 ref 名字错开。
+    from datetime import datetime
+
+    from miloco.utils.time_utils import deploy_timezone
+
+    local_dt = datetime.fromtimestamp(timestamp_ms / 1000, tz=deploy_timezone())
+    return f"{prefix}-{local_dt.strftime('%Y-%m-%d-%H-%M-%S')}.{suffix}"
+
+
 def get_snapshot_root() -> Path:
     """返回截图根目录绝对路径.
 
@@ -92,25 +120,32 @@ def check_disk_space(root: Path, min_free_mb: int) -> bool:
         return True
 
 
-def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
+def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> list[str]:
     """落盘一次 omni 触发事件的所有产物(clip 字节 + omni trace).
 
     路径:
     - per-device clip: `{snapshot_root}/{event_id}/{region_slug(device_id)}/clip.{mp4|m4a}`
+    - per-device 参考帧: `{snapshot_root}/{event_id}/{region_slug(device_id)}/ref.jpg`(仅 Smart Crop)
     - 事件级 trace: `{snapshot_root}/{event_id}/omni_trace.json.gz`
 
     Args:
         event_id: 事件 UUID
-        artifacts: 含 clips dict 和 trace dict 的容器.两者都空时返 0 不落任何文件.
+        artifacts: 含 clips / trace / gallery / ref_frames 的容器.四者全空时返空列表、
+            不落任何文件(只有 ref_frames 非空时照样落 ref.jpg).
 
     Returns:
-        成功落盘的 device clip 个数(0 ~ len(artifacts.clips));trace 不计入.
-        保持 MeaningfulEvent.snapshot_count 字段含义.
+        成功落盘的 device_id 列表;trace / gallery / ref 均不计入.
+        len(result) 等价于原 snapshot_count.
 
     Caller 责任:调用前已 check_disk_space 确认有空间;本函数遇 OSError 静默跳过.
     """
-    if not artifacts.clips and artifacts.trace is None and not artifacts.gallery:
-        return 0
+    if (
+        not artifacts.clips
+        and artifacts.trace is None
+        and not artifacts.gallery
+        and not artifacts.ref_frames
+    ):
+        return []
 
     snapshot_root = get_snapshot_root()
     event_dir = snapshot_root / event_id
@@ -118,26 +153,32 @@ def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> int:
         event_dir.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         logger.error("Failed to create event dir %s: %s", event_dir, e)
-        return 0
+        return []
 
-    clip_count = _save_clips(event_dir, artifacts.clips)
+    clip_dids = _save_clips(event_dir, artifacts.clips)
+    if artifacts.ref_frames:
+        _save_ref_frames(event_dir, artifacts.ref_frames)
     if artifacts.trace is not None:
         _save_trace(event_dir, artifacts.trace)
     if artifacts.gallery:
         _save_gallery(event_dir, artifacts.gallery)
-    return clip_count
+    return clip_dids
 
 
 def _save_clips(
     event_dir: Path,
     clips: dict[str, tuple[bytes, ClipKind]],
-) -> int:
-    """落 per-device clip 字节到 event_dir.kind 非法 / 空字节 → 跳过该 device."""
-    count = 0
+) -> list[str]:
+    """落 per-device clip 字节到 event_dir.kind 非法 / 空字节 → 跳过该 device.
+
+    Returns:
+        成功落盘的 device_id 列表.
+    """
+    saved: list[str] = []
     for device_id, (clip_bytes, kind) in clips.items():
         if not clip_bytes:
             continue
-        if kind not in ("mp4", "m4a"):
+        if f"clip.{kind}" not in CLIP_CANDIDATES:
             logger.error("Unknown clip kind %r for %s; skipping", kind, device_id)
             continue
         device_dir = event_dir / region_slug(device_id)
@@ -149,11 +190,32 @@ def _save_clips(
         path = device_dir / f"clip.{kind}"
         try:
             path.write_bytes(clip_bytes)
-            count += 1
+            saved.append(device_id)
         except OSError as e:
             logger.error("Failed to write %s: %s", path, e)
             continue
-    return count
+    return saved
+
+
+def _save_ref_frames(event_dir: Path, ref_frames: dict[str, bytes]) -> None:
+    """落 per-device 全景参考帧 JPEG 到 `{device_slug}/ref.jpg`(与 clip 同目录).
+
+    空字节 → 跳过该 device.失败 logger.error 不抛,不影响 clip / trace 落盘.
+    """
+    for device_id, jpeg_bytes in ref_frames.items():
+        if not jpeg_bytes:
+            continue
+        device_dir = event_dir / region_slug(device_id)
+        try:
+            device_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.error("Failed to create device dir %s: %s", device_dir, e)
+            continue
+        path = device_dir / "ref.jpg"
+        try:
+            path.write_bytes(jpeg_bytes)
+        except OSError as e:
+            logger.error("Failed to write %s: %s", path, e)
 
 
 def _save_trace(event_dir: Path, trace: dict[str, Any]) -> None:

@@ -19,7 +19,8 @@
 
 ⚠️ 零额外推理硬约束:任何 ReID embedding **都从 ReIDProvider 取**(读跟踪侧
 Track.features deque 末尾元素),严禁本文件调 HumanReID.extract_feature。
-单测 ``test_tier_u_no_extra_extract`` 是护栏。
+护栏是 ``tests/perception/engine/identity/test_tier_u.py::test_pool_never_calls_extract_feature``
+(跨包, 在 tests/ 树下)。
 """
 
 from __future__ import annotations
@@ -31,13 +32,16 @@ import threading
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Callable, Iterable
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from miloco.perception.engine.identity._image_utils import (
+    SHARPNESS_NORM_REF as _SHARPNESS_NORM_REF,
+)
 from miloco.perception.engine.identity._image_utils import (
     hamming as _hamming,
 )
@@ -95,10 +99,6 @@ _W_SHARP: float = 0.2
 # aspect 评分用的 "sweet spot": w/h = 1:2.5 = 0.4 = 站立人形标准比例。
 # 偏离 sweet spot 越远 → aspect_score 越低。
 _ASPECT_SWEET: float = 0.4
-
-# sharpness 归一化参考值 (Laplacian variance), 沿用 extractor._SHARPNESS_NORM_REF。
-# 跟 v4 §2.2.3 TierA 评分公式同口径。
-_SHARPNESS_NORM_REF: float = 300.0
 
 
 def _aspect_dist_normalized(
@@ -222,7 +222,13 @@ class TierUConfig:
     # 误隐藏。逐张比对(不 mean): tier_c 样本差异大, mean 后反而模糊化。
     reid_threshold_tier_c_dedup: float = 0.90
     # quality gate(crop 进 L2 前过滤)
-    area_ratio_min: float = 0.05
+    # 曾有一个 area_ratio_min 字段:不参与任何判定(_pass_quality_gate 不校面积占比 ——
+    # 这里拿不到 frame size,面积由 detector_conf 间接保障),也不在 yaml、不在前端,
+    # 连"可调但无效"都不构成,已删除。
+    # 注:它并非"全仓无引用" —— dump_to 用 vars(self.config) 原样落盘,所以旧快照的
+    # manifest 里还带着它;load_from 会把认不出来的键丢掉并告警(见那边的说明)。
+    # ⚠️ 以下这组阈值在 identity/extractor.py 有一套同名语义的模块级常量(_GATE_*),
+    # 两套之间无任何绑定 —— 不要假设它们一致,改这里之前请直接比对那边的代码。
     aspect_min: float = 0.25                 # w/h ≥ 0.25 = 不接受比 1:4 更瘦的 bbox
                                              # (0.20→0.25:1:5 极瘦杆即使 sharpness 高
                                              # 也不利辨认,直接源头丢)
@@ -460,11 +466,15 @@ class TierUPool:
         self._fully_closed_clusters: set[str] = set()
         # centroid (cluster mean emb) 缓存: cluster_id → (signature, centroid)。
         # 省 _cluster_pairwise_union 跨 fetch 重复算 np.mean(K×crops×128)。
-        # **内容指纹式**而非主动删除式: signature = (member frozenset, 参与 mean 的
-        # emb 数), 簇内容一变 signature 自然对不上 → 自动失效, 无需在 push_crop /
-        # flush / merge / close / evict 等 6 条路径手动 invalidate。漏维护指纹最坏
-        # 退化成"多算一次"(性能), 而非主动删除式"漏删一处 → 用 stale centroid 误合
-        # 不同人 → 不可逆跨身份污染"。详见 _cluster_mean_embedding。
+        # **正确性**靠内容指纹: signature = (member frozenset, 参与 mean 的 emb 数,
+        # 每成员的 (贡献层级, 具体 crop 帧号 / entry 级快照 ts)), 簇内容一变 signature
+        # 对不上 → 自动重算, 无需在 push_crop / flush / merge / close 等路径手动
+        # invalidate(漏维护最坏"多算一次", 不会用 stale centroid 误合)。指纹的**边界**
+        # (以及为何"emb 数"一项不够)见 _cluster_mean_embedding 的指纹处注释。
+        # **但内存回收指纹管不了**: cluster_id 被彻底弹掉(evict 最后一个成员 / merge 旧簇
+        # 被吸收)后永不再被查 → 其 cache 项既不会被指纹重算也不会被删 → 单调泄漏
+        # (issue #429)。故 _evict_entry / _merge_into_cluster 这两条"簇消失"路径
+        # 显式 pop 掉对应 cluster_id(只 pop 已消失的 id, 对存活簇零影响, 无误合风险)。
         self._centroid_cache: dict[str, tuple[tuple, NDArray[np.float32]]] = {}
 
     @_synchronized
@@ -569,6 +579,12 @@ class TierUPool:
                 # emb 拉到才收手——拉不到下窗口按 retry_gap 节流重试
                 te.did_first_dedup = True
 
+        # 本次 push 往 L1 加了一张(可能还刷了 entry 级 emb 快照)→ 该 cluster 的
+        # centroid 可能漂移。不清的话 _cluster_pairwise_union 会命中旧 sim、把刚算好的
+        # 新 centroid 丢掉:旧低分让同人在池里长期分裂,旧高分导致不可逆错合。
+        # 放在函数末尾:一次覆盖 L1 append 与 G 方案的 entry 级 emb 刷新两种变动。
+        self._invalidate_match_cache_for_entry(te)
+
     @_synchronized
     def flush_if_due(self) -> list[str]:
         """对所有 entry 检查 L1 是否累积到 l1_capacity,达标则晋级。
@@ -592,6 +608,8 @@ class TierUPool:
             if best is None:
                 # 全部不合格 → 清 L1 重新累积(不强行写)
                 te.crops_l1.clear()
+                # 清空 L1 同样改 centroid(该成员此前若无 L2 emb, 正是靠 L1 mean 贡献)
+                self._invalidate_match_cache_for_entry(te)
                 continue
 
             # 2) 给入 L2 的 crop 拉 per-crop emb 快照(零额外推理,读跟踪侧 deque
@@ -604,9 +622,6 @@ class TierUPool:
             # 3) 推入 L2(FIFO 满则弹最旧)
             while len(te.crops_l2) >= self.config.l2_capacity:
                 te.crops_l2.popleft()
-                # 顺手清匹配 cache(该 cluster 的代表帧可能变了——保守清)
-                if te.cluster_id is not None:
-                    self._invalidate_match_cache_for_cluster(te.cluster_id)
             te.crops_l2.append(best)
             te.crops_l1.clear()
             te.last_l1_push_ts = now
@@ -623,6 +638,14 @@ class TierUPool:
                     te.embedding_snapshot_ts = now
                     te.embedding_sharpness = best.sharpness
                     te.embedding_dirty = True
+
+            # 本轮 flush 动过该 entry 的 L2 popleft / L2 append / L1 清空 / entry 级 emb
+            # 刷新 —— 四者都改 centroid,放在循环体末尾一次覆盖。
+            # 此前只在上面 popleft 分支清,于是 L2 未满的"填充期"(每成员前 l2_capacity
+            # 次 flush)的 centroid 漂移对 _match_cache 完全不可见:pairwise union 会一直
+            # 复用第一次算的分数,catch-up 合并对 crop 累积型漂移失效(旧低分→同人长期
+            # 分裂;早期 noisy crop 的旧高分→不可逆错合)。
+            self._invalidate_match_cache_for_entry(te)
 
         # 4) 跑入库去重(脏标记驱动,intra_cam 内)
         promoted_clusters = self._intra_cam_dedup_tick()
@@ -791,37 +814,59 @@ class TierUPool:
             self._centroid_cache.pop(cluster_id, None)
             return None
         embs: list[NDArray[np.float32]] = []
-        for key in cluster.members:
+        # 每成员的贡献指纹 (key, tier, content),进下面的 signature。tier: 2=L2 /
+        # 1=L1 / 0=entry 级快照 / -1=无贡献。content 钉住"具体是哪一批 emb":
+        # crop 层用贡献 crop 的 frame_index 元组,entry 层用 embedding_snapshot_ts。
+        # 成员按 sorted 遍历(原本是 set 序):既让 parts 可比,也让 np.mean 的累加
+        # 顺序确定 → 同一批 emb 每次算出逐位相同的 centroid。
+        parts: list[tuple[tuple[str, int], int, tuple[float, ...]]] = []
+        for key in sorted(cluster.members):
             entry = self._entries.get(key)
             if entry is None:
+                parts.append((key, -1, ()))
                 continue
-            # 优先收所有 L2 crop emb
-            before = len(embs)
-            for crop in entry.crops_l2:
-                if crop.reid_embedding is not None:
-                    embs.append(crop.reid_embedding)
-            if len(embs) > before:
-                continue
-            # L2 全为空 → 退到 L1 (短命 track 没机会晋级 L2 时)
-            for crop in entry.crops_l1:
-                if crop.reid_embedding is not None:
-                    embs.append(crop.reid_embedding)
-            if len(embs) > before:
-                continue
+            tier = -1
+            content: tuple[float, ...] = ()
+            # 优先收所有 L2 crop emb;L2 全空 → 退到 L1(短命 track 没机会晋级 L2 时)
+            for tier_id, crops in ((2, entry.crops_l2), (1, entry.crops_l1)):
+                frames: list[float] = []
+                for crop in crops:
+                    if crop.reid_embedding is not None:
+                        embs.append(crop.reid_embedding)
+                        frames.append(float(crop.frame_index))
+                if frames:
+                    tier, content = tier_id, tuple(frames)
+                    break
             # L1 也空 → 退到 entry 级 emb 快照(首次 push 拉的)
-            if entry.reid_embedding is not None:
+            if tier == -1 and entry.reid_embedding is not None:
                 embs.append(entry.reid_embedding)
+                tier, content = 0, (entry.embedding_snapshot_ts,)
+            parts.append((key, tier, content))
         if not embs:
             self._centroid_cache.pop(cluster_id, None)
             return None
-        # 内容指纹: (member frozenset, 参与 mean 的 emb 数)。收集 embs 引用是
-        # O(crops) 廉价指针操作, 真正贵的是下面 np.mean(K×crops×128)。指纹命中
-        # 就跳过 np.mean。crop emb append-only + flush 只移动不替换 → 同一批 emb
-        # 指纹不变 centroid 也不变 (安全)。member 增删 / push / close 都会改指纹
-        # → 自动重算。唯一窄碰撞: 某 member L1/L2 全空时 entry 级兜底 emb 被
-        # embedding_dirty 重算替换 (emb 数不变但值变) → 慢一拍, 但仍是同 entry 的
-        # emb 旧值, 非跨身份, 可接受。
-        signature = (frozenset(cluster.members), len(embs))
+        # 内容指纹: (member frozenset, emb 数, 每成员的 (tier, 贡献内容))。收集 embs
+        # 引用 + 攒 parts 是 O(crops) 廉价指针 / 小元组操作, 真正贵的是下面
+        # np.mean(K×crops×128); 指纹命中就跳过 np.mean。
+        #
+        # 指纹**不是无条件**保证 —— 它只在"emb 集合变了 ⇒ 上面三元组必变"时自愈。
+        # 当前代码成立, 因为每条改 centroid 的写入都动了三元组里某一项。历史上按
+        # (members, emb 数) 两项指纹漏掉过三类"条数不变但换了 emb"的碰撞, 现已分别由
+        # tier / frame_index / snapshot_ts 覆盖:
+        #   1. **层级切换**: 某 crop 被回填 emb (_cluster_candidate_for) 或 crop 被清空
+        #      (close_write_gate) 让该成员从 L1↔L2↔entry 级换层, 条数可能恰好不变 → 由
+        #      tier 区分。这条最毒: 它会让 _invalidate_match_cache_for_entry 退化成空操作
+        #      (pair sim 清了, 但这里返回旧 centroid, 于是同一个旧分数被原样写回)。
+        #   2. **L2 FIFO 换血**: L2 满时 flush_if_due 先 popleft 再 append, 条数恒 =
+        #      l2_capacity 但换了一张 → 由 frame_index 元组区分 (帧号单调递增, 不复用)。
+        #      旧注释断言的"flush 只移动不替换"漏了 popleft 这侧。
+        #   3. **entry 级快照被替换**: L1/L2 无 emb 时靠 entry 级兜底, 而它会被
+        #      embedding_dirty 重算替换 (条数不变值变) → 由 snapshot_ts 区分。
+        #
+        # 仍未覆盖的形态: emb 值被**原地替换**且 frame_index 与 snapshot_ts 都没动。
+        # 当前无此路径(crop emb 写入一律 None→有值; entry 级替换必刷 ts), 新增路径请
+        # 自查 —— 别把这段读成"指纹永远自愈"。
+        signature = (frozenset(cluster.members), len(embs), tuple(parts))
         cached = self._centroid_cache.get(cluster_id)
         if cached is not None and cached[0] == signature:
             return cached[1]
@@ -883,6 +928,10 @@ class TierUPool:
         # 的 entry, old 已被弹 (set 里残留就是 stale)。
         self._fully_closed_clusters.discard(target_cluster_id)
         self._fully_closed_clusters.discard(old_cluster_id)
+        # old_cluster_id 已 dangling,其 _centroid_cache 项永不再被查(不会自愈)→
+        # 显式清,否则每次跨 cluster 合并泄漏一条 (issue #429)。target 的
+        # centroid 虽也变了但 member 指纹随之变 → _cluster_mean_embedding 自动重算,不用清。
+        self._centroid_cache.pop(old_cluster_id, None)
 
     # ----- 注册取数:fetch -----
 
@@ -1008,6 +1057,12 @@ class TierUPool:
                 # 顺手给那张 best crop 也带上 emb,下游 BodySample → .npy 链路省一次抽取
                 if best.reid_embedding is None:
                     best.reid_embedding = emb
+                # entry 级快照与 L1 crop emb 都在 _cluster_mean_embedding 的三级
+                # fallback 里 → centroid 变。下面的 _intra_cam_dedup_tick 只在**真发生
+                # merge** 时才顺带清 cache,分数没过阈值就会留下"质心已变、cache 未清"。
+                # 本段在步骤 3 之前跑,于是紧随其后的 _cluster_pairwise_union 会直接
+                # 命中此前几轮 fetch 写入的旧分数,把这里刚补出来的新 centroid 白算掉。
+                self._invalidate_match_cache_for_entry(e)
             # 跑一次 dedup tick,让刚补 emb 的 entry 跟现有 cluster 比对合并
             self._intra_cam_dedup_tick()
 
@@ -1303,6 +1358,10 @@ class TierUPool:
         all_l1: list[CropEntry] = []
         per_cam_rep: dict[str, CropEntry] = {}
         for e in group_entries:
+            # 本 entry 这轮是否发生过 emb 回填(L1/L2 任一)。回填让"原本无 emb 的
+            # crop"进了 _cluster_mean_embedding 的收集范围 → 参与 mean 的条数变 →
+            # centroid 变,必须清 _match_cache。详见循环末尾的说明。
+            emb_backfilled = False
             for c in e.crops_l2:
                 # 兜底:L2 crop 在 flush 时通常会拉 emb,但若 flush 那刻 provider 暂时
                 # 拿不到(mode=fast/skip_windows 偶发空 deque),crop.reid_embedding 留
@@ -1311,6 +1370,7 @@ class TierUPool:
                 # ReID 没出产"边缘场景。
                 if c.reid_embedding is None and e.reid_embedding is not None:
                     c.reid_embedding = e.reid_embedding
+                    emb_backfilled = True
                 all_l2.append(c)
                 cur = per_cam_rep.get(e.cam_id)
                 if cur is None or c.sharpness > cur.sharpness:
@@ -1324,7 +1384,21 @@ class TierUPool:
                 # fallback 写出来的 tier_a 样本也带 ReID emb。
                 if c.reid_embedding is None and e.reid_embedding is not None:
                     c.reid_embedding = e.reid_embedding
+                    emb_backfilled = True
                 all_l1.append(c)
+            # 回填改的是 entry 持有的 CropEntry 对象本身(不是副本),而
+            # _cluster_mean_embedding 收的正是 crop.reid_embedding —— 某 crop 从
+            # None 变成有值会让参与 mean 的条数 +1(或让该成员整体换一层收)→
+            # centroid 变。_centroid_cache 靠内容指纹自愈(指纹含每成员的贡献层级 +
+            # 具体 crop 帧号,回填导致的换层也算变;边界见其指纹处注释),
+            # _match_cache 不带指纹必须显式清。
+            # **本函数跑在 _cluster_pairwise_union 之后**(fetch 步骤 3→4),不清则
+            # 本次 fetch 刚写入的 sim 当场就与新 centroid 不一致;下次 fetch 命中即
+            # 误判 —— 号码图翻页是靠 agent 拿 next_offset 重发 fetch 实现的,用户回
+            # 一句"更多"就是秒级内的第二次全局 fetch,不依赖任何竞态。
+            # 后果与 4a/4b 同类:旧高分→不可逆身份错合;旧低分→同人长期分裂。
+            if emb_backfilled:
+                self._invalidate_match_cache_for_entry(e)
         # L2 + L1 都为空才真的没数据;只有 L1 时 representative 取 L1 最锐(用户
         # 刚出现在镜头前,L1 还没满 flush 时也能让 fetch 看到候选)
         if not all_l2 and not all_l1:
@@ -1494,9 +1568,56 @@ class TierUPool:
         return closed
 
     def _invalidate_match_cache_for_cluster(self, cluster_id: str) -> None:
+        """清掉所有含 ``cluster_id`` 的 pair sim。
+
+        **不变量**:任何改变该 cluster **centroid** 的路径都必须调本函数 —— 口径是
+        centroid 而非"成员集合",后者小一圈:``_cluster_mean_embedding`` 收的是**全体
+        成员的所有 crop emb**(L2 优先,空则 L1,再空则 entry 级快照),所以成员集合不
+        变、只是某成员攒 / 吐一张 crop、甚至只是给某张 crop **回填** emb(参与 mean 的
+        条数 +1)也会改 centroid。
+
+        下面按写入 / 读取两侧列已知调用点。**这张清单不宣称穷举** —— 判据是上面那条
+        centroid 不变量,新增路径请照不变量自查、并把自己加进来。历史上这里两次因为
+        "声明清单完整"而漏路径:928da26 写成"成员集合变"漏了 crop 累积(8033ea6 补),
+        8033ea6 只列写入侧漏了下面 fetch 读取侧两条。
+
+        - 写入侧 · 成员集合变:_merge_into_cluster / split_cluster /
+          close_write_gate / _evict_entry(含只淘汰部分成员)。
+        - 写入侧 · 成员内部 crop / emb 变:push_crop 的 L1 累积、flush_if_due 的 L2
+          popleft/append + L1 清空 + entry 级 emb 刷新。
+        - **读取侧(fetch)· emb 回填**:fetch 第 4 道防线的现场抽 emb 回写、
+          _cluster_candidate_for 给缺 emb 的 L1/L2 crop 回填 entry 级快照。后者跑在
+          ``_cluster_pairwise_union`` **之后**,不清则本次 fetch 刚写入的 sim 当场就与
+          新 centroid 不一致,下次 fetch(号码图翻页 = 秒级内重发一次全局 fetch)命中
+          即误判。
+
+        后三类均经 ``_invalidate_match_cache_for_entry``。
+
+        _match_cache 的键只有 ``frozenset({cid_a, cid_b})``、**不带内容指纹**,不像
+        _centroid_cache 那样能靠指纹自愈,所以漏一处就会长期复用错的 sim(旧低分让同
+        人长期分裂;旧高分错合两簇尤其危险,身份合并不可逆)。
+
+        另注:清 pair sim 只有在 ``_cluster_mean_embedding`` 真能算出新 centroid 时才
+        有意义 —— 若其内容指纹漏判(碰撞形态见该函数指纹处注释),这里清完下一次仍会把
+        同一个旧分数原样写回,本函数退化成空操作。两处必须一起看。
+        """
         stale = [k for k in self._match_cache if cluster_id in k]
         for k in stale:
             self._match_cache.pop(k, None)
+
+    def _invalidate_match_cache_for_entry(self, entry: TierUEntry) -> None:
+        """某 entry 的 crop / emb 变动 → 其所属 cluster 的 centroid 可能漂移 → 清 pair sim。
+
+        **保守清**:不判断这次变动是否真的改到了 centroid(取决于该成员当前靠 L2 /
+        L1 / entry 级哪一层贡献,判据易随 _cluster_mean_embedding 改动而失配)。代价
+        不对称——多清 = 下次 fetch 多算一次 128 维 cosine;漏清 = 长期复用错的 sim。
+
+        副作用是活跃 cluster 的 pair sim 基本每帧失效。这是可接受的:_match_cache 只
+        在 fetch 里的 _cluster_pairwise_union 被读写(~1-2 次/天),被清掉的正是"正在
+        长 crop、分数必然过时"的那些 cluster;闲置 cluster 的 pair 仍跨 fetch 复用。
+        """
+        if entry.cluster_id is not None:
+            self._invalidate_match_cache_for_cluster(entry.cluster_id)
 
     # ----- M10:cluster 拆分(commit 前的"误合并修正"接口) -----
 
@@ -1624,14 +1745,31 @@ class TierUPool:
             cluster = self._clusters.get(entry.cluster_id)
             if cluster is not None:
                 cluster.members.discard(key)
+                # 成员集合一变 centroid 就变 → 立刻清所有含该 cluster 的 pair sim,
+                # **不能等 cluster 被删空**:_match_cache 的键只有
+                # frozenset({cid_a, cid_b})、不含成员指纹(不同于 _centroid_cache
+                # 的内容指纹自愈),TTL/LRU 只淘汰部分成员时 pair 键不变,
+                # _cluster_pairwise_union 会继续复用旧 sim:
+                #   - 假阴性:旧低分挡掉本该发生的 merge;
+                #   - 假阳性:旧高分把"成员淘汰后已不再相近"的两簇错合 —— 身份合并
+                #     不可逆,危害更大。
+                # 其余改成员的路径(_merge_into_cluster / split_cluster /
+                # close_write_gate / L2 FIFO 弹出)本就各自清过,这里补齐最后一处,
+                # 让"成员变即清 cache"在所有路径上成立。
+                # (_centroid_cache 此处无需动:member frozenset 进了签名,下次
+                #  _cluster_mean_embedding 自动重算;只有下面 cluster 整个消失、
+                #  永不再被查的情形才必须显式 pop。)
+                self._invalidate_match_cache_for_cluster(entry.cluster_id)
                 if not cluster.members:
                     self._clusters.pop(entry.cluster_id, None)
-                    self._invalidate_match_cache_for_cluster(entry.cluster_id)
                     # cluster 整个被弹 (TTL/LRU 清掉最后一个成员) → set 里残留就是
                     # stale, 跟 _merge_into_cluster 跨 cluster 合并 old 被弹同语义。
                     # 不清的话 set 单调泄漏 (UUID 36 字节/条) + 跟 __init__ 注释
                     # "接新成员/被弹时移除"承诺不一致。
                     self._fully_closed_clusters.discard(entry.cluster_id)
+                    # 同理清 _centroid_cache:cluster 已弹、永不再被查 → 不清则每淘汰
+                    # 一簇泄漏一条 (issue #429 高 track churn 长跑最坏几百 MB)。
+                    self._centroid_cache.pop(entry.cluster_id, None)
 
     # ----- 状态查询(给 status 端点用) -----
 
@@ -1786,6 +1924,9 @@ class TierUPool:
 
         v1 快照真需要离线分析时,显式手改 manifest.json 里 ``"version": 1 → 2`` +
         把 entries[*].cam_id 重写到 device_id 再 load(没工具脚本,自己 grep 改)。
+
+        版本闸管的是**字段语义变化**。纯粹的死字段删除不走它:快照 config 里认不出来的
+        键直接丢掉并告警,因为那种字段本就不影响任何判定,为它把存量快照全部作废不划算。
         """
         import json
         import os
@@ -1799,7 +1940,22 @@ class TierUPool:
             )
         arrays = np.load(os.path.join(path, "arrays.npz"))
 
-        pool_config = config if config is not None else TierUConfig(**manifest["config"])
+        if config is not None:
+            pool_config = config
+        else:
+            # dump 侧是 vars(self.config) 原样落盘,所以快照里可能带着本版本已经删掉的
+            # 死字段;直接 TierUConfig(**raw) 会抛 TypeError,而这是排障工具 —— 排障现场
+            # 最不该遇到的就是工具自己炸,且那个报错完全不提示该怎么办。
+            # 认不出来的键**丢掉并告警**:纯死字段的删除不改变任何语义,不值得 bump 版本
+            # 把存量快照全部作废(版本闸管的是字段语义变化,见上面 docstring)。
+            raw = manifest["config"]
+            known = {f.name for f in fields(TierUConfig)}
+            dropped = sorted(set(raw) - known)
+            if dropped:
+                logger.warning(
+                    "[TierU] 快照 config 含本版本已不存在的字段, 已忽略: %s", dropped,
+                )
+            pool_config = TierUConfig(**{k: v for k, v in raw.items() if k in known})
         pool = cls(config=pool_config, reid_provider=reid_provider, now_fn=now_fn)
 
         def _dict_to_crop(d: dict) -> CropEntry:

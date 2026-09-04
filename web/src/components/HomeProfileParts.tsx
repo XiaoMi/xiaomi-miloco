@@ -65,11 +65,30 @@ export const isMemberType = (t: HomeEntryType): boolean =>
   t.startsWith("member_");
 
 // 归属判定：member 类型且 subjectId 命中某个已知家人 → 归该成员（进其抽屉）；
-// 否则一律归家庭档案面板（含 family/space/device 与「没认出是谁」的 member_*）。
-// 保证每条 profile/candidate 都恰好出现在一处，绝不从界面上蒸发。
+// 宠物条目（subjectId 是 pet_*）→ 归宠物档案卡，见 hostedByPetCard；
+// 其余一律归家庭档案面板（含 family/space/device 与「没认出是谁」的 member_*）。
+// 保证每条 profile/candidate 都恰好出现在一处，绝不从界面上蒸发、也不在两处重复。
 export function ownerOf(entry: HomeEntry, persons: Person[]): Person | null {
   if (!isMemberType(entry.type) || !entry.subjectId) return null;
   return persons.find((p) => p.id === entry.subjectId) ?? null;
+}
+
+/** subjectId 形如 pet_* → 宠物主体条目。纯前缀判定（不查花名册），给动作守卫用：
+ *  花名册未加载时也要拦住「改派给家人」，宁可少给一个动作也不要把宠物条目改成人的。 */
+export function isPetSubject(entry: HomeEntry): boolean {
+  return Boolean(entry.subjectId?.startsWith("pet_"));
+}
+
+/** 该条目是否由「宠物档案卡」独占承载（→ 家庭档案面板不再重复展示）。
+ *  **只认外观（member_persona）**：它在宠物档案卡右上「编辑」→ PetDrawer 里有改的入口，排除掉不会
+ *  失去写回路径。其余宠物条目（作息/健康…）一律留在家庭档案面板——宠物档案卡是只读展示，把它们也
+ *  排除等于让 Agent 写进去的事实在 Web 上既改不了也删不掉。代价是这些条目两处可见（卡内只读、
+ *  面板内可编），比丢掉唯一的改/删入口划算。
+ *  前缀 + 花名册命中（与后端 service 的 _is_pet_entry 同口径）；花名册还没到（undefined）时
+ *  按前缀先当宠物，避免宠物外观在「共享信息」里闪现一帧。 */
+export function hostedByPetCard(entry: HomeEntry, pets?: { id: string }[]): boolean {
+  if (entry.type !== "member_persona" || !isPetSubject(entry)) return false;
+  return pets === undefined || pets.some((p) => p.id === entry.subjectId);
 }
 
 // ── 写执行器：写 → commit 重渲染 md → toast → reload ─────────
@@ -77,7 +96,9 @@ export function ownerOf(entry: HomeEntry, persons: Person[]): Person | null {
 // commit 失败仅吞掉（md 不同步不该挡住数据已落盘的事实）。
 export function useHomeWrite(onChanged: () => void) {
   const { t } = useTranslation();
-  return async (fn: () => Promise<void>, okMsg?: string): Promise<void> => {
+  // fn 的返回值一律忽略（只 await 完成与否）→ 用 unknown 收，让返回 id 的写操作
+  // （如 addHomeEntry: Promise<string>）也能直接传进来。
+  return async (fn: () => Promise<unknown>, okMsg?: string): Promise<void> => {
     try {
       await fn();
     } catch (e) {
@@ -154,7 +175,7 @@ export function EntryRow({
     <button
       type="button"
       onClick={onOpen}
-      className="group w-full flex items-center gap-3 py-3 text-left transition-colors hover:bg-bg-tertiary/50 -mx-2 px-2 rounded-md"
+      className="group w-full flex items-center gap-3 py-3 text-left transition-colors hover:bg-bg-tertiary -mx-2 px-2 rounded-md"
     >
       <span className="min-w-0 flex-1 text-body text-text-primary break-words">
         {who && <span className="text-text-secondary">{who} · </span>}
@@ -200,7 +221,7 @@ export function CandidateRow({
     <button
       type="button"
       onClick={onOpen}
-      className="group w-full flex items-center gap-3 py-3 text-left transition-colors hover:bg-bg-tertiary/50 -mx-2 px-2 rounded-md"
+      className="group w-full flex items-center gap-3 py-3 text-left transition-colors hover:bg-bg-tertiary -mx-2 px-2 rounded-md"
     >
       <span className="status-dot status-dot-info shrink-0" />
       <span className="min-w-0 flex-1 text-body text-text-primary break-words">
@@ -266,7 +287,11 @@ export function EntryDetailSheet({
     !!onReassign &&
     !!persons &&
     persons.length > 0 &&
-    isMemberType(entry.type);
+    isMemberType(entry.type) &&
+    // 宠物条目不给「改派给家人」：改派会把 subjectId 从 pet_* 换成 person_id，
+    // 宠物档案卡按 pet_id 过滤就再也找不到它 → 卡片被清空、外观看似消失。
+    // 删除按钮保留（孤儿 pet_* 条目的唯一清理入口）。
+    !isPetSubject(entry);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(entry.content);
   const [confirmDel, setConfirmDel] = useState(false);

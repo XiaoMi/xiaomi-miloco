@@ -7,7 +7,7 @@ Covers the load-bearing edge cases of the cold-storage path:
 
 - 早退（无旧数据）：fast SELECT 1 LIMIT 1 命中 None → 不开事务
 - cutoff 按本地日 00:00 对齐：(today - N) 当天的数据保留在 raw，不被劈裂
-- ON CONFLICT 累加：同 (date, model, type) 多次 rollup 不重复，度量字段累加
+- ON CONFLICT 累加：同 (date, model, base_url, type) 多次 rollup 不重复，度量字段累加
 - 多 (model, type) 维度：一次 rollup 产生多行 daily
 - 所有 modality 列（input/output/cache/video/audio）一起 SUM 入 daily
 - rollup 后 raw 被 DELETE
@@ -172,7 +172,11 @@ def test_cutoff_is_day_aligned(repo):
 
 
 def test_on_conflict_accumulates_when_run_twice(repo):
-    """同一 (date, model, type) 多次 rollup → daily 行被 UPDATE 累加，不重复插入。"""
+    """同一 (date, model, base_url, type) 多次 rollup → daily 行被 UPDATE 累加，不重复插入。
+
+    本用例只出一行，是因为两次都不传 base_url、落在同一个默认空串上（即同一个四元组）；
+    跨 endpoint 不会合并，那条由 test_token_usage_base_url_migration 钉着。
+    """
     today = date.today()
     old = today - timedelta(days=5)
 
@@ -349,19 +353,32 @@ def test_aggregate_buckets_bin_changes_bucket_assignment(repo):
 
 def test_clear_all_empties_both_tables(repo):
     """clear_all 删空实时表 + 日聚合，返回各表删除条数。"""
-    repo.insert("mimo", {"prompt_tokens": 100, "completion_tokens": 10}, "realtime")
-    repo.insert("mimo", {"prompt_tokens": 200, "completion_tokens": 20}, "on_demand")
+    repo.insert(
+        "mimo", "https://a/v1", {"prompt_tokens": 100, "completion_tokens": 10}, "realtime"
+    )
+    repo.insert(
+        "mimo", "https://a/v1", {"prompt_tokens": 200, "completion_tokens": 20}, "on_demand"
+    )
 
     events, _ = repo.list_events(None, None, 100)
     assert len(events) == 2
 
     deleted = repo.clear_all()
-    assert deleted == {"token_usage": 2, "token_usage_daily": 0}
+    # clear_all 现在走 clear_since(None)，额外带回 daily_from_date（全清时为 None）
+    assert deleted == {
+        "token_usage": 2,
+        "token_usage_daily": 0,
+        "daily_from_date": None,
+    }
 
     events_after, _ = repo.list_events(None, None, 100)
     assert events_after == []
     # 幂等：再清一次返回全 0
-    assert repo.clear_all() == {"token_usage": 0, "token_usage_daily": 0}
+    assert repo.clear_all() == {
+        "token_usage": 0,
+        "token_usage_daily": 0,
+        "daily_from_date": None,
+    }
 
 
 def test_fire_record_persists_from_ephemeral_loop(repo):
@@ -378,6 +395,7 @@ def test_fire_record_persists_from_ephemeral_loop(repo):
     async def one_window() -> None:
         fire_record(
             "mimo-v2.5",
+            "https://api.example/v1",
             {"prompt_tokens": 3000, "completion_tokens": 200},
             "realtime",
         )
@@ -389,3 +407,35 @@ def test_fire_record_persists_from_ephemeral_loop(repo):
     assert len(events) == 1, "临时 loop 退出后 realtime 用量必须已落库,不能被丢"
     assert events[0]["type"] == "realtime"
     assert events[0]["input_tokens"] == 3000
+    # base_url 也必须一起落库——它是模型身份的一半
+    assert events[0]["base_url"] == "https://api.example/v1"
+
+
+def test_rollup_failure_keeps_the_new_event(repo, monkeypatch):
+    """滚存失败不该把当天这条新用量一起拒收。
+
+    持续失败（磁盘满、写锁超时）时，若每条事件都先撞上滚存失败再丢掉自己，
+    用量统计就冻在原地而感知照常跑——界面上只剩「用量不再增长」这一个线索，
+    而记用量的入口把异常降级成 warning。标记位仍然不置，下次插入自动重试。
+    """
+    boom_calls = {"n": 0}
+
+    def boom(_ts_ms):
+        boom_calls["n"] += 1
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(repo, "_maybe_rollup", boom)
+    repo._last_archive_check = None
+
+    repo.insert("m1", "https://a/v1", {"prompt_tokens": 10, "completion_tokens": 2}, "realtime")
+
+    with repo.db.get_connection() as conn:
+        rows = conn.execute("SELECT model, input_tokens FROM token_usage").fetchall()
+    assert [(r["model"], r["input_tokens"]) for r in rows] == [("m1", 10)]
+    assert boom_calls["n"] == 1
+
+    # 标记位没被置上 → 下一条插入还会再试一次
+    repo.insert("m1", "https://a/v1", {"prompt_tokens": 5, "completion_tokens": 1}, "realtime")
+    assert boom_calls["n"] == 2
+    with repo.db.get_connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM token_usage").fetchone()[0] == 2

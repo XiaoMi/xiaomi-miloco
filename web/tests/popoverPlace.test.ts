@@ -1,0 +1,63 @@
+/**
+ * fixed 浮层落点。抽成纯函数就是为了让这几条能回归——明细表同一行上挂着两个浮层
+ * （模型列那格的 URL 气泡、末尾操作格的清理菜单），最初各写了一份落点算法，
+ * 结果一个会在视口底部翻转、另一个不会。
+ */
+
+import { describe, it, expect } from "vitest";
+import { placePopover } from "@/lib/popoverPlace";
+
+const VP = { width: 1440, height: 900 };
+const box = { width: 216, height: 212 };
+const anchorAt = (top: number, left = 1000, w = 30, h = 30) => ({
+  top,
+  bottom: top + h,
+  left,
+  right: left + w,
+});
+
+describe("placePopover", () => {
+  it("下方装得下就贴下方", () => {
+    const p = placePopover(anchorAt(400), box, VP, { gap: 8, edge: 8, align: "right" });
+    expect(p.top).toBe(438); // 400 + 30 + 8
+  });
+
+  it("下方装不下就翻到上方——这是行内浮层最常见的处境", () => {
+    // 按钮底 830，下方只剩 70px，放不下 212 高的浮层
+    const p = placePopover(anchorAt(800), box, VP, { gap: 8, edge: 8, align: "right" });
+    expect(p.top).toBe(800 - 8 - 212); // 580，翻到按钮上方
+    expect(p.top).toBeGreaterThanOrEqual(8);
+    expect(p.top + box.height).toBeLessThanOrEqual(VP.height - 8);
+  });
+
+  it("上下都装不下时贴下方并夹住，不翻上——翻上会把标题推出视口", () => {
+    const tall = { width: 216, height: 880 };
+    const p = placePopover(anchorAt(400), tall, VP, { gap: 8, edge: 8, align: "right" });
+    expect(p.top).toBe(VP.height - 8 - 880); // 12，夹在视口内
+    expect(p.top).toBeGreaterThanOrEqual(8);
+  });
+
+  it("align=right 贴锚点右缘，align=left 贴左缘", () => {
+    const a = anchorAt(100, 1000, 30);
+    const r = placePopover(a, box, VP, { gap: 8, edge: 8, align: "right" });
+    const l = placePopover(a, box, VP, { gap: 8, edge: 8, align: "left" });
+    expect(r.left).toBe(1030 - 216); // 右缘对齐
+    expect(l.left).toBe(1000); // 左缘对齐
+  });
+
+  it("右侧溢出时往左收", () => {
+    const p = placePopover(anchorAt(100, 1400), box, VP, { gap: 8, edge: 8, align: "left" });
+    expect(p.left).toBe(VP.width - 216 - 8);
+  });
+
+  it("锚点贴着视口左缘时，浮层不许压到边上——没有下界就会落在 0", () => {
+    // 左对齐 + 锚点 left=0 → 想要的落点就是 0，比留白还小，靠下界抬回 edge。
+    // 视口给 320（老机型 / 分屏）只是因为这种贴边锚点在窄屏更常见，与结论无关。
+    const p = placePopover(anchorAt(100, 0), box, { width: 320, height: 640 }, {
+      gap: 6,
+      edge: 8,
+      align: "left",
+    });
+    expect(p.left).toBeGreaterThanOrEqual(8);
+  });
+});

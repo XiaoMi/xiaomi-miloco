@@ -19,6 +19,10 @@ from miloco.database.person_repo import UNSET
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.perception.engine.identity import _avatar
+from miloco.perception.engine.identity._image_utils import (
+    decode_image,
+    is_still_image_container,
+)
 from miloco.perception.engine.identity.config_loader import resolve_library_root
 from miloco.perception.engine.identity.library import IdentityLibrary, _list_crop_files
 from miloco.person.schema import PersonCreate, PersonUpdate, _normalize_optional_str
@@ -31,10 +35,6 @@ from miloco.utils.paths import miloco_home
 _PERSON_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z"
 )
-# 头像上传大小上限：前端裁剪产物恒 ~20-50KB；直连 API 时用 image.size 前置闸拦超大包
-# （不必先读进内存）、读后 len 兜底。
-_MAX_AVATAR_BYTES = 5 * 1024 * 1024
-
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/identity", tags=["Identity"])
@@ -246,7 +246,7 @@ def _ensure_meta_name_from_sql(person_id: str) -> None:
 )
 async def register_sample(
     person_id: str,
-    body_image: UploadFile = File(..., description="人体 crop（jpg/png）"),
+    body_image: UploadFile = File(..., description="人体 crop（常见格式均可，含 iPhone 的 HEIC）"),
     face_image: UploadFile | None = File(None, description="人脸 crop（可选，face_recog 备料）"),
     source: str = Form("user_upload"),
     current_user: str = Depends(verify_token),
@@ -318,12 +318,15 @@ async def register_sample(
 
 
 async def _decode_image_upload(upload: UploadFile) -> "np.ndarray | None":
-    """读 UploadFile 并 cv2.imdecode；失败返回 None。"""
+    """读 UploadFile 并解码；失败返回 None。走 ``decode_image``（含 HEIC/HEIF 回退）。
+
+    解码丢工作线程：格式放开后 HEIC 走 libheif，单张 12MP 是几百毫秒量级（改前只解 jpg/png
+    是几十毫秒），而同进程还并行着直播转码 / 录制切片 / MQTT 感知推理。
+    """
     raw = await upload.read()
     if not raw:
         return None
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    img = await asyncio.to_thread(decode_image, raw)
     if img is None or img.size == 0:
         return None
     return img
@@ -351,7 +354,7 @@ class SampleBatchPayload(BaseModel):
     items: list[SampleBatchItem]
 
 
-def _decode_b64_image(b64: str) -> "np.ndarray | None":
+async def _decode_b64_image(b64: str) -> "np.ndarray | None":
     import base64
     try:
         raw = base64.b64decode(b64)
@@ -359,8 +362,7 @@ def _decode_b64_image(b64: str) -> "np.ndarray | None":
         return None
     if not raw:
         return None
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    img = await asyncio.to_thread(decode_image, raw)
     if img is None or img.size == 0:
         return None
     return img
@@ -418,7 +420,7 @@ async def register_sample_batch(
         if item.type not in ("body", "face"):
             failed.append({"index": i, "reason": f"unknown type {item.type!r}"})
             continue
-        img = _decode_b64_image(item.image_b64)
+        img = await _decode_b64_image(item.image_b64)
         if img is None:
             failed.append({"index": i, "reason": "image decode failed"})
             continue
@@ -538,7 +540,7 @@ def _flatten_candidates_with_auto(
 )
 async def extract_samples(
     person_id: str,
-    media: UploadFile = File(..., description="图片(jpg/png)或视频(mp4/webm)"),
+    media: UploadFile = File(..., description="图片（常见格式均可，含 HEIC）或视频（mp4/webm/mov 等）"),
     max_frames: int = Form(_EXTRACT_VIDEO_MAX_FRAMES),
     current_user: str = Depends(verify_token),
 ):
@@ -574,6 +576,12 @@ async def extract_samples(
     ct = (media.content_type or "").lower()
     fname = (media.filename or "").lower()
     is_video = ct.startswith("video/") or fname.endswith((".mp4", ".webm", ".mov", ".avi", ".mkv"))
+    # 字节级复核（同 pet observe / register_preview 口径）：HEIF/AVIF 与 mp4/mov 共用 ISO BMFF
+    # 容器，一张被报成 video/* 或命名成 .mov 的 HEIC 若按视频抽帧，ffmpeg 不拼 tile grid、只
+    # 暴露 512x512 瓦片 → 全链路零报错地在一块瓦片上跑完。三个端点必须同口径，缺一处就留一个洞。
+    if is_video and is_still_image_container(raw[:16]):
+        logger.info("event=extract_samples_still_image_declared_as_video 已按图片处理")
+        is_video = False
 
     detector = _load_detector()
     reid_extractor = manager.perception_service.get_reid_extractor()
@@ -602,10 +610,9 @@ async def extract_samples(
             except OSError:
                 pass
     else:
-        arr = np.frombuffer(raw, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        img = await asyncio.to_thread(decode_image, raw)
         if img is None or img.size == 0:
-            raise HTTPException(status_code=400, detail="image decode failed")
+            raise HTTPException(status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）")
         frames = [(0, img)]
 
     if not frames:
@@ -736,25 +743,14 @@ async def read_tier_sample(
 # =============================================================================
 
 
-def _sniff_image_ext(data: bytes) -> str | None:
-    """按文件头魔数判定真实图片格式（jpg/png/webp），不看文件名后缀——杜绝「后缀与
-    内容不符」，让盘上后缀 / Content-Type / 真实字节恒一致；不在白名单则 None。
-    （不引 imghdr——3.13 已移除；也不引 Pillow 新依赖。）"""
-    if data[:3] == b"\xff\xd8\xff":
-        return "jpg"
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "png"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "webp"
-    return None
-
-
 @router.post(
     "/persons/{person_id}/avatar", summary="Upload Person Avatar", response_model=NormalResponse
 )
 async def upload_person_avatar(
     person_id: str,
-    image: UploadFile = File(..., description="头像图片（jpg/jpeg/png/webp）"),
+    image: UploadFile = File(
+        ..., description="头像图片（常见格式均可，含 iPhone 的 HEIC）"
+    ),
     current_user: str = Depends(verify_token),
 ):
     if not _PERSON_ID_RE.match(person_id):
@@ -762,18 +758,24 @@ async def upload_person_avatar(
     if not manager.person_service.exists(person_id):
         raise HTTPException(status_code=404, detail="person 不存在")
     # 前置闸：用 multipart 自带的字节数拦超大包，不必先读进内存（size 缺失时靠读后兜底）。
-    if image.size is not None and image.size > _MAX_AVATAR_BYTES:
+    if image.size is not None and image.size > _avatar.AVATAR_MAX_BYTES:
         raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
     data = await image.read()
-    if len(data) > _MAX_AVATAR_BYTES:  # size 缺失时兜底
+    if len(data) > _avatar.AVATAR_MAX_BYTES:  # size 缺失时兜底
         raise HTTPException(status_code=400, detail="图片过大（上限 5 MB）")
-    # 先确认能解码（挡垃圾字节），再按魔数取真实格式作落盘扩展名——不信任文件名后缀，
-    # 让 盘上后缀 / Content-Type / 真实字节 三者恒一致（同 enroll 口径用 cv2、不引新依赖）。
-    if cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) is None:
-        raise HTTPException(status_code=400, detail="无法识别的图片")
-    ext = _sniff_image_ext(data)
-    if ext is None:
-        raise HTTPException(status_code=400, detail="不支持的图片格式（仅 jpg/png/webp）")
+    # 归一化：解码验真（挡垃圾字节）+ 定落盘扩展名。jpg/png/webp 原字节直通；HEIC 等
+    # 浏览器渲染不了的容器解码后重编无损 webp，让 盘上后缀 / Content-Type / 真实字节 恒一致。
+    # 体积闸卡的是**上传**字节；无损重编后可能超过它，这是有意的（闸拦请求体，不约束盘上物件）。
+    # 走 to_thread：解码 + 重编是纯 CPU 活（HEIC 经 libheif、无损 WebP 编码），同进程还并行着
+    # 直播转码 / 感知推理，占着事件循环会把它们一起饿死（本文件 7 处解码同口径）。
+    normalized = await asyncio.to_thread(
+        _avatar.normalize_for_storage, data, prefer="webp"
+    )
+    if normalized is None:
+        raise HTTPException(
+            status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）"
+        )
+    data, ext = normalized
     try:
         norm = _get_identity_library().set_person_avatar(person_id, data=data, ext=ext)
     except ValueError as e:
@@ -1193,6 +1195,21 @@ async def register_preview(
         extract_from_video,
     )
 
+    # media_kind 由客户端自报、服务端原先不复核。HEIF/AVIF 与 mp4/mov 共用 ISO BMFF 容器，
+    # 一张被报成 "video" 的 HEIC 会进 extract_from_video → ffmpeg 不拼 HEIC 的 tile grid、
+    # 只暴露 512x512 瓦片 → DeepSORT 在一块瓦片上跑 → 200 "no valid subject"，零提示。
+    # 这条路今天真实可达（CLI 的 ftyp 判据把 HEIC 判成视频、报错文案又引导 agent 改用
+    # --video）。按 brand 掰回图片路径，两处读 media_kind 的地方（本处 dispatch 与下方
+    # select_fn 的 is_video）一并覆盖。
+    if body.media_b64 and body.media_kind == "video":
+        try:
+            _head = base64.b64decode(body.media_b64[:64])
+        except Exception:  # noqa: BLE001 — 非法 base64 交给下游按原逻辑报错
+            _head = b""
+        if is_still_image_container(_head):
+            logger.info("event=register_preview_still_image_declared_as_video 已按图片处理")
+            body.media_kind = "image"
+
     candidates = []
     source = "from_media"
     # video_per_track 仅在 video 分支生成(extract_from_video 输出 ``{track_id: list}``);
@@ -1238,8 +1255,7 @@ async def register_preview(
         merged: list = []
         for i, b64 in enumerate(body.media_b64_list):
             raw = base64.b64decode(b64)
-            arr = np.frombuffer(raw, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            img = await asyncio.to_thread(decode_image, raw)
             if img is None or img.size == 0:
                 # 单张解码失败不阻断整批——记 warning,跳过这张继续。
                 logger.warning("register/preview: media_b64_list[%d] decode failed,跳过", i)
@@ -1264,10 +1280,9 @@ async def register_preview(
         source = "from_media_batch"
     elif body.media_b64 and body.media_kind == "image":
         raw = base64.b64decode(body.media_b64)
-        arr = np.frombuffer(raw, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        img = await asyncio.to_thread(decode_image, raw)
         if img is None or img.size == 0:
-            raise HTTPException(status_code=400, detail="image decode failed")
+            raise HTTPException(status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）")
         # 图像路径没有 DeepSORT 关联预算好的 emb,这里现场抽:借 perception_service
         # 共享的 HumanReID 实例(随便挑一个活动 tracker 的);摄像头未启动时返 None,
         # ScoredCandidate.reid_embedding 留 None,下游 add_tier_a_samples_batch 还有
@@ -1294,9 +1309,12 @@ async def register_preview(
             # 因为 wheel 不打 onnx, __file__ 在 site-packages 下找不到。
             mdir = str(get_settings().directories.models_dir)
             # 用 yaml-resolved DeepSortConfigDC,跟主流程 tracking_service 共享同一份
-            # 配置(尤其 max_age_sec)。硬编码 ``DeepSortConfigDC()`` 默认 max_age_sec=1.0
-            # 会让视频注册路径只容忍 1 帧 miss,而主流程已被 yaml 调到 3.0;边界帧
-            # confidence 抖动时 track 过早杀死、分裂为多 track,误触发号码图分支。
+            # 配置(尤其 max_age_sec)。硬编码 ``DeepSortConfigDC()`` 拿到的是 dataclass
+            # 默认值,而 yaml 把它覆盖成了更长的一档(见
+            # ``perception/engine/identity/default_config.yaml::deep_sort.max_age_sec``,
+            # 跨包、不在本目录下;**此处不写两边当前取值**,写了就会随调参失真);差别落在
+            # 本路径能容忍几帧 miss 上 —— 短了以后边界帧 confidence 抖动会把 track 过早
+            # 杀死、分裂为多 track,误触发号码图分支。
             return DeepSortTracker(
                 detector=_load_detector(),
                 config=manager.perception_service.deep_sort_config,
@@ -1668,10 +1686,9 @@ async def extract_endpoint(
             status_code=400, detail="本期 extract 端点仅支持 media_kind='image'",
         )
     raw = base64.b64decode(body.media_b64)
-    arr = np.frombuffer(raw, dtype=np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    img = await asyncio.to_thread(decode_image, raw)
     if img is None or img.size == 0:
-        raise HTTPException(status_code=400, detail="image decode failed")
+        raise HTTPException(status_code=400, detail="无法打开这张图片（文件可能损坏，或不是图片）")
     candidates = await asyncio.to_thread(
         extract_from_image,
         img, detector=_load_detector(),
@@ -2206,8 +2223,7 @@ async def select_endpoint(
     for d in body.candidates:
         b64 = d.get("image_jpeg_b64") or ""
         if b64:
-            arr = np.frombuffer(base64.b64decode(b64), dtype=np.uint8)
-            crop = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            crop = await asyncio.to_thread(decode_image, base64.b64decode(b64))
         else:
             crop = np.zeros((1, 1, 3), dtype=np.uint8)
         scored.append(ScoredCandidate(

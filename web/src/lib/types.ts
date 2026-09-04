@@ -49,6 +49,58 @@ export interface Person {
   avatarExt?: string | null;
 }
 
+// 宠物（非人家庭成员）——独立花名册，不进人身份库
+export interface Pet {
+  id: string; // pet_XXXXXXXXXXXX
+  name: string;
+  species: string;
+  avatarExt?: string | null; // 有头像时的文件后缀；null=无头像
+  referenceCropCount?: number; // 已录入的多姿态识别参照图张数（喂 ③ 识别）
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+// 实验性功能开关（后端 /api/admin/features）
+export interface Features {
+  petRecognition: boolean;
+  petHeadGrounding: boolean;
+  petBodyGrounding: boolean; // 回退路径（框不到猫狗）裁本体作参考图；默认开
+  petReidDiverse: boolean; // 参考图多样性用人体 ReID 特征距离选多姿态；关或模型不可用回退 dHash
+}
+
+// observe 建议类不阻断提示（后端算）：species_mismatch / generic_look / refs_inconsistent / multiple_pets
+export interface PetObserveWarning {
+  type: string;
+  level: string; // "warn"
+  message: string;
+}
+
+// observe 单个候选（一只宠物的一张姿态 crop）
+export interface PetObserveCandidate {
+  trackId: number | null;
+  speciesGuess: string;
+  cropB64: string;
+  headBbox?: number[] | null; // 该 crop 的头部归一化框（grounding 开时）
+  // P0 契约质量分（可选；门控/候选展示/落盘绝对分用）
+  conf?: number;
+  sharpness?: number;
+  areaRatio?: number;
+  bbox?: number[] | null; // [x, y, w, h]（相对来源帧像素）
+  frameIdx?: number | null;
+}
+
+// pet:observe 返回：门控选出的 ≤3 张同一只多姿态 crop + omni 一次成型共性描述
+export interface PetObserveResult {
+  detected: boolean;
+  description: Record<string, unknown> | null; // {species, breed, size_build, ..., summary}
+  headBbox: number[] | null; // primary crop 的头部归一化 [x,y,w,h]
+  primaryCropB64: string;
+  primaryIndex: number; // candidates 中主候选下标（默认头像/primary_crop 对应那张）
+  candidates: PetObserveCandidate[];
+  refsInconsistent: boolean | null; // 多图时 omni 判"疑似不是同一只"；单图/回退恒 null
+  warnings: PetObserveWarning[];
+}
+
 // ── 设备 ────────────────────────────────────────────────────
 export type DeviceCategory =
   | "light"
@@ -127,10 +179,38 @@ export interface ActivityEvent {
   clip_kind?: "mp4" | "m4a" | null;
   /** omni_trace.json.gz 是否存在;前端据此决定是否显示反馈按钮 */
   has_trace?: boolean;
+  /** 是否有全景参考帧 ref.jpg(= 本事件走了 Smart Crop);前端据此决定是否请求 /ref/ 并渲染参考卡 */
+  has_ref?: boolean;
   /** 该事件是否已有反馈打包 */
   has_feedback?: boolean;
   feedback_pack_path?: string | null;
   feedback_pack_size?: number | null;
+}
+
+// ── 主动查询日志(on_demand_log)─────────────────────────────
+export interface OnDemandLogEntry {
+  id: string;
+  timestamp: number; // Unix ms
+  query: string;
+  answer: string;
+  sources: string[]; // device dids
+  latency_ms: number | null;
+  snapshot_count: number;
+  clip_dids: string[];
+  clip_kinds: Record<string, "mp4" | "m4a">;
+  has_trace: boolean;
+  has_feedback: boolean;
+  feedback_pack_path: string | null;
+  feedback_pack_size: number | null;
+}
+
+// Smart Crop 事件的裁切区域元数据(GET /api/events/{id}/crop/{device_id}).
+// 坐标在全景帧像素空间,与 ref.jpg 同一空间(ref.jpg 只是等比缩放过)——
+// 所以画框只需 svg viewBox="0 0 W H",letterbox 缩放交给浏览器,前端不算坐标.
+export interface EventCropMeta {
+  region_xyxy: [number, number, number, number];
+  frame_size_wh: [number, number];
+  crop_short_edge: number;
 }
 
 // ── 家庭档案（home_profile：候选区 / 正式区记忆）─────────────────
@@ -245,7 +325,7 @@ export type HomeId = string;
 // ── 用量统计（📊 用量 tab）─────────────────────────────────────
 // 数据来自 backend admin token-usage 接口（仅 omni/MiMo 调用有计费）：
 //   today      → GET /api/admin/token-usage/buckets  （服务端按桶聚合）
-//   week/month → GET /api/admin/token-usage/daily     （按 date/model/type 聚合）
+//   week/month → GET /api/admin/token-usage/daily     （按 date/model/base_url/type 聚合）
 // 客户端在 src/api/real.ts::realGetUsageStats 里折算成下面的结构。
 // 注意：video/audio/cache 都是 input 的子集（不叠加）；总量 = input + output。
 
@@ -278,9 +358,17 @@ export interface UsageGroup {
   breakdown: TokenBreakdown;
 }
 
-/** 明细表的一行：model × type 组合。 */
+/** 明细表的一行：模型名 × endpoint × 调用类型。同名模型挂两个 endpoint 会各占一行。 */
 export interface UsageRow {
   model: string;
+  /**
+   * 该行用量所用的 endpoint，**完整 URL 原文**。
+   *
+   * 模型身份 = (model, base_url)：同一个模型名可以同时挂在两个 endpoint 上，
+   * 只看模型名分不出哪个 endpoint 用了多少。空串 = 该行早于用量表记录此列（DB schema v3 之前），
+   * 来源无从得知——展示侧直说「旧版本数据未记录 URL」，不做任何推断或回填。
+   */
+  base_url: string;
   type: UsageCallType;
   calls: number;
   /** input + output。 */
@@ -298,13 +386,67 @@ export interface UsageStats {
   totals: TokenBreakdown;
   /** 按调用类型聚合（realtime / on_demand），按 tokens 降序。 */
   by_type: UsageGroup[];
-  /** model × type 明细行，按 tokens 降序。 */
+  /** 明细行，键为「模型名 + endpoint + 调用类型」，按模型名与 endpoint 排序。 */
   rows: UsageRow[];
   /**
-   * 时间序列。today 桶数随 bin 粒度变化（10分=144 / 1时=24 / 3小时=8，默认 1 时）且铺满整天；
+   * 时间序列。today 桶数随 bin 粒度变化（15分=96 / 1时=24 / 3小时=8，默认 1 时）且铺满整天；
    * week=7 天，month=30 天。ts 是 ISO 8601。
    */
-  timeline: { ts: string; tokens: number }[];
+  timeline: UsageTimelinePoint[];
+  /**
+   * 日聚合表里已有的最早 / 最新日期（YYYY-MM-DD）；表为空或接口未给时为 null。
+   *
+   * 清除确认窗据此判断「清到某一天会不会连带删掉那天更早的记录」——日表按整天删，
+   * 但只有边界那天真的落在日表已有的日期区间里才谈得上连带。两头各挡一类落空，
+   * 见 usageTokens.dailyCaveatApplies。
+   */
+  daily_earliest_date: string | null;
+  daily_latest_date: string | null;
+}
+
+/**
+ * 一个桶里、某个「模型名 + endpoint」的用量拆分。
+ *
+ * 桶本身是跨模型合并的，只看桶级字段就回答不了「这一段是哪个 endpoint 在用」。
+ * 模型身份是 (模型名, endpoint) 而不是模型名，所以拆分也按这个二元组折叠——**若**
+ * 只按模型名合并，同名挂在两个地址上的用量就又粘回一起，等于把后端刚拆开的东西
+ * 在前端重新合上。各项之和恒等于桶的对应字段（见 accPoint）。
+ */
+export interface UsageTimelineTarget {
+  model: string;
+  /** 完整 URL 原文；'' = 老数据未记录。 */
+  base_url: string;
+  /** input − video − audio 的残差（含图片、系统提示，非纯文本）。 */
+  text: number;
+  video: number;
+  audio: number;
+  output: number;
+  cache: number;
+}
+
+/**
+ * 时间序列的一个桶。除总量外还带**分模态拆分**，供时间分布图按模态堆叠——
+ * 后端的 bucket / daily 行本来就带 video / audio / cache 列，这里只是别在
+ * 前端把它们加成一个总数就丢掉。
+ *
+ * 口径与 TokenBreakdown 一致：video / audio / cache 都是 input 的子集，
+ * `text` 是 `input − video − audio` 的**残差**——它不只有文本，还含图片
+ * （gallery / 参考帧的 image 块，后端未单列该模态）与系统提示。
+ * 总量口径 tokens = (text + video + audio) + output = input + output。
+ */
+export interface UsageTimelinePoint {
+  ts: string;
+  /** input + output。 */
+  tokens: number;
+  /** input − video − audio 的残差（含图片、系统提示，非纯文本）。 */
+  text: number;
+  video: number;
+  audio: number;
+  output: number;
+  /** 命中缓存的 prompt token（⊆ text + video + audio）。 */
+  cache: number;
+  /** 本桶按「模型名 + endpoint」的拆分。各项之和 == 桶的对应字段。 */
+  targets: UsageTimelineTarget[];
 }
 
 // ── omni 模型配置（在「模型」页内读/写，支持多档案切换） ──────────────
@@ -555,6 +697,11 @@ export interface PerfTraceRow {
   cycle_error_msg: string | null;
   /** traces_v 视图派生:EXISTS(SELECT 1 FROM agent_runs WHERE trace_id=t.trace_id)。 */
   has_agent_turn: number;
+  /**
+   * traces_v 视图派生的「耗时/窗口跨度」比值族。明细表用「实时率」一列显示
+   * rtf_e2e ?? rtf、超过 1 标红,那一行「有没有跟上」就看它;rtf_pipeline /
+   * rtf_stream_e2e / rtf_omni 表上没有对应列,留给调用方按需取。
+   */
   rtf: number | null;
   rtf_pipeline: number | null;
   rtf_e2e: number | null;
@@ -634,6 +781,23 @@ export interface MemorySeries {
   points: MemoryPoint[];
 }
 
+// === Proc monitor (/monitor/proc/series) ===
+
+export interface ProcPoint {
+  ts: number;
+  cpu_pct: number;
+  cpu_pct_max: number;
+  num_threads: number;
+}
+
+export interface ProcSeries {
+  ts_start: number | null;
+  ts_end: number | null;
+  interval_s: number;
+  points: ProcPoint[];
+  core_count: number;
+}
+
 // === Monitor meta (/monitor/) ===
 
 export interface MonitorMeta {
@@ -682,4 +846,22 @@ export interface Task {
   record: TaskRecordSummary | null;
   // 详情抽屉「有价值的详情」：驱动规则，随 summary 一并返回。
   ruleBriefs: TaskRuleBrief[];
+}
+
+// ── 升级检测 / 一键升级（对齐 backend /api/admin/upgrade/*、/version） ──
+export interface UpgradeCheck {
+  current: string;
+  latest: string | null;
+  has_update: boolean;
+  deploy_kind: "release" | "dev";
+  release_url: string | null;
+  reachable: boolean;
+  checked_at: number;
+  /** 后端持久化的「已确认版本」；banner 在 latest === dismissed 时不显（存后端，非浏览器）。 */
+  dismissed: string | null;
+}
+
+export interface UpgradeStatus {
+  /** idle | starting | downloading | installing | done | failed —— 前端据此点亮步骤 / 判完成。 */
+  phase: string;
 }

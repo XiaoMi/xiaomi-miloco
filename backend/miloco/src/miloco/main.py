@@ -60,6 +60,7 @@ from miloco.observability.router import router as observability_router
 from miloco.perception.events_router import router as events_router
 from miloco.perception.router import router as perception_router
 from miloco.person.router import router as person_router
+from miloco.pet.router import router as pet_router
 from miloco.rule.router import router as rule_router
 from miloco.schedule.router import router as schedule_router
 from miloco.schedule.runner import get_runner as get_schedule_runner
@@ -94,6 +95,11 @@ async def _log_cleanup_loop() -> None:
         except Exception as e:
             logger.error("Perception log cleanup failed: %s", e)
         try:
+            deleted_od = mgr.perception_service.cleanup_on_demand_logs(settings.perception.event_ttl_days)
+            logger.info("On-demand log cleanup: deleted %d entries", deleted_od)
+        except Exception as e:
+            logger.error("On-demand log cleanup failed: %s", e)
+        try:
             deleted_r = await mgr.rule_service.cleanup_logs(settings.rule.log_ttl)
             logger.info("Rule log cleanup: deleted %d entries", deleted_r)
         except Exception as e:
@@ -109,32 +115,42 @@ async def _log_cleanup_loop() -> None:
         # perf.enabled=false 时跳过 observability cleanup — obs_init_schema 在
         # conn 上无条件建表,这里不门控会让关闭 perf 后 observability.db 仍被建出。
         if settings.perf.enabled:
-            try:
+            from miloco.database.connector import incremental_vacuum
+
+            def _cleanup_obs_db() -> tuple[int, int, int, int, int]:
+                # 整段(建表 + 5 条 DELETE + 回收)在工作线程内跑,连接线程内建、内关、
+                # 不跨线程共享:关服 cancel 时事件循环侧没有 conn.close() 会跑,不会关掉
+                # 本线程正在用的连接;顺带把 obs 这 5 条 DELETE 也移出事件循环(本 loop
+                # 其余几块清理仍同步跑在事件循环上,待后续统一处理)。
                 conn = obs_connect(obs_db_path)
                 try:
                     obs_init_schema(conn)
-                    dt = cleanup_traces_table(conn, settings.perf.retention.traces_days)
-                    dtd = cleanup_traces_device_table(conn, settings.perf.retention.traces_days)
-                    de = cleanup_events_table(conn, settings.perf.retention.events_days)
-                    da = cleanup_agent_runs_table(
-                        conn, settings.perf.retention.agent_runs_days
+                    counts = (
+                        cleanup_traces_table(conn, settings.perf.retention.traces_days),
+                        cleanup_traces_device_table(conn, settings.perf.retention.traces_days),
+                        cleanup_events_table(conn, settings.perf.retention.events_days),
+                        cleanup_agent_runs_table(conn, settings.perf.retention.agent_runs_days),
+                        cleanup_action_ledger_table(conn, settings.perf.retention.action_ledger_days),
                     )
-                    dal = cleanup_action_ledger_table(
-                        conn, settings.perf.retention.action_ledger_days
-                    )
-                    logger.info(
-                        "Observability cleanup: traces=%d, traces_device=%d, "
-                        "events=%d, agent_runs=%d, action_ledger=%d",
-                        dt, dtd, de, da, dal,
-                    )
-                    # auto_vacuum=INCREMENTAL 下,DELETE 把页标 free 但不还 OS。
-                    # 这里集中触发 incremental_vacuum,每页 4KB × 10000 ≈ 40MB 回收上限。
+                    # DELETE 把页标 free 但不还 OS,逐页回收(为何必须 fetchall、为何按
+                    # chunk 分批)见 connector.incremental_vacuum。
+                    # 单独 catch:DELETE 已在 autocommit 连接上提交,回收失败不该把行数
+                    # 统计一起吞掉、也不该报成「整段 cleanup 失败」误导排查方向。
                     try:
-                        conn.execute("PRAGMA incremental_vacuum(10000)")
+                        incremental_vacuum(conn)
                     except Exception as e:
                         logger.error("incremental_vacuum failed: %s", e)
+                    return counts
                 finally:
                     conn.close()
+
+            try:
+                dt, dtd, de, da, dal = await asyncio.to_thread(_cleanup_obs_db)
+                logger.info(
+                    "Observability cleanup: traces=%d, traces_device=%d, "
+                    "events=%d, agent_runs=%d, action_ledger=%d",
+                    dt, dtd, de, da, dal,
+                )
             except Exception as e:
                 logger.error("Observability DB cleanup failed: %s", e)
         # meaningful_events 行清理(按 event_ttl_days)
@@ -162,12 +178,17 @@ async def _log_cleanup_loop() -> None:
         except Exception as e:
             logger.error("Snapshots cleanup failed: %s", e)
         # miloco.db 已 DELETE 旧 perception_log / rule_log / meaningful_events,
-        # 走 incremental_vacuum 把 free pages 还 OS。
+        # 走 incremental_vacuum 把 free pages 还 OS。阻塞 I/O 移出事件循环。
         try:
-            from miloco.database.connector import get_db_connector
+            from miloco.database.connector import get_db_connector, incremental_vacuum
 
-            with get_db_connector().get_connection() as conn:
-                conn.execute("PRAGMA incremental_vacuum(10000)")
+            def _vacuum_miloco_db() -> None:
+                # 连接在工作线程内建、内关（get_connection 每次 sqlite3.connect
+                # 新建），不跨线程共享 conn。
+                with get_db_connector().get_connection() as conn:
+                    incremental_vacuum(conn)
+
+            await asyncio.to_thread(_vacuum_miloco_db)
         except Exception as e:
             logger.error("Miloco DB incremental_vacuum failed: %s", e)
         await asyncio.sleep(86400)
@@ -501,7 +522,10 @@ async def catch_all_exceptions_middleware(request: Request, call_next):
 
 app.include_router(admin_router, prefix="/api")
 app.include_router(miot_router, prefix="/api")
+# person_router 与 pet_router 共用 prefix="/identity"：路径首段互斥（/persons* vs /pets*）、
+# 两侧都无首段通配路由，故注册顺序无关；新增路由须维持这一互斥，否则先注册者会遮蔽后者。
 app.include_router(person_router, prefix="/api")
+app.include_router(pet_router, prefix="/api")
 app.include_router(home_profile_router, prefix="/api")
 app.include_router(rule_router, prefix="/api")
 app.include_router(schedule_router, prefix="/api")
@@ -716,6 +740,14 @@ def start_server():
     from miloco.utils.uvicorn import get_uvicorn_config
 
     bootstrap("server")
+
+    # opencv 默认线程池 = CPU 核数(实测占 ~15 线程/进程),miloco 只做小图
+    # resize/imencode 用不满;钉死为 4。砍的是纯 idle 线程,图进程线程数干净,
+    # 非 CPU/RSS 优化(idle 线程不占 CPU)。
+    import cv2
+
+    _OPENCV_THREADS = 4  # 与 DECODE_THREADS 的 4 无关:此为 OpenCV 全局池上限
+    cv2.setNumThreads(_OPENCV_THREADS)
 
     uv_config = get_uvicorn_config()
 

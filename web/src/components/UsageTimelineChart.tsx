@@ -1,24 +1,78 @@
 /**
- * 时间分布图：纯 SVG 柱状图（受控）。周期由 UsagePage 统一控制并传入；
- * today 额外支持切换 bin 大小（10分/1时/3小时）——raw 事件带毫秒时间戳，可任意分桶；
- * week/month 走 daily rollup 只有「天」粒度，故不显示 bin 选项。
+ * 时间分布图。周期与粒度由 UsagePage 的工具条统一控制并传入，本组件只负责画。
  *
- * 不引第三方图表库；柱高 = tokens 占全段最大值的百分比；悬停显示具体 tokens + 时间。
+ * 可切两种着色：
+ *  - **合计**：单序列，用中性色（`usage-total`）。刻意不取四个模态色之一，否则
+ *    「总量」会被读成「文本」。
+ *  - **按模态**：柱子按模态堆叠，与左栏环形图共用同一套颜色和同一份图例，于是
+ *    「今天视频占一半」和「视频集中在傍晚」成了同一个色块的两个聚合层级。
+ *
+ * 用 CSS flex 柱而不是 SVG：柱子是「按容器宽等分、每根自己保持 1:1」的堆叠色块，用
+ * DOM 表达能直接复用环形图那套 bg-usage-* 类与圆角、过渡（同一份颜色、同一份图例），
+ * 在 SVG 里得按像素自己铺一遍。不是为了省掉宽度测量——这张图本来就在量：横轴标签密度
+ * 要实测像素宽（下面 barsRef + ResizeObserver），就近命中要 getBoundingClientRect。
+ *
+ * 取数路径三条都通：鼠标、触屏（pointer 事件一并覆盖）、键盘（Tab 聚焦后方向键逐段、
+ * Esc 收起），并另挂一个 sr-only 的 live region 播报当前桶。此前只有 mouseenter，
+ * 触屏与键盘都读不到任何数值，aria-label 又是不含数据的死字符串——整块数据对键盘与
+ * 读屏用户不可达。命中判定放在整条绘图区上按最近桶算，而非逐柱 hit-box：15 分钟粒度
+ * 下柱宽只剩几个像素，逐柱命中会有死区。
  */
 
-import { useEffect, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { useTranslation } from "react-i18next";
-import type { UsagePeriod, UsageStats } from "@/lib/types";
-import { humanTokensShort } from "@/lib/formatTokens";
+import type {
+  UsagePeriod,
+  UsageStats,
+  UsageTimelinePoint,
+  UsageTimelineTarget,
+} from "@/lib/types";
+import { axisTokens, humanTokens } from "@/lib/formatTokens";
+import { PERIOD_KEYS } from "@/lib/usagePeriods";
 import { Segmented } from "./Segmented";
 
-const BIN_OPTIONS: { minutes: number; labelKey: string }[] = [
-  { minutes: 10, labelKey: "usage.bin10min" },
-  { minutes: 60, labelKey: "usage.bin1hour" },
-  { minutes: 180, labelKey: "usage.bin3hour" },
-];
+/** 浮层里最多列几个来源，其余归并成一行。见浮层里那段关于绘图区高度的说明。 */
+const MAX_TARGET_ROWS = 3;
 
-function formatTimelineLabel(
+/**
+ * 一个来源的总量。口径与桶的 tokens 一致（三个输入模态 + 输出），所以各来源之和
+ * 恒等于柱高——缓存是输入的子集，不计入总量。
+ */
+function targetTotal(t: UsageTimelineTarget): number {
+  return t.text + t.video + t.audio + t.output;
+}
+
+/** 绘图区高度（px）。x 轴刻度带在它之外，不占绘图高度。 */
+const PLOT_H = 168;
+/** 纵轴刻度带宽度（px），柱子从这里之后开始。 */
+const GUTTER = 44;
+/** 峰值直标那一行的高度（12px 字 × 1.45 行高 + 4px 下留白，向上取整）。 */
+const PEAK_LABEL_H = 22;
+/** 单根柱最大宽度：桶少时不至于糊成一整块色。 */
+const BAR_MAX = 22;
+/** 非零桶的最小可见高度（占绘图高的百分比）：否则尖峰对比下会渲染成亚像素、与空桶分不开。 */
+const MIN_BAR_PCT = 0.9;
+
+type Coloring = "total" | "modality";
+
+/** 堆叠顺序（自下而上）。与图例、环形图同序，肉眼才好对。 */
+const MODALITIES = [
+  { key: "text", cls: "bg-usage-text", labelKey: "usage.modalityText" },
+  { key: "video", cls: "bg-usage-video", labelKey: "usage.modalityVideo" },
+  { key: "audio", cls: "bg-usage-audio", labelKey: "usage.modalityAudio" },
+  { key: "output", cls: "bg-usage-output", labelKey: "usage.modalityOutput" },
+] as const;
+
+function formatBucketLabel(
   ts: string,
   period: UsagePeriod,
   binMinutes: number,
@@ -26,29 +80,17 @@ function formatTimelineLabel(
   const d = new Date(ts);
   if (period === "today") {
     const hh = d.getHours().toString().padStart(2, "0");
-    if (binMinutes < 60) {
-      return `${hh}:${d.getMinutes().toString().padStart(2, "0")}`;
-    }
+    if (binMinutes < 60) return `${hh}:${d.getMinutes().toString().padStart(2, "0")}`;
     return `${hh}h`;
   }
-  // week / month: 显示 "M/D"
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
-/** 横轴标签密度：today 桶数随 bin 变化，自适应到约 12 个标签；month 每 5 天。 */
-function shouldShowLabel(i: number, total: number, period: UsagePeriod): boolean {
-  if (period === "week") return true;
-  if (period === "month") return i % 5 === 0 || i === total - 1;
-  // today：只标桶「起始」边界，按 step 抽稀；末尾的 24h 由单独的结束刻度负责。
-  const step = Math.max(1, Math.ceil(total / 12));
-  return i % step === 0;
-}
-
-/** 把动态最大值向上取整成漂亮数（1/2/5 × 10ⁿ），作纵轴上限——标签干净且顶部留头部空隙。 */
+/** 纵轴上限取 1/2/5×10ⁿ 的漂亮数，柱高与刻度线都以它为基准。 */
 function niceCeil(v: number): number {
   if (v <= 0) return 1;
   const base = Math.pow(10, Math.floor(Math.log10(v)));
-  const f = v / base; // 1..10
+  const f = v / base;
   const nice = f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10;
   return nice * base;
 }
@@ -56,226 +98,525 @@ function niceCeil(v: number): number {
 export function UsageTimelineChart({
   stats,
   binMinutes,
-  onBinChange,
-  embedded = false,
+  urlLabels,
 }: {
   stats: UsageStats;
   binMinutes: number;
-  onBinChange: (minutes: number) => void;
-  embedded?: boolean;
+  /** 全卡共用的地址压短映射，见 UsagePage 里那段说明——与明细表必须是同一份。 */
+  urlLabels: Map<string, string>;
 }) {
   const { t } = useTranslation();
-  // 用 stats.period（数据自带的周期）而非外部选中值，避免切换时数据未到位却用新周期
+  // 用 stats.period（数据自带）而非外部选中值，避免切周期时数据未到位却用新周期
   // 格式化横轴导致的瞬态错渲染。
   const period = stats.period;
-  // hover 状态：高亮某一根柱
-  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  useEffect(() => setHoverIdx(null), [period, binMinutes]);
+  const data = stats.timeline;
+
+  const [coloring, setColoring] = useState<Coloring>("modality");
+  const [activeIdx, setActiveIdx] = useState<number | null>(null);
+  useEffect(() => setActiveIdx(null), [period, binMinutes]);
+
+  const barsRef = useRef<HTMLDivElement | null>(null);
+  const [plotW, setPlotW] = useState(0);
+  const n = data.length;
+  const max = data.reduce((m, d) => Math.max(m, d.tokens), 0);
+  const niceMax = niceCeil(max);
+  const peakIdx = data.reduce((m, d, i) => (d.tokens > data[m].tokens ? i : m), 0);
+
+  const pick = useCallback(
+    (i: number | null) => {
+      setActiveIdx(i == null ? null : Math.min(n - 1, Math.max(0, i)));
+    },
+    [n],
+  );
+
+  /**
+   * 这次聚焦是指针带来的吗。
+   *
+   * 整条绘图区既可聚焦又收指针事件（命中按最近桶算，不用逐柱 hit-box——细粒度下柱宽
+   * 只剩几像素、逐柱会有死区），于是「点一下」同时点着两条读数入口，而它们抢同一个
+   * activeIdx。浏览器在 mousedown 上授予焦点，而 mousedown 排在 pointerdown 之后，
+   * 不闸住的话 onFocus 会把刚命中的桶改写成峰值桶。触屏更糟：兼容鼠标事件攒到抬指
+   * 之后才补发，排在 pointerleave 后面，「点一下」的净效果是
+   * pick(命中) → pick(null) → pick(峰值)，而触屏没有 pointermove 来纠正。
+   */
+  const fromPointer = useRef(false);
+
+  const onPointer = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const node = barsRef.current;
+    if (!node || n === 0) return;
+    const r = node.getBoundingClientRect();
+    fromPointer.current = true;
+    pick(Math.floor(((e.clientX - r.left) / r.width) * n));
+  };
+
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const base = activeIdx ?? peakIdx;
+    switch (e.key) {
+      case "ArrowRight":
+      case "ArrowUp":
+        pick(base + 1);
+        break;
+      case "ArrowLeft":
+      case "ArrowDown":
+        pick(base - 1);
+        break;
+      case "Home":
+        pick(0);
+        break;
+      case "End":
+        pick(n - 1);
+        break;
+      case "Escape":
+        pick(null);
+        return;
+      default:
+        return;
+    }
+    e.preventDefault();
+  };
+
+  // 全周期无用量：给一句空态，而不是画空图配「0 / 1 / 1」的无意义纵轴
+  const isEmpty = max <= 0 || n === 0;
+  const peak = isEmpty ? null : data[peakIdx];
+  const active = activeIdx != null ? data[activeIdx] : null;
+
+  // 横轴标签密度按**实际像素宽**算，不能只按桶数抽稀，否则窄容器下相邻标签会压字。
+  // 依赖 isEmpty 而不是空数组：被测的柱区只在非空分支里渲染（空态是另一个不挂 ref 的
+  // 容器），空依赖的话「首次挂载时今日零用量」会让 effect 早退、此后柱子出现也不再重跑,
+  // 实测宽度永远停在 0、ResizeObserver 也从未 attach，于是标签密度长期吃兜底的 600px
+  // ——窄屏下正是这套测量要防的压字。放在 isEmpty 之后声明才拿得到它。
+  // 没复用 hooks/useMeasuredWidth：那个 hook 把 ref 挂在组件根上、依赖数组为空，而这里
+  // 被测的柱区只在非空分支里渲染，必须跟着 isEmpty 重跑（见下面的依赖）。测量本身两边
+  // 同款：都先量一次再看有没有 ResizeObserver，都用 useLayoutEffect 在首次绘制前量到。
+  useLayoutEffect(() => {
+    const node = barsRef.current;
+    if (!node) return;
+    const measure = () => setPlotW(node.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(node);
+    return () => ro.disconnect();
+  }, [isEmpty]);
 
   return (
-    <section
-      className={
-        embedded
-          ? ""
-          : "rounded-xl bg-bg-secondary border border-border shadow-sm p-5 md:p-6"
-      }
-      aria-labelledby="usage-timeline-title"
-    >
-      <div className="flex items-baseline justify-between flex-wrap gap-3 mb-4">
-        <h2 id="usage-timeline-title" className="text-title">{t("usage.timelineTitle")}</h2>
-        {period === "today" && (
+    <section aria-labelledby="usage-timeline-title">
+      <div className="flex items-center justify-between flex-wrap gap-3 mb-3">
+        <h3 id="usage-timeline-title" className="text-body font-semibold text-text-primary">
+          {t("usage.timelineTitle")}
+        </h3>
+        {!isEmpty && (
           <Segmented
-            ariaLabel={t("usage.granularityAria")}
-            value={binMinutes}
-            onChange={onBinChange}
-            options={BIN_OPTIONS.map((b) => ({ key: b.minutes, label: t(b.labelKey) }))}
+            ariaLabel={t("usage.coloringAria")}
+            value={coloring}
+            onChange={setColoring}
+            options={[
+              { key: "total" as Coloring, label: t("usage.coloringTotal") },
+              { key: "modality" as Coloring, label: t("usage.coloringModality") },
+            ]}
           />
         )}
       </div>
 
-      <Chart
-        data={stats.timeline}
-        period={period}
-        binMinutes={binMinutes}
-        hoverIdx={hoverIdx}
-        setHoverIdx={setHoverIdx}
-      />
+      {!peak ? (   /* peak 由 isEmpty 派生，判它一次就够 */
+        <div
+          className="flex items-center justify-center text-caption text-text-secondary
+                     border border-dashed border-border rounded-lg px-4 text-center"
+          style={{ height: PLOT_H, marginLeft: GUTTER }}
+        >
+          {t("usage.timelineEmpty")}
+        </div>
+      ) : (
+        <div className="relative">
+          {/* 网格线：实线 hairline。虚线在图表里读作「预测 / 阈值」，而这只是网格。 */}
+          <div
+            className="absolute right-0 top-0 pointer-events-none"
+            style={{ left: GUTTER, height: PLOT_H }}
+            aria-hidden
+          >
+            {[0, 0.5, 1].map((r) => (
+              <div
+                key={r}
+                className={`absolute left-0 right-0 h-px ${
+                  r === 0 ? "bg-border-strong" : "bg-border"
+                }`}
+                style={{ top: PLOT_H - r * PLOT_H }}
+              />
+            ))}
+          </div>
+
+          {/* 纵轴刻度：与网格线同一个 top 换算，数字与线对齐到同一像素行 */}
+          {[0, 0.5, 1].map((r) => (
+            <div
+              key={r}
+              className="absolute left-0 text-caption num text-text-secondary text-right pr-1.5
+                         -translate-y-1/2 pointer-events-none"
+              style={{ width: GUTTER, top: PLOT_H - r * PLOT_H }}
+              aria-hidden
+            >
+              {axisTokens(niceMax * r)}
+            </div>
+          ))}
+
+          {/* 柱：整条绘图区一个 pointermove 做就近命中，避免细柱下的死区 */}
+          <div
+            ref={barsRef}
+            tabIndex={0}
+            role="img"
+            aria-label={t("usage.chartAriaLabel", {
+              period: t(PERIOD_KEYS[period]),
+              bins: n,
+              peakAt: formatBucketLabel(peak.ts, period, binMinutes),
+              peakValue: humanTokens(peak.tokens),
+            })}
+            onPointerMove={onPointer}
+            onPointerDown={onPointer}
+            // 只有鼠标真的移出去才清空：触屏抬指后必发 pointerleave，
+            // 而那一桶正是用户要读的数，且没有第二次机会把它选回来。
+            onPointerLeave={(e) => {
+              if (e.pointerType !== "mouse") return;
+              fromPointer.current = false;
+              pick(null);
+            }}
+            // 指针带来的焦点：命中的桶已经算好了，别覆盖。只有 Tab 进来
+            // （此时没有任何指针交互跑过）才落到峰值桶当键盘起点。
+            onFocus={() => {
+              if (fromPointer.current) return;
+              pick(peakIdx);
+            }}
+            onBlur={() => {
+              fromPointer.current = false;
+              pick(null);
+            }}
+            onKeyDown={onKeyDown}
+            className="relative flex items-end rounded outline-none
+                       focus-visible:outline focus-visible:outline-2
+                       focus-visible:outline-offset-2 focus-visible:outline-brand-primary"
+            style={{ height: PLOT_H, marginLeft: GUTTER }}
+          >
+            {data.map((d, i) => {
+              const dim = activeIdx != null && activeIdx !== i;
+              const pct =
+                d.tokens > 0 ? Math.max((d.tokens / niceMax) * 100, MIN_BAR_PCT) : 0;
+              return (
+                <div
+                  key={d.ts}
+                  className={`flex-1 h-full flex items-end justify-center transition-opacity ${
+                    dim ? "opacity-40" : ""
+                  }`}
+                >
+                  {/* 强调用「其余变淡」而不是「当前变亮」：亮度方向在浅/深两个主题下
+                      相反，而变淡在两边都成立，不必按主题分叉。 */}
+                  <div
+                    className={`w-[calc(100%-2px)] rounded-t-[3px] ${
+                      coloring === "modality"
+                        ? "flex flex-col justify-end gap-px overflow-hidden"
+                        : "bg-usage-total"
+                    }`}
+                    style={{ height: `${pct}%`, maxWidth: BAR_MAX }}
+                  >
+                    {coloring === "modality" &&
+                      // 自上而下渲染 → 视觉自下而上堆叠，与图例顺序一致
+                      [...MODALITIES].reverse().map((m) =>
+                        d[m.key] > 0 ? (
+                          <span
+                            key={m.key}
+                            className={`block w-full first:rounded-t-[3px] ${m.cls}`}
+                            style={{ flex: `${d[m.key]} 0 0` }}
+                          />
+                        ) : null,
+                      )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* 峰值直标：选择性直标，只标极值——每根都标就没人看了 */}
+          <div
+            className="absolute text-caption num text-text-secondary whitespace-nowrap
+                       pointer-events-none"
+            style={{
+              left: `calc(${GUTTER}px + (100% - ${GUTTER}px) * ${(peakIdx + 0.5) / n})`,
+              // 下钳一行的高度：柱贴着纵轴上界时柱顶只剩几像素，不钳这行字会顶到
+              // 标题行上去。这里用常数是安全的——它只有一行固定文案，高度不随内容变，
+              // 与那个行数会变的浮层不是一回事。
+              top: Math.max(PLOT_H - (peak.tokens / niceMax) * PLOT_H, PEAK_LABEL_H),
+              transform: "translate(-50%, -100%)",
+              paddingBottom: 4,
+            }}
+            aria-hidden
+          >
+            {t("usage.peakLabel", { value: humanTokens(peak.tokens) })}
+          </div>
+
+          <AxisLabels data={data} period={period} binMinutes={binMinutes} plotW={plotW} />
+
+          {active && (
+            <Tooltip
+              point={active}
+              idx={activeIdx!}
+              total={n}
+              niceMax={niceMax}
+              period={period}
+              binMinutes={binMinutes}
+              stacked={coloring === "modality"}
+              urlShort={urlLabels}
+            />
+          )}
+
+          {/* 读屏播报：浮层本身是视觉产物（aria-hidden），当前桶的数值走这里，
+              键盘逐段移动时才有得念。 */}
+          <p className="sr-only" role="status">
+            {active
+              ? t("usage.bucketReadout", {
+                  at: formatBucketLabel(active.ts, period, binMinutes),
+                  value: humanTokens(active.tokens),
+                })
+              : ""}
+          </p>
+        </div>
+      )}
     </section>
   );
 }
 
-interface ChartProps {
-  data: { ts: string; tokens: number }[];
+/**
+ * 横轴刻度。密度按「可用像素 ÷ 标签宽」定，而不是按桶数固定抽稀——后者在窄容器下
+ * 会让相邻标签互相压字（默认 1 小时视图在所有手机宽度下 00h 与 02h 就已重叠）。
+ * 末桶标签始终画；倒数第二个若落在一个 step 之内就跳过，避免和它挤在一起。
+ */
+function AxisLabels({
+  data,
+  period,
+  binMinutes,
+  plotW,
+}: {
+  data: UsageTimelinePoint[];
   period: UsagePeriod;
   binMinutes: number;
-  hoverIdx: number | null;
-  setHoverIdx: (i: number | null) => void;
-}
-
-/** 纯 SVG 柱状图。viewBox 固定，按容器宽度自适应。 */
-function Chart({ data, period, binMinutes, hoverIdx, setHoverIdx }: ChartProps) {
-  const { t } = useTranslation();
-  const W = 800;
-  const H = 200;
-  const padL = 44; // 左留白给纵轴数值标签，柱子从这里起，标签不再压到首根柱
-  const padR = 0;
-  const padT = 20;
-  const padB = 28;
-  const innerW = W - padL - padR;
-  const innerH = H - padT - padB;
-
-  // 用 reduce 不用 Math.max(...spread) — period=year 等场景 data.length 可能 365+,
-  // spread 大数组栈溢出风险;reduce 线性安全。
-  const max = data.reduce((m, d) => Math.max(m, d.tokens), 1);
-  const niceMax = niceCeil(max); // 纵轴上限（动态取整），柱高与网格线都以它为基准
+  plotW: number;
+}) {
   const n = data.length;
-  // 桶数多时收窄间距，避免 barW 变负（today 10 分钟桶达 144 个）。
-  const barGap = n > 150 ? 0 : n > 50 ? 1 : period === "today" ? 2 : 4;
-  const barW = n > 0 ? Math.max((innerW - barGap * (n - 1)) / n, 0.5) : 0;
+  if (n === 0) return null;
+  const sample = formatBucketLabel(data[0].ts, period, binMinutes);
+  // "13:20" 比 "13h" 宽；按字符数粗估即可，只要能随格式变化就够
+  const labelPx = sample.length > 3 ? 46 : 32;
+  const maxLabels = Math.max(2, Math.floor((plotW || 600) / labelPx));
+  const step = Math.max(1, Math.ceil(n / maxLabels));
 
-  const CHART_H = 220; // SVG 渲染像素高（固定）；viewBox→px 换算用它
+  const idxs: number[] = [];
+  for (let i = 0; i < n; i += step) {
+    if (i !== 0 && n - 1 - i < step) continue;
+    idxs.push(i);
+  }
+  if (idxs[idxs.length - 1] !== n - 1) idxs.push(n - 1);
 
   return (
-    <div className="relative w-full" style={{ height: CHART_H }}>
-      {/* 柱 + 网格线放 SVG（非等比拉伸对矩形/线无影响）；坐标轴文字一律走 HTML，避免被横向拉伸 */}
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className="w-full block"
-        style={{ height: CHART_H }}
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={t("usage.chartAriaLabel")}
+    <div className="relative h-[18px] mt-1.5" style={{ marginLeft: GUTTER }} aria-hidden>
+      {idxs.map((i) => {
+        const first = i === 0;
+        const last = i === n - 1;
+        return (
+          <span
+            key={data[i].ts}
+            className="absolute top-0 text-caption num text-text-secondary whitespace-nowrap"
+            style={
+              first
+                ? { left: 0 }
+                : last
+                  ? { right: 0 }
+                  : { left: `${((i + 0.5) / n) * 100}%`, transform: "translateX(-50%)" }
+            }
+          >
+            {formatBucketLabel(data[i].ts, period, binMinutes)}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+/** 值在前、名在后（读者已经知道在看哪根柱，想要的是数）。序列用短线 key 而非填充方块。 */
+function Tooltip({
+  point,
+  idx,
+  total,
+  niceMax,
+  period,
+  binMinutes,
+  stacked,
+  urlShort,
+}: {
+  point: UsageTimelinePoint;
+  idx: number;
+  total: number;
+  niceMax: number;
+  period: UsagePeriod;
+  binMinutes: number;
+  stacked: boolean;
+  /** 全卡共用的地址压短映射，由页面层算一次传下来（见 UsagePage 的说明）。 */
+  urlShort: Map<string, string>;
+}) {
+  const { t } = useTranslation();
+  const centerPct = ((idx + 0.5) / total) * 100;
+  // 贴边时改同侧对齐，否则首/末桶的浮层会越出卡片圆角边框
+  const align = centerPct < 12 ? "left" : centerPct > 88 ? "right" : "center";
+  const shiftX = align === "center" ? "-50%" : align === "right" ? "-100%" : "0";
+
+  /**
+   * 按来源拆分：两档都给，但「按模态」档只给一行计数、不展开。
+   *
+   * 浮层的落点被夹在绘图区内（PLOT_H）。「按模态」档本身已有四行模态明细，再把来源
+   * 逐个列出会把浮层撑到绘图高的一倍半——夹取只能把它顶到绘图区顶部，多出来的部分照样
+   * 溢出去盖住下面的明细表（实测过：两档都展开那版的底边确实压进了明细表）。所以按模态
+   * 档压成一行「N 个来源」：默认档位下至少知道有几个来源，要看是谁
+   * 切到「合计」档；合计档只有总量一行、空间富余，正好展开。
+   */
+  const sorted = useMemo(
+    () => [...point.targets].sort((a, b) => targetTotal(b) - targetTotal(a)),
+    [point],
+  );
+  const showTargets = sorted.length > 0;
+  const soleTarget = sorted.length === 1 ? sorted[0] : null;
+  const expandTargets = sorted.length > 1 && !stacked;
+  /**
+   * 这一桶**真有**模态可列。`stacked` 只说明档位允许列模态，不代表这桶有量：空桶四个
+   * 字段全是 0，下面那四行会被逐行的 `> 0` 守卫全部跳过。而空桶不是边角——绘图区是
+   * 整条做就近命中（细柱下不留死区），指针落在空桶上照样弹浮层，最细档「近 24 小时
+   * ÷ 15 分」有 96 个桶（默认 1 小时档 24 个），夜里成片都是空的。
+   *
+   * 底边与下面那段模态明细共用这一个判据，不各判各的：上一次悬空底边正是因为两处
+   * 口径分叉才漏掉的。
+   */
+  const showModalities = stacked && MODALITIES.some((m) => point[m.key] > 0);
+  const shownTargets = expandTargets ? sorted.slice(0, MAX_TARGET_ROWS) : [];
+  const restTargets = expandTargets ? sorted.slice(MAX_TARGET_ROWS) : [];
+  const restTotal = restTargets.reduce((a, t) => a + targetTotal(t), 0);
+
+  /**
+   * 纵向落点按**实测高度**算，不用常数猜。
+   *
+   * 浮层的行数随「是否按模态」变化，高度差两三倍；而柱越高浮层越靠上，
+   * 拿一个固定地板去挡越界，只在「浮层恰好那么高」时成立——峰值柱贴着纵轴上界时
+   * 柱顶只剩几像素，浮层会整个翻到绘图区上方、盖住卡片工具条上住户刚点过的控件。
+   * 故先量出来：上方装不下就翻到柱顶下方，并夹在绘图区内——「按模态」把四个模态全列出时
+   * 浮层比绘图区本身还高，不夹的话往下翻会越出绘图区、去盖下面的明细表。宁可盖住它正在
+   * 解读的那张图，也不去盖邻区：图是浮层的上下文，而明细与工具条不是。
+   */
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const [boxH, setBoxH] = useState(0);
+  useLayoutEffect(() => {
+    setBoxH(boxRef.current?.offsetHeight ?? 0);
+  }, [point, stacked, expandTargets]);
+
+  const barTop = PLOT_H - (point.tokens / niceMax) * PLOT_H;
+  const GAP = 8;
+  const above = barTop - boxH - GAP;
+  const top =
+    above >= 0 ? above : Math.min(barTop + GAP, Math.max(0, PLOT_H - boxH));
+
+  return (
+    <div
+      ref={boxRef}
+      aria-hidden
+      /* max-w 是为了让来源行的 truncate 真正生效：宽度不设上限时，网格的 1fr 列会被
+         内容撑开，truncate 就永远不触发，长地址会把浮层拉得比图还宽。 */
+      className="absolute z-10 pointer-events-none whitespace-nowrap text-caption
+                 max-w-[280px] rounded-lg bg-bg-secondary border border-border
+                 shadow-md px-2.5 py-1.5"
+      style={{
+        left:
+          align === "left"
+            ? GUTTER
+            : align === "right"
+              ? "100%"
+              : `calc(${GUTTER}px + (100% - ${GUTTER}px) * ${(idx + 0.5) / total})`,
+        top,
+        // 纵向已按实测高度算完，这里只做横向对齐
+        transform: `translate(${shiftX}, 0)`,
+        // 量到高度之前先隐形渲一帧，避免看到从默认位置跳过来
+        visibility: boxH === 0 ? "hidden" : undefined,
+      }}
+    >
+      <div className="num text-text-secondary mb-1">
+        {formatBucketLabel(point.ts, period, binMinutes)}
+      </div>
+      {/* 底边只在下面真有东西可分隔时才画，否则是条悬空线 */}
+      <div
+        className={`flex items-baseline justify-between gap-3.5 ${
+          showModalities || showTargets ? "pb-1 mb-1 border-b border-border" : ""
+        }`}
       >
-        {/* 纵轴网格线 */}
-        {[0, 0.5, 1].map((ratio) => {
-          const gy = H - padB - ratio * innerH;
-          return (
-            <line
-              key={ratio}
-              x1={padL}
-              y1={gy}
-              x2={W - padR}
-              y2={gy}
-              className={ratio === 0 ? "stroke-border" : "stroke-border opacity-40"}
-              strokeWidth="1"
-              strokeDasharray={ratio === 0 ? undefined : "3 3"}
-            />
-          );
-        })}
-
-        {/* 柱 */}
-        {data.map((d, i) => {
-          const h = (d.tokens / niceMax) * innerH;
-          const x = padL + i * (barW + barGap);
-          const y = H - padB - h;
-          const on = hoverIdx === i;
-          return (
-            <g
-              key={d.ts}
-              onMouseEnter={() => setHoverIdx(i)}
-              onMouseLeave={() => setHoverIdx(null)}
-              style={{ cursor: "pointer" }}
+        <span className="num font-semibold text-text-primary">{humanTokens(point.tokens)}</span>
+        <span className="text-text-secondary">{t("usage.tokensUnit")}</span>
+      </div>
+      {showModalities &&
+        MODALITIES.map((m) =>
+          point[m.key] > 0 ? (
+            <div
+              key={m.key}
+              className="grid grid-cols-[12px_1fr_auto] items-center gap-2 leading-6"
             >
-              {/* 透明 hit-box，让贴近的鼠标也能命中（柱子很瘦时）*/}
-              <rect
-                x={x}
-                y={padT}
-                width={barW + barGap}
-                height={H - padT - padB}
-                fill="transparent"
-              />
-              <rect
-                x={x}
-                y={y}
-                width={barW}
-                height={h}
-                rx={Math.min(barW / 4, 3)}
-                className={on ? "fill-brand-primary" : "fill-info opacity-70"}
-              />
-            </g>
-          );
-        })}
-      </svg>
-
-      {/* 纵轴数值标签（HTML，右对齐在左留白区、垂直居中到网格线）*/}
-      {[0, 0.5, 1].map((ratio) => {
-        const gy = H - padB - ratio * innerH;
-        return (
-          <div
-            key={ratio}
-            className="text-caption num text-text-tertiary text-right pr-1.5 pointer-events-none"
-            style={{
-              position: "absolute",
-              left: 0,
-              width: `${(padL / W) * 100}%`,
-              top: `${(gy / H) * CHART_H}px`,
-              transform: "translateY(-50%)",
-            }}
-          >
-            {humanTokensShort(niceMax * ratio)}
-          </div>
-        );
-      })}
-
-      {/* x 轴刻度标签（HTML，落在桶左边界；首桶左对齐）*/}
-      {data.map((d, i) => {
-        if (!shouldShowLabel(i, n, period)) return null;
-        const atStart = i === 0;
-        const x = atStart ? padL : padL + i * (barW + barGap) - barGap / 2;
-        return (
-          <div
-            key={d.ts}
-            className="text-caption num text-text-tertiary pointer-events-none whitespace-nowrap"
-            style={{
-              position: "absolute",
-              left: `${(x / W) * 100}%`,
-              bottom: 2,
-              transform: atStart ? "none" : "translateX(-50%)",
-            }}
-          >
-            {formatTimelineLabel(d.ts, period, binMinutes)}
-          </div>
-        );
-      })}
-
-      {/* today：右端 24h 结束刻度 */}
-      {period === "today" && (
-        <div
-          className="text-caption num text-text-tertiary pointer-events-none whitespace-nowrap"
-          style={{ position: "absolute", right: 0, bottom: 2 }}
-        >
-          {binMinutes < 60 ? "24:00" : "24h"}
+              <span className={`block h-0.5 rounded-full ${m.cls}`} />
+              <span className="text-text-secondary">{t(m.labelKey)}</span>
+              <span className="num font-semibold text-text-primary">
+                {humanTokens(point[m.key])}
+              </span>
+            </div>
+          ) : null,
+        )}
+      {/* 按来源拆分。只在这一桶真有两个以上来源时列出——只有一个来源时，它的数就是
+          上面那个总量，再列一遍只是把同一个数说两次。 */}
+      {showTargets && !expandTargets && (
+        <div className="grid grid-cols-[1fr_auto] items-baseline gap-3.5 leading-6">
+          <span className="text-text-tertiary">{t("usage.timelineByTarget")}</span>
+          {/* 只有一个来源时报身份而不报数——那个数就是上面的总量，重复一遍没意义；
+              但「这一段是谁在用」正是这份拆分存在的理由，不该因为只有一个就不说。
+              多个来源时这里只报个数，逐个列出要切到「合计」档（见上面那段说明）。 */}
+          <span className="num text-text-secondary truncate min-w-0">
+            {soleTarget
+              ? `${soleTarget.model} ${
+                  soleTarget.base_url
+                    ? (urlShort.get(soleTarget.base_url) ?? soleTarget.base_url)
+                    : t("usage.timelineTargetLegacy")
+                }`
+              : t("usage.timelineTargetCount", { count: sorted.length })}
+          </span>
         </div>
       )}
-
-      {/* hover tooltip（HTML 浮层）：定位到所悬停柱子正上方 */}
-      {hoverIdx != null &&
-        data[hoverIdx] &&
-        (() => {
-          const cx = padL + hoverIdx * (barW + barGap) + barW / 2;
-          const leftPct = (cx / W) * 100;
-          // 柱顶（viewBox→px：SVG 渲染高 220、viewBox 高 H）；高柱时下钳到 48px 留出上方空间
-          const barTopPx =
-            ((H - padB - (data[hoverIdx].tokens / niceMax) * innerH) / H) * CHART_H;
-          const anchorY = Math.max(barTopPx, 48);
-          return (
+      {expandTargets && (
+        <>
+          <div className="text-text-tertiary leading-6">{t("usage.timelineByTarget")}</div>
+          {shownTargets.map((tg) => (
             <div
-              className="text-caption absolute z-10 px-2.5 py-1.5 rounded-lg bg-bg-secondary border border-border shadow-sm pointer-events-none whitespace-nowrap text-center"
-              style={{
-                left: `${leftPct}%`,
-                top: `${anchorY}px`,
-                transform: "translate(-50%, calc(-100% - 6px))",
-              }}
+              key={`${tg.model}\u001f${tg.base_url}`}
+              className="grid grid-cols-[1fr_auto] items-baseline gap-3.5 leading-6"
             >
-              <div className="num text-text-primary">
-                {t("usage.tokensTooltip", { value: humanTokensShort(data[hoverIdx].tokens) })}
-              </div>
-              <div className="text-text-secondary num">
-                {formatTimelineLabel(data[hoverIdx].ts, period, binMinutes)}
-              </div>
+              <span className="text-text-secondary truncate min-w-0">
+                {tg.model}
+                <span className="text-text-tertiary">
+                  {" "}
+                  {tg.base_url
+                    ? (urlShort.get(tg.base_url) ?? tg.base_url)
+                    : t("usage.timelineTargetLegacy")}
+                </span>
+              </span>
+              <span className="num font-semibold text-text-primary">
+                {humanTokens(targetTotal(tg))}
+              </span>
             </div>
-          );
-        })()}
+          ))}
+          {restTargets.length > 0 && (
+            <div className="grid grid-cols-[1fr_auto] items-baseline gap-3.5 leading-6">
+              <span className="text-text-tertiary">
+                {t("usage.timelineTargetMore", { count: restTargets.length })}
+              </span>
+              <span className="num text-text-secondary">{humanTokens(restTotal)}</span>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

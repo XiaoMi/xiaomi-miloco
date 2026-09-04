@@ -26,9 +26,11 @@ from miloco.perception.types import (
 )
 
 
-def _artifacts(clips: dict | None = None) -> OmniEventArtifacts:
-    """造 OmniEventArtifacts 实例,只填 clips,trace 留 None."""
-    return OmniEventArtifacts(clips=clips or {})
+def _artifacts(
+    clips: dict | None = None, ref_frames: dict | None = None
+) -> OmniEventArtifacts:
+    """造 OmniEventArtifacts 实例,填 clips(+ 可选 ref_frames),trace 留 None."""
+    return OmniEventArtifacts(clips=clips or {}, ref_frames=ref_frames or {})
 
 
 @pytest.fixture
@@ -141,6 +143,46 @@ class TestPersistMeaningfulEvent:
         assert event_dir.exists()
         assert (event_dir / "cam_living_01" / "clip.mp4").read_bytes() == _clip_payload(1)[0]
         assert (event_dir / "cam_kitchen_01" / "clip.mp4").read_bytes() == _clip_payload(2)[0]
+
+    async def test_rule_status_rendered_in_text(self, isolated_db, dao):
+        """rule_statuses 透传到 build_agent_text，DB.text 含「触发状态」行。"""
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")]
+        )
+        from miloco.rule.schema import TriggerOutcome
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts({"cam_kitchen_01": _clip_payload()}),
+            rule_statuses={"r1": TriggerOutcome.FIRED},
+        )
+        rows = dao.query()
+        assert len(rows) == 1
+        assert "触发状态：已触发" in rows[0]["text"]
+
+    async def test_incomplete_rule_rendered_as_unknown_in_text(self, isolated_db, dao):
+        """incomplete_rule_ids 透传到 build_agent_text，DB.text 标「未知」而非聚合值。
+
+        钉住 _persist_meaningful_event → build_agent_text 这一跳:删掉那个 kwarg 透传时,
+        住户看到的正是本 PR 要修的「确定但偏弱的假标签」,故必须有回归守着。
+        """
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")]
+        )
+        from miloco.rule.schema import TriggerOutcome
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts({"cam_kitchen_01": _clip_payload()}),
+            rule_statuses={"r1": TriggerOutcome.STILL_IN},  # 聚合值存在但证据残缺
+            incomplete_rule_ids={"r1"},
+        )
+        rows = dao.query()
+        assert len(rows) == 1
+        assert "触发状态：未知" in rows[0]["text"]
+        assert "未触发（持续中）" not in rows[0]["text"]
 
     async def test_caption_only_does_not_insert(self, isolated_db, dao):
         """纯 caption(无 rule/suggestion/asr)→ 不入表(B5)."""
@@ -372,6 +414,115 @@ class TestPersistMeaningfulEvent:
         assert rows[0]["has_rule_hit"] is True
         assert "rule 已被删" in rows[0]["text"]
 
+    async def test_task_desc_wired_into_text(self, isolated_db, dao):
+        """client.py 接线：反查 rule → 按 rule.task_id 取 task.description → 以 rule_id 回填 →
+        落库 text 含「任务」+「规则」；同 task 多规则 get_description 只调一次（去重缓存）。"""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from miloco.manager import get_manager
+
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(rule_id="r1", reason="炒菜", source_device_ids=["cam_k"]),
+                MatchedRule(rule_id="r2", reason="看火", source_device_ids=["cam_k"]),
+            ]
+        )
+        rules = {
+            "r1": SimpleNamespace(
+                name="[kitchen] 灶台有人", task_id="kitchen",
+                condition=SimpleNamespace(query="灶台前有人"),
+            ),
+            "r2": SimpleNamespace(
+                name="[kitchen] 明火", task_id="kitchen",
+                condition=SimpleNamespace(query="是否有明火"),
+            ),
+        }
+        get_desc = MagicMock(return_value="厨房安防")
+
+        mgr = get_manager()
+
+        class _FakeRuleService:
+            get_rule = AsyncMock(side_effect=lambda rid: rules.get(rid))
+
+        class _FakeTaskService:
+            get_description = get_desc
+
+        mgr._rule_service = _FakeRuleService()
+        mgr._task_service = _FakeTaskService()
+        try:
+            await _persist_meaningful_event(
+                result=result, device_ids=["cam_k"], artifacts=_artifacts({}),
+            )
+        finally:
+            for attr in ("_rule_service", "_task_service"):
+                if hasattr(mgr, attr):
+                    delattr(mgr, attr)
+
+        rows = dao.query()
+        assert len(rows) == 1
+        text = rows[0]["text"]
+        assert "任务：厨房安防" in text
+        assert "规则：[灶台有人] 灶台前有人" in text
+        assert "规则：[明火] 是否有明火" in text
+        # 同 task 两条规则 → description 只查一次（去重缓存生效）
+        assert get_desc.call_count == 1
+
+    async def test_task_desc_cross_task_attribution(self, isolated_db, dao):
+        """不同 task 的规则 → 各自 description 正确归属（不串行）；每个 task 各查一次。"""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from miloco.manager import get_manager
+
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(rule_id="r1", reason="炒菜", source_device_ids=["cam_k"]),
+                MatchedRule(rule_id="r2", reason="躺床", source_device_ids=["cam_b"]),
+            ]
+        )
+        rules = {
+            "r1": SimpleNamespace(
+                name="[kitchen] 灶台有人", task_id="kitchen",
+                condition=SimpleNamespace(query=""),
+            ),
+            "r2": SimpleNamespace(
+                name="[bedroom] 有人躺床", task_id="bedroom",
+                condition=SimpleNamespace(query=""),
+            ),
+        }
+        descs = {"kitchen": "厨房安防", "bedroom": "卧室监控"}
+        get_desc = MagicMock(side_effect=lambda tid: descs.get(tid))
+
+        mgr = get_manager()
+
+        class _FakeRuleService:
+            get_rule = AsyncMock(side_effect=lambda rid: rules.get(rid))
+
+        class _FakeTaskService:
+            get_description = get_desc
+
+        mgr._rule_service = _FakeRuleService()
+        mgr._task_service = _FakeTaskService()
+        try:
+            await _persist_meaningful_event(
+                result=result, device_ids=["cam_k", "cam_b"], artifacts=_artifacts({}),
+            )
+        finally:
+            for attr in ("_rule_service", "_task_service"):
+                if hasattr(mgr, attr):
+                    delattr(mgr, attr)
+
+        text = dao.query()[0]["text"]
+        blocks = text.split("═══")
+        kb = next(b for b in blocks if "灶台有人" in b)
+        bb = next(b for b in blocks if "有人躺床" in b)
+        # 各自块内归属正确、不串行
+        assert "任务：厨房安防" in kb and "卧室监控" not in kb
+        assert "任务：卧室监控" in bb and "厨房安防" not in bb
+        # 两个不同 task → 各查一次
+        assert get_desc.call_count == 2
+
     async def test_asr_from_mic_off_cam_stripped_not_persisted(self, isolated_db, dao):
         """默认关(opt-in):相机不在拾音白名单 → speech 在 _persist 内被
         _filter_voice_enabled 剥掉,speech-only 结果不入表。
@@ -466,6 +617,44 @@ class TestPersistMeaningfulEvent:
         event_dir = get_snapshot_root() / rows[0]["id"]
         assert (event_dir / "cam_entrance" / "clip.mp4").exists()
         assert not (event_dir / "cam_study").exists()
+
+    async def test_ref_frames_narrowed_to_rule_source(self, isolated_db, dao):
+        """Smart Crop 多摄像头:规则只命中玄关,书房也产出了 crop 视频 + ref 参考帧,
+        但 ref_frames 应与 clips / device_ids 同步收窄——只落玄关的 ref.jpg,书房的
+        ref 不落盘(否则其 device_id 已不在 device_ids 内,ref 经 locate_ref 校验取不到、
+        也不进 feedback pack,纯占 snapshot 配额)。"""
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(
+                    rule_id="r1", reason="陌生人进入玄关",
+                    source_device_ids=["cam_entrance"],
+                )
+            ]
+        )
+        clips_by_device = {
+            "cam_entrance": _clip_payload(1),
+            "cam_study": _clip_payload(2),
+        }
+        ref_frames = {
+            "cam_entrance": b"\xff\xd8\xff\xe0ref-entrance",
+            "cam_study": b"\xff\xd8\xff\xe0ref-study",
+        }
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_entrance", "cam_study"],
+            artifacts=_artifacts(clips_by_device, ref_frames=ref_frames),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["device_ids"] == ["cam_entrance"]
+
+        from miloco.perception.snapshot_writer import get_snapshot_root, region_slug
+
+        event_dir = get_snapshot_root() / rows[0]["id"]
+        assert (event_dir / region_slug("cam_entrance") / "ref.jpg").exists()
+        assert not (event_dir / region_slug("cam_study")).exists()
 
     async def test_device_ids_union_across_rules_and_asr(self, isolated_db, dao):
         """同一行事件里规则命中书房、语音指令来自客厅(拾音白名单相机)→ device_ids

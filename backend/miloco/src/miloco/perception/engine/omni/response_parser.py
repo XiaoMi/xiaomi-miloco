@@ -272,9 +272,20 @@ def _build_output(
     rule_name_to_id: "dict[str, str] | None" = None,
 ) -> OmniOutput:
     caption = _parse_caption(parsed.get("caption"))
-    matched_rules = _parse_matched_rules(
-        parsed.get("matched_rules"), rule_name_to_id
-    )
+    # pet_identities 是 prompt 侧的宠物称呼唯一真源（caption / suggestions / matched_rules 据其
+    # 派生），**不入 OmniOutput、不进 IdentityEngine / person 表**（红线）。这里只落审计日志，
+    # 便于事后核「叫了谁、凭什么」——**不据此改变任何下游行为**。
+    # PET_NAMING_SPEC「规则点名宠物须 conf=high」的代码侧强制留待后续：可靠判定「某条规则是否
+    # 在点名某只宠物」需要结构化信息，靠「宠物名是规则名子串」会误吞无关规则（宠物叫「宝宝」时
+    # 连「宝宝独处提醒」这类人身安全规则一起丢），代价高于收益。
+    pet_high, pet_mid = _parse_pet_identities(parsed.get("pet_identities"))
+    if pet_high or pet_mid:
+        logger.info(
+            "event=pet_identities high=%s mid=%s",
+            sorted(_sanitize_for_log(n) for n in pet_high),
+            sorted(_sanitize_for_log(n) for n in pet_mid),
+        )
+    matched_rules = _parse_matched_rules(parsed.get("matched_rules"), rule_name_to_id)
     speeches = _parse_speeches(parsed.get("speeches"))
     env_sounds = _parse_env_sounds(parsed.get("env_sounds"))
     suggestions = _parse_suggestions(parsed.get("suggestions"))
@@ -307,6 +318,31 @@ def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | No
         if rn and (rn in name or name in rn):
             return rid
     return None
+
+
+def _sanitize_for_log(s: str) -> str:
+    """模型可控串进日志前压平换行 + 截断（同 pet_library 的日志注入加固口径）。"""
+    return re.sub(r"\s+", " ", str(s)).strip()[:40]
+
+
+def _parse_pet_identities(raw: Any) -> tuple[set[str], set[str]]:
+    """``pet_identities`` → ``(high 名单, mid 名单)``。
+
+    **仅供审计日志**；不入 OmniOutput、不进 IdentityEngine / person 表，也不改变下游行为
+    （名字直接来自模型输出、未与花名册核对，不足以作过滤依据）。
+    """
+    if not isinstance(raw, list):
+        return set(), set()
+    high: set[str] = set()
+    mid: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()[:32]
+        if not name:
+            continue
+        (high if str(item.get("conf", "")).strip().lower() == "high" else mid).add(name)
+    return high, mid
 
 
 def _parse_matched_rules(

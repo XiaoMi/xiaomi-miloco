@@ -104,6 +104,33 @@
       },
       "required": ["omni"]
     },
+    "features": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "产品级实验性功能开关（默认关，住户在 web 显式开启）",
+      "properties": {
+        "pet_recognition": {
+          "type": "boolean",
+          "default": false,
+          "description": "宠物识别（实验性）总开关：开启后启用宠物作为家庭成员的注册与基于外观描述的命名识别；默认关，关闭时前端隐藏入口、后端不注入宠物命名规则，已录数据保留"
+        },
+        "pet_head_grounding": {
+          "type": "boolean",
+          "default": true,
+          "description": "宠物头像头部定位子开关（默认开）：开启后注册时由 omni 输出头部区域坐标作头像默认裁剪框；关闭则用全身 crop。仅在 pet_recognition 开启时有意义；内部调优参数，一般无需改动"
+        },
+        "pet_body_grounding": {
+          "type": "boolean",
+          "default": true,
+          "description": "宠物本体定位子开关（默认开）：仅作用于检测器框不到猫/狗的回退路径——开启后由 omni 在整幅画面输出目标动物本体坐标、裁本体作参考 crop（兼容非猫狗物种）；关闭则回退路径不产参考 crop。仅在 pet_recognition 开启时有意义；内部调优参数，一般无需改动"
+        },
+        "pet_reid_diverse": {
+          "type": "boolean",
+          "default": true,
+          "description": "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 特征距离在同一只候选里贪心选最不相似的 ≤3 张多姿态（第 1 张取质量分最高，第 2/3 张依次选特征距离最远者）；关闭或模型不可用时回退感知哈希 dHash。仅在 pet_recognition 开启时有意义；内部调优参数，一般无需改动"
+        }
+      }
+    },
     "scheduler": {
       "type": "object",
       "additionalProperties": true,
@@ -125,6 +152,19 @@
           "type": "number",
           "default": 60.0,
           "description": "相同通知文案在此窗口（秒）内只发一次；<=0 = 关闭去重"
+        }
+      }
+    },
+    "perception": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "感知管线相关配置",
+      "properties": {
+        "min_suggestion_urgency": {
+          "type": "string",
+          "enum": ["low", "medium", "high"],
+          "default": "low",
+          "description": "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃；low=不过滤（默认，向后兼容），medium=丢弃 low，high=只保留 high。result.suggestions 保留完整，仅 agent 派发受限"
         }
       }
     }

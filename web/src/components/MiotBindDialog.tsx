@@ -344,7 +344,7 @@ export function MiotBindDialog({ open, onClose, onDone }: Props) {
                   key={h.homeId}
                   className={`flex items-center gap-3 px-3 py-2 rounded-lg border cursor-pointer transition-colors ${
                     selectedHomeId === h.homeId
-                      ? "border-brand-primary bg-brand-primary/10"
+                      ? "border-brand-primary bg-brand-soft"
                       : "border-border hover:border-border-strong"
                   }`}
                 >
