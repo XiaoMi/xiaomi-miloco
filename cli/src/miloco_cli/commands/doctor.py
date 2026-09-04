@@ -1000,13 +1000,32 @@ def probe_backend() -> BackendState:
 
             version_data = _fetch_backend_version(client)
 
-            if not is_bound:
+            def _state(**kw) -> BackendState:
+                """三条返回分支共用的构造点，预置与「绑定到哪一步」无关的那几项。
+
+                收成一处是有原因的：授权健康度与 ``is_bound`` 正交——续期被云端
+                永久拒绝、而访问令牌还没到期时后端报已绑定；等访问令牌也过期，
+                后端改报未绑定，而健康度**仍然**是降级。「未绑定且已失效」是后端
+                会真实发出的组合。这两个字段在 :class:`BackendState` 上有默认值，
+                某个分支忘了传不会报错，只会静默变成「未失效」，于是判定那一层
+                「失效优先于未绑定」的分支顺序在它唯一真正需要生效的场景里失效：
+                问题变严重的那一刻退出码反而从 1 掉回 0。
+                """
                 return BackendState(
-                    url=base_url, reachable=True, error=None,
+                    url=base_url,
+                    reachable=True,
+                    error=None,
+                    version_data=version_data,
+                    auth_degraded=auth_degraded,
+                    auth_degraded_since=auth_degraded_since,
+                    **kw,
+                )
+
+            if not is_bound:
+                return _state(
                     account_bound=False, account_uid=None,
                     home_enabled=False, home_id=None, home_name=None,
                     cameras=[],
-                    version_data=version_data,
                 )
 
             r_homes = client.get("/api/miot/scope/homes")
@@ -1020,14 +1039,10 @@ def probe_backend() -> BackendState:
                     homes = hb.get("data") or []
             enabled_home = next((h for h in homes if h.get("in_use")), None)
             if enabled_home is None:
-                return BackendState(
-                    url=base_url, reachable=True, error=None,
+                return _state(
                     account_bound=True, account_uid=uid,
                     home_enabled=False, home_id=None, home_name=None,
                     cameras=[],
-                    version_data=version_data,
-                    auth_degraded=auth_degraded,
-                    auth_degraded_since=auth_degraded_since,
                 )
 
             r_cams = client.get("/api/miot/camera_list")
@@ -1047,16 +1062,12 @@ def probe_backend() -> BackendState:
                             local_ip=c.get("local_ip"),
                         ))
 
-            return BackendState(
-                url=base_url, reachable=True, error=None,
+            return _state(
                 account_bound=True, account_uid=uid,
                 home_enabled=True,
                 home_id=enabled_home.get("home_id"),
                 home_name=enabled_home.get("home_name"),
                 cameras=cameras,
-                auth_degraded=auth_degraded,
-                auth_degraded_since=auth_degraded_since,
-                version_data=version_data,
             )
     except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPError) as e:
         return _backend_state(
