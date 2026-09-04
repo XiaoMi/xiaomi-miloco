@@ -321,13 +321,17 @@ def test_oauth_state_uses_sha256_and_stays_self_consistent():
 
 
 def test_no_unsanitized_value_reaches_the_log_in_that_router():
-    """米家接口那一组日志里不留未清洗的漏网。
+    """名单上的值不许裸传进这一组日志。
 
-    钉住两个值，理由不同：**调用者标识**今天恒为 ``None``（两条鉴权依赖成功时都
-    不返回值），钉它是为了「将来补成返回真实身份」那天不必回头逐处补；**通知文本**
-    是调用方提交上来的自由字符串、只被约束非空不限字符集，是今天就真的外部可控的
-    那个，钉它是防现时回退——带服务凭据的调用方塞一个含换行的值进去，日志里就多出
-    一整行看起来完全正常的记录，按行切的采集器分不出真假。
+    守的是**一份显式名单**，不是「这个文件里所有该清洗的值」。名单之外还有别的值
+    也裸传进日志（WS 文本帧原文、若干路径与查询参数），它们在主干上即如此、本次
+    未纳入，这条护栏也不管它们——要扩大守护范围就往名单里加，别指望它自动发现。
+
+    名单上现有两个值，理由不同：**调用者标识**今天恒为 ``None``（两条鉴权依赖成功
+    时都不返回值），钉它是为了「将来补成返回真实身份」那天不必回头逐处补；**通知
+    文本**是调用方提交上来的自由字符串、只被约束非空不限字符集，是今天就真的外部
+    可控的那个，钉它是防现时回退——带服务凭据的调用方塞一个含换行的值进去，日志里
+    就多出一整行看起来完全正常的记录，按行切的采集器分不出真假。
 
     判据按 **AST 看实参**，不按行文本匹配：同一个值在这个文件里有好几种写法
     （占位符写法不同、单参数与多参数、单行与折行），按行匹配只覆盖其中一种。
@@ -347,6 +351,10 @@ def test_no_unsanitized_value_reaches_the_log_in_that_router():
         **向下遍历整棵子树**，不只看顶层——``extra={"user": current_user}`` 会把值
         埋进字典、f-string 会把它埋进 ``JoinedStr``，只看顶层就全漏过去了。
         """
+        # 要守的名单。往里加名字即可扩大守护范围。
+        BARE_NAMES = {"current_user"}
+        DOTTED_NAMES = {"request.notify"}
+
         found: list[str] = []
 
         def visit(n: ast.AST) -> None:
@@ -359,17 +367,15 @@ def test_no_unsanitized_value_reaches_the_log_in_that_router():
                 and n.func.id == "_log_safe"
             ):
                 return
-            if isinstance(n, ast.Name) and n.id == "current_user":
-                found.append("current_user")
+            # 名单判定：裸名字，以及 `对象.属性` 形式
+            if isinstance(n, ast.Name) and n.id in BARE_NAMES:
+                found.append(n.id)
                 return
-            if (
-                isinstance(n, ast.Attribute)
-                and n.attr == "notify"
-                and isinstance(n.value, ast.Name)
-                and n.value.id == "request"
-            ):
-                found.append("request.notify")
-                return
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name):
+                dotted = f"{n.value.id}.{n.attr}"
+                if dotted in DOTTED_NAMES:
+                    found.append(dotted)
+                    return
             for child in ast.iter_child_nodes(n):
                 visit(child)
 

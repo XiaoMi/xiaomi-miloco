@@ -92,11 +92,15 @@ def verify_websocket_token(websocket: WebSocket) -> None:
     accept the token from either the standard ``Authorization: Bearer …``
     header (used by CLI / server-to-server callers) or the ``?token=…`` query
     parameter (used by browser pages like ``static/watch.html``).
-    
+
     **返回值约束**：与 ``verify_token`` 同款——本依赖恒返回 ``None``。若将来改为
-    返回真实的调用者标识，返回前必须剥掉 ``\r`` / ``\n``：注入进来的这个值会被
-    接口直接当 ``logger`` 的 ``%s`` 参数记「接口被调用」，带换行即可在日志里伪造
-    出整行。两条依赖注入的是同名参数、被同样地打进日志，约束因此两边都写。
+    返回真实的调用者标识，**返回前必须剥掉** ``\r`` / ``\n``。两条依赖注入的是同名
+    参数、被同样地打进日志，约束因此两边都写。
+
+    这一条尤其要在**返回前**剥，不能只在打日志的地方包一下：注入进来的值除了被接口
+    自己记一行「接口被调用」，还会作为连接方标识下传给流管理层，在那里与令牌摘要拼
+    成一个标签再打进日志。拼接之后就分不出哪一段来自外部，逐个日志点去包既容易漏，
+    也看不出这条跨层路径——所以约束落在源头。
     """
     service_token = get_settings().server.token
     if not service_token:
