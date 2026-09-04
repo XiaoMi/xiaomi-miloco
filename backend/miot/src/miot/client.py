@@ -468,9 +468,13 @@ class MIoTClient:
         self._oauth_info = await self._oauth_client.get_access_token_async(code=code)
         # 授权码已被消费，先落盘再做副作用——理由同 refresh_access_token_async。
         self.__persist_oauth_info(persist, "authorize")
+        # 取身份前必须先把新令牌推进 HTTP 客户端——那一步是真实的 HTTP 请求。
+        self.__apply_token_to_http_header()
         await self.get_user_info_async()
         self.__persist_oauth_info(persist, "authorize:user_info")
-        await self.__apply_access_token_async()
+        # 重新授权可能换了账号:账号级主题 user/{uid}/g_op/* 只在重建时发出,
+        # 单纯换密码重连会把旧 uid 的订阅原样重放。
+        await self.__apply_access_token_async(rebuild_mips=True)
         # First-time OAuth: mips_cloud 由 __apply_access_token_async 在
         # _mips_cloud 尚未建立时负责 setup（需要 user uid，上面已拉到）。
         return self._oauth_info
@@ -501,6 +505,8 @@ class MIoTClient:
             oauth_info.user_info = self._oauth_info.user_info
         self._oauth_info = oauth_info
         self.__persist_oauth_info(persist, "refresh")
+        # 同上：下面可能要取身份，先把新令牌推进去。
+        self.__apply_token_to_http_header()
 
         if oauth_info.user_info is None:
             # 首次刷新时没有可继承的 user_info，补拉一次；拿到后再存一遍，
@@ -526,11 +532,17 @@ class MIoTClient:
         except Exception as e:  # noqa: BLE001 - 落盘失败不应中断刷新
             _LOGGER.error("persist oauth info failed at %s: %s", stage, e)
 
-    async def __apply_access_token_async(self) -> None:
-        """把新的 access_token 推给各个下游持有者。
+    def __apply_token_to_http_header(self) -> None:
+        """把新令牌推进 HTTP 客户端。
 
-        每一项独立 try：任何一项失败都不该影响其余项，更不该冒泡成「刷新失败」
-        ——令牌此刻已经落盘，刷新在语义上已经成功了。
+        纯内存赋值，不发请求、不进原生库，因此**必须**排在 get_user_info_async
+        之前：取账号身份本身是一次 HTTP 请求，而它读的正是这里写入的令牌。排在
+        后面的话，首次授权时那里还是空串（客户端构造时传的就是空），uid 换取会
+        撞上「access token is empty」的硬校验，把一次已经成功、授权码已被消费的
+        授权报成失败；换账号重绑时更隐蔽——它会拿回**旧账号**的 uid，让「是否同
+        一账号」的判定恒真，于是该清的接入范围配置永远不清。
+
+        同时也是 __apply_access_token_async 的第一步，重复调用无副作用。
         """
         token = self._oauth_info.access_token if self._oauth_info else None
         if not token:
@@ -539,6 +551,24 @@ class MIoTClient:
             self._http_client.update_http_header(access_token=token)
         except Exception as e:  # noqa: BLE001
             _LOGGER.error("update http header failed: %s", e)
+
+    async def __apply_access_token_async(self, *, rebuild_mips: bool = False) -> None:
+        """把新的 access_token 推给各个下游持有者。
+
+        每一项独立 try：任何一项失败都不该影响其余项，更不该冒泡成「刷新失败」
+        ——令牌此刻已经落盘，刷新在语义上已经成功了。
+
+        Args:
+            rebuild_mips: 重建云端长连接，而非只换密码重连。重新授权必须置真:
+                账号级主题 ``user/{uid}/g_op/*`` 只在重建时发出，而重连只会把
+                ``_subs`` 里按 topic 字符串存着的旧 uid 主题原样重放——换了账号
+                就再也订阅不到新账号的绑定/解绑推送。定时续期不换账号，走廉价
+                的重连即可。
+        """
+        token = self._oauth_info.access_token if self._oauth_info else None
+        if not token:
+            return
+        self.__apply_token_to_http_header()
         # 与本文件既有写法一致地判空——这里原先没判，而 _camera_client 确实
         # 会被置 None，是刷新链路上最容易踩的一颗雷。
         if self._camera_client is not None:
@@ -547,11 +577,12 @@ class MIoTClient:
             except Exception as e:  # noqa: BLE001
                 _LOGGER.error("update camera access token failed: %s", e)
         try:
-            if self._mips_cloud is not None:
+            if self._mips_cloud is not None and not rebuild_mips:
                 await self._mips_cloud.update_access_token(token)
             else:
-                # mips_cloud not yet set up (e.g. fresh process restored oauth
-                # from KV cache and is doing its first refresh). Set up now.
+                # 两种情况要重建:mips_cloud 还没建起来(进程刚起、从 KV 恢复了
+                # 凭据并做首次续期),或者这是一次重新授权——后者可能换了账号,
+                # 而账号级主题只在重建时发出。
                 await self._setup_mips_async()
         except Exception as e:  # noqa: BLE001
             _LOGGER.error("update mips access token failed: %s", e)

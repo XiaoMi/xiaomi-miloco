@@ -5,11 +5,13 @@
  * 取代 v2 的"大色块 chip"——dev tool 风格更克制，不抢主区注意力。
  *
  * Item 1: 看家（perception running / paused / 异常）
- * Item 2: 米家（已连 / 未连）
+ * Item 2: 米家（已连 / 授权已失效 / 未连）
  */
 
 import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { relativeTime } from "@/lib/relativeTime";
+import { miotTone } from "@/lib/miotTone";
 import type { HomeStatus } from "@/lib/types";
 
 type Tone = "ok" | "info" | "warn" | "danger" | "brand";
@@ -76,7 +78,10 @@ type ItemProps = {
   label: ReactNode;
   meta?: ReactNode;
 } & (
-  | { cta?: { text: string; onClick: () => void; disabled?: boolean }; onClick?: never }
+  | {
+      cta?: { text: string; onClick: () => void; disabled?: boolean };
+      onClick?: never;
+    }
   | { cta?: never; onClick: () => void }
 );
 
@@ -115,11 +120,7 @@ function StatusItem({ tone, label, meta, cta, onClick }: ItemProps) {
       </button>
     );
   }
-  return (
-    <div className={cls}>
-      {inner}
-    </div>
-  );
+  return <div className={cls}>{inner}</div>;
 }
 
 interface Props {
@@ -151,7 +152,11 @@ export function StatusRibbon({
     status.perception.ready ? (
       <StatusItem
         tone={allCamerasOff ? "warn" : "ok"}
-        label={allCamerasOff ? t("hero.watchItemStandby") : t("hero.watchItemWatching")}
+        label={
+          allCamerasOff
+            ? t("hero.watchItemStandby")
+            : t("hero.watchItemWatching")
+        }
       />
     ) : (
       <StatusItem
@@ -160,9 +165,7 @@ export function StatusRibbon({
         // 60 字符防 ribbon 撑爆 / 把 cta 挤下一行；完整 message 放在 title 属性
         // 里 hover 看。
         label={
-          <span
-            title={status.perception.engineMessage ?? undefined}
-          >
+          <span title={status.perception.engineMessage ?? undefined}>
             {t("hero.watchItemNotReady")}
             {status.perception.engineMessage
               ? ` · ${truncate(status.perception.engineMessage, 60)}`
@@ -181,23 +184,36 @@ export function StatusRibbon({
   );
 
   // ── Item 2：米家连接 3 态 ─────────────────────
-  // bound && !authDegraded → 绿，已连
-  // bound && authDegraded  → 红，授权已失效（感知照跑，只有设备控制不保证）
-  // !bound                 → 黄，未连
-  // authDegraded 与 bound 正交：令牌续期被云端拒绝、但 access_token 还没到期时
-  // bound 仍是 true，只看 bound 会在授权其实已经失效时显示「一切正常」。
-  const miotItem = status.miot.bound ? (
-    status.miot.authDegraded ? (
+  // authDegraded           → 红，授权已失效（感知照跑，只有设备控制不保证）
+  // bound                  → 绿，已连
+  // 其余                    → 黄，未连
+  // 失效档**独立于 bound、且优先级最高**，与命令行体检的分支顺序对齐。两者正交：
+  // 续期被云端拒绝、而 access_token 还没到期时 bound 仍是 true，只看 bound 会在
+  // 授权其实已失效时显示「一切正常」；等 access_token 也过期 bound 翻 false，若
+  // 失效档被 bound 门控，问题变得更严重的那一刻反而从红退回黄「未连」，失效原因
+  // 也一并消失——而同一刻命令行体检正确报不通过，两个面的口径就劈叉了。
+  const miotItem =
+    miotTone(status.miot) === "degraded" ? (
       <StatusItem
         tone="danger"
         label={
-          <span title={t("hero.miotAuthDegradedHint")}>
+          <span
+            title={
+              // 有起点就说明「自 X 时起」——失效是永久状态，住户想知道是从
+              // 什么时候开始的（命令行体检也报这个时间，两处口径一致）。
+              status.miot.authDegradedSince
+                ? t("hero.miotAuthDegradedSince", {
+                    since: relativeTime(status.miot.authDegradedSince * 1000),
+                  })
+                : t("hero.miotAuthDegradedHint")
+            }
+          >
             {t("hero.miotAuthDegraded")}
           </span>
         }
         cta={{ text: t("account.rebind"), onClick: onConnectMiot }}
       />
-    ) : (
+    ) : miotTone(status.miot) === "connected" ? (
       <StatusItem
         tone="ok"
         label={
@@ -213,14 +229,13 @@ export function StatusRibbon({
         }
         onClick={onJumpDevices}
       />
-    )
-  ) : (
-    <StatusItem
-      tone="warn"
-      label={t("hero.miotNotConnected")}
-      cta={{ text: t("hero.miotCtaConnect"), onClick: onConnectMiot }}
-    />
-  );
+    ) : (
+      <StatusItem
+        tone="warn"
+        label={t("hero.miotNotConnected")}
+        cta={{ text: t("hero.miotCtaConnect"), onClick: onConnectMiot }}
+      />
+    );
 
   return (
     <div

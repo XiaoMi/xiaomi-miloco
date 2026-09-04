@@ -864,6 +864,33 @@ class TestAssessBackend:
         # 说清影响范围，别让住户以为感知也停了
         assert "感知" in account.message
 
+    def test_auth_degraded_still_fails_after_access_token_also_expires(self):
+        """降级 + 未绑定同时成立时仍须判不通过——问题变严重的那一刻不该反而不报警。
+
+        ``account_bound`` 来自一次实时的云端校验：刷新令牌被永久拒绝之后，手上的
+        access_token 通常还能再用几小时，那段时间它仍是 True；等 access_token 也
+        过期，它翻成 False。若「未绑定」的守卫先返回，退出码就从 1 掉回 0，写成
+        ``doctor || alert`` 的巡检恰在最该告警时停止告警；文案也会从「授权已失效」
+        变成「账号未绑定」，而住户明明授权过。
+        """
+        results = assess_backend(
+            _bs(
+                account_bound=False,
+                auth_degraded=True,
+                auth_degraded_since=1_700_000_000,
+                home_enabled=False,
+                home_id=None,
+                home_name=None,
+                cameras=[],
+            )
+        )
+        account = next(r for r in results if r.name == "小米账号授权")
+        assert account.status == Status.FAIL, "退出码会从 1 掉回 0"
+        assert "miloco-cli account bind" in account.fix_hint
+        assert not any(r.name == "小米账号绑定" for r in results), (
+            "已授权过的住户不该看到「账号未绑定」"
+        )
+
     def test_auth_ok_keeps_pass(self):
         results = assess_backend(_bs())
         assert not any(r.name == "小米账号授权" for r in results), (

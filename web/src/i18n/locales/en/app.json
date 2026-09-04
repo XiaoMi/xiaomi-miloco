@@ -32,6 +32,7 @@
     "engineStoppedWakeManuallyNoMsg": "Engine stopped, wake it manually",
     "stopFail": "Couldn't stop, try again later",
     "miotBound": "Xiaomi Home connected",
+    "miotBoundScopeKept": "Xiaomi Home reconnected — your existing homes and cameras were kept",
     "loadOnDemandLogsFail": "Failed to load on-demand logs"
   }
 }

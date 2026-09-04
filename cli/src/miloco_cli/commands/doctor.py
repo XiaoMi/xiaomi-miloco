@@ -1146,6 +1146,31 @@ def assess_backend(state: BackendState, t: Translator = _ZH_T) -> list[CheckResu
     if version_result is not None:
         results.append(version_result)
 
+    # 降级判定排在「未绑定」之前：account_bound 来自一次实时的云端校验，刷新令牌
+    # 被永久拒绝之后手上的 access_token 通常还能再用几小时，那段时间它仍是 True；
+    # 等 access_token 也过期，它翻成 False。若让「未绑定」的守卫先 return，问题
+    # 恰在变严重的那一刻从 FAIL 掉回 WARN——退出码由 1 变 0，`doctor || alert`
+    # 这类巡检在最该告警时停止告警，文案也从「授权已失效」变成「账号未绑定」，
+    # 而住户明明授权过。
+    if state.auth_degraded:
+        # 授权已被云端拒绝，设备控制不再保证成功。算 FAIL 让 doctor 退出码为 1
+        # ——这是需要住户动手才能解的。
+        since = _format_epoch(state.auth_degraded_since)
+        results.append(
+            CheckResult(
+                section="miloco",
+                name=t("account.degraded.name"),
+                status=Status.FAIL,
+                message=t(
+                    "account.degraded.message",
+                    uid=state.account_uid or "unknown",
+                    since=since,
+                ),
+                fix_hint=t("account.degraded.fix"),
+            )
+        )
+        return results
+
     if not state.account_bound:
         results.append(CheckResult(
             section="miloco",
@@ -1156,24 +1181,13 @@ def assess_backend(state: BackendState, t: Translator = _ZH_T) -> list[CheckResu
         ))
         return results
 
-    if state.auth_degraded:
-        # 授权已被云端拒绝：绑定关系还在（account_bound=True），但设备控制不再
-        # 保证成功。算 FAIL 让 doctor 退出码为 1——这是需要住户动手才能解的。
-        since = _format_epoch(state.auth_degraded_since)
-        results.append(CheckResult(
-            section="miloco",
-            name=t("account.degraded.name"),
-            status=Status.FAIL,
-            message=t("account.degraded.message", uid=state.account_uid or "unknown", since=since),
-            fix_hint=t("account.degraded.fix"),
-        ))
-    else:
-        results.append(CheckResult(
-            section="miloco",
-            name=t("account.bound.name"),
-            status=Status.PASS,
-            message=t("account.bound.message", uid=state.account_uid or "unknown"),
-        ))
+    # 走到这里 = 既没降级、也没未绑定，即已绑定且授权健康。
+    results.append(CheckResult(
+        section="miloco",
+        name=t("account.bound.name"),
+        status=Status.PASS,
+        message=t("account.bound.message", uid=state.account_uid or "unknown"),
+    ))
 
     if not state.home_enabled:
         results.append(CheckResult(

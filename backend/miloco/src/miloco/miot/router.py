@@ -137,9 +137,10 @@ async def authorize_miot(
 ):
     """Exchange the authorization code (pasted by user) for an access token."""
     logger.info("MiOT authorize API called, user: %s", current_user)
-    # data 里带回 account_changed / scope_preserved：CLI 据此决定要不要再跑
-    # 一遍选家流程（它会覆写家庭白名单，把后端刚保住的配置又冲掉），web 据此
-    # 告知住户摄像头配置是保留了还是重置了。老客户端忽略多出的字段即可。
+    # data 里带回 account_changed / scope_preserved：命令行与 web 都据此决定
+    # 要不要再跑一遍选家流程（它是「唯一启用」语义，会覆写家庭白名单，把后端
+    # 刚保住的配置又冲掉），并据此告知住户配置是保留了还是重置了。老客户端
+    # 忽略多出的字段即可。
     result = await manager.miot_service.authorize_with_code(
         request.code, request.state
     )

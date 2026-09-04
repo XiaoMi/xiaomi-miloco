@@ -343,11 +343,18 @@ class MiotProxy:
         for key in [
             AuthConfigKeys.MIOT_TOKEN_INFO_KEY,
             DeviceInfoKeys.USER_INFO_KEY,
+            # 解绑 = 授权关系整体作废，降级态与中断标记都属于这段关系。留着的话
+            # 体检会对「主动解绑」的机器报「授权已被云端拒绝」、退出码 1——住户
+            # 是自己解的绑，不是被拒；而这份残留是落库的，跨重启不消失，直到
+            # 下次有人绑定成功才会被复位清掉。
+            AuthConfigKeys.MIOT_AUTH_STATE_KEY,
+            AuthConfigKeys.MIOT_REFRESH_INFLIGHT_KEY,
         ]:
             self._kv_repo.delete(key)
 
         # 5. Clear in-memory state
         self._oauth_info = None
+        self._auth_health = MiotAuthHealth()
         self._camera_info_dict = {}
         self._device_info_dict = {}
         self._scene_info_dict = {}

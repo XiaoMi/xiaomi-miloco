@@ -158,3 +158,110 @@ def test_empty_and_missing_credential_values_do_not_break_redaction():
     assert _redact_map(None) == {}
     assert _redact_map({"Authorization": ""}) == {"Authorization": ""}
     assert _redact_map({"Authorization": None}) == {"Authorization": None}
+
+
+# ─────────────── 两条流程的拒绝码要分开 ───────────────
+
+
+async def _reject_with(data: dict):
+    """把 data 喂给**真正的** __get_token_async，返回它抛出的异常。
+
+    只替掉 HTTP 会话（返回一份实机抓到的拒绝响应），分类逻辑跑的是真实现——
+    复刻一份判据的话，实现改了测试还会绿。
+    """
+    from miot.cloud import MIoTOAuth2Client
+    from miot.error import MIoTOAuth2Error
+
+    cli = MIoTOAuth2Client(
+        redirect_uri="https://example.invalid/cb",
+        cloud_server="cn",
+        uuid="test-uuid",
+    )
+
+    class _Res:
+        status = 200
+
+        async def text(self, encoding="utf-8"):
+            return json.dumps(REAL_REJECTION, ensure_ascii=False)
+
+    class _Session:
+        async def get(self, **kw):
+            return _Res()
+
+    cli._ensure_session = lambda: _Session()
+    try:
+        await cli._MIoTOAuth2Client__get_token_async(data)
+    except MIoTOAuth2Error as e:
+        return e
+    finally:
+        cli._session = None
+    raise AssertionError("预期抛出 MIoTOAuth2Error，实际没抛")
+
+
+
+@pytest.mark.asyncio
+async def test_refresh_rejection_reports_invalid_refresh_token():
+    """定时续期被拒 → 报「刷新令牌无效」。"""
+    from miot.error import MIoTErrorCode
+
+    err = await _reject_with({"refresh_token": "rt_value", "client_id": "x"})
+    assert err.code == MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN
+
+
+@pytest.mark.asyncio
+async def test_code_exchange_rejection_reports_unauthorized():
+    """授权码兑换被拒 → 报「未授权」，不能也报「刷新令牌无效」。
+
+    授权码同样一次性：用户在授权页面停留过久、或回调被刷第二次就会被拒。两条
+    报同一个码，日志里「续期凭据失效」和「授权码已过期」就分不开——排障的人会
+    去查续期链路，而问题其实在授权页面往返上。
+    """
+    from miot.error import MIoTErrorCode
+
+    err = await _reject_with({"code": "auth_code_value", "client_id": "x"})
+    assert err.code == MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED, (
+        "授权码兑换失败被误报成刷新令牌无效"
+    )
+
+
+@pytest.mark.asyncio
+async def test_both_rejection_codes_stay_permanent():
+    """两个码都必须留在永久失效集合里，否则会被当成瞬时故障反复重试。"""
+    from miloco.miot.auth_state import is_permanent_auth_error
+    from miot.error import MIoTErrorCode
+
+    assert is_permanent_auth_error(MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.value)
+    assert is_permanent_auth_error(MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED.value)
+
+
+def test_response_body_is_redacted_when_shape_is_invalid():
+    """响应形状不合法时，异常消息里的响应体也要脱敏。
+
+    这条分支的判据之一是「access_token 非空但 refresh_token 为空」——触发时
+    响应里完全可能带着一枚可用的令牌，而异常消息会进日志。只脱敏请求体，
+    等于把另一半原样留着。
+    """
+    from miot.cloud import _redact_response
+
+    tok = "AT_live_token_that_must_not_leak_0123456789"
+    body = {
+        "code": 0,
+        "result": {"access_token": tok, "refresh_token": "", "expires_in": 3600},
+    }
+    out = _redact_response(body, json.dumps(body))
+
+    assert tok not in out, "响应体里的 access_token 原文进了异常消息"
+    assert out.startswith("{"), "正常结构应当仍以 JSON 呈现，便于排障"
+    # 排障需要的结构信息要留着
+    assert "expires_in" in out and "refresh_token" in out
+
+
+def test_unparsable_response_falls_back_to_length_only():
+    """解析不出预期结构时只报长度，不把整个响应体原样落盘。"""
+    from miot.cloud import _redact_response
+
+    raw = "<html>gateway error, token=AT_should_not_leak</html>"
+    out = _redact_response(None, raw)
+
+    assert "AT_should_not_leak" not in out
+    assert str(len(raw)) in out

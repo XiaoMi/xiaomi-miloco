@@ -96,6 +96,25 @@ def _redact(data: Dict) -> str:
     return json.dumps(_redact_map(data))
 
 
+def _redact_response(res_obj, res_str: str) -> str:
+    """响应体转成可入日志的字符串。
+
+    令牌在 ``result`` 里，脱敏要下探一层。解析不出预期结构时（响应本就不合法
+    才走到这条路上）退回只报长度——宁可少一点排障信息，也不要把整个响应体
+    原样落盘，那里面可能有一枚可用的令牌。
+    """
+    if not isinstance(res_obj, dict):
+        return f"<unparsable len={len(res_str or '')}>"
+    safe = dict(res_obj)
+    result = safe.get("result")
+    if isinstance(result, dict):
+        safe["result"] = _redact_map(result)
+    try:
+        return json.dumps(safe, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return f"<unserializable len={len(res_str or '')}>"
+
+
 class MIoTOAuth2Client:
     """OAuth2 agent url, default: product env."""
 
@@ -227,6 +246,15 @@ class MIoTOAuth2Client:
         # 会一路落进下面的通用分支被当成 CODE_UNKNOWN,于是「凭据真失效」和
         # 「响应偶发不合法」在调用方眼里完全一样——那正是要区分开的两件事。
         # 两个位置都查:顶层是为兼容可能的另一种形状,不做形状假设。
+        # 本方法服务两条流程:请求体带 refresh_token 的是定时续期,带 code 的是
+        # 首次/重新授权的授权码兑换。授权码同样一次性,停留过久或回调被刷第二次
+        # 就会被拒。两条报同一个码,日志里「续期凭据失效」和「授权码已过期」就分
+        # 不开,排障的人会去查错的链路。两个码都在永久失效集合内,续期侧判定不变。
+        reject_code = (
+            MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN
+            if isinstance(data, dict) and "refresh_token" in data
+            else MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED
+        )
         err_obj = res_obj if isinstance(res_obj, dict) else {}
         result_obj = err_obj.get("result")
         for holder in (err_obj, result_obj if isinstance(result_obj, dict) else {}):
@@ -234,7 +262,7 @@ class MIoTOAuth2Client:
                 raise MIoTOAuth2Error(
                     f"oauth/get_token rejected, error={holder.get('error')}, "
                     f"description={holder.get('error_description')}",
-                    MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN,
+                    reject_code,
                 )
         if (
             not res_obj
@@ -247,8 +275,12 @@ class MIoTOAuth2Client:
             or not res_obj["result"]["access_token"]
             or not res_obj["result"]["refresh_token"]
         ):
+            # 响应体同样要脱敏:这条分支的判据之一是「access_token 非空但
+            # refresh_token 为空」,触发时响应里完全可能带着一枚可用的令牌,
+            # 而这个异常消息会进日志。只脱敏请求体等于留了另一半口子。
             raise MIoTOAuth2Error(
-                f"invalid http response, {res_str}, {_redact(data)}"
+                f"invalid http response, {_redact_response(res_obj, res_str)}, "
+                f"{_redact(data)}"
             )
 
         return MIoTOauthInfo(
