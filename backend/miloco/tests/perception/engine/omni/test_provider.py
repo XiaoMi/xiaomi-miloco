@@ -68,9 +68,11 @@ class TestMiMoAdapter:
         assert block["media_resolution"] == "max"
         assert block["video_url"]["url"].startswith("data:video/mp4;base64,")
 
-    def test_audio_block(self):
+    def test_audio_block_has_format(self):
+        """根因回归守护:audio 块缺 format 是 2026-07-29 422×3 → OPEN_CONFIG 停摆的起点。"""
         block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA)
         assert block["type"] == "input_audio"
+        assert block["input_audio"]["format"] == "mp4"
         assert block["input_audio"]["data"].startswith("data:audio/m4a;base64,")
 
     def test_request_body_non_stream(self):
