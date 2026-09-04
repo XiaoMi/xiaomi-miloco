@@ -87,6 +87,7 @@
   "plugin.version_too_old": "openclaw 版本过低 (%1)，需要 >= %2，请先升级: npm install -g openclaw@latest",
   "plugin.openclaw_not_found": "未找到 openclaw 命令，请先安装: npm install -g openclaw@latest",
   "plugin.version_check_failed": "无法获取 openclaw 版本号，跳过版本检查",
+  "plugin.capability_probe_timeout": "探测 openclaw 插件安装参数超时，将按旧版方式安装；若宿主为 openclaw >= 2026.8 可能被 capability 授权拦下，届时请手动执行: openclaw plugins install --force --accept-capabilities <tgz>",
   "plugin.skipped": "已跳过插件安装",
   "plugin.plugin_ok": "插件安装完成",
   "plugin.plugin_fail": "插件安装失败",

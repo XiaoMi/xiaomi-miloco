@@ -107,10 +107,26 @@ resolve_version() {
     log "版本: pep440=$RESOLVED_PEP npm=$RESOLVED_NPM (raw=$RESOLVED_RAW)"
 }
 
-# 临时给 npm 包打版本号后还原 package.json，保证工作树不残留改动（CI 同样无害）。
+# 临时给 npm 包打版本号 / 剔 devDependencies 前备份 package.json，构建后还原。
+# 还原不能只靠 git checkout：部署机目录由 rsync 同步且排除了 .git/，那里 git 分支是
+# 空操作，残留「无 devDependencies + 版本号被改」会让下次 pnpm install --frozen-lockfile
+# 直接拒装（ERR_PNPM_OUTDATED_LOCKFILE）。所以先 cp 一份原文，还原时拷回。
+backup_pkg_json() {
+    local f="$1"
+    # 不覆盖已存在的备份：上次构建若被 SIGKILL / OOM 掐死(EXIT trap 跑不到)，树里会留下
+    # 「已剔 devDeps 的 package.json + 完好的 .build-bak」。此时直接 cp 会把好备份冲掉，
+    # 之后每次构建都撞 ERR_PNPM_OUTDATED_LOCKFILE 且部署机上无 git 可退。先还原再重备。
+    if [[ -f "$PROJECT_ROOT/$f.build-bak" ]]; then
+        restore_pkg_json "$f"
+    fi
+    cp "$PROJECT_ROOT/$f" "$PROJECT_ROOT/$f.build-bak"
+}
+
 restore_pkg_json() {
     local f="$1"
-    if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -f "$PROJECT_ROOT/$f.build-bak" ]]; then
+        mv -f "$PROJECT_ROOT/$f.build-bak" "$PROJECT_ROOT/$f"
+    elif git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         git -C "$PROJECT_ROOT" checkout -- "$f" 2>/dev/null || true
     fi
 }
@@ -187,6 +203,10 @@ build_miloco_cli() {
 build_openclaw() {
     log "构建 openclaw 插件 ..."
 
+    # npm version / npm pkg delete 临时改脏 package.json；先备份原文，并用 EXIT trap
+    # 兜住 set -e 下子 shell pack 失败的退出路径，保证任何情况下都能还原。
+    backup_pkg_json plugins/openclaw/package.json
+    trap 'restore_pkg_json plugins/openclaw/package.json' EXIT
     (
         cd "$PROJECT_ROOT/plugins/openclaw"
         # 临时写版本号供 npm pack 命名 tgz，pack 后由外层 restore_pkg_json 还原
@@ -195,9 +215,16 @@ build_openclaw() {
         # 想删 node_modules 会因没 TTY 中止；CI=true 让 pnpm 自动跳过确认。
         CI=true pnpm install --frozen-lockfile
         pnpm build
+        # 发布产物不带 devDependencies：openclaw 安装插件依赖时会把 devDeps 当可装依赖，
+        # 其中 devDependencies.openclaw 会让 npm 解析整个框架包 → 10.9.x/12.x edgesOut 崩溃
+        # （2026-09-03 hcl-book podman 2026.5.2 / cat@mac 2026.6.11 实证）。devDeps 仅本地
+        # 构建/类型用，pack 后由 restore_pkg_json 从 .build-bak 拷回原文(git checkout 仅在
+        # 无备份时兜底)，连同临时写入的版本号一并还原。
+        npm pkg delete devDependencies >/dev/null
         npm pack --pack-destination "$DIST_DIR"
     )
     restore_pkg_json plugins/openclaw/package.json
+    trap - EXIT
 }
 
 build_hermes() {
