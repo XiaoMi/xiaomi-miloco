@@ -23,6 +23,32 @@ logger = logging.getLogger(__name__)
 
 
 SYSTEM_ERROR_CODE = 9000
+MAX_VALIDATION_ERRORS = 20
+MAX_VALIDATION_LOCATION_PARTS = 8
+VALIDATION_LOCATION_ROOTS = frozenset({"body", "query", "path", "header", "cookie"})
+VALIDATION_TYPE_MESSAGES = {
+    "missing": "Field required",
+    "extra_forbidden": "Unexpected field",
+    "literal_error": "Invalid literal value",
+    "value_error": "Invalid value",
+    "assertion_error": "Invalid value",
+    "string_type": "Invalid string",
+    "string_too_short": "String value is too short",
+    "string_too_long": "String value is too long",
+    "int_type": "Invalid integer",
+    "int_parsing": "Invalid integer",
+    "float_type": "Invalid number",
+    "float_parsing": "Invalid number",
+    "bool_type": "Invalid boolean",
+    "list_type": "Invalid list",
+    "tuple_type": "Invalid tuple",
+    "dict_type": "Invalid object",
+    "greater_than": "Value is below the allowed range",
+    "greater_than_equal": "Value is below the allowed range",
+    "less_than": "Value is above the allowed range",
+    "less_than_equal": "Value is above the allowed range",
+    "validation_error": "Invalid value",
+}
 
 
 def _create_error_response(
@@ -63,6 +89,39 @@ def _handle_base_api_exception(exc: BaseAPIException) -> JSONResponse:
     )
 
 
+def _safe_location_part(value: object) -> str:
+    if isinstance(value, str) and value in VALIDATION_LOCATION_ROOTS:
+        return value
+    return "item" if type(value) is int else "field"
+
+
+def _safe_validation_errors(exc: RequestValidationError) -> list[dict[str, object]]:
+    """Return bounded validation metadata without request values or context."""
+
+    safe_errors: list[dict[str, object]] = []
+    for error in exc.errors()[:MAX_VALIDATION_ERRORS]:
+        raw_type = error.get("type")
+        validation_type = (
+            raw_type
+            if isinstance(raw_type, str) and raw_type in VALIDATION_TYPE_MESSAGES
+            else "validation_error"
+        )
+        raw_location = error.get("loc", ())
+        if not isinstance(raw_location, (list, tuple)):
+            raw_location = ()
+        safe_errors.append(
+            {
+                "type": validation_type,
+                "loc": [
+                    _safe_location_part(part)
+                    for part in raw_location[:MAX_VALIDATION_LOCATION_PARTS]
+                ],
+                "msg": VALIDATION_TYPE_MESSAGES[validation_type],
+            }
+        )
+    return safe_errors
+
+
 def handle_exception(request: Request, exc: Exception) -> JSONResponse:
     """
     Unified exception handling function - handles all exceptions
@@ -82,12 +141,13 @@ def handle_exception(request: Request, exc: Exception) -> JSONResponse:
     """
     # 1. Special handling for RequestValidationError (Pydantic validation errors)
     if isinstance(exc, RequestValidationError):
-        logger.warning("Request validation failed: %s", exc)
+        validation_errors = _safe_validation_errors(exc)
+        logger.warning("Request validation failed: %s", validation_errors)
         return _create_error_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             code=1002,  # Parameter validation failure error code, consistent with ValidationException
             message="Request parameter validation failed",
-            data=exc.errors(),
+            data=validation_errors,
         )
 
     # 2. Handle other custom API exceptions
@@ -105,11 +165,9 @@ def handle_exception(request: Request, exc: Exception) -> JSONResponse:
 
     # 4. Handle other exceptions (system exceptions) - final fallback
     exc_type = type(exc)
-    logger.error(
-        "Unhandled system error - %s: %s", exc_type.__name__, str(exc), exc_info=True
-    )
+    logger.error("Unhandled system error - %s", exc_type.__name__)
     return _create_error_response(
         status_code=500,
         code=SYSTEM_ERROR_CODE,
-        message="Internal server error " + exc_type.__name__ + ": " + str(exc),
+        message="Internal server error",
     )
