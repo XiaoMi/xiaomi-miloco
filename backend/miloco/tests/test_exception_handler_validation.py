@@ -3,10 +3,15 @@
 
 import json
 import logging
+import re
 
 from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
-from miloco.middleware.exception_handler import SYSTEM_ERROR_CODE, handle_exception
+from miloco.middleware.exception_handler import (
+    SYSTEM_ERROR_CODE,
+    _create_error_response,
+    handle_exception,
+)
 
 
 def _request() -> Request:
@@ -120,11 +125,11 @@ def test_system_error_response_is_fixed_and_opaque() -> None:
     response = handle_exception(_request(), RuntimeError(secret))
 
     assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
-    assert _payload(response) == {
-        "code": SYSTEM_ERROR_CODE,
-        "message": "Internal server error",
-        "data": None,
-    }
+    payload = _payload(response)
+    assert payload["code"] == SYSTEM_ERROR_CODE
+    assert payload["message"] == "Internal server error"
+    assert isinstance(payload["data"], dict)
+    assert re.fullmatch(r"err-[0-9a-f]{12}", payload["data"]["error_id"])
     assert secret.encode() not in response.body
 
 
@@ -132,7 +137,33 @@ def test_system_error_log_omits_exception_text(caplog) -> None:
     secret = "private-system-log-value"
 
     with caplog.at_level(logging.ERROR):
-        handle_exception(_request(), RuntimeError(secret))
+        response = handle_exception(_request(), RuntimeError(secret))
 
+    response_data = _payload(response)["data"]
+    assert isinstance(response_data, dict)
+    error_id = response_data["error_id"]
     assert "Unhandled system error - RuntimeError" in caplog.text
+    assert f"error_id={error_id}" in caplog.text
     assert secret not in caplog.text
+
+
+def test_system_error_log_keeps_only_sanitized_miloco_code_location(caplog) -> None:
+    try:
+        _create_error_response(
+            status_code=500,
+            code=SYSTEM_ERROR_CODE,
+            message="test",
+            data={object()},
+        )
+    except TypeError as exc:
+        with caplog.at_level(logging.ERROR):
+            handle_exception(_request(), exc)
+
+    message = caplog.messages[-1]
+    assert (
+        "location=miloco.middleware.exception_handler:_create_error_response:"
+        in message
+    )
+    assert "exception_handler.py" not in message
+    assert "E:\\" not in message
+    assert "C:\\" not in message

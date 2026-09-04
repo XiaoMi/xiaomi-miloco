@@ -10,6 +10,7 @@ Provides exception handling mechanisms:
 """
 
 import logging
+import secrets
 
 from fastapi import Request, status
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 SYSTEM_ERROR_CODE = 9000
 MAX_VALIDATION_ERRORS = 20
 MAX_VALIDATION_LOCATION_PARTS = 8
+MAX_SYSTEM_ERROR_LOCATIONS = 5
 VALIDATION_LOCATION_ROOTS = frozenset({"body", "query", "path", "header", "cookie"})
 VALIDATION_TYPE_MESSAGES = {
     "missing": "Field required",
@@ -122,6 +124,29 @@ def _safe_validation_errors(exc: RequestValidationError) -> list[dict[str, objec
     return safe_errors
 
 
+def _safe_symbol(value: object, *, fallback: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 160:
+        return fallback
+    if not all(part.isidentifier() for part in value.split(".")):
+        return fallback
+    return value
+
+
+def _safe_traceback_locations(exc: Exception) -> tuple[str, ...]:
+    """Return bounded Miloco code positions without paths, source, or local values."""
+
+    locations: list[str] = []
+    traceback = exc.__traceback__
+    while traceback is not None:
+        frame = traceback.tb_frame
+        module_name = _safe_symbol(frame.f_globals.get("__name__"), fallback="")
+        if module_name == "miloco" or module_name.startswith("miloco."):
+            function_name = _safe_symbol(frame.f_code.co_name, fallback="function")
+            locations.append(f"{module_name}:{function_name}:{traceback.tb_lineno}")
+        traceback = traceback.tb_next
+    return tuple(locations[-MAX_SYSTEM_ERROR_LOCATIONS:])
+
+
 def handle_exception(request: Request, exc: Exception) -> JSONResponse:
     """
     Unified exception handling function - handles all exceptions
@@ -164,10 +189,18 @@ def handle_exception(request: Request, exc: Exception) -> JSONResponse:
         )
 
     # 4. Handle other exceptions (system exceptions) - final fallback
-    exc_type = type(exc)
-    logger.error("Unhandled system error - %s", exc_type.__name__)
+    exc_type = _safe_symbol(type(exc).__name__, fallback="Exception")
+    error_id = f"err-{secrets.token_hex(6)}"
+    locations = _safe_traceback_locations(exc)
+    logger.error(
+        "Unhandled system error - %s error_id=%s location=%s",
+        exc_type,
+        error_id,
+        ",".join(locations) if locations else "unavailable",
+    )
     return _create_error_response(
         status_code=500,
         code=SYSTEM_ERROR_CODE,
         message="Internal server error",
+        data={"error_id": error_id},
     )
