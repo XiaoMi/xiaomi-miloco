@@ -30,7 +30,7 @@ def _payload(response) -> dict:
     return json.loads(response.body)
 
 
-def test_validation_error_is_redacted_through_registered_asgi_stack() -> None:
+def test_validation_error_is_redacted_through_registered_asgi_stack(caplog) -> None:
     class Body(BaseModel):
         limit: int
 
@@ -42,16 +42,18 @@ def test_validation_error_is_redacted_through_registered_asgi_stack() -> None:
         del body
         return {"ok": True}
 
-    response = TestClient(app).post(
-        "/echo",
-        json={"limit": "sk-live-secret"},
-    )
+    with caplog.at_level(logging.WARNING):
+        response = TestClient(app).post(
+            "/echo",
+            json={"limit": "sk-live-secret"},
+        )
 
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
     assert response.json()["code"] == 1002
     assert "detail" not in response.json()
     assert "sk-live-secret" not in response.text
     assert response.json()["data"][0]["loc"] == ["body", "limit"]
+    assert "route=/echo" in caplog.messages[-1]
 
 
 def test_asgi_validation_keeps_schema_fields_but_redacts_dynamic_dict_keys() -> None:
@@ -350,3 +352,27 @@ def test_traceback_locations_include_sanitized_cause_frames() -> None:
 
     assert any(":service_save:" in location for location in locations)
     assert any(":storage_write:" in location for location in locations)
+
+
+def test_traceback_locations_skip_registered_class_method() -> None:
+    namespace: dict[str, object] = {"__name__": "miloco.middleware"}
+    exec(
+        "def business_operation():\n"
+        "    raise RuntimeError('private')\n"
+        "class ErrorMiddleware:\n"
+        "    @staticmethod\n"
+        "    def dispatch():\n"
+        "        business_operation()\n",
+        namespace,
+    )
+    middleware_class = namespace["ErrorMiddleware"]
+    dispatch = cast(Callable[[], None], getattr(middleware_class, "dispatch"))
+    skip_traceback_location(dispatch)
+
+    try:
+        dispatch()
+    except RuntimeError as exc:
+        locations = _safe_traceback_locations(exc)
+
+    assert any(":business_operation:" in location for location in locations)
+    assert not any(":dispatch:" in location for location in locations)

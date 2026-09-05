@@ -90,7 +90,10 @@ def _create_error_response(
     return JSONResponse(status_code=status_code, content=response_data.model_dump())
 
 
-def _handle_base_api_exception(exc: BaseAPIException) -> JSONResponse:
+def _handle_base_api_exception(
+    request: Request,
+    exc: BaseAPIException,
+) -> JSONResponse:
     """
     Common method for handling BaseAPIException
 
@@ -102,9 +105,10 @@ def _handle_base_api_exception(exc: BaseAPIException) -> JSONResponse:
     """
     locations = _safe_traceback_locations(exc)
     logger.error(
-        "Request failed - %s code=%s location=%s",
+        "Request failed - %s code=%s route=%s location=%s",
         _safe_symbol(type(exc).__name__, fallback="Exception"),
         exc.code,
+        _safe_route_template(request),
         ",".join(locations) if locations else "unavailable",
     )
 
@@ -247,6 +251,19 @@ def _safe_symbol(value: object, *, fallback: str) -> str:
     return value
 
 
+def _safe_route_template(request: Request) -> str:
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    if (
+        not isinstance(path, str)
+        or not path.startswith("/")
+        or len(path) > 256
+        or not all(character.isalnum() or character in "/{}_-.:" for character in path)
+    ):
+        return "unavailable"
+    return path
+
+
 def _safe_traceback_locations(exc: BaseException) -> tuple[str, ...]:
     """Return bounded Miloco code positions without paths, source, or local values."""
 
@@ -303,10 +320,7 @@ def skip_traceback_location(function: Callable[..., object]) -> None:
     """Exclude one registered Miloco framework frame from error locations."""
 
     module_name = _safe_symbol(getattr(function, "__module__", None), fallback="")
-    function_name = _safe_symbol(
-        getattr(function, "__qualname__", None),
-        fallback="",
-    )
+    function_name = _safe_symbol(getattr(function, "__name__", None), fallback="")
     if (
         not (module_name == "miloco" or module_name.startswith("miloco."))
         or not function_name
@@ -344,7 +358,11 @@ def handle_exception(request: Request, exc: Exception) -> JSONResponse:
             exc,
             schema_field_names=_safe_schema_field_names(request),
         )
-        logger.warning("Request validation failed: %s", validation_errors)
+        logger.warning(
+            "Request validation failed route=%s: %s",
+            _safe_route_template(request),
+            validation_errors,
+        )
         return _create_error_response(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             code=1002,  # Parameter validation failure error code, consistent with ValidationException
@@ -354,7 +372,7 @@ def handle_exception(request: Request, exc: Exception) -> JSONResponse:
 
     # 2. Handle other custom API exceptions
     if isinstance(exc, BaseAPIException):
-        return _handle_base_api_exception(exc)
+        return _handle_base_api_exception(request, exc)
 
     # 3. Handle FastAPI HTTPException (fallback handling)
     if isinstance(exc, FastAPIHTTPException):
@@ -371,10 +389,11 @@ def handle_exception(request: Request, exc: Exception) -> JSONResponse:
     locations = _safe_traceback_locations(exc)
     cause_types = _safe_exception_types(exc)
     logger.error(
-        "Unhandled system error - %s error_id=%s causes=%s location=%s",
+        "Unhandled system error - %s error_id=%s causes=%s route=%s location=%s",
         exc_type,
         error_id,
         ",".join(cause_types),
+        _safe_route_template(request),
         ",".join(locations) if locations else "unavailable",
     )
     return _create_error_response(
