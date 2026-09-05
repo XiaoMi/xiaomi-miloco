@@ -36,6 +36,7 @@ from miloco.manager import get_manager
 from miloco.middleware.exception_handler import (
     handle_exception,
     register_exception_handlers,
+    skip_traceback_location,
 )
 from miloco.miot.router import router as miot_router
 from miloco.node_monitor.event_log import NodeEventLog
@@ -522,6 +523,9 @@ async def catch_all_exceptions_middleware(request: Request, call_next):
         return await call_next(request)
     except Exception as exc:
         return handle_exception(request, exc)
+
+
+skip_traceback_location(catch_all_exceptions_middleware)
 
 
 app.include_router(admin_router, prefix="/api")

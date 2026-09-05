@@ -16,9 +16,10 @@ from miloco.middleware.exception_handler import (
     _safe_traceback_locations,
     handle_exception,
     register_exception_handlers,
+    skip_traceback_location,
 )
 from miloco.middleware.exceptions import ResourceNotFoundException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 def _request() -> Request:
@@ -50,6 +51,83 @@ def test_validation_error_is_redacted_through_registered_asgi_stack() -> None:
     assert response.json()["code"] == 1002
     assert "detail" not in response.json()
     assert "sk-live-secret" not in response.text
+    assert response.json()["data"][0]["loc"] == ["body", "limit"]
+
+
+def test_asgi_validation_keeps_schema_fields_but_redacts_dynamic_dict_keys() -> None:
+    class Body(BaseModel):
+        metadata: dict[str, int]
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.post("/echo")
+    async def echo(body: Body) -> dict[str, bool]:
+        del body
+        return {"ok": True}
+
+    response = TestClient(app).post(
+        "/echo",
+        json={"metadata": {"private-user-key": "not-an-integer"}},
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["data"][0]["loc"] == ["body", "metadata", "field"]
+    assert "private-user-key" not in response.text
+
+
+def test_asgi_validation_redacts_forbidden_extra_field_name() -> None:
+    class Body(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        limit: int
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.post("/echo")
+    async def echo(body: Body) -> dict[str, bool]:
+        del body
+        return {"ok": True}
+
+    response = TestClient(app).post(
+        "/echo",
+        json={"limit": 1, "private-extra-key": "secret"},
+    )
+
+    assert response.json()["data"][0]["loc"] == ["body", "field"]
+    assert "private-extra-key" not in response.text
+
+
+def test_common_validation_types_keep_fixed_actionable_messages() -> None:
+    expected = {
+        "bool_parsing": "Invalid boolean",
+        "json_invalid": "Invalid JSON body",
+        "string_pattern_mismatch": "Value does not match the required format",
+        "datetime_parsing": "Invalid datetime",
+        "date_parsing": "Invalid date",
+        "uuid_parsing": "Invalid UUID",
+        "enum": "Invalid enum value",
+        "model_type": "Invalid object",
+        "too_short": "Too few items",
+        "too_long": "Too many items",
+    }
+    exc = RequestValidationError(
+        [
+            {
+                "type": validation_type,
+                "loc": ("body", "value"),
+                "msg": "private original message",
+                "input": "private original input",
+            }
+            for validation_type in expected
+        ]
+    )
+
+    response = handle_exception(_request(), exc)
+
+    errors = _payload(response)["data"]
+    assert [(error["type"], error["msg"]) for error in errors] == list(expected.items())
+    assert "private original" not in bytes(response.body).decode("utf-8")
 
 
 def test_validation_response_keeps_only_public_error_fields() -> None:
@@ -213,16 +291,17 @@ def test_business_error_keeps_response_message_but_redacts_log(caplog) -> None:
     assert all(record.exc_info is None for record in caplog.records)
 
 
-def test_traceback_locations_skip_constant_catch_all_frame() -> None:
+def test_traceback_locations_skip_registered_framework_frame() -> None:
     namespace: dict[str, object] = {"__name__": "miloco.main"}
     exec(
         "def business_operation():\n"
         "    raise RuntimeError('private')\n"
-        "def catch_all_exceptions_middleware():\n"
+        "def global_exception_middleware():\n"
         "    business_operation()\n",
         namespace,
     )
-    middleware = cast(Callable[[], None], namespace["catch_all_exceptions_middleware"])
+    middleware = cast(Callable[[], None], namespace["global_exception_middleware"])
+    skip_traceback_location(middleware)
 
     try:
         middleware()
@@ -231,5 +310,43 @@ def test_traceback_locations_skip_constant_catch_all_frame() -> None:
 
     assert any(":business_operation:" in location for location in locations)
     assert not any(
-        ":catch_all_exceptions_middleware:" in location for location in locations
+        ":global_exception_middleware:" in location for location in locations
     )
+
+
+def test_system_error_log_keeps_sanitized_exception_chain_types(caplog) -> None:
+    secret = "private-wrapped-error"
+    try:
+        try:
+            raise ValueError(secret)
+        except ValueError as cause:
+            raise RuntimeError(secret) from cause
+    except RuntimeError as exc:
+        with caplog.at_level(logging.ERROR):
+            handle_exception(_request(), exc)
+
+    assert "causes=RuntimeError,ValueError" in caplog.messages[-1]
+    assert secret not in caplog.text
+
+
+def test_traceback_locations_include_sanitized_cause_frames() -> None:
+    namespace: dict[str, object] = {"__name__": "miloco.storage"}
+    exec(
+        "def storage_write():\n"
+        "    raise ValueError('private')\n"
+        "def service_save():\n"
+        "    try:\n"
+        "        storage_write()\n"
+        "    except ValueError as cause:\n"
+        "        raise RuntimeError('private') from cause\n",
+        namespace,
+    )
+    service_save = cast(Callable[[], None], namespace["service_save"])
+
+    try:
+        service_save()
+    except RuntimeError as exc:
+        locations = _safe_traceback_locations(exc)
+
+    assert any(":service_save:" in location for location in locations)
+    assert any(":storage_write:" in location for location in locations)
