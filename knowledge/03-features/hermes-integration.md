@@ -60,23 +60,23 @@ miloco 原本只通过 OpenClaw 插件（`plugins/openclaw/`）接入小米内�
 对外暴露三个方法（满足 AgentPlatformAdapter duck-typed 契约）：
 
 - `send_turn(ctx)` — 调 Hermes `/v1/chat/completions`（OpenAI 兼容端点），用 `X-Hermes-Session-Id: miloco:<sessionKey>:<lane>` 头维持会话连续；`build_system` 丢线程池执行（避免 catalog CLI 阻塞事件循环）。
-- `read_trace_meta(run_id)` — 读 `$MILOCO_HOME/trace/<run_id>.meta.json`（trace.py 常写，adapter 只读）。
+- `read_trace_meta(run_id)` — 读 `$MILOCO_HOME/trace/agent/<YYYYMMDD>/` 下的 `.meta.json`（trace.py 写，adapter 只读）。两侧 run_id 口径不同（adapter 用 uuid、trace.py 用 session_id），靠发送原文与 meta 的 `query` 前缀匹配关联。
 - `reset_sessions(routes)` — 切家庭时清理 Hermes 会话（调 `hermes sessions delete` CLI）。
 
 上下文溢出 best-effort 自愈：识别溢出关键词后，丢弃会话上下文用无 session 头的全新 turn 重试一次。
 
 ### 与 OpenClaw 集成的关键差异
 
-| 维度             | OpenClaw 版                                       | Hermes 版                                                                           |
-| ---------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| 插件语言         | TypeScript                                        | Python                                                                              |
-| 上下文注入       | `before_prompt_build` → system prompt             | adapter.build_system → `<system>` 消息（丢线程池，不阻塞事件循环）                  |
-| 入站回调         | 插件内 `api.registerHttpRoute("/miloco/webhook")` | backend adapter 直调 Hermes `/v1/chat/completions`                                  |
-| 同步等 turn      | `api.runtime.subagent.run` + `waitForRun`         | adapter.send_turn 内 httpx POST `/v1/chat/completions`（sync，X-Hermes-Session-Id） |
-| get_trace        | 内存 trace buffer，后端反向轮询取 meta            | 文件 IPC：trace.py 写 `$MILOCO_HOME/trace/*.meta.json`，adapter 读盘                |
-| 溢出自愈         | `deleteSession({deleteTranscript:true})` + 重跑   | 丢弃会话上下文、无 session 头全新 turn 重试一次                                     |
-| 通知投递         | subagent run with deliver:true                    | adapter._deliver_response → `hermes send --json --to <platform:chat_id>`            |
-| backend 生命周期 | 有（`miloco-cli service restart/stop`）           | 有（supervisord 管理）                                                              |
+| 维度             | OpenClaw 版                                       | Hermes 版                                                                                                                       |
+| ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| 插件语言         | TypeScript                                        | Python                                                                                                                          |
+| 上下文注入       | `before_prompt_build` → system prompt             | adapter.build_system → `<system>` 消息（丢线程池，不阻塞事件循环）                                                              |
+| 入站回调         | 插件内 `api.registerHttpRoute("/miloco/webhook")` | backend adapter 直调 Hermes `/v1/chat/completions`                                                                              |
+| 同步等 turn      | `api.runtime.subagent.run` + `waitForRun`         | adapter.send_turn 内 httpx POST `/v1/chat/completions`（sync，X-Hermes-Session-Id）                                             |
+| get_trace        | 内存 trace buffer，后端反向轮询取 meta            | 文件 IPC：trace.py 按天写 `trace/agent/<YYYYMMDD>/*.meta.json`，adapter 读盘（hermes 插件不能注册 HTTP 路由，拿不到跨进程内存） |
+| 溢出自愈         | `deleteSession({deleteTranscript:true})` + 重跑   | 丢弃会话上下文、无 session 头全新 turn 重试一次                                                                                 |
+| 通知投递         | subagent run with deliver:true                    | adapter._deliver_response → `hermes send --json --to <platform:chat_id>`                                                        |
+| backend 生命周期 | 有（`miloco-cli service restart/stop`）           | 有（supervisord 管理）                                                                                                          |
 
 ### 配置共享
 

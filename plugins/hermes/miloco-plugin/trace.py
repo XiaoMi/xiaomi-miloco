@@ -15,7 +15,8 @@ Hermes 没有 ``runId`` 概念——直接用 ``session_id`` 作为 turn id。tr
 落盘：``$MILOCO_HOME/trace/agent/<YYYYMMDD>/<runId>__<query>.jsonl.gz`` + 同名
 ``.meta.json``（adapter 的 read_trace_meta 读这个）。
 
-每日 cap 300（超出 warn 跳过，防撑爆磁盘）—— 与 openclaw 完全一致。
+jsonl 是诊断产物，与 openclaw 一样只在 debug 开时写、并有每日数量上限；meta 是
+backend 记账的唯一来源（openclaw 那边走内存 webhook），必须常写，超上限淘汰最老的。
 """
 
 from __future__ import annotations
@@ -35,22 +36,25 @@ logger = logging.getLogger(__name__)
 
 # ── 常量（与 openclaw trace.ts 对齐） ─────────────────────────────────────
 BUFFER_MAX = 5000  # 单 turn buffer 上限（events 数）；超出记 _truncated
-DAILY_DUMP_MAX = 300  # 每日 jsonl.gz 文件数 cap
-QUERY_LEN_MAX = 80  # 文件名里 query 部分最大长度
-TRACE_DONE_TTL_S = 3600.0  # done turns 在内存保留 1h（adapter get_trace 轮询窗口）
+DAILY_DUMP_MAX = 300  # 每日 jsonl.gz 文件数 cap（debug 开时才落 jsonl）
+META_DAILY_MAX = 300  # 每日 meta.json 文件数上限，超出淘汰最老的
+QUERY_LEN_MAX = 80  # 文件名里 query 部分最大长度（字符）
+NAME_MAX_BYTES = 255  # POSIX 单个文件名字节上限
+_STEM_MAX_BYTES = NAME_MAX_BYTES - len(".meta.json")  # 后缀最长的那个
+STUCK_TTL_S = 900.0  # 未结束 turn 超此时长强制清理（hook 没走到 session_end 的僵尸）
+TURNS_HARD_CAP = 20  # _turns 大小硬上限，兜底防泄漏
 
 
 # ── 状态 ────────────────────────────────────────────────────────────────
 
 class _TurnState:
-    __slots__ = ("buffer", "started_at", "query", "done", "done_at")
+    __slots__ = ("buffer", "started_at", "query", "last_seen")
 
     def __init__(self, started_at: int) -> None:
         self.buffer: List[Dict[str, Any]] = []
         self.started_at = started_at
         self.query: str = ""
-        self.done: Optional[Dict[str, Any]] = None
-        self.done_at: int = 0
+        self.last_seen = started_at
 
 
 # 进程内 registry：run_id → _TurnState（与 openclaw turns Map 等价）
@@ -85,6 +89,11 @@ def _extract_user_query(prompt: Optional[str]) -> str:
     return cleaned.strip()
 
 
+def _truncate_bytes(s: str, limit: int) -> str:
+    """按 UTF-8 字节截断，不切碎多字节字符。"""
+    return s.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+
+
 def _sanitize_filename(q: Optional[str]) -> str:
     """与 openclaw sanitizeQueryForFilename 等价。"""
     if not q:
@@ -96,12 +105,31 @@ def _sanitize_filename(q: Optional[str]) -> str:
     return s or "system"
 
 
-def _gc_expired_turns() -> None:
-    """清理 done 超 1h 的 turn（释放内存）。"""
-    cutoff = _now_ms() - int(TRACE_DONE_TTL_S * 1000)
-    expired = [k for k, v in _turns.items() if v.done and v.done_at < cutoff]
-    for k in expired:
-        _turns.pop(k, None)
+def _sweep_stale_turns() -> None:
+    """清理没走到 on_session_end 的僵尸 turn（对齐 openclaw ``gcExpiredTurns``）。
+
+    正常 turn 在 on_session_end 就被 pop 掉。这里兜的是 hook 之间 run_id 口径不一致：
+    ``on_session_start`` 只拿得到 session_id，其余 hook 优先用 task_id，两者不等时
+    前者建的 state 永远等不到自己那次 session_end。
+
+    判据一律用「多久没有新事件」而不是「开了多久」——僵尸的特征是不再有人往里写，
+    而慢 turn 每条 hook 都会刷新，不该被当成僵尸清掉。
+    """
+    cutoff = _now_ms() - int(STUCK_TTL_S * 1000)
+    for run_id in [k for k, v in _turns.items() if v.last_seen < cutoff]:
+        state = _turns.pop(run_id, None)
+        if state is not None:
+            logger.warning(
+                "[miloco-trace] stuck turn evicted: runId=%s idle=%ds",
+                run_id, (_now_ms() - state.last_seen) // 1000,
+            )
+    if len(_turns) > TURNS_HARD_CAP:
+        # 按最后一次事件时间淘汰：还在跑的 turn 每条 hook 都会刷新 last_seen，只进不出的
+        # 僵尸不会。用 started_at 会先删掉跑得最久的那个活 turn。
+        oldest = sorted(_turns.items(), key=lambda kv: kv[1].last_seen)
+        for run_id, _ in oldest[: len(_turns) - TURNS_HARD_CAP]:
+            _turns.pop(run_id, None)
+        logger.warning("[miloco-trace] turns over hard cap %d, evicted oldest", TURNS_HARD_CAP)
 
 
 # ── 公共 API ────────────────────────────────────────────────────────────
@@ -135,29 +163,6 @@ def pop_trace_link(run_id: str) -> Optional[str]:
         return v
 
 
-def pop_done_turn(run_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """adapter 的 get_trace 调：取 done meta（原子，poll 完即清）。
-
-    ``run_id=None`` 时返回最新一个 done turn 的 meta（兜底，对应 backend 用
-    ``get_trace`` 不带 runId 的轮询）。
-    """
-    with _lock:
-        if run_id is None:
-            done = [(k, v.done, v.done_at) for k, v in _turns.items() if v.done]
-            if not done:
-                return None
-            done.sort(key=lambda x: x[2], reverse=True)
-            run_id, meta, _ = done[0]
-        else:
-            state = _turns.get(run_id)
-            meta = state.done if state else None
-        if meta is None:
-            return None
-        # pop（与 openclaw popDoneTurn 等价——meta 给 backend 后即清，避免重复消费）
-        _turns.pop(run_id, None)
-        return meta
-
-
 def _get_or_init(run_id: str) -> _TurnState:
     state = _turns.get(run_id)
     if state is None:
@@ -167,6 +172,7 @@ def _get_or_init(run_id: str) -> _TurnState:
 
 
 def _push_event(state: _TurnState, ev: Dict[str, Any]) -> None:
+    state.last_seen = _now_ms()
     if len(state.buffer) < BUFFER_MAX:
         state.buffer.append(ev)
     elif len(state.buffer) == BUFFER_MAX:
@@ -229,26 +235,52 @@ def _reduce_meta(buffer: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-def _flush_to_disk(run_id: str, state: _TurnState, final_success: bool) -> Optional[str]:
+def _evict_old_metas(dir_path: Path) -> None:
+    """腾出一个 meta 名额：删最老的几个。
+
+    meta 是记账来源，撞上限只能淘汰旧的，不能像 jsonl 那样拒写。淘汰本身是尽力而为，
+    失败只记日志——让它冒出去会连累这一轮的 meta 写不成。
+    """
+    try:
+        metas = list(dir_path.glob("*.meta.json"))
+        if len(metas) < META_DAILY_MAX:
+            return
+        metas.sort(key=lambda p: p.stat().st_mtime)
+        for old in metas[: len(metas) - META_DAILY_MAX + 1]:
+            old.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("[miloco-trace] evict meta failed: %s", exc)
+
+
+def _flush_to_disk(run_id: str, state: _TurnState, final_success: bool) -> None:
     """落盘：``trace/agent/<YYYYMMDD>/<runId>__<query>.jsonl.gz`` + 同名 ``.meta.json``。
 
-    返回 jsonl 相对路径（写进 meta 让 backend / 调试看到）；超出每日 cap 时 warn 跳过。
+    jsonl 跟着 debug 开关走（对齐 openclaw），meta 无论如何都要写 —— backend 靠它记账。
     """
     try:
         dir_path = _today_dir()
         dir_path.mkdir(parents=True, exist_ok=True)
-        existing = [p for p in dir_path.iterdir() if p.suffix == ".gz"]
-        if len(existing) >= DAILY_DUMP_MAX:
-            logger.warning(
-                "[miloco-trace] daily cap reached: %d/%d, skip dump runId=%s",
-                len(existing), DAILY_DUMP_MAX, run_id,
-            )
-            return None
-        filename = f"{run_id}__{_sanitize_filename(state.query)}.jsonl.gz"
-        full_path = dir_path / filename
-        text = "\n".join(json.dumps(e, ensure_ascii=False) for e in state.buffer) + "\n"
-        with gzip.open(full_path, "wt", encoding="utf-8") as f:
-            f.write(text)
+        stem = _truncate_bytes(f"{run_id}__{_sanitize_filename(state.query)}", _STEM_MAX_BYTES)
+        jsonl_path: Optional[str] = None
+        if is_debug_enabled():
+            # 明细只是诊断产物，它自己的 IO 失败绝不能连累下面的 meta 写入
+            # （磁盘写满时 meta 往往还写得下）。openclaw trace.ts 的 gzip 段同样自带一层。
+            try:
+                existing = [p for p in dir_path.iterdir() if p.suffix == ".gz"]
+                if len(existing) >= DAILY_DUMP_MAX:
+                    logger.warning(
+                        "[miloco-trace] daily cap reached: %d/%d, skip jsonl runId=%s",
+                        len(existing), DAILY_DUMP_MAX, run_id,
+                    )
+                else:
+                    filename = f"{stem}.jsonl.gz"
+                    text = "\n".join(json.dumps(e, ensure_ascii=False) for e in state.buffer) + "\n"
+                    with gzip.open(dir_path / filename, "wt", encoding="utf-8") as f:
+                        f.write(text)
+                    jsonl_path = f"trace/agent/{dir_path.name}/{filename}"
+            except OSError as exc:
+                logger.warning("[miloco-trace] jsonl write failed runId=%s: %s", run_id, exc)
+        _evict_old_metas(dir_path)
         # meta 文件（adapter read_trace_meta 读这个）——小 JSON 包含聚合统计 + 路径。
         # 字段名统一 snake_case，与 adapter.py read_trace_meta 读盘侧一致。
         meta = _reduce_meta(state.buffer)
@@ -256,16 +288,15 @@ def _flush_to_disk(run_id: str, state: _TurnState, final_success: bool) -> Optio
         meta["trace_id"] = _trace_links.get(run_id)
         meta["query"] = state.query
         meta["success"] = final_success
-        meta["jsonl_path"] = f"trace/agent/{dir_path.name}/{filename}"
+        meta["jsonl_path"] = jsonl_path
         meta["started_at"] = state.started_at
         meta["done_at"] = _now_ms()
         meta["duration_ms"] = meta["done_at"] - meta["started_at"]
-        meta_path = dir_path / f"{run_id}__{_sanitize_filename(state.query)}.meta.json"
-        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-        return meta["jsonl_path"]
+        (dir_path / f"{stem}.meta.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8",
+        )
     except OSError as exc:
         logger.warning("[miloco-trace] flush failed runId=%s: %s", run_id, exc)
-        return None
 
 
 # ── hook handlers ───────────────────────────────────────────────────────
@@ -341,11 +372,11 @@ def _hk_on_session_start(session_id, model, platform, **kwargs):
 
 
 def _hk_on_session_end(session_id, completed, interrupted, model, platform, **kwargs):
-    """对齐 OpenClaw agent_end——finalize turn，写盘 + 留 meta 给 backend 拉。"""
+    """对齐 OpenClaw agent_end——finalize turn：先释放内存里的 turn state，再落盘。"""
     run_id = _run_id_from_args(session_id=session_id, task_id=kwargs.get("task_id"))
     with _lock:
         state = _turns.get(run_id)
-        if not state or state.done:
+        if not state:
             return
         _push_event(state, {
             "ts": _now_iso(),
@@ -360,25 +391,17 @@ def _hk_on_session_end(session_id, completed, interrupted, model, platform, **kw
                 "durationMs": _now_ms() - state.started_at,
             },
         })
-        # session_id 不以 "miloco:" 开头 = 非 miloco 触发的 turn（普通 chat）→ GC，不落盘。
-        # 替代旧的 register_trace_link 跨进程机制：该函数在两个进程间无法调用，
-        # 用 session_id 前缀判定更可靠（_map_session 生成固定前缀 "miloco:<key>:<lane>"）。
-        if not (session_id or "").startswith("miloco:"):
-            _turns.pop(run_id, None)
-            _gc_expired_turns()
-            return
-        jsonl_path = _flush_to_disk(run_id, state, bool(completed))
-        meta = _reduce_meta(state.buffer)
-        meta["run_id"] = run_id
-        meta["trace_id"] = _trace_links.get(run_id)
-        meta["query"] = state.query
-        meta["duration_ms"] = _now_ms() - state.started_at
-        meta["success"] = bool(completed)
-        meta["jsonl_path"] = jsonl_path
-        state.done = meta
-        state.done_at = _now_ms()
-        _gc_expired_turns()
-    pop_trace_link(run_id)
+        # 先摘下来：持久会话下一轮复用同一个 run_id，不释放会让下一轮接着写本轮 buffer。
+        # 摘完 state 只属于本次调用，落盘不必再占这把全局锁，也就没有"落盘抛错导致漏释放"。
+        _turns.pop(run_id, None)
+        _sweep_stale_turns()
+    try:
+        # 只落 miloco 触发的 turn，普通 chat 直接丢。用 session_id 前缀判定而不是
+        # register_trace_link——后者跨进程调不到（_map_session 生成固定 "miloco:" 前缀）。
+        if (session_id or "").startswith("miloco:"):
+            _flush_to_disk(run_id, state, bool(completed))
+    finally:
+        pop_trace_link(run_id)
 
 
 # ── 注册 ────────────────────────────────────────────────────────────────
