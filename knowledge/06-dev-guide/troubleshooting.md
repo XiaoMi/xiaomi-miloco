@@ -187,4 +187,4 @@ Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -D
 | 2002      | 资源冲突          | 规则名重复、成员名重复              |
 | 3200      | MiOT 异常         | 小米云通信失败                      |
 | 3201      | OAuth 异常        | 未绑定或 token 过期                 |
-| 9000      | 系统错误          | 未捕获的内部异常                    |
+| 9000      | 系统错误          | 未捕获的内部异常；响应 `data.error_id` 与后端日志中的 `error_id=` 一一对应，排障时先记录该 ID，再执行 `grep 'error_id=<id>' $MILOCO_HOME/log/miloco-backend.log` |

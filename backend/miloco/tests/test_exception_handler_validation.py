@@ -4,14 +4,21 @@
 import json
 import logging
 import re
+from collections.abc import Callable
+from typing import cast
 
-from fastapi import Request, status
+from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
+from fastapi.testclient import TestClient
 from miloco.middleware.exception_handler import (
     SYSTEM_ERROR_CODE,
     _create_error_response,
+    _safe_traceback_locations,
     handle_exception,
+    register_exception_handlers,
 )
+from miloco.middleware.exceptions import ResourceNotFoundException
+from pydantic import BaseModel
 
 
 def _request() -> Request:
@@ -20,6 +27,29 @@ def _request() -> Request:
 
 def _payload(response) -> dict:
     return json.loads(response.body)
+
+
+def test_validation_error_is_redacted_through_registered_asgi_stack() -> None:
+    class Body(BaseModel):
+        limit: int
+
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.post("/echo")
+    async def echo(body: Body) -> dict[str, bool]:
+        del body
+        return {"ok": True}
+
+    response = TestClient(app).post(
+        "/echo",
+        json={"limit": "sk-live-secret"},
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+    assert response.json()["code"] == 1002
+    assert "detail" not in response.json()
+    assert "sk-live-secret" not in response.text
 
 
 def test_validation_response_keeps_only_public_error_fields() -> None:
@@ -167,3 +197,39 @@ def test_system_error_log_keeps_only_sanitized_miloco_code_location(caplog) -> N
     assert "exception_handler.py" not in message
     assert "E:\\" not in message
     assert "C:\\" not in message
+
+
+def test_business_error_keeps_response_message_but_redacts_log(caplog) -> None:
+    secret = "private-person-name"
+    try:
+        raise ResourceNotFoundException(secret)
+    except ResourceNotFoundException as exc:
+        with caplog.at_level(logging.ERROR):
+            response = handle_exception(_request(), exc)
+
+    assert _payload(response)["message"] == secret
+    assert "code=2001" in caplog.messages[-1]
+    assert secret not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_traceback_locations_skip_constant_catch_all_frame() -> None:
+    namespace: dict[str, object] = {"__name__": "miloco.main"}
+    exec(
+        "def business_operation():\n"
+        "    raise RuntimeError('private')\n"
+        "def catch_all_exceptions_middleware():\n"
+        "    business_operation()\n",
+        namespace,
+    )
+    middleware = cast(Callable[[], None], namespace["catch_all_exceptions_middleware"])
+
+    try:
+        middleware()
+    except RuntimeError as exc:
+        locations = _safe_traceback_locations(exc)
+
+    assert any(":business_operation:" in location for location in locations)
+    assert not any(
+        ":catch_all_exceptions_middleware:" in location for location in locations
+    )

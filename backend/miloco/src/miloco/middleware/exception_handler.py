@@ -12,7 +12,7 @@ Provides exception handling mechanisms:
 import logging
 import secrets
 
-from fastapi import Request, status
+from fastapi import FastAPI, Request, status
 from fastapi.exceptions import HTTPException as FastAPIHTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -27,6 +27,7 @@ SYSTEM_ERROR_CODE = 9000
 MAX_VALIDATION_ERRORS = 20
 MAX_VALIDATION_LOCATION_PARTS = 8
 MAX_SYSTEM_ERROR_LOCATIONS = 5
+TRACEBACK_SKIP_LOCATIONS = frozenset({"miloco.main:catch_all_exceptions_middleware"})
 VALIDATION_LOCATION_ROOTS = frozenset({"body", "query", "path", "header", "cookie"})
 VALIDATION_TYPE_MESSAGES = {
     "missing": "Field required",
@@ -82,8 +83,12 @@ def _handle_base_api_exception(exc: BaseAPIException) -> JSONResponse:
     Returns:
         JSONResponse: Error response
     """
+    locations = _safe_traceback_locations(exc)
     logger.error(
-        "Request failed - %s: %s", type(exc).__name__, exc.message, exc_info=True
+        "Request failed - %s code=%s location=%s",
+        _safe_symbol(type(exc).__name__, fallback="Exception"),
+        exc.code,
+        ",".join(locations) if locations else "unavailable",
     )
 
     return _create_error_response(
@@ -142,9 +147,17 @@ def _safe_traceback_locations(exc: Exception) -> tuple[str, ...]:
         module_name = _safe_symbol(frame.f_globals.get("__name__"), fallback="")
         if module_name == "miloco" or module_name.startswith("miloco."):
             function_name = _safe_symbol(frame.f_code.co_name, fallback="function")
-            locations.append(f"{module_name}:{function_name}:{traceback.tb_lineno}")
+            location_name = f"{module_name}:{function_name}"
+            if location_name not in TRACEBACK_SKIP_LOCATIONS:
+                locations.append(f"{location_name}:{traceback.tb_lineno}")
         traceback = traceback.tb_next
     return tuple(locations[-MAX_SYSTEM_ERROR_LOCATIONS:])
+
+
+def register_exception_handlers(app: FastAPI) -> None:
+    """Install handlers that FastAPI would otherwise consume before middleware."""
+
+    app.add_exception_handler(RequestValidationError, handle_exception)
 
 
 def handle_exception(request: Request, exc: Exception) -> JSONResponse:

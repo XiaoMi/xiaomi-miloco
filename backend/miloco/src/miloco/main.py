@@ -33,7 +33,10 @@ from miloco.database.connector import init_database
 from miloco.dispatch import AgentDispatcher, set_agent_dispatcher
 from miloco.home_profile.router import router as home_profile_router
 from miloco.manager import get_manager
-from miloco.middleware.exception_handler import handle_exception
+from miloco.middleware.exception_handler import (
+    handle_exception,
+    register_exception_handlers,
+)
 from miloco.miot.router import router as miot_router
 from miloco.node_monitor.event_log import NodeEventLog
 from miloco.node_monitor.monitor import get_monitor
@@ -509,6 +512,7 @@ app = FastAPI(
     version=_settings.app.version,
     lifespan=lifespan,
 )
+register_exception_handlers(app)
 
 
 @app.middleware("http")
