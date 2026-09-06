@@ -1148,6 +1148,7 @@ def test_put_fallbacks_preserves_order(client):
             "model": "m1",
             "base_url": "https://x/v1",
             "api_key": "sk-k111111111",
+            "activate": False,
         },
     )
     client.put(
@@ -1157,6 +1158,7 @@ def test_put_fallbacks_preserves_order(client):
             "model": "m2",
             "base_url": "https://y/v1",
             "api_key": "sk-k222222222",
+            "activate": False,
         },
     )
     r = client.put(
@@ -1165,3 +1167,35 @@ def test_put_fallbacks_preserves_order(client):
     )
     assert r.status_code == 200
     assert r.json()["data"]["fallbacks"] == ["配置2", "配置1"]
+
+
+def test_put_fallbacks_dedupes_and_excludes_primary(client):
+    """去重 + 排除主 provider：重复项只保留第一个，主 provider 被剔除。"""
+    # 配置1 成为主（activate 默认 true）
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置1",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-k111111111",
+        },
+    )
+    # 配置2 非主
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置2",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-k222222222",
+            "activate": False,
+        },
+    )
+    r = client.put(
+        "/api/admin/omni-config/fallbacks",
+        json={"labels": ["配置2", "配置2", "配置1", "不存在的档案"]},
+    )
+    assert r.status_code == 200
+    # 重复的「配置2」只保留一个；主 provider「配置1」被剔除；不存在的被过滤
+    assert r.json()["data"]["fallbacks"] == ["配置2"]

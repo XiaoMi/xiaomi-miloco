@@ -527,10 +527,10 @@ export interface OmniPoolSnapshot {
 export interface OmniConfigState {
   active: OmniActiveConfig;
   profiles: OmniProfile[];
-  /** 按优先级排序的 fallback provider label 列表（引用 profiles 的 label）。 */
-  fallbacks: string[];
+  /** 按优先级排序的 fallback provider label 列表（引用 profiles 的 label）。旧后端可能不返回，故标可选。 */
+  fallbacks?: string[];
   /** ProviderPool 运行时快照；池未初始化时为 null。 */
-  pool: OmniPoolSnapshot | null;
+  pool?: OmniPoolSnapshot | null;
 }
 
 /** 定位一套档案(档案名 = 唯一 id)。 */

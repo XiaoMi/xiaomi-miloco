@@ -139,6 +139,10 @@ class OmniProviderPool:
 
     def snapshot(self) -> PoolSnapshot:
         """返回池当前状态快照（供 admin API）。"""
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
+
         with self._lock:
             active = self._get_active_unlocked()
             _, fallbacks = self._resolve_providers_unlocked()
@@ -162,7 +166,9 @@ class OmniProviderPool:
                     self._recovery_task is not None
                     and not self._recovery_task.done()
                 ),
-                exhausted=self._exhausted,
+                # 熔断器已回正常 → 感知在跑，耗尽态是陈旧的，不要误导前端。
+                exhausted=self._exhausted
+                and get_omni_circuit_breaker().snapshot().state != "ok",
             )
 
     async def start(self) -> None:
@@ -394,13 +400,32 @@ class OmniProviderPool:
                 if is_primary:
                     primary_recovered = True
 
+        resume_in_place = False
         if recovered_keys:
             with self._lock:
                 self._failed_keys -= recovered_keys
+                # 池耗尽时若当前 active 自己探测通过，必须就地解除耗尽态并 reset 熔断器：
+                # primary 未恢复 → 不走 _switch_back_to_primary；而 OPEN_CONFIG 下
+                # tick 通道的 try_arm_probe() 恒为 False —— 不在这里收尾就没人收尾了。
+                if (
+                    self._exhausted
+                    and _provider_key(self._get_active_unlocked())
+                    not in self._failed_keys
+                ):
+                    self._exhausted = False
+                    self._last_switch_monotonic = time.monotonic()
+                    self._last_switch_wall_ms = int(time.time() * 1000)
+                    resume_in_place = True
 
-        # primary 恢复 → 自动切回
+        # primary 恢复 → 自动切回（内部已负责 reset 熔断器）
         if primary_recovered:
             await self._switch_back_to_primary()
+        elif resume_in_place:
+            logger.info(
+                "[provider-pool] 当前 provider %s 自愈，解除池耗尽态并恢复感知",
+                _provider_key(self.get_active()),
+            )
+            await get_omni_circuit_breaker().record_probe_result(True, None)
 
     async def _switch_back_to_primary(self) -> None:
         """自动切回 primary provider。"""
@@ -430,6 +455,15 @@ class OmniProviderPool:
         if need_reset:
             # 走熔断器自己的探测结果入口：写 _last_probe_at / _last_probe_result，
             # 由熔断器统一维护，admin 面板「上次探测时间/结果」才正确更新。
+            # 本轮网络探测期间 tick 通道可能已经 arm 了自己的探测。此时不要替它
+            # 落 record_probe_result —— 那会清掉它的 in-flight 位，且它随后的失败
+            # 结果会把刚 reset 的熔断器重新打开。RECOVERABLE 链上 tick 会自己收尾；
+            # OPEN_CONFIG（state == "error"）下 tick 不会探测，仍由池强制 reset。
+            if cb.probe_in_flight() and cb.snapshot().state != "error":
+                logger.debug(
+                    "[provider-pool] tick 探测在飞行中，本轮不 reset 熔断器"
+                )
+                return
             await cb.record_probe_result(True, None)
 
     async def _recovery_loop(self) -> None:

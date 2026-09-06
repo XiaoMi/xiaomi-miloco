@@ -605,6 +605,58 @@ async def test_switch_back_on_pool_exhausted_primary_recovery(loop, monkeypatch)
     assert pool.get_active().model == "primary-model"
 
 
+async def test_pool_exhausted_current_fallback_self_recovery(loop, monkeypatch):
+    """耗尽态下当前备选自己探通 → 就地解除耗尽态并 reset 熔断器。
+
+    单备选部署（主 + A）：主 401 熔断切到 A，A 被几帧坏数据打进 OPEN_CONFIG，
+    池耗尽后（_active_label="a"、_exhausted=True）。下一轮 _probe_failed_providers
+    探通 A（主仍 401）→ primary_recovered=False，必须走 resume_in_place 出口，
+    否则 OPEN_CONFIG 下 tick 通道 try_arm_probe() 恒 False，没人 reset → 永久停摆。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 构造耗尽态：_active_label="a"、_exhausted=True、failed_keys 含主和 A
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("bad_key", "m", ErrorCategory.CONFIG)
+        )
+    assert cb.snapshot().state == "error"
+    pool._active_label = "a"
+    pool._exhausted = True
+    pool._failed_keys.add(_provider_key(primary))
+    pool._failed_keys.add(_provider_key(fb_a))
+
+    # mock probe：主仍失败，A 探通
+    async def _mock_probe(model, base_url, api_key):
+        key = f"{model}@{base_url}"
+        return {"ok": key == _provider_key(fb_a)}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _mock_probe,
+    )
+
+    await pool._probe_failed_providers()
+
+    # A 自愈：耗尽态解除，熔断器回 ok
+    assert pool._exhausted is False
+    assert cb.snapshot().state == "ok"
+    # A 从 failed 移除，主仍在 failed
+    assert _provider_key(fb_a) not in pool._failed_keys
+    assert _provider_key(primary) in pool._failed_keys
+    # active 仍是 A
+    assert pool.get_active().label == "a"
+
+
 # ── test: 恢复循环超时分支推进 failover（OPEN_CONFIG 钉死修复） ──────────────
 
 

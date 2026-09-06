@@ -96,7 +96,7 @@ cd backend && uv run task dev
 ### 用户最常修改的配置项
 
 - `model.omni.api_key`：感知启动前必填，通过 `miloco-cli config set model.omni.api_key <key>` 设置
-- `model.omni_fallbacks`：主模型熔断时的备选 provider 列表（lable 引用 `omni_profiles`），推荐通过 web「模型」页的 fallback 面板拖拽管理；修改后无需重启，下个推理周期自动生效
+- `model.omni_fallbacks`：主模型熔断时的备选 provider 列表（label 引用 `omni_profiles`），推荐通过 web「模型」页的 fallback 面板拖拽管理；修改后无需重启，下个推理周期自动生效
 - `timezone`：部署时区（IANA 名），服务器时区 ≠ 家庭时区时必配，详见下节
 - `server.host`：默认 `127.0.0.1`，仅本机可达；开放局域网访问改为 `0.0.0.0`（需自行评估网络安全）
 - `server.port`：服务监听端口，默认 `1810`（定义在 `settings.yaml::server` / `settings.py` 的 `ServerSettings`，不进 schema.json）；与其他服务端口冲突时修改此项

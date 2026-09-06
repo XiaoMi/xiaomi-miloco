@@ -116,8 +116,8 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 
 - **自动 failover**：当主 provider（`model.omni`）熔断器打开（累计失败 ≥ 阈值），按 `omni_fallbacks` 列表顺序依次尝试备选 provider。每次 `get_active()` 调用动态从 settings 读取 provider 列表，**web 上改 fallback 无需重启即生效**。
 - **min_switch_interval 去抖**：两次 failover 之间最小间隔 30s，防止配置错误的多 provider 来回抖动。
-- **全部不可用时暂停**：所有 provider（主 + 全部 fallback）都不可用时，感知引擎暂停（保持最后的 `OPEN_CONFIG` 状态）。
-- **后台恢复循环**：`_recovery_loop` 每 30s 探测所有 failed provider 是否恢复，主 provider 恢复后自动切回（同时触发 CB `reset_on_config_change` 回到 CLOSED）。
+- **全部不可用时暂停**：所有 provider（主 + 全部 fallback）都不可用时，感知引擎暂停，熔断器保持切换发生时的开启状态（`OPEN_RECOVERABLE` 或 `OPEN_CONFIG`）；前者 tick 退避探测仍在跑，后者只能靠池的恢复循环自愈。
+- **后台恢复循环**：`_recovery_loop` 每 30s 探测所有 failed provider 是否恢复，主 provider 恢复后自动切回（同时以 `record_probe_result(True, None)` 把熔断器复位到 CLOSED 并刷新探测字段）。
 - **线程安全**：CB listener 回调可能来自任意线程，通过 `call_soon_threadsafe` 投递到主 event loop 处理。
 
 配置方式：通过 web「模型」页的 fallback 面板拖拽管理，或直接在 `config.json` 中设置 `model.omni_fallbacks`（label 列表，每个 label 必须是 `omni_profiles` 中已存档的档案名）。

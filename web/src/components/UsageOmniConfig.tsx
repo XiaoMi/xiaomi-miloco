@@ -503,7 +503,7 @@ export function UsageOmniConfig() {
   // 撤销本地修改
   function resetFallbacks() {
     if (state) {
-      setFallbackLabels([...state.fallbacks]);
+      setFallbackLabels([...(state.fallbacks ?? [])]);
     }
     setFallbackDirty(false);
   }

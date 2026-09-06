@@ -1583,12 +1583,20 @@ def put_omni_fallbacks(
     """
     m = get_settings().model
     valid_labels: set[str] = {p.label for p in m.omni_profiles}
-    filtered = [lbl for lbl in body.labels if lbl in valid_labels]
-    skipped = [lbl for lbl in body.labels if lbl not in valid_labels]
+    seen: set[str] = set()
+    filtered: list[str] = []
+    for label in body.labels:
+        # 过滤三类：不存在的 label、主 provider 自己、重复项。主 provider 不该出现在
+        # 备选列表里；重复项会让前端面板渲染多行且拖拽/取消勾选行为错位。
+        if label not in valid_labels or _label_is_active(label) or label in seen:
+            continue
+        seen.add(label)
+        filtered.append(label)
+    skipped = len(body.labels) - len(filtered)
     if skipped:
         logger = logging.getLogger(__name__)
         logger.warning(
-            "omni_fallbacks 中 %d 个 label 不存在，已过滤", len(skipped)
+            "omni_fallbacks 中 %d 个 label 已过滤（不存在/主 provider/重复）", skipped
         )
     update_shared_config(model={"omni_fallbacks": filtered})
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
