@@ -1170,14 +1170,20 @@ async def put_omni_config(
     update: dict = {"omni_profiles": profiles}
     # 改名时同步改 omni_fallbacks 里的引用，否则该备选静默失效
     # （label 查不到 → _resolve_providers_unlocked 跳过），前端面板上直接消失。
-    if orig and orig != label:
-        fallbacks = get_settings().model.omni_fallbacks
-        if orig in fallbacks:
-            update["omni_fallbacks"] = [
-                label if x == orig else x for x in fallbacks
-            ]
+    fallbacks = list(get_settings().model.omni_fallbacks)
+    new_fallbacks: list[str] | None = None
+    if orig and orig != label and orig in fallbacks:
+        new_fallbacks = [label if x == orig else x for x in fallbacks]
     if will_activate:
         update["omni"] = entry
+        # 与 activate_omni_config / put_omni_fallbacks 的过滤口径对齐：
+        # 主档案不该同时是自己的备选，否则 failover 会把首个备选当成
+        # "已 failed" 跳过，单备选场景直接误判为全部耗尽。
+        base = fallbacks if new_fallbacks is None else new_fallbacks
+        if label in base:
+            new_fallbacks = [x for x in base if x != label]
+    if new_fallbacks is not None:
+        update["omni_fallbacks"] = new_fallbacks
     update_shared_config(model=update)
     if will_activate:
         # preflight 通过 = 新配置已验可用,主动把熔断状态清掉。之前 OPEN_CONFIG (bad_key

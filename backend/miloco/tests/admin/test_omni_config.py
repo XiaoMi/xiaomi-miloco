@@ -1307,3 +1307,43 @@ def test_activate_profile_removes_from_fallbacks(client):
     ).json()["data"]
     assert out["active"]["label"] == "配置2"
     assert out["fallbacks"] == []
+
+
+def test_put_activate_default_removes_from_fallbacks(client):
+    """保存接口（未显式传 activate，默认启用）启用档案时，同步从 omni_fallbacks 摘除。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置1",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-k111111111",
+        },
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置2",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-k222222222",
+            "activate": False,
+        },
+    )
+    # 配置2 进 fallback
+    client.put(
+        "/api/admin/omni-config/fallbacks",
+        json={"labels": ["配置2"]},
+    )
+    # 编辑配置2（original_label=配置2，不传 activate → 默认 activate=true 启用）
+    out = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置2",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "original_label": "配置2",
+        },
+    ).json()["data"]
+    assert out["active"]["label"] == "配置2"
+    assert out["fallbacks"] == []

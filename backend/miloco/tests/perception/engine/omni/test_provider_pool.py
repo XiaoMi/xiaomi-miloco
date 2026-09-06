@@ -79,6 +79,25 @@ def loop():
     lp.close()
 
 
+# ── test: provider key 指纹 ───────────────────────────────────────────────
+
+
+def test_provider_key_distinguishes_same_gateway_different_keys():
+    """同 model + 同 base_url 但不同 key 的档案应生成不同的 provider key。
+
+    同一网关下的多把配额 key 是两个独立 provider，不带指纹会被折叠成一个，
+    导致 failover 直接判耗尽。
+    """
+    a = _omni(label="a", model="m1", base_url="https://x/v1", api_key="sk-aaa")
+    b = _omni(label="b", model="m1", base_url="https://x/v1", api_key="sk-bbb")
+    assert _provider_key(a) != _provider_key(b)
+    # 同一档案（同 key）稳定
+    a2 = _omni(label="a", model="m1", base_url="https://x/v1", api_key="sk-aaa")
+    assert _provider_key(a) == _provider_key(a2)
+    # 不泄漏明文 key
+    assert "sk-aaa" not in _provider_key(a)
+
+
 # ── test: 空 fallback 始终返回 primary ───────────────────────────────────────
 
 
@@ -482,8 +501,7 @@ async def test_probe_failed_providers_recovery_flow(loop, monkeypatch):
 
     # Mock probe_omni：primary 恢复，fb_a 仍为失败
     async def _mock_probe(model, base_url, api_key):
-        key = f"{model}@{base_url}"
-        return {"ok": key == _provider_key(primary)}
+        return {"ok": model == "primary-model"}
 
     monkeypatch.setattr(
         "miloco.perception.engine.omni.probe.probe_omni",
@@ -637,8 +655,7 @@ async def test_pool_exhausted_current_fallback_self_recovery(loop, monkeypatch):
 
     # mock probe：主仍失败，A 探通
     async def _mock_probe(model, base_url, api_key):
-        key = f"{model}@{base_url}"
-        return {"ok": key == _provider_key(fb_a)}
+        return {"ok": model == "fb-a-model"}
 
     monkeypatch.setattr(
         "miloco.perception.engine.omni.probe.probe_omni",
@@ -691,8 +708,7 @@ async def test_probe_skips_reset_when_tick_armed_during_probe(loop, monkeypatch)
     # mock probe：主仍失败，只有 A 探通；探测过程中模拟 tick 通道 arm 自己的探测
     async def _mock_probe(model, base_url, api_key):
         cb._probe_in_flight = True
-        key = f"{model}@{base_url}"
-        return {"ok": key == _provider_key(fb_a)}
+        return {"ok": model == "fb-a-model"}
 
     monkeypatch.setattr(
         "miloco.perception.engine.omni.probe.probe_omni",

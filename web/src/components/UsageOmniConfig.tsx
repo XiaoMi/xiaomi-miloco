@@ -416,7 +416,15 @@ export function UsageOmniConfig() {
         toast(`${t("usage.cannotEnable")}：${testReason(res)}`, severityOf(res) === "warn" ? "warn" : "danger");
         return;
       }
-      setState(await activateOmniConfig({ label: p.label }));
+      const s = await activateOmniConfig({ label: p.label });
+      setState(s);
+      // 后端启用时会把该 label 从 omni_fallbacks 里摘掉。本地编辑态不同步
+      // 就会把新主档案继续画成一行备选，且下次保存会把它原样提交回去。
+      // 只在它确实在本地列表里时重置，避免静默回滚用户未保存的拖拽顺序。
+      if (fallbackLabels.includes(p.label)) {
+        setFallbackLabels([...(s.fallbacks ?? [])]);
+        setFallbackDirty(false);
+      }
       toast(t("usage.activateSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.activateFailed"), "danger");
@@ -488,7 +496,9 @@ export function UsageOmniConfig() {
       if (from < 0 || to < 0) return prev;
       const next = [...prev];
       const [item] = next.splice(from, 1);
-      next.splice(to, 0, item);
+      // 指示线画在目标行上方（border-t-2），语义是"插到目标行之前"。
+      // 向下拖时 splice 删除会让目标行下标前移 1，直接用 to 会落到目标行之后。
+      next.splice(from < to ? to - 1 : to, 0, item);
       return next;
     });
     setFallbackDirty(true);

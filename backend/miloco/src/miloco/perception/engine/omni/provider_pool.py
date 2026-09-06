@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import threading
 import time
@@ -45,8 +46,15 @@ _RECOVERY_PROBE_INTERVAL_SEC = 30.0
 
 
 def _provider_key(omni: OmniModelSettings) -> str:
-    """生成 provider 的唯一标识（用于 failed 集合追踪）。"""
-    return f"{omni.model}@{omni.base_url}"
+    """生成 provider 的唯一标识（用于 failed 集合追踪）。
+
+    必须带上 api_key 指纹：同 model + 同 base_url 但换 key 的档案
+    （同一网关下的多把配额 key）是两个独立 provider，不带指纹会被
+    折叠成一个 —— 第二把 key 永远选不中，failover 直接判耗尽。
+    只取 sha256 前 8 位，避免明文 key 进日志 / 进 snapshot().failed_keys。
+    """
+    fp = hashlib.sha256((omni.api_key or "").encode()).hexdigest()[:8]
+    return f"{omni.model}@{omni.base_url}#{fp}"
 
 
 @dataclass
@@ -373,6 +381,11 @@ class OmniProviderPool:
                 _provider_key(fb) for fb in fallbacks
             }
             self._failed_keys &= live_keys
+            # 运行期备选被清空时，主也要退出 failed 集：零备选下池不介入
+            # 自愈，探测通道完全交还熔断器的指数退避（与 PR 描述的
+            # "零配置兼容"口径一致，也与 _try_failover 的空备选早退对称）。
+            if not fallbacks:
+                self._failed_keys.discard(_provider_key(primary))
             if not self._failed_keys:
                 return
 
