@@ -4,7 +4,9 @@
 - 主 provider (primary) 来自 ``model.omni``，备选来自 ``model.omni_fallbacks``
   （label 列表，按优先级排序，运行时从 ``model.omni_profiles`` 解析为完整配置）
 - 主 provider 熔断器打开时自动依次尝试 fallback
-- 所有 provider 都不可用时感知引擎暂停（保持最后的 OPEN_CONFIG 状态）
+- 所有 provider 都不可用时感知引擎暂停：熔断器保持切换发生时的开启状态
+  （``OPEN_RECOVERABLE`` 或 ``OPEN_CONFIG``），前者 tick 退避探测仍在跑，
+  后者只能靠本模块的恢复循环自愈
 - 后台恢复循环定期探测 failed provider，primary 恢复后自动切回
 - 去抖保护：短时间内连续切换受 ``_min_switch_interval`` 限制
 - 每次 ``get_active()`` / failover 时动态从 settings 读取 provider 列表，
@@ -400,6 +402,13 @@ class OmniProviderPool:
                 if is_primary:
                     primary_recovered = True
 
+        cb = get_omni_circuit_breaker()
+        # tick 探测在飞行中时不抢收尾权（与 _switch_back_to_primary 同一条守卫）：
+        # 替它落 record_probe_result 会清掉它的 in-flight 位，且它随后的失败结果
+        # 会把刚 reset 的熔断器重新打开。OPEN_CONFIG（state == "error"）下 tick
+        # 不探测，仍由池强制 reset。
+        tick_owns_reset = cb.probe_in_flight() and cb.snapshot().state != "error"
+
         resume_in_place = False
         if recovered_keys:
             with self._lock:
@@ -408,13 +417,15 @@ class OmniProviderPool:
                 # primary 未恢复 → 不走 _switch_back_to_primary；而 OPEN_CONFIG 下
                 # tick 通道的 try_arm_probe() 恒为 False —— 不在这里收尾就没人收尾了。
                 if (
-                    self._exhausted
+                    not tick_owns_reset
+                    and self._exhausted
                     and _provider_key(self._get_active_unlocked())
                     not in self._failed_keys
                 ):
                     self._exhausted = False
+                    # 只更新去抖用的 monotonic 起点：这条路径 active 没变，
+                    # 对外的 last_switch_at_ms 不该上报一次不存在的切换。
                     self._last_switch_monotonic = time.monotonic()
-                    self._last_switch_wall_ms = int(time.time() * 1000)
                     resume_in_place = True
 
         # primary 恢复 → 自动切回（内部已负责 reset 熔断器）
@@ -425,7 +436,7 @@ class OmniProviderPool:
                 "[provider-pool] 当前 provider %s 自愈，解除池耗尽态并恢复感知",
                 _provider_key(self.get_active()),
             )
-            await get_omni_circuit_breaker().record_probe_result(True, None)
+            await cb.record_probe_result(True, None)
 
     async def _switch_back_to_primary(self) -> None:
         """自动切回 primary provider。"""

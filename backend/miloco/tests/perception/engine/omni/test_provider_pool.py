@@ -657,6 +657,56 @@ async def test_pool_exhausted_current_fallback_self_recovery(loop, monkeypatch):
     assert pool.get_active().label == "a"
 
 
+async def test_probe_skips_reset_when_tick_armed_during_probe(loop, monkeypatch):
+    """探测期间 tick 通道 arm 了自己的探测 → 池不抢收尾权。
+
+    OPEN_RECOVERABLE 耗尽态下，池在函数开头读到 probe_in_flight()==False 放行，
+    网络探测期间 tick 才 arm 探测。探测返回 ok 后，tick_owns_reset 守卫应让池
+    跳过 resume_in_place：不清耗尽态、不 reset 熔断器、不清 in-flight 位。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 构造 OPEN_RECOVERABLE（RECOVERABLE 类错误，state == "warn"）
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("rate_limited", "m", ErrorCategory.RECOVERABLE)
+        )
+    assert cb.snapshot().state == "warn"
+
+    # 构造耗尽态：_active_label="a"、_exhausted=True、failed_keys 含主和 A
+    pool._active_label = "a"
+    pool._exhausted = True
+    pool._failed_keys.add(_provider_key(primary))
+    pool._failed_keys.add(_provider_key(fb_a))
+
+    # mock probe：主仍失败，只有 A 探通；探测过程中模拟 tick 通道 arm 自己的探测
+    async def _mock_probe(model, base_url, api_key):
+        cb._probe_in_flight = True
+        key = f"{model}@{base_url}"
+        return {"ok": key == _provider_key(fb_a)}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _mock_probe,
+    )
+
+    await pool._probe_failed_providers()
+
+    # 守卫生效：耗尽态未清、熔断器未 reset、in-flight 位未清
+    assert pool._exhausted is True
+    assert cb.snapshot().state == "warn"
+    assert cb.probe_in_flight() is True
+
+
 # ── test: 恢复循环超时分支推进 failover（OPEN_CONFIG 钉死修复） ──────────────
 
 

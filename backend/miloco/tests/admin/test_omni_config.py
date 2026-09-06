@@ -1199,3 +1199,77 @@ def test_put_fallbacks_dedupes_and_excludes_primary(client):
     assert r.status_code == 200
     # 重复的「配置2」只保留一个；主 provider「配置1」被剔除；不存在的被过滤
     assert r.json()["data"]["fallbacks"] == ["配置2"]
+
+
+def test_delete_profile_cleans_fallbacks(client):
+    """删除档案时同步清理 omni_fallbacks 里的悬空引用。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置1",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-k111111111",
+        },
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置2",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-k222222222",
+            "activate": False,
+        },
+    )
+    # 配置2 进 fallback
+    client.put(
+        "/api/admin/omni-config/fallbacks",
+        json={"labels": ["配置2"]},
+    )
+    # 删除配置2 → fallbacks 应同步清空
+    out = client.post(
+        "/api/admin/omni-config/delete", json={"label": "配置2"}
+    ).json()["data"]
+    assert out["fallbacks"] == []
+
+
+def test_rename_profile_updates_fallbacks(client):
+    """改名档案时同步改 omni_fallbacks 里的引用。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置1",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-k111111111",
+        },
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置2",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-k222222222",
+            "activate": False,
+        },
+    )
+    # 配置2 进 fallback
+    client.put(
+        "/api/admin/omni-config/fallbacks",
+        json={"labels": ["配置2"]},
+    )
+    # 改名 配置2 → 配置3（activate=False，key 沿用）
+    out = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置3",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "original_label": "配置2",
+            "activate": False,
+        },
+    ).json()["data"]
+    # fallbacks 里的引用同步改成「配置3」
+    assert out["fallbacks"] == ["配置3"]

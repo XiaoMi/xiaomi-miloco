@@ -206,9 +206,9 @@ export function UsageOmniConfig() {
   const [fallbackLabels, setFallbackLabels] = useState<string[]>([]);
   const [fallbackDirty, setFallbackDirty] = useState(false);
   const [savingFallbacks, setSavingFallbacks] = useState(false);
-  // 拖拽状态
-  const [dragIdx, setDragIdx] = useState<number | null>(null);
-  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
+  // 拖拽状态（按 label 追踪：渲染列表会过滤掉悬空 label，下标与 fallbackLabels 不对齐）
+  const [dragLabel, setDragLabel] = useState<string | null>(null);
+  const [dragOverLabel, setDragOverLabel] = useState<string | null>(null);
 
   useEffect(() => {
     void load();
@@ -444,7 +444,11 @@ export function UsageOmniConfig() {
     if (!p) return;
     setDeleting(true);
     try {
-      setState(await deleteOmniConfig({ label: p.label }));
+      const s = await deleteOmniConfig({ label: p.label });
+      setState(s);
+      // 删除的档案可能正在备选列表里，同步本地编辑态，避免悬空 label 残留
+      setFallbackLabels([...(s.fallbacks ?? [])]);
+      setFallbackDirty(false);
       setRowTestResults((m) => {
         const next = { ...m };
         delete next[p.label];
@@ -472,13 +476,16 @@ export function UsageOmniConfig() {
     setFallbackDirty(true);
   }
 
-  // 拖拽排序：从 fromIdx 移动到 toIdx
-  function moveFallback(fromIdx: number, toIdx: number) {
-    if (fromIdx === toIdx) return;
+  // 拖拽排序：按 label 在 fallbackLabels 里定位，避免与渲染下标错位
+  function moveFallbackByLabel(fromLabel: string, toLabel: string) {
+    if (fromLabel === toLabel) return;
     setFallbackLabels((prev) => {
+      const from = prev.indexOf(fromLabel);
+      const to = prev.indexOf(toLabel);
+      if (from < 0 || to < 0) return prev;
       const next = [...prev];
-      const [item] = next.splice(fromIdx, 1);
-      next.splice(toIdx, 0, item);
+      const [item] = next.splice(from, 1);
+      next.splice(to, 0, item);
       return next;
     });
     setFallbackDirty(true);
@@ -513,35 +520,35 @@ export function UsageOmniConfig() {
     return profiles.find((p) => p.label === label);
   }
 
-  // ── 拖拽事件（HTML5 native DnD）──────────────────────────────────────
-  function onDragStart(idx: number) {
+  // ── 拖拽事件（HTML5 native DnD，按 label 追踪）───────────────────────
+  function onDragStart(label: string) {
     return (e: React.DragEvent) => {
       e.dataTransfer.effectAllowed = "move";
-      setDragIdx(idx);
+      setDragLabel(label);
     };
   }
-  function onDragOver(idx: number) {
+  function onDragOver(label: string) {
     return (e: React.DragEvent) => {
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
-      setDragOverIdx(idx);
+      setDragOverLabel(label);
     };
   }
   function onDragLeave() {
-    setDragOverIdx(null);
+    setDragOverLabel(null);
   }
-  function onDrop(idx: number) {
+  function onDrop(label: string) {
     return () => {
-      if (dragIdx != null && dragIdx !== idx) {
-        moveFallback(dragIdx, idx);
+      if (dragLabel != null && dragLabel !== label) {
+        moveFallbackByLabel(dragLabel, label);
       }
-      setDragIdx(null);
-      setDragOverIdx(null);
+      setDragLabel(null);
+      setDragOverLabel(null);
     };
   }
   function onDragEnd() {
-    setDragIdx(null);
-    setDragOverIdx(null);
+    setDragLabel(null);
+    setDragOverLabel(null);
   }
 
   // 尚未加入 fallback 的可选 profile（排除 active 行，排除已在 fallback 中的）
@@ -804,16 +811,16 @@ export function UsageOmniConfig() {
                         <div
                           key={p.label}
                           draggable
-                          onDragStart={onDragStart(idx)}
-                          onDragOver={onDragOver(idx)}
+                          onDragStart={onDragStart(p.label)}
+                          onDragOver={onDragOver(p.label)}
                           onDragLeave={onDragLeave}
-                          onDrop={onDrop(idx)}
+                          onDrop={onDrop(p.label)}
                           onDragEnd={onDragEnd}
                           className={`flex items-center gap-3 px-3 py-2.5 border-b border-border last:border-b-0 transition-colors ${
-                            dragOverIdx === idx
+                            dragOverLabel === p.label
                               ? "border-t-2 border-t-brand-primary"
                               : ""
-                          } ${dragIdx === idx ? "opacity-50" : ""}`}
+                          } ${dragLabel === p.label ? "opacity-50" : ""}`}
                         >
                           {/* 拖拽手柄 */}
                           <span

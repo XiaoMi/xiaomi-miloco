@@ -1168,6 +1168,14 @@ async def put_omni_config(
     else:
         profiles.append(entry)
     update: dict = {"omni_profiles": profiles}
+    # 改名时同步改 omni_fallbacks 里的引用，否则该备选静默失效
+    # （label 查不到 → _resolve_providers_unlocked 跳过），前端面板上直接消失。
+    if orig and orig != label:
+        fallbacks = get_settings().model.omni_fallbacks
+        if orig in fallbacks:
+            update["omni_fallbacks"] = [
+                label if x == orig else x for x in fallbacks
+            ]
     if will_activate:
         update["omni"] = entry
     update_shared_config(model=update)
@@ -1261,6 +1269,12 @@ async def delete_omni_config(
     was_active = _label_is_active(label)
     profiles = [p for p in _profiles_as_dicts() if p["label"] != label]
     update: dict = {"omni_profiles": profiles}
+    # 档案没了，omni_fallbacks 里的引用也要一起清：留着会让 ProviderPool 每次
+    # get_active() 打一条 warning，且 GET /omni-config 的 fallbacks 与
+    # pool.fallback_count 长期对不上。
+    fallbacks = get_settings().model.omni_fallbacks
+    if label in fallbacks:
+        update["omni_fallbacks"] = [x for x in fallbacks if x != label]
     if was_active:
         # 删当前生效模型 → 当前生效配置重置为出厂未配态(MiMo 默认 + 空 key)。
         update["omni"] = OmniModelSettings().model_dump()
