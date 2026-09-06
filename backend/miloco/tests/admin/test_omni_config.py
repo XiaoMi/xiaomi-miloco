@@ -1100,3 +1100,68 @@ def test_test_connection_failure_does_not_touch_breaker(client, monkeypatch, rea
 
     # 熔断仍是 error
     assert get_omni_circuit_breaker().snapshot().state == "error"
+
+
+# ─── fallback 保存（PUT /omni-config/fallbacks） ────────────────────────────
+
+
+def test_put_fallbacks_filters_unknown_labels(client):
+    """不存在于 omni_profiles 的 label 被静默过滤，端点仍返回 200。
+
+    这是「保存 fallback 顺序」的设计决策：前端可能带着已被删除的 label 提交，
+    后端静默过滤而不是 400，避免整次保存失败。
+    """
+    # 建两套档案，只有「配置2」会进 fallback
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置2",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-k111111111",
+        },
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置1",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-k222222222",
+        },
+    )
+    r = client.put(
+        "/api/admin/omni-config/fallbacks",
+        json={"labels": ["配置2", "不存在的档案"]},
+    )
+    assert r.status_code == 200
+    # 不存在的 label 被静默过滤，仅保留有效 label，且保持顺序
+    assert r.json()["data"]["fallbacks"] == ["配置2"]
+
+
+def test_put_fallbacks_preserves_order(client):
+    """fallback 顺序按请求体 labels 的先后保留（靠前优先）。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置1",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-k111111111",
+        },
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置2",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-k222222222",
+        },
+    )
+    r = client.put(
+        "/api/admin/omni-config/fallbacks",
+        json={"labels": ["配置2", "配置1"]},
+    )
+    assert r.status_code == 200
+    assert r.json()["data"]["fallbacks"] == ["配置2", "配置1"]

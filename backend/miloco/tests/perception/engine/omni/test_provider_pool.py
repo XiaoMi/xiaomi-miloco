@@ -193,6 +193,70 @@ async def test_pool_exhausted_stays_paused(loop, monkeypatch):
     assert active.model == "primary-model"
 
 
+async def test_pool_exhausted_from_fallback_keeps_active_label(loop, monkeypatch):
+    """从备选耗尽时，_active_label 保持指向备选而非清空回主。
+
+    若清空成 None，get_active() 翻回 primary，omni_client 的配置变更钩子
+    （三元组变化即清熔断）会误判成用户改配置而清掉熔断器，感知没暂停反而
+    继续对着已知挂掉的主 provider 发 payload。改用 _exhausted 显式标记。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    async def _trip_cb():
+        for _ in range(3):
+            await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+
+    # 第一步：primary 熔断 → 切到 A
+    await _trip_cb()
+    assert await pool._try_failover()
+    assert pool._active_label == "a"
+    assert pool._exhausted is False
+
+    # 第二步：A 也熔断 → 池耗尽（唯一备选 A 已 failed）
+    await _trip_cb()
+    assert not await pool._try_failover()
+
+    # 关键断言：_active_label 保持 "a"（不清空回主），_exhausted 置 True
+    assert pool._active_label == "a"
+    assert pool._exhausted is True
+    assert pool.get_active().label == "a"
+
+
+async def test_no_fallback_does_not_mark_primary_failed(loop, monkeypatch):
+    """没配置任何备选时，池不介入自愈，primary 不进 failed 集。
+
+    若 primary 进了 failed 集，_probe_failed_providers 会起一条绕开熔断器
+    指数退避的 30s 固定探测通道，破坏「零配置兼容」承诺。
+    """
+    primary = _omni(label="p", model="primary-model")
+    _mock_settings(primary, [], [], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    assert cb.snapshot().state == "error"
+
+    # 零 fallback：_try_failover 直接返回 False，且不标记 primary failed
+    assert not await pool._try_failover()
+    assert _provider_key(primary) not in pool._failed_keys
+    assert pool._exhausted is False
+    assert pool.get_active().model == "primary-model"
+
+
 # ── test: 去抖跳过快速连续切换 ───────────────────────────────────────────────
 
 

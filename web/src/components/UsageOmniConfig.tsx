@@ -223,7 +223,7 @@ export function UsageOmniConfig() {
     try {
       const s = await getOmniConfig();
       setState(s);
-      setFallbackLabels([...s.fallbacks]);
+      setFallbackLabels([...(s.fallbacks ?? [])]);
       setFallbackDirty(false);
       setLoadErr(null);
     } catch (e) {
@@ -490,7 +490,7 @@ export function UsageOmniConfig() {
     try {
       const s = await updateOmniFallbacks(fallbackLabels);
       setState(s);
-      setFallbackLabels([...s.fallbacks]);
+      setFallbackLabels([...(s.fallbacks ?? [])]);
       setFallbackDirty(false);
       toast(t("usage.fallbackSaveSuccess"), "ok");
     } catch (e) {

@@ -997,7 +997,8 @@ def _full_omni_payload() -> dict:
 
     fallbacks: 按优先级排序的备选 provider label 列表（引用 omni_profiles 的 label）。
     profiles 中每项含 is_fallback 标记，便于前端区分。
-    pool: ProviderPool 运行时快照（当前 active provider、failed 集合、failover 次数等）。
+    pool: ProviderPool 运行时快照（当前 active provider、failed 集合、
+    上次切换时间戳、恢复循环是否在跑等；字段全集见 PoolSnapshot）。
     """
     from dataclasses import asdict
 
@@ -1054,6 +1055,7 @@ def _full_omni_payload() -> dict:
                 "failed_keys": snap.failed_keys,
                 "last_switch_at_ms": snap.last_switch_at_ms,
                 "recovery_loop_running": snap.recovery_loop_running,
+                "exhausted": snap.exhausted,
             }
     except Exception:
         logger.warning("[omni-config] 获取 ProviderPool 快照失败，pool_snapshot 置为 None", exc_info=True)

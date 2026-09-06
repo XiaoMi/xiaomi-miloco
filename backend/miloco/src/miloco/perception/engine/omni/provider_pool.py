@@ -60,6 +60,7 @@ class PoolSnapshot:
     failed_keys: list[str]
     last_switch_at_ms: int | None
     recovery_loop_running: bool
+    exhausted: bool  # 是否处于「所有 provider 都不可用」的暂停态
 
 
 class OmniProviderPool:
@@ -103,6 +104,9 @@ class OmniProviderPool:
         self._failed_keys: set[str] = set()
         self._last_switch_monotonic: float = 0.0
         self._last_switch_wall_ms: int | None = None  # time.time() epoch ms，对外暴露
+        # 耗尽标志：所有 provider 都不可用。与 _active_label=None（正常在主）区分开，
+        # 因为 omni_client 的配置变更钩子会把「active 翻回主」误判成用户改配置而清熔断。
+        self._exhausted: bool = False
 
         # 恢复循环控制
         self._recovery_task: asyncio.Task | None = None
@@ -158,6 +162,7 @@ class OmniProviderPool:
                     self._recovery_task is not None
                     and not self._recovery_task.done()
                 ),
+                exhausted=self._exhausted,
             )
 
     async def start(self) -> None:
@@ -178,7 +183,7 @@ class OmniProviderPool:
         try:
             await task
         except asyncio.CancelledError:
-            pass # cancel() 后的预期结果
+            pass  # cancel() 后的预期结果
         except Exception:
             logger.warning("[provider-pool] 恢复循环关闭时遇到未预期异常", exc_info=True)
         finally:
@@ -278,18 +283,23 @@ class OmniProviderPool:
             if cb.snapshot().state == "ok":
                 return False
 
+            # 动态读取 fallback 列表（支持热更新）
+            _primary, fallbacks = self._resolve_providers_unlocked()
+
+            # 没配置任何备选 → 池无事可做，把自愈完整交还给熔断器 tick 通道。
+            # 必须在 _failed_keys.add 之前返回：一旦 primary 进了 failed 集，
+            # _probe_failed_providers 就会起一条绕开退避的 30s 固定探测通道。
+            if not fallbacks:
+                return False
+
             # 标记当前 provider 为 failed
             current = self._get_active_unlocked()
             current_key = _provider_key(current)
             self._failed_keys.add(current_key)
-            self._active_label = None  # 当前已 failed，状态重置待重新分配
             logger.info(
                 "[provider-pool] 当前 provider %s 已标记 failed",
                 current_key,
             )
-
-            # 动态读取 fallback 列表（支持热更新）
-            _primary, fallbacks = self._resolve_providers_unlocked()
 
             # 查找下一个健康备选
             selected_label: str | None = None
@@ -299,17 +309,23 @@ class OmniProviderPool:
                     break
 
             if selected_label is None:
-                # 所有备选都不可用 → 池耗尽
+                # 所有备选都不可用 → 池耗尽。
+                # 关键：这里不清 _active_label。若清成 None，get_active() 会从
+                # 当前备选翻回 primary，omni_client 的配置变更钩子看到三元组变化
+                # 会误判成「用户改配置」而清掉熔断器，感知没暂停反而继续对着已知
+                # 挂掉的主 provider 发 payload。改用 _exhausted 显式标记。
                 logger.error(
                     "[provider-pool] 所有 provider 已耗尽（failed=%s），感知引擎暂停",
                     self._failed_keys,
                 )
+                self._exhausted = True
                 self._last_switch_monotonic = now
                 self._last_switch_wall_ms = int(time.time() * 1000)
                 return False
 
             # 切换到新 provider
             self._active_label = selected_label
+            self._exhausted = False
             new_active = self._get_active_unlocked()
             logger.warning(
                 "[provider-pool] failover: %s → %s (label=%s)",
@@ -332,6 +348,9 @@ class OmniProviderPool:
         - fallback 恢复 → 从 failed 集中移除（后续可再被选中）
         """
         from miloco.perception.engine.omni import probe as _probe
+        from miloco.perception.engine.omni.circuit_breaker import (
+            get_omni_circuit_breaker,
+        )
 
         with self._lock:
             if not self._failed_keys:
@@ -347,6 +366,11 @@ class OmniProviderPool:
                     to_probe.append((fk, fb, False))
 
         if not to_probe:
+            return
+
+        # 熔断器的 tick 探测通道正在探测当前 active 时，池本轮跳过，避免两条
+        # 探测通道对打（池的固定 30s 探测 vs tick 的指数退避探测）。
+        if get_omni_circuit_breaker().probe_in_flight():
             return
 
         primary_recovered = False
@@ -401,9 +425,12 @@ class OmniProviderPool:
                 self._last_switch_monotonic = time.monotonic()
                 self._last_switch_wall_ms = int(time.time() * 1000)
                 need_reset = True
+            self._exhausted = False
 
         if need_reset:
-            await cb.reset_on_config_change()
+            # 走熔断器自己的探测结果入口：写 _last_probe_at / _last_probe_result，
+            # 由熔断器统一维护，admin 面板「上次探测时间/结果」才正确更新。
+            await cb.record_probe_result(True, None)
 
     async def _recovery_loop(self) -> None:
         """后台恢复循环：监听 failover 事件 + 定期探测 failed provider。
