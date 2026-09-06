@@ -327,8 +327,10 @@ class OmniProviderPool:
                     self._failed_keys,
                 )
                 self._exhausted = True
+                # 只更新去抖用的 monotonic 起点：耗尽分支 active 没变，
+                # 对外的 last_switch_at_ms 不该上报一次不存在的切换
+                # （与 _probe_failed_providers 的 resume_in_place 分支同口径）。
                 self._last_switch_monotonic = now
-                self._last_switch_wall_ms = int(time.time() * 1000)
                 return False
 
             # 切换到新 provider
@@ -364,6 +366,16 @@ class OmniProviderPool:
             if not self._failed_keys:
                 return
             primary, fallbacks = self._resolve_providers_unlocked()
+            # 档案被删 / 改名后旧 key 不会再出现在 primary+fallbacks 里，
+            # 也就永远进不了 to_probe、永远摘不掉。这里顺手裁掉，避免
+            # snapshot().failed_keys 和耗尽日志长期挂着不存在的 provider。
+            live_keys = {_provider_key(primary)} | {
+                _provider_key(fb) for fb in fallbacks
+            }
+            self._failed_keys &= live_keys
+            if not self._failed_keys:
+                return
+
             to_probe: list[tuple[str, OmniModelSettings, bool]] = []
             pk = _provider_key(primary)
             if pk in self._failed_keys:
@@ -403,11 +415,15 @@ class OmniProviderPool:
                     primary_recovered = True
 
         cb = get_omni_circuit_breaker()
-        # tick 探测在飞行中时不抢收尾权（与 _switch_back_to_primary 同一条守卫）：
-        # 替它落 record_probe_result 会清掉它的 in-flight 位，且它随后的失败结果
-        # 会把刚 reset 的熔断器重新打开。OPEN_CONFIG（state == "error"）下 tick
-        # 不探测，仍由池强制 reset。
-        tick_owns_reset = cb.probe_in_flight() and cb.snapshot().state != "error"
+        # tick 探测在飞行中 → 本轮探测结论整轮不落账。摘 failed 集 / 解除耗尽 /
+        # 切回 primary 三个动作要么全做要么全不做：只落一半会留下「池已在 primary、
+        # primary 又不在 failed 集、熔断器仍 OPEN」的中间态 —— tick 拿的是 arm 那
+        # 一刻解析定的旧 provider，它的失败结果会把熔断器推深，而此后
+        # _try_failover 只从 fallbacks 里选，没有任何路径能把 active 带回 primary。
+        # OPEN_CONFIG（state == "error"）下 tick 不探测，不让权，仍由池收尾。
+        if cb.probe_in_flight() and cb.snapshot().state != "error":
+            logger.debug("[provider-pool] tick 探测在飞行中，本轮探测结论不落账")
+            return
 
         resume_in_place = False
         if recovered_keys:
@@ -417,8 +433,7 @@ class OmniProviderPool:
                 # primary 未恢复 → 不走 _switch_back_to_primary；而 OPEN_CONFIG 下
                 # tick 通道的 try_arm_probe() 恒为 False —— 不在这里收尾就没人收尾了。
                 if (
-                    not tick_owns_reset
-                    and self._exhausted
+                    self._exhausted
                     and _provider_key(self._get_active_unlocked())
                     not in self._failed_keys
                 ):
@@ -466,15 +481,9 @@ class OmniProviderPool:
         if need_reset:
             # 走熔断器自己的探测结果入口：写 _last_probe_at / _last_probe_result，
             # 由熔断器统一维护，admin 面板「上次探测时间/结果」才正确更新。
-            # 本轮网络探测期间 tick 通道可能已经 arm 了自己的探测。此时不要替它
-            # 落 record_probe_result —— 那会清掉它的 in-flight 位，且它随后的失败
-            # 结果会把刚 reset 的熔断器重新打开。RECOVERABLE 链上 tick 会自己收尾；
-            # OPEN_CONFIG（state == "error"）下 tick 不会探测，仍由池强制 reset。
-            if cb.probe_in_flight() and cb.snapshot().state != "error":
-                logger.debug(
-                    "[provider-pool] tick 探测在飞行中，本轮不 reset 熔断器"
-                )
-                return
+            # 「tick 探测在飞行中就不抢收尾权」的守卫由唯一调用方
+            # _probe_failed_providers 在落账前统一持有，这里不再重复判断
+            # —— 在这里判等于状态已改了才掉头，会留下半提交的中间态。
             await cb.record_probe_result(True, None)
 
     async def _recovery_loop(self) -> None:

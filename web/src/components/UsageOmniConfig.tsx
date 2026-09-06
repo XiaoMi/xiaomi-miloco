@@ -446,9 +446,12 @@ export function UsageOmniConfig() {
     try {
       const s = await deleteOmniConfig({ label: p.label });
       setState(s);
-      // 删除的档案可能正在备选列表里，同步本地编辑态，避免悬空 label 残留
-      setFallbackLabels([...(s.fallbacks ?? [])]);
-      setFallbackDirty(false);
+      // 只有被删档案真的在本地编辑态里时才整表重置（否则会留下悬空 label）；
+      // 删的是无关档案时保留用户未保存的拖拽顺序，不要静默回滚。
+      if (fallbackLabels.includes(p.label)) {
+        setFallbackLabels([...(s.fallbacks ?? [])]);
+        setFallbackDirty(false);
+      }
       setRowTestResults((m) => {
         const next = { ...m };
         delete next[p.label];

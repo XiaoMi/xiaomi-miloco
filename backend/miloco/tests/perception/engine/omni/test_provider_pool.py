@@ -707,6 +707,54 @@ async def test_probe_skips_reset_when_tick_armed_during_probe(loop, monkeypatch)
     assert cb.probe_in_flight() is True
 
 
+async def test_probe_skips_checkpoint_when_tick_armed_primary_recovered(loop, monkeypatch):
+    """主档案恢复 + tick 探测在飞行中 → 整轮探测结论不落账。
+
+    tick 的探测目标在 arm 那一刻解析定，池探测期间 tick arm 了探测。落账前
+    检测到 probe_in_flight 且非 OPEN_CONFIG → 整轮不摘 failed 集、不切回主，
+    避免「池已切回主但熔断器仍 OPEN」的半提交中间态。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 构造 OPEN_RECOVERABLE（state == "warn"）
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("rate_limited", "m", ErrorCategory.RECOVERABLE)
+        )
+    assert cb.snapshot().state == "warn"
+
+    # active 在备选 A，主在 failed 集（主已熔断切到 A）
+    pool._active_label = "a"
+    pool._failed_keys.add(_provider_key(primary))
+
+    # mock probe：主探通；探测过程中 tick 通道 arm 了自己的探测
+    async def _mock_probe(model, base_url, api_key):
+        cb._probe_in_flight = True
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _mock_probe,
+    )
+
+    await pool._probe_failed_providers()
+
+    # 整轮不落账：主仍在 failed 集、active 仍是 A、熔断器未清零
+    assert _provider_key(primary) in pool._failed_keys
+    assert pool.get_active().label == "a"
+    assert cb.snapshot().state == "warn"
+    assert cb.probe_in_flight() is True
+
+
 # ── test: 恢复循环超时分支推进 failover（OPEN_CONFIG 钉死修复） ──────────────
 
 

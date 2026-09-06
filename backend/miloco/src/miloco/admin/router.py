@@ -1211,16 +1211,21 @@ async def activate_omni_config(
             result = await _probe.probe_omni(p.model, p.base_url, p.api_key)
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result)
-            update_shared_config(
-                model={
-                    "omni": {
-                        "label": p.label,
-                        "model": p.model,
-                        "base_url": p.base_url,
-                        "api_key": p.api_key,
-                    }
+            update: dict = {
+                "omni": {
+                    "label": p.label,
+                    "model": p.model,
+                    "base_url": p.base_url,
+                    "api_key": p.api_key,
                 }
-            )
+            }
+            # 与 put_omni_fallbacks 的过滤口径对齐：主档案不该同时是自己的备选，
+            # 否则快照的 active_is_primary / active_index 自相矛盾，
+            # 前端备选面板会把当前生效档案当成一行备选画出来。
+            fallbacks = get_settings().model.omni_fallbacks
+            if p.label in fallbacks:
+                update["omni_fallbacks"] = [x for x in fallbacks if x != p.label]
+            update_shared_config(model=update)
             # 同 upsert 路径:preflight 通过后主动清熔断状态,避免 OPEN_CONFIG 卡死。
             from miloco.perception.engine.omni.circuit_breaker import (
                 get_omni_circuit_breaker,

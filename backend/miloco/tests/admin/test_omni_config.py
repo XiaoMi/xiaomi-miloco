@@ -1273,3 +1273,37 @@ def test_rename_profile_updates_fallbacks(client):
     ).json()["data"]
     # fallbacks 里的引用同步改成「配置3」
     assert out["fallbacks"] == ["配置3"]
+
+
+def test_activate_profile_removes_from_fallbacks(client):
+    """激活档案时同步把该 label 从 omni_fallbacks 摘除（主档案不该是自己的备选）。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置1",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-k111111111",
+        },
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "配置2",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-k222222222",
+            "activate": False,
+        },
+    )
+    # 配置2 进 fallback
+    client.put(
+        "/api/admin/omni-config/fallbacks",
+        json={"labels": ["配置2"]},
+    )
+    # 激活 配置2 → 它从 fallbacks 摘除
+    out = client.post(
+        "/api/admin/omni-config/activate", json={"label": "配置2"}
+    ).json()["data"]
+    assert out["active"]["label"] == "配置2"
+    assert out["fallbacks"] == []
