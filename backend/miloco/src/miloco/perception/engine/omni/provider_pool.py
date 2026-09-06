@@ -296,7 +296,18 @@ class OmniProviderPool:
 
             # 检查 CB 状态，若已恢复 CLOSED 则不需要 failover
             cb = get_omni_circuit_breaker()
-            if cb.snapshot().state == "ok":
+            snap = cb.snapshot()
+            if snap.state == "ok":
+                return False
+
+            # tick 探测在飞行中 → 本轮不切。切换尾部的 reset_on_config_change 只
+            # 复位状态机，_transition_to_closed_locked 不清 _probe_in_flight，旧
+            # provider 的探测结论落回来会把刚复位成 CLOSED 的熔断器重新推开，新
+            # provider 被无辜短路（配置类错误还会把 tick 通道钉死）。与
+            # _probe_failed_providers 同口径：OPEN_CONFIG（state == "error"）下
+            # tick 不 arm 新探测，不让权，仍由池收尾。
+            if cb.probe_in_flight() and snap.state != "error":
+                logger.debug("[provider-pool] tick 探测在飞行中，本轮跳过 failover")
                 return False
 
             # 动态读取 fallback 列表（支持热更新）

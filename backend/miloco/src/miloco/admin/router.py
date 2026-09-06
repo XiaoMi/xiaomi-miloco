@@ -996,7 +996,6 @@ def _full_omni_payload() -> dict:
     与「模型」页 active 行的连接状态列均读此字段。
 
     fallbacks: 按优先级排序的备选 provider label 列表（引用 omni_profiles 的 label）。
-    profiles 中每项含 is_fallback 标记，便于前端区分。
     pool: ProviderPool 运行时快照（当前 active provider、failed 集合、
     上次切换时间戳、恢复循环是否在跑等；字段全集见 PoolSnapshot）。
     """
@@ -1006,7 +1005,6 @@ def _full_omni_payload() -> dict:
 
     m = get_settings().model
     active = m.omni
-    fallback_labels: set[str] = set(m.omni_fallbacks)
     profiles = [
         {
             "label": p.label,
@@ -1015,7 +1013,6 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(p.api_key),
             "has_key": bool(p.api_key),
             "active": p.label == active.label,
-            "is_fallback": p.label in fallback_labels,
         }
         for p in m.omni_profiles
     ]
@@ -1029,7 +1026,6 @@ def _full_omni_payload() -> dict:
                 "api_key_masked": _mask_api_key(active.api_key),
                 "has_key": True,
                 "active": True,
-                "is_fallback": False,  # 合成行不在 fallback 中
             },
         )
     health = asdict(get_omni_circuit_breaker().snapshot())

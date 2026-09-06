@@ -465,8 +465,6 @@ export interface OmniModelConfig {
 /** 已保存的配置档案（label 为唯一标识），active 标记是否为当前生效。 */
 export interface OmniProfile extends OmniModelConfig {
   active: boolean;
-  /** 该档案是否在备选池中（后端 GET /omni-config 计算；旧后端不返回该字段）。 */
-  is_fallback?: boolean;
 }
 
 /** omni 熔断器实时健康度（对齐后端 HealthSnapshot）。 */
