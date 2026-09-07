@@ -17,7 +17,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from miloco.database.kv_repo import DeviceInfoKeys, ScopeConfigKeys
+from miloco.database.kv_repo import (
+    AuthConfigKeys,
+    DeviceInfoKeys,
+    ScopeConfigKeys,
+)
 from miloco.middleware.exceptions import (
     MiotServiceException,
     ResourceNotFoundException,
@@ -886,6 +890,34 @@ def _lru_cleared(db_connector) -> bool:
         for c in db_connector.execute_update.call_args_list
         if "device_lru" in str(c)
     )
+
+
+@pytest.mark.asyncio
+async def test_authorize_clears_scope_when_it_fails_after_the_token_landed():
+    """换票已落库、其后某一步失败时，范围也必须清——那道比对根本跑不到。
+
+    授权这条路上「取账号身份」刻意不兜异常（当场报错让住户重试一次，比留下
+    「绑上了但收不到推送」更诚实）。于是存在「新账号的令牌已经落库、而身份未知」
+    的中间态：此时上面那道 fail-closed 比对整个跳过，库里剩下「新账号的令牌 +
+    旧账号的家庭与摄像头范围」。跨账号残留的拾音白名单若在新账号下命中，会让住户
+    从未授权的摄像头麦克风直接生效——那是唯一「误命中等于隐私泄露」的键。
+    """
+    kv = _scope_kv("old-uid")
+    kv.set(AuthConfigKeys.MIOT_TOKEN_INFO_KEY, json.dumps({"access_token": "old"}))
+    svc, proxy, _db = _authorize_fixture(kv, new_uid="new-uid")
+
+    async def _exchange_then_fail(code, state):
+        # 模拟真实顺序：落库先发生（SDK 的 persist 回调），之后那一步才抛
+        kv.set(AuthConfigKeys.MIOT_TOKEN_INFO_KEY, json.dumps({"access_token": "new"}))
+        raise TimeoutError("fetching account identity timed out")
+
+    proxy.get_miot_auth_info = AsyncMock(side_effect=_exchange_then_fail)
+
+    with pytest.raises(MiotServiceException):
+        await svc.authorize_with_code(code="test_code", state="test_state")
+
+    assert kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY) is None
+    assert kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY) is None
 
 
 @pytest.mark.asyncio

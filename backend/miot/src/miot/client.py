@@ -514,6 +514,10 @@ class MIoTClient:
         self.__persist_oauth_info(persist, "authorize")
         # 取身份前必须先把新令牌推进 HTTP 客户端——那一步是真实的 HTTP 请求。
         self.__apply_token_to_http_header()
+        # 这里**刻意不兜**，与续期路径不对称：账号 uid 是建立账号级推送订阅的硬
+        # 前提，拿不到就只会打一条 warning 然后静默地没有推送。首次授权是住户正
+        # 在等结果的动作，当场报错让他重试一次，比留下一个「绑上了但收不到推送」
+        # 的状态更诚实。改这一处之前先想清楚这个取舍。
         await self.get_user_info_async()
         self.__persist_oauth_info(persist, "authorize:user_info")
         # 重新授权可能换了账号:账号级主题 user/{uid}/g_op/* 只在重建时发出,
@@ -555,8 +559,18 @@ class MIoTClient:
         if oauth_info.user_info is None:
             # 首次刷新时没有可继承的 user_info，补拉一次；拿到后再存一遍，
             # 让库里那份也带上账号身份（同账号重绑判定要用它）。
-            await self.get_user_info_async()
-            self.__persist_oauth_info(persist, "refresh:user_info")
+            #
+            # 与相邻两步同款单独兜住：令牌此刻已在库中、续期在语义上已经成功，
+            # 让这一次业务请求的超时或 5xx 冒泡出去，会把下面「把新令牌推给原生
+            # 相机库与云端长连接」那一步整个跳过——它们于是一直持有旧访问令牌，
+            # 直到下一次自然临期续期才被换掉，量级是天。而上层看到的是「续期失败」，
+            # 会按退避再刷三次，每次都再换一对令牌、再在同一处抛。身份缺失本身
+            # 无害，由下一轮刷新补上即可。
+            try:
+                await self.get_user_info_async()
+                self.__persist_oauth_info(persist, "refresh:user_info")
+            except Exception as e:  # noqa: BLE001 - 取身份失败不应判续期失败
+                _LOGGER.error("fetch user info after refresh failed: %s", e)
 
         await self.__apply_access_token_async()
         return self._oauth_info

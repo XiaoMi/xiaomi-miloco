@@ -166,11 +166,13 @@ async def test_persist_lands_before_any_side_effect_runs():
 
 
 @pytest.mark.asyncio
-async def test_interrupted_before_response_is_reported_not_silently_retried():
-    """响应回来之前就崩溃——新令牌从未到达本机，救不回来，但要立刻给结论。
+async def test_interrupted_before_response_leaves_a_verification_intent():
+    """响应回来之前就崩溃——留下的是「结果未知」，不是「令牌已死」。
 
-    这是修复覆盖不到的那一格：库里那枚很可能已被云端消费。此时正确的行为不是
-    拿它反复重试，而是判为需要重新授权。
+    这是修复覆盖不到的那一格：库里那枚**可能**已被云端消费，也可能完好（硬杀
+    发生在请求抵达云端之前）。两种现场留下的痕迹一模一样，所以这里只安排下一次
+    检查立刻验一次，不预先定论——误判的代价是住户白白重绑一次，而不定论的代价
+    只是真死时慢一次往返。
     """
     from miloco.miot.client import MiotProxy
 
@@ -210,6 +212,9 @@ async def test_interrupted_before_response_is_reported_not_silently_retried():
     reborn._auth_health = reborn._load_auth_health()
     reborn._apply_interrupted_refresh_on_start()
 
-    assert reborn.auth_health.is_degraded, (
-        "上一轮刷新结果未知时，应当立刻判为需要重新授权，而不是继续拿它重试"
+    assert not reborn.auth_health.is_degraded, (
+        "结果未知不等于令牌已死，不该在启动时就判永久失效"
+    )
+    assert reborn._verify_token_on_start, (
+        "但也不能就这么放过——要安排下一次检查立刻验一次，别等自然临期"
     )

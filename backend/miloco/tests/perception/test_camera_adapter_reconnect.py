@@ -60,7 +60,7 @@ class TestSyncDevicesOnDemandRefresh:
 
     def test_refresh_when_expected_gt_connected(self, monkeypatch):
         proxy = MagicMock()
-        proxy.is_authenticated = True
+        proxy.is_operational = True   # 显式开门；靠 MagicMock 自动真值看不出这层依赖
         proxy.refresh_cameras = AsyncMock()
         adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
         # _devices 空（卡死态：reg_id<0 已被剔除），discover 出 1 台 → 应连 1 > 已连 0
@@ -74,7 +74,7 @@ class TestSyncDevicesOnDemandRefresh:
 
     def test_no_refresh_when_all_connected(self, monkeypatch):
         proxy = MagicMock()
-        proxy.is_authenticated = True
+        proxy.is_operational = True   # 门开着，不触发只能是「应连 == 已连」的功劳
         proxy.refresh_cameras = AsyncMock()
         proxy.get_cached_camera = MagicMock(return_value=None)
         adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
@@ -87,12 +87,23 @@ class TestSyncDevicesOnDemandRefresh:
 
         proxy.refresh_cameras.assert_not_awaited()
 
-    def test_no_refresh_when_unauthenticated(self, monkeypatch):
+    def test_no_refresh_when_not_operational(self, monkeypatch):
+        """授权被云端永久拒绝后，按需补建这一支不该再去问云端。
+
+        两处细节是这条用例能不能守住的关键。**判据要设对**：这道门读的是「有凭据
+        且未被永久拒绝」，而 ``MagicMock`` 会给没设过的属性自动生成一个真值对象
+        ——设错字段等于把门开着测。**「应连 > 已连」要成立**：让 discover 返回空
+        字典的话，补建那一步本来就不会被调到，门开着关着都是绿的。
+        """
         proxy = MagicMock()
-        proxy.is_authenticated = False
+        # 凭据还在（库里有令牌），但云端已永久拒绝续期——正是要停手的那一档
+        proxy.is_authenticated = True
+        proxy.is_operational = False
         proxy.refresh_cameras = AsyncMock()
         adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
-        monkeypatch.setattr(adapter, "discover_devices", AsyncMock(return_value={}))
+        monkeypatch.setattr(
+            adapter, "discover_devices", AsyncMock(return_value={"cam1": _source()})
+        )
 
         asyncio.run(adapter.sync_devices())
 
@@ -101,7 +112,7 @@ class TestSyncDevicesOnDemandRefresh:
     def test_throttle_skips_rapid_refresh(self, monkeypatch):
         # 无设备态 sync 1s 一轮，节流让 refresh_cameras 最多每 10s 一次。
         proxy = MagicMock()
-        proxy.is_authenticated = True
+        proxy.is_operational = True   # 门开着，不触发只能是节流的功劳
         proxy.refresh_cameras = AsyncMock()
         adapter = self._adapter_with_mocked_connect(monkeypatch, proxy)
         monkeypatch.setattr(

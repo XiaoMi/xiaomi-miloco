@@ -430,6 +430,10 @@ class MiotService:
         """Get the MIoTClient instance."""
         return self._miot_proxy.miot_client
 
+    #: 「换票前那份令牌还没读到」的哨兵。用它而不是 ``None``：库里本来没有令牌
+    #: （首次绑定）时读出来就是 ``None``，那种情况下换票成功同样要走清理。
+    _TOKEN_UNREAD = object()
+
     async def authorize_with_code(self, code: str, state: str) -> dict:
         """
         Exchange the OAuth authorization code (provided by user after redirect)
@@ -449,11 +453,17 @@ class MiotService:
             与 web 都据此决定要不要再跑一遍选家流程（它是「唯一启用」语义，会
             覆写家庭白名单），并据此告知住户配置是保留了还是重置了。
         """
+        prev_token: object = self._TOKEN_UNREAD
         try:
             logger.info("authorize_with_code state=%s code=%s…", state, code[:8])
 
             # 必须早于交换：交换会覆写两处 uid 副本
             prev_uid = self._current_uid_from_kv()
+            # 换票内部在落库之后还要取账号身份，而授权这条路上那一步刻意不兜异常
+            # （见 get_access_token_async 的说明）。于是「新账号的令牌已经落库、
+            # 而身份未知」是可能的，下面那道比对会整个跑不到。先记下换票前库里
+            # 那份令牌，异常出口据此判断换票是否已经生效。
+            prev_token = self._kv_repo.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY)
             oauth_info = await self._miot_proxy.get_miot_auth_info(
                 code=code, state=state
             )
@@ -506,6 +516,20 @@ class MiotService:
             }
 
         except Exception as e:
+            # 换票已经把新账号的令牌落了库、而其后某一步失败时，上面那道 fail-closed
+            # 比对整个跑不到——库里于是是「新账号的令牌 + 旧账号的家庭与摄像头范围」，
+            # 而状态接口此后会报「已连」（令牌是新的、云端校验能过），家庭白名单却
+            # 指向一个已不属于当前账号的家。身份未知一律按「换了账号」处理，与那道
+            # 比对同向：跨账号残留的拾音白名单若在新账号下命中，会让住户从未授权的
+            # 摄像头麦克风直接生效，那是唯一「误命中等于隐私泄露」的键。
+            if prev_token is not self._TOKEN_UNREAD and (
+                self._kv_repo.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY) != prev_token
+            ):
+                logger.warning(
+                    "Authorization failed after the new token was already persisted; "
+                    "clearing home / camera scope fail-closed"
+                )
+                self._clear_account_scope_state()
             logger.error("Failed to process Xiaomi MiOT authorization code: %s", e)
             raise MiotServiceException(
                 f"Failed to process Xiaomi MiOT authorization code: {str(e)}"
