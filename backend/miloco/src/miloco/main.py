@@ -70,8 +70,8 @@ from miloco.task_record.router import router as task_record_router
 from miloco.utils.common import escape_for_js_string
 from miloco.utils.paths import miloco_home
 
-# httpx 的 get_environment_proxies 遍历的三个键(all = 全协议出口,常见于 SOCKS)。
-_PROXY_SCHEMES = ("http", "https", "all")
+# 只从系统快照补 HTTP(S);ALL_PROXY 由用户显式配置,不自动导出。
+_PROXY_SCHEMES = ("http", "https")
 
 
 def _system_proxies() -> dict[str, str]:
@@ -104,7 +104,7 @@ def _ensure_no_proxy_for_local() -> None:
 
     **写入前必须先把当前可见的代理快照导出到 env**:CPython 的 getproxies() 是
     ``getproxies_environment() or getproxies_macosx_sysconf()``(Windows 同构走
-    注册表)——只要环境里存在任何 ``*_proxy`` 变量,前者返回非空 dict 并短路掉
+    注册表)——只要环境代理解析结果非空(含单独的 ``no`` 键),就会短路掉
     系统代理查询。若不先快照就写 NO_PROXY,系统代理会被整体"影子化",云端 API
     (openrouter 等)从此直连、墙内不可达。
 
@@ -132,7 +132,10 @@ def _ensure_no_proxy_for_local() -> None:
       改动后 _system_proxies() 兜回系统代理并落进 env → 云端改走代理。这正是
       本 PR 想要的(墙内访问云 API 需要代理),但对"故意设 NO_PROXY 来禁用代理"
       的用户是行为反转——他们应改用 no_proxy 精确列目标,或显式设空的
-      http_proxy/https_proxy 表达"不要代理"。
+      http_proxy/https_proxy 表达"该协议不补系统代理"。未配置的另一协议仍补
+      系统代理;非空显式配置同样只影响自身协议。这是逐协议补齐的行为变化。
+      ALL_PROXY/all_proxy 存在时(含空值)则整体不补系统代理,保留用户默认出口;
+      若 ALL_PROXY 非空,单个协议设空仍可能落到该出口。全部直连应设 NO_PROXY=*。
     - **快照会扩大代理的作用范围,不止子进程**。系统代理只有"系统感知"的库
       (urllib / httpx)会读;落地成 env 后,凡是认 ``*_proxy`` 的都会开始走代理:
       ① backend spawn 的子进程(git、升级脚本里的 curl / uv);② **同进程**内经
@@ -142,34 +145,23 @@ def _ensure_no_proxy_for_local() -> None:
     """
     import urllib.request
 
-    # 先快照——顺序不能反,理由见 docstring。
-    try:
-        snapshot = urllib.request.getproxies()
-        # getproxies() 自己也会被 env 短路:**裸 NO_PROXY 也是 *_proxy**,
-        # 折叠成 `no` 键即让 dict 非空。用户 .zshrc 里 `export NO_PROXY=...`、
-        # 或 .env 经 load_dotenv() 注入(它跑在本函数之前)时,快照会静默取空,
-        # 系统代理照旧被影子化。所以拿不到 http/https 时直接问系统设置一次。
-        if not any(snapshot.get(k) for k in _PROXY_SCHEMES):
-            snapshot = {**_system_proxies(), **snapshot}
-    except Exception:  # noqa: BLE001 - 取不到代理不该拖垮启动
-        snapshot = {}
-    # 判**存在**而非真值:空值是 curl / CPython 生态里"显式取消该 scheme 代理"
-    # 的通行约定(getproxies_environment 第二遍扫描对空值走 proxies.pop),
-    # 用真值判断会把 `export https_proxy=` 当成"没配"、反手把系统代理写上去,
-    # 恰好打掉 docstring 给出的那条退出办法。
-    # 用户已显式配过任一出口就整体不插手:只配了 ALL_PROXY 的纯 SOCKS 出口
-    # (v2ray / Clash / ssh -D 的通行写法,httpx 的 get_environment_proxies
-    # 遍历 http/https/all 三个键)若只查 http/https,会被系统代理顶掉 http/https
-    # 出口——与"只追加缺失项"相反。
-    user_configured = any(
-        f"{s}_proxy" in os.environ or f"{s.upper()}_PROXY" in os.environ
-        for s in _PROXY_SCHEMES
+    # ALL_PROXY(含空值)表示用户掌管默认出口;否则仅补未配置的协议。
+    # 按变量存在性判断,保留显式空值及 CPython 的大小写优先级。
+    proxy_env_keys = {key.lower() for key in os.environ}
+    missing_schemes = (
+        [] if "all_proxy" in proxy_env_keys else
+        [s for s in _PROXY_SCHEMES if f"{s}_proxy" not in proxy_env_keys]
     )
-    if not user_configured:
-        # 导出只做 http/https:平台函数的键集里没有 all(macOS _scproxy 给
-        # http/https/ftp/gopher/socks,Windows 注册表给协议名),唯一能产出 all 的是
-        # getproxies_environment(),而那种情况 user_configured 已为真、走不到这里。
-        for scheme in ("http", "https"):
+    if missing_schemes:
+        # 必须先快照再写 NO_PROXY。裸 NO_PROXY 或仅配置一个协议,都会让
+        # getproxies() 短路系统设置;对缺失协议单独检查是否需要系统回退。
+        try:
+            snapshot = urllib.request.getproxies()
+            if any(not snapshot.get(s) for s in missing_schemes):
+                snapshot = {**_system_proxies(), **snapshot}
+        except Exception:  # noqa: BLE001 - 取不到代理不该拖垮启动
+            snapshot = {}
+        for scheme in missing_schemes:
             proxied = snapshot.get(scheme)
             if proxied:
                 os.environ[f"{scheme}_proxy"] = proxied

@@ -15,8 +15,8 @@ import httpx
 
 from miloco_cli.config import load_config
 
-# httpx 的 get_environment_proxies 遍历的三个键(all = 全协议出口,常见于 SOCKS)。
-_PROXY_SCHEMES = ("http", "https", "all")
+# 只从系统快照补 HTTP(S);ALL_PROXY 由用户显式配置,不自动导出。
+_PROXY_SCHEMES = ("http", "https")
 
 
 def _system_proxies() -> dict[str, str]:
@@ -36,27 +36,29 @@ def ensure_no_proxy_for_local() -> None:
     """把回环并入 NO_PROXY,防系统代理劫持 CLI→后端(127.0.0.1:1810)的调用。
 
     与 backend 的 ``main._ensure_no_proxy_for_local`` 同口径(先快照、快照本身防
-    env 短路、守门看三个 scheme 且判**存在性**而非真值、两个大小写写同值、
+    env 短路、ALL_PROXY 整体守门、HTTP(S) 分别按存在性守门、两个大小写写同值、
     不列 CIDR),详见那边 docstring 的完整推理。
     两个包互不依赖故各留一份;本函数刻意包成函数而非模块级裸语句——模块级
     ``for`` 在 Python 里不是块作用域,循环变量会挂在模块命名空间上,且无法在
     测试里重复调用。
     """
-    try:
-        snapshot = urllib.request.getproxies()
-        if not any(snapshot.get(k) for k in _PROXY_SCHEMES):
-            snapshot = {**_system_proxies(), **snapshot}
-    except Exception:  # noqa: BLE001
-        snapshot = {}
-    user_configured = any(
-        f"{s}_proxy" in os.environ or f"{s.upper()}_PROXY" in os.environ
-        for s in _PROXY_SCHEMES
+    # ALL_PROXY(含空值)表示用户掌管默认出口;否则仅补未配置的协议。
+    # 按变量存在性判断,保留显式空值及 CPython 的大小写优先级。
+    proxy_env_keys = {key.lower() for key in os.environ}
+    missing_schemes = (
+        [] if "all_proxy" in proxy_env_keys else
+        [s for s in _PROXY_SCHEMES if f"{s}_proxy" not in proxy_env_keys]
     )
-    if not user_configured:
-        # 导出只做 http/https:平台函数的键集里没有 all(macOS _scproxy 给
-        # http/https/ftp/gopher/socks,Windows 注册表给协议名),唯一能产出 all 的是
-        # getproxies_environment(),而那种情况 user_configured 已为真、走不到这里。
-        for scheme in ("http", "https"):
+    if missing_schemes:
+        # 必须先快照再写 NO_PROXY。裸 NO_PROXY 或仅配置一个协议,都会让
+        # getproxies() 短路系统设置;对缺失协议单独检查是否需要系统回退。
+        try:
+            snapshot = urllib.request.getproxies()
+            if any(not snapshot.get(s) for s in missing_schemes):
+                snapshot = {**_system_proxies(), **snapshot}
+        except Exception:  # noqa: BLE001 - 取不到代理不该拖垮启动
+            snapshot = {}
+        for scheme in missing_schemes:
             proxied = snapshot.get(scheme)
             if proxied:
                 os.environ[f"{scheme}_proxy"] = proxied

@@ -13,8 +13,11 @@
 from __future__ import annotations
 
 import os
+import urllib.request
 
+import httpx
 import pytest
+from httpx._utils import get_environment_proxies
 
 # 必须在 import miloco.main **之前**快照:该模块在模块级就调用了
 # _ensure_no_proxy_for_local(),import 的一瞬间就会把系统代理写进 os.environ,
@@ -50,6 +53,9 @@ def clean_proxy_env(monkeypatch):
     saved = {k: v for k, v in os.environ.items() if k.lower().endswith("_proxy")}
     for key in saved:
         del os.environ[key]
+    # 不读取开发机系统代理;具体场景再显式注入系统设置。
+    for name in ("getproxies_macosx_sysconf", "getproxies_registry"):
+        monkeypatch.setattr(urllib.request, name, lambda: {}, raising=False)
     yield monkeypatch
     for key in [k for k in os.environ if k.lower().endswith("_proxy")]:
         del os.environ[key]
@@ -158,7 +164,8 @@ def test_snapshot_survives_preexisting_bare_no_proxy(clean_proxy_env):
 
 
 def test_env_proxy_wins_over_system(clean_proxy_env):
-    """env 已显式配了代理时,不去问系统设置(env 是更强的用户意图)。"""
+    """两个协议均已显式配置时,不读取系统设置。"""
+    clean_proxy_env.setenv("http_proxy", "http://env-set:1080")
     clean_proxy_env.setenv("https_proxy", "http://env-set:1080")
     clean_proxy_env.setattr(
         "miloco.main._system_proxies",
@@ -221,3 +228,87 @@ def test_empty_proxy_value_treated_as_explicit_opt_out(clean_proxy_env):
     )
     _ensure_no_proxy_for_local()
     assert os.environ["https_proxy"] == ""
+
+
+@pytest.mark.parametrize(
+    ("proxy_env", "expected_proxies"),
+    [
+        ({}, {"http://": "http://sys:7897", "https://": "http://sys:7897"}),
+        ({"http_proxy": ""}, {"https://": "http://sys:7897"}),
+        ({"HTTP_PROXY": ""}, {"https://": "http://sys:7897"}),
+        ({"https_proxy": ""}, {"http://": "http://sys:7897"}),
+        ({"HTTPS_PROXY": ""}, {"http://": "http://sys:7897"}),
+        ({"http_proxy": "http://user:1080"},
+         {"http://": "http://user:1080", "https://": "http://sys:7897"}),
+        ({"https_proxy": "http://user:1080"},
+         {"http://": "http://sys:7897", "https://": "http://user:1080"}),
+        ({"http_proxy": "", "https_proxy": ""}, {}),
+        ({"HTTP_PROXY": "http://upper:1080", "http_proxy": ""},
+         {"https://": "http://sys:7897"}),
+        ({"HTTPS_PROXY": "http://upper:1080", "https_proxy": "http://lower:1080"},
+         {"http://": "http://sys:7897", "https://": "http://lower:1080"}),
+        ({"ALL_PROXY": "socks5://user:1080"}, {"all://": "socks5://user:1080"}),
+        ({"all_proxy": "socks5://user:1080"}, {"all://": "socks5://user:1080"}),
+        ({"ALL_PROXY": ""}, {}),
+        ({"all_proxy": "", "https_proxy": "http://user:1080"},
+         {"https://": "http://user:1080"}),
+        ({"ALL_PROXY": "socks5://user:1080", "https_proxy": "http://user:1081"},
+         {"all://": "socks5://user:1080", "https://": "http://user:1081"}),
+    ],
+    ids=["system", "empty-http", "empty-HTTP", "empty-https", "empty-HTTPS",
+         "partial-http", "partial-https", "both-empty", "lowercase-empty-wins",
+         "lowercase-value-wins", "ALL-socks", "all-socks", "empty-ALL",
+         "empty-all-explicit-https", "ALL-with-explicit-https"],
+)
+def test_httpx_proxy_routes(clean_proxy_env, proxy_env, expected_proxies):
+    """只替换系统设置来源,让真实 urllib 和 httpx 解析最终环境及路由。"""
+    for name in ("getproxies_macosx_sysconf", "getproxies_registry"):
+        clean_proxy_env.setattr(
+            urllib.request, name,
+            lambda: {"http": "http://sys:7897", "https": "http://sys:7897"},
+            raising=False,
+        )
+    for key, value in proxy_env.items():
+        clean_proxy_env.setenv(key, value)
+    clean_proxy_env.setenv("NO_PROXY", "upper.example,localhost")
+    clean_proxy_env.setenv("no_proxy", "lower.example,localhost")
+
+    _ensure_no_proxy_for_local()
+
+    # 完整字典相等也守护条数,避免通配条目意外把整张代理表清空。
+    expected = {
+        **expected_proxies,
+        "all://*upper.example": None,
+        "all://*lower.example": None,
+        "all://localhost": None,
+        "all://127.0.0.1": None,
+        "all://[::1]": None,
+    }
+    assert get_environment_proxies() == expected
+    for key, value in proxy_env.items():
+        assert os.environ[key] == value
+    # 启动初始化重复执行不会改变已经确定的出口。
+    _ensure_no_proxy_for_local()
+    assert get_environment_proxies() == expected
+
+
+def test_httpx_client_selects_loopback_direct_and_cloud_proxy(clean_proxy_env):
+    """真实 Client 的 transport 选择;不发网络请求、不依赖本机代理服务。"""
+    clean_proxy_env.setenv("https_proxy", "http://proxy.invalid:7897")
+    clean_proxy_env.setenv("http_proxy", "http://proxy.invalid:7897")
+    _ensure_no_proxy_for_local()
+    with httpx.Client() as client:
+        for scheme in ("http", "https"):
+            for host in ("localhost", "127.0.0.1", "[::1]"):
+                url = httpx.URL(f"{scheme}://{host}:1810")
+                assert client._transport_for_url(url) is client._transport
+            cloud = httpx.URL(f"{scheme}://cloud.example")
+            assert client._transport_for_url(cloud) is not client._transport
+
+
+def test_httpx_explicit_wildcard_bypasses_all(clean_proxy_env):
+    """用户主动指定 NO_PROXY=* 时,仍应允许整表为空。"""
+    clean_proxy_env.setenv("https_proxy", "http://user:1080")
+    clean_proxy_env.setenv("NO_PROXY", "*")
+    _ensure_no_proxy_for_local()
+    assert get_environment_proxies() == {}
