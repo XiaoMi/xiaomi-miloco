@@ -26,6 +26,12 @@ _IS_APPLE_SILICON = (
     platform.system() == "Darwin" and platform.machine() == "arm64"
 )
 
+# Intel 平台(x86_64/AMD64)默认启用 OpenVINO EP 做硬件加速:
+# N100/Alder Lake-N 等 Intel CPU 可用 OpenVINO CPU EP 的 AVX2/VNNI 优化。
+# N100 无独立 GPU,集成 UHD 性能有限且共享内存带宽,故固定走 OpenVINO CPU EP。
+# 通过环境变量 MILOCO_DISABLE_OPENVINO=1 可强制回退 CPU EP。
+_IS_INTEL_PLATFORM = platform.machine() in ("x86_64", "AMD64", "x86", "i386", "i686")
+
 # CoreML EP 每建一个 InferenceSession 都会把 ONNX 子图序列化成一个 ~模型等大的
 # 中间 .mlmodel 写进 $TMPDIR,且删除只挂在 C++ Execution 析构链上——进程被
 # SIGKILL / session 对象不及时释放时文件永久遗留,长跑累积可撑爆磁盘(上游
@@ -56,6 +62,18 @@ def _ort_version_ge(major: int, minor: int) -> bool:
         return (int(parts[0]), int(parts[1])) >= (major, minor)
     except (ValueError, IndexError):
         return False
+
+
+def _openvino_disabled() -> bool:
+    """环境变量 MILOCO_DISABLE_OPENVINO=1/true/yes 时强制禁用 OpenVINO EP。
+
+    用于现场排障:OpenVINO 在某些模型/驱动组合上可能行为异常,留一条
+    不重启改代码的逃生通道。
+    """
+    import os
+
+    val = os.environ.get("MILOCO_DISABLE_OPENVINO", "").strip().lower()
+    return val in ("1", "true", "yes")
 
 
 def apply_kleidiai_opt_out(opts: "ort.SessionOptions") -> None:
@@ -207,6 +225,21 @@ def make_session(
             "Check onnxruntime wheel build options.",
             available,
         )
+    # Intel 平台(x86_64/AMD64):N100/Alder Lake-N 等芯片走 OpenVINO EP 做硬件加速。
+    # OpenVINO CPU EP 自动利用 AVX2/VNNI 指令集优化卷积/GEMM,无需代码感知。
+    # 若用户显式禁用(环境变量)或 runtime 未带 OpenVINO EP,则静默回退 CPU EP。
+    elif (
+        _IS_INTEL_PLATFORM
+        and "OpenVINOExecutionProvider" in available
+        and not _openvino_disabled()
+    ):
+        providers = [
+            (
+                "OpenVINOExecutionProvider",
+                {"device_type": "CPU"},
+            ),
+            "CPUExecutionProvider",
+        ]
 
     opts = ort.SessionOptions()
     threads = num_threads if num_threads is not None else _DEFAULT_NUM_THREADS

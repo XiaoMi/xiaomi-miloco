@@ -14,6 +14,10 @@ dependencies = [
   "numpy>=2.2.0",
   "opencv-python-headless>=4.13.0.92",
   "onnxruntime>=1.27.0",
+  # Intel 平台(N100/Alder Lake-N 等 x86)走 OpenVINO EP 硬件加速;
+  # 该 wheel 与 onnxruntime 同版本,但额外包含 OpenVINOExecutionProvider。
+  # 安装时若平台无对应 wheel(如 ARM)则自动跳过,回退标准 onnxruntime。
+  "onnxruntime-openvino>=1.27.0; platform_machine=='x86_64' or platform_machine=='AMD64'",
   # HEIC/HEIF 解码（iPhone 相机默认格式）。选 pi-heif 而非 pillow-heif：两者同作者、同样封装
   # libheif，但 pi-heif 只带解码器（libde265），不捆绑 x265 编码器，PyPI 分类器因此是 LGPLv3
   # 而非 GPLv2；我们只需要解码。ffmpeg 走不通——它把 HEIC 的 tile grid 当成几十条独立

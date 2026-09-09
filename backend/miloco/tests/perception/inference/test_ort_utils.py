@@ -103,3 +103,132 @@ def test_reset_hook_invalidates_detector_singleton(iso_home, monkeypatch):
     reset_settings()  # 触发 register_reset_hook 注册的 cache_clear
     d3 = router._load_detector()
     assert d3 is not d1  # reset 后单例失效,重新构造
+
+
+# =============================================================================
+# Intel / OpenVINO EP 适配测试
+# =============================================================================
+
+
+def test_openvino_disabled_by_env_var(monkeypatch):
+    """MILOCO_DISABLE_OPENVINO=1 时 _openvino_disabled() 返回 True。"""
+    assert ort_utils._openvino_disabled() is False  # 默认不禁用
+    monkeypatch.setenv("MILOCO_DISABLE_OPENVINO", "1")
+    assert ort_utils._openvino_disabled() is True
+    monkeypatch.setenv("MILOCO_DISABLE_OPENVINO", "true")
+    assert ort_utils._openvino_disabled() is True
+    monkeypatch.setenv("MILOCO_DISABLE_OPENVINO", "0")
+    assert ort_utils._openvino_disabled() is False
+
+
+def test_intel_platform_detection(monkeypatch):
+    """platform.machine() 为 x86_64/AMD64 时 _IS_INTEL_PLATFORM 为 True。"""
+    import platform as _plat
+
+    monkeypatch.setattr(_plat, "machine", lambda: "x86_64")
+    # 重新加载模块以应用 patch(模块级常量)
+    import importlib
+
+    importlib.reload(ort_utils)
+    assert ort_utils._IS_INTEL_PLATFORM is True
+
+    monkeypatch.setattr(_plat, "machine", lambda: "arm64")
+    importlib.reload(ort_utils)
+    assert ort_utils._IS_INTEL_PLATFORM is False
+
+    # 恢复(避免影响其他测试)
+    monkeypatch.undo()
+    importlib.reload(ort_utils)
+
+
+def test_make_session_prefers_openvino_on_intel(monkeypatch, tmp_path):
+    """Intel 平台 + OpenVINO EP 可用时,make_session 优先走 OpenVINO。"""
+    import platform as _plat
+
+    monkeypatch.setattr(_plat, "machine", lambda: "x86_64")
+    monkeypatch.setattr(_plat, "system", lambda: "Linux")
+    monkeypatch.setattr(ort_utils, "_IS_INTEL_PLATFORM", True)
+    monkeypatch.setattr(ort_utils, "_IS_APPLE_SILICON", False)
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_available_providers",
+        lambda: ["CPUExecutionProvider", "OpenVINOExecutionProvider"],
+    )
+    monkeypatch.delenv("MILOCO_DISABLE_OPENVINO", raising=False)
+
+    captured = {}
+
+    def _fake_session(*args, **kwargs):
+        captured["providers"] = kwargs.get("providers", args[2] if len(args) > 2 else [])
+        return object()
+
+    monkeypatch.setattr(ort_utils.ort, "InferenceSession", _fake_session)
+
+    model = tmp_path / "det.onnx"
+    model.write_bytes(b"dummy")
+    ort_utils.make_session(str(model))
+
+    providers = captured["providers"]
+    assert providers[0] == (
+        "OpenVINOExecutionProvider",
+        {"device_type": "CPU"},
+    )
+    assert providers[1] == "CPUExecutionProvider"
+
+
+def test_make_session_falls_back_to_cpu_when_openvino_missing(monkeypatch, tmp_path):
+    """Intel 平台但 OpenVINO EP 不可用时,回退纯 CPU EP。"""
+    import platform as _plat
+
+    monkeypatch.setattr(_plat, "machine", lambda: "x86_64")
+    monkeypatch.setattr(ort_utils, "_IS_INTEL_PLATFORM", True)
+    monkeypatch.setattr(ort_utils, "_IS_APPLE_SILICON", False)
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_available_providers",
+        lambda: ["CPUExecutionProvider"],  # 无 OpenVINO
+    )
+    monkeypatch.delenv("MILOCO_DISABLE_OPENVINO", raising=False)
+
+    captured = {}
+
+    def _fake_session(*args, **kwargs):
+        captured["providers"] = kwargs.get("providers", args[2] if len(args) > 2 else [])
+        return object()
+
+    monkeypatch.setattr(ort_utils.ort, "InferenceSession", _fake_session)
+
+    model = tmp_path / "det.onnx"
+    model.write_bytes(b"dummy")
+    ort_utils.make_session(str(model))
+
+    assert captured["providers"] == ["CPUExecutionProvider"]
+
+
+def test_make_session_falls_back_to_cpu_when_openvino_disabled(monkeypatch, tmp_path):
+    """环境变量禁用 OpenVINO 时,即使 Intel + OpenVINO 可用也走 CPU EP。"""
+    import platform as _plat
+
+    monkeypatch.setattr(_plat, "machine", lambda: "x86_64")
+    monkeypatch.setattr(ort_utils, "_IS_INTEL_PLATFORM", True)
+    monkeypatch.setattr(ort_utils, "_IS_APPLE_SILICON", False)
+    monkeypatch.setattr(
+        ort_utils.ort,
+        "get_available_providers",
+        lambda: ["CPUExecutionProvider", "OpenVINOExecutionProvider"],
+    )
+    monkeypatch.setenv("MILOCO_DISABLE_OPENVINO", "1")
+
+    captured = {}
+
+    def _fake_session(*args, **kwargs):
+        captured["providers"] = kwargs.get("providers", args[2] if len(args) > 2 else [])
+        return object()
+
+    monkeypatch.setattr(ort_utils.ort, "InferenceSession", _fake_session)
+
+    model = tmp_path / "det.onnx"
+    model.write_bytes(b"dummy")
+    ort_utils.make_session(str(model))
+
+    assert captured["providers"] == ["CPUExecutionProvider"]
