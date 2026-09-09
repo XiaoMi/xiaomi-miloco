@@ -578,7 +578,8 @@ class IdentityLibrary:
         """只写一张 face_*.png + sidecar, 绕过 add_tier_a_sample 的"必须有 body"约束。
 
         web 批量注册里用户可能只勾 face(纯人脸); add_tier_a_sample 以 body_crop 必填, 直接调
-        会被迫多写一张冗余 body。本方法保持与正常 face 样本同格式(omni gallery 仍能识别)。
+        会被迫多写一张冗余 body。本方法保持与正常 face 样本同格式；当前 omni gallery
+        仍要求 body composite，仅有 face 样本的成员不会进入 gallery。
         face 容量(tier_a_max // 2)已满返 False。
         """
         tier_a_dir = self.persons_dir / person_id / "tier_a"

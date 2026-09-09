@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -226,7 +227,8 @@ def build_fused_payload(
                            的实际结果（``_PreparedGallery.entries``）决定——库非空但样本
                            取不到、或「全或无」放弃时同样降级为精简版（只判
                            unknown/no_person），保证 spec 与 prompt 里有没有 <gallery>
-                           恒一致。no_person 判定链路不变（见 field_registry.IDENTITY_NO_MATCH）。
+                           恒一致。无候选窗口还用它保留实例 B 按库是否为空选版的旧行为。
+                           no_person 判定链路不变（见 field_registry.IDENTITY_NO_MATCH）。
 
     Returns:
         dict，含字段：
@@ -373,6 +375,17 @@ def build_fused_payload(
         if candidates and not matching_moot
         else _PreparedGallery(entries=[])
     )
+    if candidates:
+        # 无参考图时，名册中仍可能有前几窗已确认的姓名；库非空本身不保证这一点。
+        candidate_tids = {c.track_id for c in candidates}
+        member_names_unavailable = not (
+            _roster_will_name_members(packets, label_lookup, candidate_tids)
+            or bool(prepared_gallery.entries)
+        )
+    else:
+        # 兼容例外：无候选窗口不跑 gallery pre-flight，实例 B 保留按库空不空选版。
+        # 即使本轮名册无姓名，库非空仍用带名版；本次只收敛有候选窗口。
+        member_names_unavailable = matching_moot
 
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
@@ -387,10 +400,7 @@ def build_fused_payload(
         # has_identity=bool(candidates) 这道闸，无候选窗口置位与否不外显；留着是为了
         # has_identity 将来与 candidates 解耦时不出意外。
         identity_match_disabled=matching_moot or (bool(candidates) and not prepared_gallery.entries),
-        # 实例 B 的专名 / 泛称只跟"库空不空"：库非空时名册仍渲染真名（label_lookup 来自
-        # list_persons()，不看 gallery_snapshot），示范 caption 叫"某人"会把已确认成员一起
-        # 带塌——他们的在场结论来自前几窗落定的 state，不依赖本轮 gallery。
-        identity_library_empty=matching_moot,
+        member_names_unavailable=member_names_unavailable,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
     user_content = _build_fused_user_content(
@@ -658,22 +668,18 @@ def _render_examples(scene: SceneDescriptor) -> str:
     时同样不附实例 A：它演示的是成员匹配（摆 ``<gallery>`` 成员、输出成员名 + 五官匹配
     reason），与精简版 identities spec / schema（只判 unknown/no_person、无 gallery）自相
     矛盾，且抵消精简省 token 的目标；身份任务已由精简版「## identities」充分约束。
-    实例 B 无 identities 字段、照常附——但其专名 / 泛称跟 ``identity_library_empty``
-    （库空不空），不跟本标志：两者判据不同，见 SceneDescriptor 字段说明。
+    实例 B 无 identities 字段、照常附——其专名 / 泛称跟 ``member_names_unavailable``，
+    与本标志独立：无参考图时名册仍可能提供已确认姓名，见 SceneDescriptor 字段说明。
     """
     if scene.route == "audio" or not scene.has_audio:
         return ""
     examples = []
     if scene.has_identity and scene.has_speech and not scene.identity_match_disabled:
         examples.append(_EXAMPLE_IDENTITY)
-    # 库空时实例 B 用泛称版：此窗**不可能**产出任何成员名（名册必然是「已识别人物：无」），
-    # caption 示范不该叫专名。库非空照旧用带名版——哪怕本轮无参考图、identities 已收敛成
-    # unknown/no_person，名册里已确认成员仍该被 caption 叫真名（他们的在场结论来自前几窗
-    # 落定的 state，不依赖本轮 gallery）。
-    # 残留窗口：库非空 + 本轮无参考图 + 名册恰好也没有已确认成员时，此窗同样产不出成员名，
-    # 却仍走带名版。属已知权衡（判据不看名册），代价与理由见 constants._EXAMPLE_CHAIN_NO_NAME。
+    # 有候选时，无有效名册姓名且无 gallery → 泛称；名册已确认姓名不因无图而被一并降级。
+    # 无候选窗口保留按库是否为空选版的兼容行为，判据在 build_fused_payload 统一计算。
     examples.append(
-        _EXAMPLE_CHAIN_NO_NAME if scene.identity_library_empty else _EXAMPLE_CHAIN
+        _EXAMPLE_CHAIN_NO_NAME if scene.member_names_unavailable else _EXAMPLE_CHAIN
     )
     return "# 输出实例\n\n" + "\n\n".join(examples)
 
@@ -736,13 +742,11 @@ def _build_user_content(
 class _PreparedGallery:
     """本窗口 gallery 段的预备结果——「渲染」与「identities spec 选版」共用的唯一判据。
 
-    ``entries`` 非空 ⟺ 本轮 prompt 里真会出现 ``<gallery>`` 块。空有三种来源，对
-    调用方而言同解（本轮无参考图可比对 → 用精简版）：「全或无」放弃（某候选 person 的
-    body composite 取不到，原因已打进 ``event=fused_gallery_giveup`` 日志）、
-    ``gallery_snapshot`` 本就为空（库非空但无可用样本），以及 ``build_fused_payload``
-    在无候选 / 身份库为空时直接构造空实例、连 pre-flight 都不跑（与
-    ``SceneDescriptor.identity_match_disabled`` 字段说明的三来源对应）。调用方不据来源
-    分流，故不携带放弃原因字段——只写不读的状态会误导读者以为有人消费它。
+    ``entries`` 非空 ⟺ 本轮 prompt 里真会出现 ``<gallery>`` 块。有候选时，库空、
+    snapshot 空或「全或无」放弃均使 entries 为空，identities 因此使用精简版。
+    无候选时也直接构造空实例、不跑 pre-flight，但不下发 identities 字段；实例 B
+    此时保留按库是否为空选版的兼容行为，不能把空 entries 当作身份库为空。
+    放弃原因已打进 ``event=fused_gallery_giveup`` 日志，不再携带未被消费的原因字段。
     """
 
     entries: list[tuple[str, str, bytes, "bytes | None"]]  # (pid, label, body_jpg, face_jpg|None)
@@ -981,6 +985,34 @@ def _is_confirmed_member_pid(pid: str) -> bool:
     return not _is_stranger_pid(pid)
 
 
+def _iter_roster_targets(
+    packet: IdentityPacket,
+    candidate_tids: set[int] | frozenset[int],
+) -> Iterator[IdentityTarget]:
+    """名册渲染与示例选版共用的先验过滤；身份分桶仍由 person_id 决定。"""
+    for target in packet.targets:
+        # 重审候选及翻身份黏旧名期目标不能以旧身份作为本轮识别先验。
+        if target.track_id not in candidate_tids and not target.suppress_as_prior:
+            yield target
+
+
+def _roster_will_name_members(
+    packets: list[IdentityPacket],
+    label_lookup: dict[str, str] | None,
+    candidate_tids: set[int] | frozenset[int],
+) -> bool:
+    """本轮名册会渲染至少一个已确认姓名；反查缺失时的裸 person_id 不算姓名。
+
+    不要求 bbox：名册允许无框或 crop 坐标换算失败时只显示姓名。
+    """
+    lookup = label_lookup or {}
+    return any(
+        _is_confirmed_member_pid(target.person_id) and bool(lookup.get(target.person_id))
+        for packet in packets
+        for target in _iter_roster_targets(packet, candidate_tids)
+    )
+
+
 def _drop_bbox(_b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
     """恒撤掉 bbox 的 remap 回调：crop 已生效、但换算基准不适用于当前 packet 时用。
 
@@ -1053,11 +1085,7 @@ def _build_device_header(
     def _bucket(ep: IdentityPacket) -> tuple[list[str], list[str]]:
         members: list[str] = []
         strangers: list[str] = []
-        for t in ep.targets:
-            # candidate_tids（本窗派发重审）+ suppress_as_prior（翻身份黏旧名 track，
-            # coasting 窗不在 candidate_tids 内）均剔出名册，避免旧/当前身份当先验锚定 omni
-            if t.track_id in candidate_tids or t.suppress_as_prior:
-                continue
+        for t in _iter_roster_targets(ep, candidate_tids):
             if _is_confirmed_member_pid(t.person_id):
                 members.append(_render_roster_entry(t, label_lookup, bbox_remap))
             elif _is_stranger_pid(t.person_id):

@@ -226,13 +226,12 @@ class SceneDescriptor:
         person 的 body composite 取不到）。②③ 仅在 ``has_identity=True`` 时置位（判据见
         ``prompt_builder.build_fused_payload`` 的 gallery pre-flight）；参考图可用时为
         False，用完整匹配版 ``IDENTITY``。
-    identity_library_empty —— 身份库本身为空（``list_persons()`` 为 0 条，即 omni.py 传进
-        来的 ``matching_moot``）。**只**驱动「# 输出实例」里实例 B 的专名 / 泛称选版：库空
-        是"本轮不可能产出任何成员名"的充分条件（名册必然是「已识别人物：无」），示范才该改
-        叫泛称；库非空、仅本轮无参考图时名册**常常**仍渲染 ``已识别人物：张三[bbox=…]``，
-        此时示范 caption 叫"某人"会把已确认成员一并带塌（名册恰好也空的残留窗口仍走带名版，
-        属已知权衡，见 constants._EXAMPLE_CHAIN_NO_NAME 的注释）。不要拿
-        ``identity_match_disabled`` 代替它（后者还含"库非空但无参考图"两个来源）。
+    member_names_unavailable —— **只**驱动实例 B 的专名 / 泛称选版。有候选时，实际
+        名册无有效姓名且本轮 gallery 未渲染 → True，实例 B 用泛称；任一来源可用则带名。
+        名册须排除待重审和 suppress_as_prior 目标，裸 person_id 不算姓名。它与
+        ``identity_match_disabled`` 独立：本轮无参考图，名册仍可能含前几窗已确认的姓名。
+        兼容例外：无候选窗口沿用 ``matching_moot``（库空不空）；库非空但名册无姓名时
+        仍用带名版，本次不改变这些窗口。非 fused 调用沿用默认 False。
     """
 
     route: Literal["video", "audio"]
@@ -242,7 +241,7 @@ class SceneDescriptor:
     has_speech: bool = True
     has_pets: bool = False
     identity_match_disabled: bool = False
-    identity_library_empty: bool = False
+    member_names_unavailable: bool = False
 
     def selected_fields(self) -> list[FieldSpec]:
         order = _ORDER_STREAM if self.stream else _ORDER_NORMAL

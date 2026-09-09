@@ -1384,13 +1384,12 @@ class TestIdentityMatchDisabled:
         # system prompt：用精简版 identity spec
         assert self._NO_MATCH_MARKER in system_prompt
         assert self._MATCH_ONLY_MARKER not in system_prompt
-        # 库空 → 实例 B 用泛称版。这两行钉住 build_fused_payload 里
-        # identity_library_empty=matching_moot 那根接线：删掉它本条会红，
-        # 而只喂 SceneDescriptor 的单元用例不会。
+        # 库空且名册无有效姓名 → 实例 B 用泛称版，验证生产路径的标志接线。
         assert "某人坐在电脑前" in system_prompt
         assert "小明坐在电脑前" not in system_prompt
 
-    def test_empty_snapshot_slims_spec_even_without_matching_moot(self):
+    @pytest.mark.parametrize("has_roster_name", [False, True], ids=["no-name", "named-roster"])
+    def test_empty_snapshot_slims_spec_even_without_matching_moot(self, has_roster_name):
         """库非空但本轮 gallery_snapshot 为空（成员一个可用样本都没有）→ 同样走精简版。
 
         取代旧的 ``test_default_matching_moot_false_keeps_empty_gallery_placeholder``：
@@ -1406,6 +1405,7 @@ class TestIdentityMatchDisabled:
             fused = build_fused_payload(
                 packets=[_video_route_packet()], context=OmniContext(),
                 candidates=[self._candidate()], gallery_snapshot={},
+                label_lookup={"wangshihao": "张三"} if has_roster_name else {},
             )
         messages = fused["messages"]
         system_prompt = messages[0]["content"]
@@ -1416,11 +1416,10 @@ class TestIdentityMatchDisabled:
         assert "待识别 track" in main_text
         assert self._NO_MATCH_MARKER in system_prompt
         assert self._MATCH_ONLY_MARKER not in system_prompt
-        # 反向对照：库非空、仅本轮无参考图 → 规范降精简版，但实例 B 仍带名。
-        # 与 test_matching_moot_skips_gallery_block_keeps_track_list 合起来
-        # 钉住"两个字段没被重新合并成一个"。
-        assert "小明坐在电脑前" in system_prompt
-        assert "某人坐在电脑前" not in system_prompt
+        # 同样无图，名册有真名才带名；只有裸 person_id 不算可引用姓名。
+        assert ("已识别人物：张三" in main_text) == has_roster_name
+        assert ("小明坐在电脑前" in system_prompt) == has_roster_name
+        assert ("某人坐在电脑前" in system_prompt) == (not has_roster_name)
 
     # ---- follow-up（PR #407 code review）：库空时「任务描述 / 示例」也须收敛，非只 gallery/字段说明 ----
     _TASK_MATCH_MARKER = "对照图片库"    # 只在完整版「# 任务」身份行里出现
@@ -1453,23 +1452,21 @@ class TestIdentityMatchDisabled:
         # has_speech=True：未修复时实例 A 本会注入，确保断言有意义
         out = _render_examples(SceneDescriptor(
             route="video", has_identity=True, has_audio=True, has_speech=True,
-            identity_match_disabled=True, identity_library_empty=True))
+            identity_match_disabled=True, member_names_unavailable=True))
         assert self._EXAMPLE_A_MARKER not in out   # 成员匹配 few-shot 不注入
         assert "实例 B" in out                       # 通用观察 few-shot 照常
         # 库空实例 B 用泛称版：无成员铺垫的窗口不示范 caption 叫专名
         assert "小明" not in out
         assert "某人坐在电脑前" in out
 
-    def test_no_reference_image_window_keeps_named_example_when_library_nonempty(self):
-        """库非空 + 本轮渲不出 gallery：实例 A 撤掉（无 gallery 可示范），但实例 B 仍用
-        带名版——名册里的已确认成员照样该被 caption 叫真名（他们的在场结论来自前几窗落定
-        的 state，不依赖本轮 gallery）。泛称示例只属于"不可能产出成员名"的库空窗口。"""
+    def test_no_reference_image_window_keeps_named_example_when_roster_names_available(self):
+        """本轮无 gallery 但名册提供已确认姓名：实例 A 撤掉，实例 B 保留带名版。"""
         from miloco.perception.engine.omni.field_registry import SceneDescriptor
         from miloco.perception.engine.omni.prompt_builder import _render_examples
 
         out = _render_examples(SceneDescriptor(
             route="video", has_identity=True, has_audio=True, has_speech=True,
-            identity_match_disabled=True, identity_library_empty=False))
+            identity_match_disabled=True, member_names_unavailable=False))
         assert self._EXAMPLE_A_MARKER not in out
         assert "小明坐在电脑前" in out
         assert "某人坐在电脑前" not in out
@@ -1495,7 +1492,7 @@ class TestIdentityMatchDisabled:
 
         moot = SceneDescriptor(
             route="video", has_identity=True, has_audio=True, has_speech=True,
-            identity_match_disabled=True, identity_library_empty=True)
+            identity_match_disabled=True, member_names_unavailable=True)
         sp = build_system_prompt(moot, include_home_profile=False)
         for leak in (self._TASK_MATCH_MARKER, "库中哪一位",
                      self._EXAMPLE_A_MARKER, self._MATCH_ONLY_MARKER):
@@ -1637,7 +1634,7 @@ class TestGalleryPreflightDrivesIdentitySpec:
         )
 
     @staticmethod
-    def _build(gallery_snapshot, candidates, *, matching_moot=False):
+    def _build(gallery_snapshot, candidates, *, matching_moot=False, packets=None, label_lookup=None):
         from miloco.perception.engine.omni.prompt_builder import build_fused_payload
 
         with patch(
@@ -1645,9 +1642,9 @@ class TestGalleryPreflightDrivesIdentitySpec:
             return_value="",
         ):
             fused = build_fused_payload(
-                packets=[_video_route_packet()], context=OmniContext(),
+                packets=packets if packets is not None else [_video_route_packet()], context=OmniContext(),
                 candidates=candidates, gallery_snapshot=gallery_snapshot,
-                matching_moot=matching_moot,
+                matching_moot=matching_moot, label_lookup=label_lookup,
             )
         messages = fused["messages"]
         main = _multimodal_user_content(messages)
@@ -1723,19 +1720,27 @@ class TestGalleryPreflightDrivesIdentitySpec:
         assert "【张三】" in main_text
         assert self._MATCH_ONLY_MARKER in system_prompt
         assert self._NO_MATCH_MARKER not in system_prompt
+        assert "小明坐在电脑前" in system_prompt
 
-    def test_giveup_falls_back_to_slim_spec(self):
+    @pytest.mark.parametrize("has_roster_name", [False, True], ids=["no-name", "named-roster"])
+    def test_giveup_falls_back_to_slim_spec(self, has_roster_name):
         """「全或无」放弃 → spec 跟着降级；不能只撤图不撤匹配纪律。"""
         snapshot = {
             "pid-1": self._samples("pid-1", "张三"),
             "pid-2": self._samples("pid-2", "李四", body=b""),
         }
-        system_prompt, main_text = self._build(snapshot, [self._candidate()])
+        system_prompt, main_text = self._build(
+            snapshot, [self._candidate()],
+            label_lookup={"wangshihao": "王五"} if has_roster_name else {},
+        )
         assert "<gallery>" not in main_text
         assert "张三" not in main_text          # 放弃后不残留半截 gallery
         assert "待识别 track" in main_text      # no_person 判定仍按 track 走
         assert self._NO_MATCH_MARKER in system_prompt
         assert self._MATCH_ONLY_MARKER not in system_prompt
+        assert ("已识别人物：王五" in main_text) == has_roster_name
+        assert ("小明坐在电脑前" in system_prompt) == has_roster_name
+        assert ("某人坐在电脑前" in system_prompt) == (not has_roster_name)
 
     def test_slim_spec_wording_consistent_with_profile_present(self):
         """库非空 + 档案里有成员名 + 本轮渲不出 gallery：精简版措辞不得断言"无注册成员"。
@@ -1772,10 +1777,98 @@ class TestGalleryPreflightDrivesIdentitySpec:
 
         （identity_match_disabled 在无候选窗口取什么值都不外显：它的三个消费方
         都先过 has_identity=bool(candidates) 这道闸。）"""
-        named, _ = self._build({"pid-1": self._samples()}, [])
+        named, main_text = self._build({}, [], label_lookup={})
         assert "小明坐在电脑前" in named
+        assert "<gallery>" not in main_text
         moot, _ = self._build({}, [], matching_moot=True)
         assert "某人坐在电脑前" in moot
+
+    @pytest.mark.parametrize(
+        "person_id,track_id,suppress,label_lookup,expect_name",
+        [
+            ("pid-1", 1, False, {"pid-1": "张三"}, True),
+            ("pid-1", 7, False, {"pid-1": "张三"}, False),
+            ("pid-1", 1, True, {"pid-1": "张三"}, False),
+            ("pid-1", 1, False, {}, False),
+            ("pid-1", 1, False, {"pid-1": ""}, False),
+            ("none", 1, False, {"none": "张三"}, False),
+            ("", 1, False, {"": "张三"}, False),
+            ("pending", 1, False, {"pending": "张三"}, False),
+            ("pending:pid-1", 1, False, {"pending:pid-1": "张三"}, False),
+            ("unknown", 1, False, {"unknown": "张三"}, False),
+            ("unknown_1", 1, False, {"unknown_1": "张三"}, False),
+        ],
+        ids=["named-without-bbox", "recheck", "suppressed", "missing-label", "empty-label",
+             "none", "empty-pid", "pending", "pending-member", "stranger", "numbered-stranger"],
+    )
+    def test_example_b_follows_rendered_roster(
+        self, person_id, track_id, suppress, label_lookup, expect_name,
+    ):
+        packet = _video_route_packet()
+        target = packet.targets[0]
+        target.person_id = person_id
+        target.track_id = track_id
+        target.suppress_as_prior = suppress
+        target.bbox_xyxy_norm = None
+        system_prompt, main_text = self._build(
+            {}, [self._candidate()], packets=[packet], label_lookup=label_lookup,
+        )
+        assert ("已识别人物：张三" in main_text) == expect_name
+        assert ("小明坐在电脑前" in system_prompt) == expect_name
+        assert ("某人坐在电脑前" in system_prompt) == (not expect_name)
+        assert "待识别 track" in main_text
+        assert "<gallery>" not in main_text
+        assert self._NO_MATCH_MARKER in system_prompt
+
+    def test_named_roster_in_second_packet_keeps_named_example(self):
+        first, second = _video_route_packet(), _video_route_packet()
+        first.targets[0].person_id = "none"
+        second.targets[0].person_id = "pid-2"
+        second.targets[0].track_id = 2
+        system_prompt, main_text = self._build(
+            {}, [self._candidate()], packets=[first, second], label_lookup={"pid-2": "李四"},
+        )
+        assert "--- 设备 2 ---" in main_text
+        assert "已识别人物：李四" in main_text
+        assert "小明坐在电脑前" in system_prompt
+
+    def test_no_candidates_keeps_library_policy_even_with_stale_named_target(self):
+        """无候选兼容分支不随名册变化；即使输入携带已删除成员的旧标签。"""
+        system_prompt, main_text = self._build(
+            {}, [], matching_moot=True, label_lookup={"wangshihao": "张三"},
+        )
+        assert "已识别人物：张三" in main_text
+        assert "某人坐在电脑前" in system_prompt
+
+    def test_face_only_registration_after_reopen_uses_generic_example(self, tmp_path):
+        """真实持久路径：只写 face，库非空但无 body gallery，不能示范安成员名。"""
+        from miloco.perception.engine.identity.library import IdentityLibrary
+
+        root = tmp_path / "identity"
+        library = IdentityLibrary(root)
+        pid = "11111111-1111-4111-8111-111111111111"
+        assert library.add_face_only_sample(pid, np.zeros((64, 64, 3), dtype=np.uint8))
+        library.set_meta(pid, name="张三")
+
+        reopened = IdentityLibrary(root)
+        persons = reopened.list_persons()
+        assert len(persons) == 1
+        assert not persons[0].has_tier_a
+        snapshot = reopened.get_gallery_composites_for_omni()
+        assert snapshot == {}
+        packet = _video_route_packet()
+        packet.targets[0].person_id = "none"
+        packet.targets[0].track_id = 7
+        system_prompt, main_text = self._build(
+            snapshot, [self._candidate()], matching_moot=not persons,
+            packets=[packet], label_lookup={ref.person_id: ref.name for ref in persons if ref.name},
+        )
+        assert "已识别人物：无" in main_text
+        assert "待识别 track" in main_text
+        assert "<gallery>" not in main_text
+        assert self._NO_MATCH_MARKER in system_prompt
+        assert "某人坐在电脑前" in system_prompt
+        assert "小明坐在电脑前" not in system_prompt
 
 
 class TestAdaptiveResolution:
