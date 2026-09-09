@@ -21,10 +21,14 @@ Authorization 头而 401 假红（CI 干净环境反而全绿）。
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 
 _ISOLATED_HOME = tempfile.mkdtemp(prefix="miloco-test-home-")
+# 进程正常退出时删掉：macOS 的 /var/folders 不随重启清空，频繁跑测试会积累一堆空目录。
+atexit.register(shutil.rmtree, _ISOLATED_HOME, ignore_errors=True)
 
 for _key in [k for k in os.environ if k.startswith("MILOCO_")]:
     del os.environ[_key]
