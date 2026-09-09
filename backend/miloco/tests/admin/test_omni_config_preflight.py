@@ -507,7 +507,7 @@ def test_snapshot_carries_relative_seconds_and_cooldown(client):
 async def test_retry_probe_cancelled_falls_back_to_open_recoverable(monkeypatch):
     """review Finding 4:retry_now() 已把 state 置 HALF_OPEN,若 probe_omni 期间
     客户端断开(CancelledError),必须回落 OPEN_RECOVERABLE,让 tick 能重新驱动 probe。
-    修复前:HALF_OPEN 卡死,tick 只 arm OPEN_RECOVERABLE,before_call 又永远短路。"""
+    修复前:HALF_OPEN 卡死,tick 只 arm OPEN_*(HALF_OPEN 不在其列),before_call 又永远短路。"""
     import asyncio
 
     from miloco.admin import router as admin_router

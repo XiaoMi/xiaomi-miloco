@@ -1292,8 +1292,8 @@ async def test_omni_config(
     result = await _probe.probe_omni(model, base_url, api_key)
     # 测通 + 三元组精确匹配当前 active + 熔断非 ok → 主动清熔断,与 put/activate/retry
     # 恢复路径对齐。护栏:测别的档案 / 未保存的新配置时不动状态。
-    # OPEN_CONFIG 下 tick 不会自动探测(只探 OPEN_RECOVERABLE),不清则用户测通了红条仍不消失,
-    # 只能靠横条上的「立即重试」或改配置重存才能恢复——「测通即恢复」是最直觉的路径。
+    # OPEN_CONFIG 下 tick 虽有慢周期自动探测(config_probe_interval_sec,默认 300s),但不清则
+    # 用户测通后最坏还要等一整个周期红条才消失——「测通即恢复」是最直觉的路径。
     if result.get("ok"):
         from miloco.perception.engine.omni.circuit_breaker import (
             get_omni_circuit_breaker,
@@ -1486,7 +1486,7 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
     except asyncio.CancelledError:
         # 客户端断开 HTTP(用户切页/关 tab/网络抖动)时 FastAPI 抛 CancelledError。
         # 此前 retry_now() 已把 state 置 HALF_OPEN,若不复位则 before_call 永久短路、
-        # tick 只 arm OPEN_RECOVERABLE 也不会驱动新 probe,只能改配置或重启。
+        # tick 只 arm OPEN_*(HALF_OPEN 不在其列)也不会驱动新 probe,只能改配置或重启。
         # 走 record_probe_result(fail, RECOVERABLE) 回落到 OPEN_RECOVERABLE 让 tick 接管。
         await cb.record_probe_result(
             False,

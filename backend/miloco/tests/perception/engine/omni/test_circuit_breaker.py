@@ -184,7 +184,7 @@ async def test_open_config_try_arm_probe_after_interval(cb, frozen_time):
 
 
 async def test_open_config_snapshot_shows_next_probe(cb):
-    """OPEN_CONFIG snapshot 携带 next_probe 字段,前端能显示"下次自动重试"倒计时。"""
+    """OPEN_CONFIG snapshot 携带 next_probe 字段,供前端消费倒计时(前端接线见 #544)。"""
     for _ in range(3):
         await cb.record_failure(_cfg("bad_key"))
     snap = cb.snapshot()

@@ -16,7 +16,7 @@ import httpx
 
 class ErrorCategory(Enum):
     RECOVERABLE = "recoverable"  # 进指数退避熔断
-    CONFIG = "config"  # 直接软停,等用户改配置
+    CONFIG = "config"  # 软停等用户改配置;熔断器另有慢周期探测(默认 300s)兜误判
 
 
 @dataclass(frozen=True)

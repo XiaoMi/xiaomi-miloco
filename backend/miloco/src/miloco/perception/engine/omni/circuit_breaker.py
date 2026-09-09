@@ -293,9 +293,9 @@ class OmniCircuitBreaker:
         """只读:是否有 probe 正在执行(tick 已 arm 但 record_probe_result 未回)。
 
         用于 router.retry_omni_probe:tick.try_arm_probe 已置 _probe_in_flight=True
-        但尚未 mark_half_open 的短暂窗口里,state 仍是 OPEN_RECOVERABLE,只判 state
-        的短路会漏掉这段,导致 retry 与 tick 双 probe 并发、record_probe_result 互相
-        覆盖引起横条闪跳。
+        但尚未 mark_half_open 的短暂窗口里,state 仍是 OPEN_RECOVERABLE / OPEN_CONFIG,
+        只判 state 的短路会漏掉这段,导致 retry 与 tick 双 probe 并发、record_probe_result
+        互相覆盖引起横条闪跳。
         """
         with self._lock:
             return self._probe_in_flight
