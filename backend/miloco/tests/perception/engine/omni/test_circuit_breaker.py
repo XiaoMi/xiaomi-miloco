@@ -733,3 +733,92 @@ async def test_probe_result_recoverable_fail_still_reopens_from_half_open(
     await cb.record_probe_result(False, _rec("unreachable"))
     assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
     assert cb.snapshot().code == "unreachable"
+
+
+# ─── 过期探测结果:探测在飞期间配置被重置,结果作废 (review 🟡2) ─────────────
+
+
+async def _open_config_probe_in_flight(cb, frozen_time) -> None:
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+
+
+async def test_stale_config_probe_after_reset_is_discarded(cb, frozen_time):
+    """OPEN_CONFIG(bad_key) 到期后台 arm 并读到旧 key;探测在飞的几秒内用户保存了
+    正确 key(reset_on_config_change → CLOSED)。旧探测带着 bad_key 回来不得把刚修好
+    的配置打回 OPEN_CONFIG 再锁 300s。"""
+    await _open_config_probe_in_flight(cb, frozen_time)
+    seen: list = []
+    cb.register_listener(lambda snap: seen.append(snap.state))
+
+    await cb.reset_on_config_change()
+    assert cb.state_for_test() == CircuitState.CLOSED
+
+    await cb.record_probe_result(False, _cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.CLOSED
+    snap = cb.snapshot()
+    assert snap.state == "ok"
+    assert snap.code is None
+    assert snap.next_probe_in_seconds is None
+    # 记账仍要发生:单飞位释放、last_probe_* 落点
+    assert cb.probe_in_flight() is False
+    assert snap.last_probe_result == "fail"
+    # 过期结果不触发状态广播:reset 之后 listener 只看到那一次 "ok"
+    assert seen == ["ok"]
+    await cb.before_call()  # 放行
+
+
+async def test_stale_ok_probe_after_reset_and_reopen_is_discarded(cb, frozen_time):
+    """反向:reset 后新配置的真流量又攒够失败重开(不同错误码),旧探测的“成功”迟到
+    不得把真开着的熔断合上;旧探测的“失败”也不得覆盖新错误码。"""
+    await _open_config_probe_in_flight(cb, frozen_time)
+    await cb.reset_on_config_change()
+    for _ in range(3):
+        await cb.record_failure(_cfg("not_found"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert cb.snapshot().code == "not_found"
+
+    await cb.record_probe_result(True, None)
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert cb.snapshot().code == "not_found"
+    assert cb.probe_in_flight() is False
+
+    # 单飞位已释放,新一轮探测照常可 arm(不会因过期结果卡死)
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    await cb.record_probe_result(False, _cfg("not_found"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+
+
+async def test_stale_retry_probe_after_reset_is_discarded(cb, frozen_time):
+    """「立即重试」发起的探测同样受代数保护:retry_now 置 in-flight 并盖代数,期间
+    走「测试连接 / 保存档案」把熔断清掉后,retry 的旧结果作废。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    await cb.retry_now()
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+    assert cb.probe_in_flight() is True
+
+    await cb.reset_on_config_change()
+    await cb.record_probe_result(False, _cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.CLOSED
+    assert cb.snapshot().state == "ok"
+    assert cb.probe_in_flight() is False
+
+
+async def test_probe_result_without_reset_still_applies(cb, frozen_time):
+    """对照:探测在飞期间没有 CLOSED 发生,结果照常生效(代数一致)。"""
+    await _open_config_probe_in_flight(cb, frozen_time)
+    await cb.record_probe_result(True, None)
+    assert cb.state_for_test() == CircuitState.CLOSED
+
+    await _open_config_probe_in_flight(cb, frozen_time)
+    await cb.record_probe_result(False, _cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert 299 <= cb.snapshot().next_probe_in_seconds <= 300

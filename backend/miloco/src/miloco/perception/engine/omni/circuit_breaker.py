@@ -117,10 +117,14 @@ class OmniCircuitBreaker:
         self._backoff_caps = backoff_caps or {"rate_limited": 60.0, "_default": 600.0}
         self._jitter_ratio = jitter_ratio
         # OPEN_CONFIG 的慢速自动探测周期。原设计 OPEN_CONFIG 只等“配置变更 / 手动
-        # retry」,但分类误判(如 422 payload 错被当成 config 错)会把感知打进永不
-        # 自愈的黑洞(2026-07-29 实锅:12:14→14:45 全部 short-circuit,零重试)。
-        # 慢周期自动探测兜住误判,同时保持"不拿注定失败的 key 反复打 provider"的
-        # 初衷——5min 一次极简 ping 的代价可忽略。
+        # retry”,但分类误判(如 422 payload 错被当成 config 错)会把感知打进永不
+        # 重试的黑洞(2026-07-29 实锅:12:14→14:45 全部 short-circuit,零重试)。
+        # 慢周期自动探测把“永久黑洞”降为“周期性重试”,同时保持"不拿注定失败的 key
+        # 反复打 provider"的初衷——5min 一次极简 ping 的代价可忽略。
+        # 分寸:探测是纯文本 ping,只对它能复现的配置错(bad_key / not_found /
+        # 服务端恢复)构成自愈;对媒体 / 请求体类 422 探测必成,CLOSED 后真流量再撞
+        # 失败才重开,且 _transition_to_closed_locked 会清掉累计证据——这类的完整
+        # 解法是 flap 计数升级(#542),不在本机制范围内。
         self._config_probe_interval_sec = config_probe_interval_sec
 
         # RLock:允许 try_arm_probe 持锁调 probe_due (probe_due 单独调用时也持锁,
@@ -138,6 +142,14 @@ class OmniCircuitBreaker:
         self._last_probe_at: float | None = None
         self._last_probe_result: str | None = None
         self._probe_in_flight: bool = False
+        # 探测代数:_transition_to_closed_locked 每次 +1;arm 探测(try_arm_probe /
+        # retry_now / mark_half_open)时把当前值盖到 _probe_epoch。record_probe_result
+        # 发现两者不等,说明探测在飞期间发生过 CLOSED(改配置 / 测通 / 换档案),它测的
+        # 是旧配置,结果作废——否则迟到的 bad_key 会把刚修好的配置打回 OPEN_CONFIG 再锁
+        # 一个慢周期。OPEN_CONFIG 参与自动探测之后,“后台探测在飞 + 用户正在改配置”
+        # 恰是横条引导用户做的事,重叠不再是小概率。
+        self._reset_epoch: int = 0
+        self._probe_epoch: int = 0
         # 进入 HALF_OPEN 前的来源态,仅供 snapshot() 决定 HALF_OPEN 的 UI 级别;
         # 每次进 HALF_OPEN 都会重写,离开 HALF_OPEN 后的残值不会被读到。
         self._half_open_from: CircuitState | None = None
@@ -222,6 +234,18 @@ class OmniCircuitBreaker:
         with self._lock:
             self._last_probe_at = time.monotonic()
             self._last_probe_result = "ok" if ok else "fail"
+            # 过期探测:arm 之后发生过 CLOSED(reset_on_config_change 等),这次结果针对
+            # 的是旧配置,只做记账(last_probe_* / 清位),不改状态。只对 arm 过的探测
+            # 判代数(_probe_in_flight 为 True 才盖过 _probe_epoch);未经 arm 直接调
+            # 本方法的路径(仅测试)维持原语义。
+            if self._probe_in_flight and self._probe_epoch != self._reset_epoch:
+                self._probe_in_flight = False
+                _emit_logger.info(
+                    "omni CB: 丢弃过期探测结果 ok=%s code=%s(探测期间配置已重置)",
+                    ok,
+                    err.code if err is not None else None,
+                )
+                return
             if ok:
                 self._transition_to_closed_locked()
             else:
@@ -280,6 +304,7 @@ class OmniCircuitBreaker:
             if not self.probe_due():
                 return False
             self._probe_in_flight = True
+            self._probe_epoch = self._reset_epoch
             return True
 
     def clear_probe_in_flight(self) -> None:
@@ -309,15 +334,22 @@ class OmniCircuitBreaker:
             ):
                 self._half_open_from = self._state
                 self._state = CircuitState.HALF_OPEN
+                self._probe_epoch = self._reset_epoch
         self._emit()
 
     async def retry_now(self) -> None:
-        """用户点「立即重试」;OPEN_RECOVERABLE / OPEN_CONFIG → HALF_OPEN。"""
+        """用户点「立即重试」;OPEN_RECOVERABLE / OPEN_CONFIG → HALF_OPEN。
+
+        同时置 in-flight 位并盖探测代数:retry 发起的 probe 与 tick 发起的一样会
+        经 record_probe_result 收尾,期间若配置被重置,结果同样要作废。
+        """
         with self._lock:
             if self._state in (CircuitState.OPEN_RECOVERABLE, CircuitState.OPEN_CONFIG):
                 self._half_open_from = self._state
                 self._state = CircuitState.HALF_OPEN
                 self._next_probe_at_monotonic = time.monotonic()
+                self._probe_in_flight = True
+                self._probe_epoch = self._reset_epoch
         self._emit()
 
     async def reset_on_config_change(self) -> None:
@@ -429,6 +461,8 @@ class OmniCircuitBreaker:
     def _transition_to_closed_locked(self) -> None:
         self._state = CircuitState.CLOSED
         self._state_since = time.monotonic()
+        # 在飞的探测(若有)自此作废,见 _reset_epoch 注释。
+        self._reset_epoch += 1
         self._current_code, self._current_message = None, ""
         self._consecutive_failures = 0
         self._samples.clear()
