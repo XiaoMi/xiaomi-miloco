@@ -13,12 +13,13 @@ from datetime import datetime, timezone
 
 import click
 
-# 必须在任何命令模块 import 之前执行:它们各自现构造 httpx client,而 client
-# 在构造时读一次代理环境。此前这个副作用挂在 commands/scope.py 的模块级
-# `from miloco_cli.client import ...` 上——全仓 18 个命令模块里唯一一个那么写
-# 的,把它改成惰性 import(一次纯粹的一致性清理)就会让整条链路静默失效,
-# 退化表现正是本修复要消灭的 502。钉在声明的入口点上,不依赖任何模块的
-# import 顺序。
+# 钉在声明的入口点上,先于所有命令模块 import——只需要早于 main() 执行(命令
+# 模块当前全部在函数体内惰性构造 httpx client,而 client 构造时读一次代理环境),
+# 排在最前面是防御性的:将来谁加了模块级 client 也不会踩到"名单还没写好"的窗口。
+# 此前这个副作用挂在 commands/scope.py 的模块级 `from miloco_cli.client
+# import ...` 上——17 个引用 client 的命令模块里唯一一个在模块级 import 的,
+# 把它改成和其余 16 个一致的函数内 import(一次纯粹的一致性清理)就会让整条
+# 链路静默失效,退化表现正是本修复要消灭的 502。
 from miloco_cli.client import ensure_no_proxy_for_local
 
 ensure_no_proxy_for_local()

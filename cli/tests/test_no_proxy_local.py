@@ -84,6 +84,31 @@ def test_all_proxy_only_user_not_overridden(clean_proxy_env):
     assert "http_proxy" not in os.environ
 
 
+def test_empty_proxy_value_treated_as_explicit_opt_out(clean_proxy_env):
+    """空值 = 显式取消该 scheme 代理(curl / CPython 通行约定),不该被系统代理覆盖。
+
+    与 backend::test_empty_proxy_value_treated_as_explicit_opt_out 对称:两侧是
+    逐行镜像的实现,守门只在一侧钉住的话,另一侧退回真值判断时 CI 全绿。
+    """
+    clean_proxy_env.setenv("https_proxy", "")
+    clean_proxy_env.setattr(
+        "miloco_cli.client._system_proxies", lambda: {"https": "http://sys:9999"}
+    )
+    ensure_no_proxy_for_local()
+    assert os.environ["https_proxy"] == ""
+
+
+def test_env_proxy_wins_over_system(clean_proxy_env):
+    """env 已显式配了代理时,不去问系统设置(env 是更强的用户意图)。"""
+    clean_proxy_env.setenv("https_proxy", "http://env-set:1080")
+    clean_proxy_env.setattr(
+        "miloco_cli.client._system_proxies",
+        lambda: pytest.fail("env 已有代理时不该回退问系统"),
+    )
+    ensure_no_proxy_for_local()
+    assert os.environ["https_proxy"] == "http://env-set:1080"
+
+
 def test_getproxies_failure_does_not_break_startup(clean_proxy_env):
     def boom():
         raise OSError("SystemConfiguration unavailable")
