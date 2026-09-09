@@ -218,24 +218,36 @@ def test_versions_mismatch_detected(tmp_path: Path):
 
 
 def test_trace_hooks_empty_trace_dir(tmp_path: Path, monkeypatch):
-    """trace 目录不存在 → ok=True + note（debug 没开过 ≠ 坏了，不进 failed）。"""
+    """trace 目录不存在 → ok=True，但不能归因到 debug（meta 不受 debug 管）。"""
     monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
     out = ts._check_trace_hooks()
     assert out["ok"] is True
-    assert out["enabled"] is False
-    assert "trace debug 未启用" in out["note"]
+    assert "debug" not in out["note"]  # 别再把「没有 meta」说成 debug 没开
+    assert "没注册上" in out["fix"]
 
 
-def test_trace_hooks_today_dir_no_files(tmp_path: Path, monkeypatch):
-    """trace 目录有但今天没 turn → ok=True + note。"""
+def test_trace_hooks_no_today_dir(tmp_path: Path, monkeypatch):
+    """trace 目录在、今天的日期目录还没建 → ok=True（今天没派过 turn）。"""
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+    (tmp_path / "trace" / "agent").mkdir(parents=True, exist_ok=True)
+    out = ts._check_trace_hooks()
+    assert out["ok"] is True
+    assert "今天还没有" in out["note"]
+
+
+def test_trace_hooks_today_dir_without_meta_is_failure(tmp_path: Path, monkeypatch):
+    """今天目录建了却没有 meta → ok=False。
+
+    该目录只由落盘时的 mkdir 建出来，所以目录在 = 有 turn 走到了落盘却没写成，
+    当天记账会全丢。自检必须报出来，不能盖章放行。
+    """
     from datetime import datetime
     monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
-    trace_dir = tmp_path / "trace" / "agent"
-    today = trace_dir / datetime.now().strftime("%Y%m%d")
+    today = tmp_path / "trace" / "agent" / datetime.now().strftime("%Y%m%d")
     today.mkdir(parents=True, exist_ok=True)
     out = ts._check_trace_hooks()
-    assert out["ok"] is True
-    assert "今天还没" in out["note"]
+    assert out["ok"] is False
+    assert "落盘失败" in out["error"]
 
 
 def test_trace_hooks_today_has_files(tmp_path: Path, monkeypatch):
@@ -251,7 +263,7 @@ def test_trace_hooks_today_has_files(tmp_path: Path, monkeypatch):
     out = ts._check_trace_hooks()
     assert out["ok"] is True
     assert out["meta_files_today"] == 1
-    assert out["trace_files_today"] == 1
+    assert out["jsonl_files_today"] == 1
     assert out["newest_meta"] == "sess-1__test.meta.json"
 
 

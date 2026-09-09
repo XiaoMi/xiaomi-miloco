@@ -233,40 +233,60 @@ def _check_versions(ctx: Any) -> Dict[str, Any]:
 
 
 def _check_trace_hooks() -> Dict[str, Any]:
-    """trace.py 是否被 register 了——通过查 $MILOCO_HOME/trace/agent/ 目录近期活动。
+    """trace hook 有没有在写盘——查 $MILOCO_HOME/trace/agent/ 今天的 meta.json。
 
-    注意：trace 是 debug 开关，没开过不代表坏了。所以 trace 目录不存在时
-    返回 ``ok=True, note="trace debug 未启用"``，不进 failed_count。
+    meta.json 每个 miloco turn 都写，不受 debug 开关影响（它是 backend 记账的唯一
+    来源）；归 debug 管的只有 jsonl.gz 明细。所以「没有 meta」不能解释成 debug 没开，
+    只有两种可能：今天确实没派过 turn，或者 hook 没注册上。
     """
+    from datetime import datetime
+
+    from .trace import is_debug_enabled
+
     trace_dir = miloco_home() / "trace" / "agent"
+    debug = is_debug_enabled()
+    no_meta_fix = (
+        "先确认 backend 今天确实派过 turn（miloco-cli service status）。派过却没有 meta "
+        "就是 trace hook 没注册上：查 hermes gateway 日志里的 "
+        "'[miloco-trace] register ... failed'，或确认插件已加载"
+    )
     if not trace_dir.is_dir():
         return {
             "ok": True,
-            "note": "trace debug 未启用（没跑过 MILOCO_TRACE_DEBUG=1 的 turn）— 不算异常",
-            "enabled": False,
-            "fix": "需要 debug 时再 export MILOCO_TRACE_DEBUG=1 跑一个 turn",
+            "note": "trace/agent 目录还不存在——至今没有 miloco turn 落过 meta",
+            "debug_enabled": debug,
+            "trace_dir": str(trace_dir),
+            "fix": no_meta_fix,
         }
-    # 看今天有没有 meta.json 写过
-    from datetime import datetime
     today = trace_dir / datetime.now().strftime("%Y%m%d")
     if not today.is_dir():
         return {
             "ok": True,
-            "note": "trace 目录在但今天没 turn 跑过（首次跑会建目录 + meta.json）",
+            "note": "今天还没有 miloco turn 落过 meta",
+            "debug_enabled": debug,
             "trace_dir": str(trace_dir),
+            "fix": no_meta_fix,
         }
     metas = list(today.glob("*.meta.json"))
     if not metas:
+        # 今天的目录只由落盘时的 mkdir 建出来，所以目录在 = 至少一个 turn 走到了落盘。
+        # 走到了却没留下 meta，就是落盘失败，这一天的 agent 统计会全部丢。
         return {
-            "ok": True,
-            "note": "今天还没 turn 跑过（debug 模式需 MILOCO_TRACE_DEBUG=1）",
-            "trace_dir": str(trace_dir),
+            "ok": False,
+            "error": "今天的 trace 目录建了却没有一份 meta——落盘失败，当天 agent 统计会全丢",
+            "debug_enabled": debug,
+            "trace_dir": str(today),
+            "fix": (
+                "查 hermes gateway 日志里的 '[miloco-trace] flush failed'，"
+                "常见原因是磁盘写满或目录没有写权限；若恰好有 turn 正在跑，稍后重跑本自检"
+            ),
         }
     newest = max(metas, key=lambda p: p.stat().st_mtime)
     return {
         "ok": True,
-        "trace_files_today": len(list(today.glob("*.jsonl.gz"))),
         "meta_files_today": len(metas),
+        "jsonl_files_today": len(list(today.glob("*.jsonl.gz"))),  # debug 开时才有
+        "debug_enabled": debug,
         "newest_meta": newest.name,
     }
 
