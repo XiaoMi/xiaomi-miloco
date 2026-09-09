@@ -25,7 +25,11 @@ miloco-cli task list --pretty
 
 返回每个 task 的 task_id / description / status / rule_briefs / cron_refs。
 
-- `rule_briefs`: rule 摘要列表（rule_id / query / actions_desc）
+- `rule_briefs`: rule 摘要列表
+  - `rule_id` / `name` / `mode` / `query`：规则标识、名称、触发方式（event = 命中即触发一次 / state = 进入与离开各触发一次）、触发条件
+  - `actions_desc`：**判重比对用这一列** —— 设备动作与 agent 文案压平混排的人话摘要
+  - `action_descriptions` / `on_enter_desc` / `on_exit_desc` / `on_target_desc` / `device_actions`：结构化原值，供 Web 就地编辑回填，判重不用看
+  - `editable_desc_slots`：Web 端可编辑的文案槽位，agent 忽略
 - `cron_refs`: cron 引用列表（`ref` + `dispatch_owner`；`internal` = backend 完整管理，`external` = 只存引用，触发仍走 openclaw 老通路，需 agent 通过自然语言指令处理）
 
 **回复**:≤30 字简述 + Markdown 表(task_id / 概要 / 状态)。

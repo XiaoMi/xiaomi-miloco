@@ -16,6 +16,7 @@ Reference: rule-design.md §6.1
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from miloco.database.rule_repo import RuleLogRepo, RuleRepo
@@ -70,6 +71,10 @@ _FORBIDDEN_QUERY_PREFIXES = (
 )
 
 
+# rule.name 的 `[task_id] ` 约定前缀 (见 plugins/skills/miloco-create-task)。
+_RULE_NAME_PREFIX_RE = re.compile(r"^\[[^\]]*\]\s*")
+
+
 def _validate_query_phrasing(query: str) -> None:
     q = query.strip()
     for prefix in _FORBIDDEN_QUERY_PREFIXES:
@@ -81,6 +86,44 @@ def _validate_query_phrasing(query: str) -> None:
                 "'用户正在做出喝水动作（举杯或瓶贴近嘴边并倾斜）'、"
                 "'用户从站立或坐姿突然倒地，身体平躺或侧卧不动'。"
                 f"当前 query: {query!r}"
+            )
+
+
+def _validate_rule_name_phrasing(name: str) -> None:
+    """规则名的断言性措辞校验 —— 与 query 共用同一份禁用前缀表。
+
+    为什么 name 也要管: 它和 query 落在感知调用的「待判断规则」段的**同一行**
+    (``perception/engine/omni/prompt_builder.py::_render_rule_conditions``:
+    ``- {rule_name}：{query}``), 断言性措辞的危害与写在 query 里完全一致。
+    以前这一处没校验, 但**不能**说是因为「agent 按 skill 约定生成所以一定合规」——
+    那份约定只约束 ``[task_id] `` 前缀形态、从不约束措辞 (CLI 帮助里 ``--name``
+    一度还写着「自由文本」), agent 侧一直是靠运气合规。补上守卫等于把这份运气变成
+    硬失败, 所以生成侧的两处契约 (miloco-create-task SKILL.md 的 name 映射行、
+    CLI ``rule create/update`` 的 ``--name`` 帮助) 同步写明了这条约束, 别让 agent
+    撞一个文档没提过的 422。Web 放开规则名编辑后, 这条 prompt 行又多了一个住户
+    直填的入口, 守卫更得跟上。
+
+    先剥掉 ``[task_id] `` 约定前缀再判: 带前缀时 ``startswith`` 恒不命中,
+    等于没校验。
+
+    挂载点只在 ``create_rule`` / ``patch_rule`` 的 name 分支 (即调用方**显式**
+    给了 name 时), 不塞进 ``_validate_rule_consistency`` —— 后者每次 PATCH 都对
+    合并后的整条规则跑一遍, 塞进去会让历史上叫得不合规的老规则连触发条件都改不动。
+    同理 ``update_rule`` (PUT 整体重写, agent 专用) 也不挂: 那条路径上 name 是
+    原值回写, 不是新输入。
+    """
+    # 先 strip 再剥前缀: 剥前缀的正则锚 ``^\[``, 名字带前导空格时不命中, 剥不掉前缀
+    # 就没有一个禁用前缀能对上 —— 整条校验会被 `" [t1] 检测到…"` 这种输入绕开
+    # (与 ``_validate_query_phrasing`` 先 strip 的口径对齐)。
+    body = _RULE_NAME_PREFIX_RE.sub("", name.strip()).strip()
+    for prefix in _FORBIDDEN_QUERY_PREFIXES:
+        if body.startswith(prefix):
+            raise ValidationException(
+                f"规则名不能以断言性词 {prefix!r} 开头："
+                "它与 condition.query 一起进感知模型的「待判断规则」段，"
+                "这种措辞会被当成已发生的事实通知，导致连续误触发。"
+                "请改写为进行时状态或可观测动作描述。"
+                f"当前 name: {name!r}"
             )
 
 
@@ -346,6 +389,7 @@ class RuleService:
 
         if self._repo.exists_by_name(rule.name):
             raise ConflictException(f"Rule name '{rule.name}' already exists")
+        _validate_rule_name_phrasing(rule.name)
 
         if not self._task_repo.task_exists(rule.task_id):
             raise ResourceNotFoundException(
@@ -443,6 +487,7 @@ class RuleService:
         if "name" in fields and update.name is not None:
             if self._repo.exists_by_name(update.name, rule_id):
                 raise ConflictException(f"Rule name '{update.name}' already exists")
+            _validate_rule_name_phrasing(update.name)
             existing.name = update.name
 
         if "task_id" in fields and update.task_id is not None:
