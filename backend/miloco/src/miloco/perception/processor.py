@@ -230,9 +230,10 @@ class PipelineProcessor:
     def drive_omni_probe(self) -> None:
         """tick 入口驱动 omni 熔断器自动探测。
 
-        三条件齐(state==OPEN_RECOVERABLE + backoff 到期 + 无 in-flight)时 fire-and-forget
-        spawn 一次 probe task;否则 sync 判断后立即返回。CLOSED 稳态开销 = 一次 sync 读,
-        可忽略。
+        三条件齐(state∈{OPEN_RECOVERABLE, OPEN_CONFIG} + 探测周期到期 + 无 in-flight)时
+        fire-and-forget spawn 一次 probe task;否则 sync 判断后立即返回。OPEN_CONFIG 走
+        固定慢周期(config_probe_interval_sec),是误判分类的逃生通道。CLOSED 稳态开销 =
+        一次 sync 读,可忽略。
 
         单飞位由熔断器内部维护(try_arm_probe 原子占位、record_probe_result 释放),
         并发 tick / 多相机 batch 场景下同一时刻只会有一个 probe in-flight。

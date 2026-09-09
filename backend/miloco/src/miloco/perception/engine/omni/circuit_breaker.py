@@ -38,6 +38,9 @@ class CircuitState(Enum):
     HALF_OPEN = "half_open"
 
 
+# HALF_OPEN 的 "warn" 只是缺省:snapshot() 会让 HALF_OPEN 沿用其来源态的级别
+# (从 OPEN_CONFIG 进入的探测期间仍报 "error"),否则 OPEN_CONFIG 每个慢周期探测
+# 一次就让红条闪一次黄、前端“到模型页修改”入口卸载又挂回。
 _STATE_TO_UI: dict[CircuitState, str] = {
     CircuitState.CLOSED: "ok",
     CircuitState.OPEN_RECOVERABLE: "warn",
@@ -71,7 +74,8 @@ class HealthSnapshot:
     next_probe_at_ms: int | None
     # 到下次 tick 探测的剩余秒数(monotonic 差算,不依赖两端时钟一致)。前端直接倒计时
     # 该值,避免 next_probe_at_ms(服务端 unix ms)与客户端 Date.now() 时钟偏差导致
-    # 倒计时不准(家用 NAS/容器场景常见)。CLOSED / OPEN_CONFIG / HALF_OPEN 时为 None。
+    # 倒计时不准(家用 NAS/容器场景常见)。CLOSED / HALF_OPEN 时为 None;
+    # OPEN_CONFIG 也有值(慢速自动探测周期,见 config_probe_interval_sec)。
     next_probe_in_seconds: float | None
     last_probe_at_ms: int | None
     last_probe_result: str | None  # "ok" | "fail" | None
@@ -102,6 +106,7 @@ class OmniCircuitBreaker:
         backoff_multiplier: float = 2.0,
         backoff_caps: dict[str, float] | None = None,
         jitter_ratio: float = 0.2,
+        config_probe_interval_sec: float = 300.0,
     ):
         self._consecutive_threshold = consecutive_threshold
         self._window_seconds = window_seconds
@@ -111,6 +116,12 @@ class OmniCircuitBreaker:
         self._backoff_multiplier = backoff_multiplier
         self._backoff_caps = backoff_caps or {"rate_limited": 60.0, "_default": 600.0}
         self._jitter_ratio = jitter_ratio
+        # OPEN_CONFIG 的慢速自动探测周期。原设计 OPEN_CONFIG 只等“配置变更 / 手动
+        # retry」,但分类误判(如 422 payload 错被当成 config 错)会把感知打进永不
+        # 自愈的黑洞(2026-07-29 实锅:12:14→14:45 全部 short-circuit,零重试)。
+        # 慢周期自动探测兜住误判,同时保持"不拿注定失败的 key 反复打 provider"的
+        # 初衷——5min 一次极简 ping 的代价可忽略。
+        self._config_probe_interval_sec = config_probe_interval_sec
 
         # RLock:允许 try_arm_probe 持锁调 probe_due (probe_due 单独调用时也持锁,
         # 嵌套 acquire 靠 RLock 兼容)。跨 loop / 跨线程访问全部通过它序列化,配合
@@ -127,6 +138,9 @@ class OmniCircuitBreaker:
         self._last_probe_at: float | None = None
         self._last_probe_result: str | None = None
         self._probe_in_flight: bool = False
+        # 进入 HALF_OPEN 前的来源态,仅供 snapshot() 决定 HALF_OPEN 的 UI 级别;
+        # 每次进 HALF_OPEN 都会重写,离开 HALF_OPEN 后的残值不会被读到。
+        self._half_open_from: CircuitState | None = None
         self._on_state_change: list[Callable[[HealthSnapshot], None]] = []
 
     def register_listener(self, cb: Callable[[HealthSnapshot], None]) -> None:
@@ -215,22 +229,32 @@ class OmniCircuitBreaker:
                 if err.category == ErrorCategory.CONFIG:
                     self._transition_to_open_config_locked(err)
                 else:
-                    self._grow_backoff_locked(err)
                     # 守卫 OPEN_CONFIG:try_arm_probe 通过后到 probe 完成之间的 await
                     # 窗口里,并发 record_failure(CONFIG) 可能把 state 推到 OPEN_CONFIG
                     # (真 auth failure)。若这里无条件设 OPEN_RECOVERABLE 会把它抹回
                     # "自动退避重试",tick 继续探测注定失败的 key,浪费 backoff 周期。
                     # 只有 state 不是 OPEN_CONFIG 时才降级到 OPEN_RECOVERABLE。
+                    # _grow_backoff_locked 也必须在守卫之内:它会把 next_probe 排到
+                    # ~backoff_start 秒后,若在守卫之前执行会覆盖 OPEN_CONFIG 刚排好的
+                    # 慢周期(OPEN_CONFIG 参与 probe_due 之后这不再是死数据)。
                     if self._state != CircuitState.OPEN_CONFIG:
+                        self._grow_backoff_locked(err)
                         self._state = CircuitState.OPEN_RECOVERABLE
                         self._current_code, self._current_message = err.code, err.message
             self._probe_in_flight = False
         self._emit()
 
     def probe_due(self) -> bool:
-        """外部 tick 查询:是否到 HALF_OPEN 时刻(不改状态)。"""
+        """外部 tick 查询:是否到 HALF_OPEN 时刻(不改状态)。
+
+        OPEN_RECOVERABLE 走指数 backoff 周期;OPEN_CONFIG 也参与——走固定慢周期
+        (config_probe_interval_sec),防误判分类造成的永久黑洞。
+        """
         with self._lock:
-            if self._state != CircuitState.OPEN_RECOVERABLE:
+            if self._state not in (
+                CircuitState.OPEN_RECOVERABLE,
+                CircuitState.OPEN_CONFIG,
+            ):
                 return False
             return (
                 self._next_probe_at_monotonic is not None
@@ -238,7 +262,7 @@ class OmniCircuitBreaker:
             )
 
     def try_arm_probe(self) -> bool:
-        """tick 驱动占位:三条件齐(OPEN_RECOVERABLE + probe_due + 未 in-flight)时置
+        """tick 驱动占位:三条件齐(OPEN_* + probe_due + 未 in-flight)时置
         in-flight 位并返回 True。调用方拿到 True 后 spawn probe task,task 里必须走
         mark_half_open → probe_omni → record_probe_result(record_probe_result 会清位)。
 
@@ -246,7 +270,10 @@ class OmniCircuitBreaker:
         原子;并发调用只有一个能拿到 True。
         """
         with self._lock:
-            if self._state != CircuitState.OPEN_RECOVERABLE:
+            if self._state not in (
+                CircuitState.OPEN_RECOVERABLE,
+                CircuitState.OPEN_CONFIG,
+            ):
                 return False
             if self._probe_in_flight:
                 return False
@@ -276,7 +303,11 @@ class OmniCircuitBreaker:
     async def mark_half_open(self) -> None:
         """外部驱动:进入 HALF_OPEN(发起 probe 前调)。"""
         with self._lock:
-            if self._state == CircuitState.OPEN_RECOVERABLE:
+            if self._state in (
+                CircuitState.OPEN_RECOVERABLE,
+                CircuitState.OPEN_CONFIG,
+            ):
+                self._half_open_from = self._state
                 self._state = CircuitState.HALF_OPEN
         self._emit()
 
@@ -284,6 +315,7 @@ class OmniCircuitBreaker:
         """用户点「立即重试」;OPEN_RECOVERABLE / OPEN_CONFIG → HALF_OPEN。"""
         with self._lock:
             if self._state in (CircuitState.OPEN_RECOVERABLE, CircuitState.OPEN_CONFIG):
+                self._half_open_from = self._state
                 self._state = CircuitState.HALF_OPEN
                 self._next_probe_at_monotonic = time.monotonic()
         self._emit()
@@ -299,9 +331,9 @@ class OmniCircuitBreaker:
             mono_now = time.monotonic()
             next_ms: int | None = None
             next_in_s: float | None = None
-            if (
-                self._next_probe_at_monotonic is not None
-                and self._state == CircuitState.OPEN_RECOVERABLE
+            if self._next_probe_at_monotonic is not None and self._state in (
+                CircuitState.OPEN_RECOVERABLE,
+                CircuitState.OPEN_CONFIG,
             ):
                 delta_s = max(0.0, self._next_probe_at_monotonic - mono_now)
                 next_ms = now_ms + int(delta_s * 1000)
@@ -315,8 +347,14 @@ class OmniCircuitBreaker:
             since_ms = 0
             if self._state != CircuitState.CLOSED:
                 since_ms = now_ms - int((mono_now - self._state_since) * 1000)
+            ui_state = _STATE_TO_UI[self._state]
+            if (
+                self._state == CircuitState.HALF_OPEN
+                and self._half_open_from == CircuitState.OPEN_CONFIG
+            ):
+                ui_state = _STATE_TO_UI[CircuitState.OPEN_CONFIG]
             return HealthSnapshot(
-                state=_STATE_TO_UI[self._state],
+                state=ui_state,
                 code=self._current_code,
                 message=self._current_message,
                 since_ms=since_ms,
@@ -380,7 +418,12 @@ class OmniCircuitBreaker:
         self._state = CircuitState.OPEN_CONFIG
         self._state_since = time.monotonic()
         self._current_code, self._current_message = err.code, err.message
-        self._next_probe_at_monotonic = None
+        # 慢速自动探测逃生通道:固定周期(不指数增长——config 错不会因等得久而好转,
+        # 周期本身已经够长)。record_probe_result 失败仍是 CONFIG 时会重入本函数,
+        # 自动排下一次。
+        self._next_probe_at_monotonic = (
+            time.monotonic() + self._config_probe_interval_sec
+        )
         self._current_backoff = 0.0
 
     def _transition_to_closed_locked(self) -> None:
