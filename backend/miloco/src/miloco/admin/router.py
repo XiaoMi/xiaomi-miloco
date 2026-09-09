@@ -1467,22 +1467,41 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
         if elapsed_ms < int(RETRY_COOLDOWN_SEC * 1000):
             return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
-    await cb.retry_now()
-    omni = get_settings().model.omni
-    if not omni.api_key:
-        # 无 key:直接标记 probe 失败,回 OPEN_CONFIG
-        await cb.record_probe_result(
-            False,
-            ClassifiedError(
-                "no_key",
-                "未配置 API Key",
-                ErrorCategory.CONFIG,
-            ),
-        )
-        return NormalResponse(code=0, message="ok", data=_full_omni_payload())
-
     try:
-        result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+        await cb.retry_now()
+        omni = get_settings().model.omni
+        if not omni.api_key:
+            # 无 key:直接标记 probe 失败,回 OPEN_CONFIG
+            await cb.record_probe_result(
+                False,
+                ClassifiedError(
+                    "no_key",
+                    "未配置 API Key",
+                    ErrorCategory.CONFIG,
+                ),
+            )
+        else:
+            result = await _probe.probe_omni(omni.model, omni.base_url, omni.api_key)
+            if result.get("ok"):
+                await cb.record_probe_result(True, None)
+            else:
+                code = result.get("code", "unreachable")
+                cat = (
+                    ErrorCategory.CONFIG
+                    if code in ("bad_key", "not_found", "rejected_authed")
+                    else ErrorCategory.RECOVERABLE
+                )
+                await cb.record_probe_result(
+                    False,
+                    ClassifiedError(
+                        code,
+                        result.get("message", ""),
+                        cat,
+                        # rate_limited 时 probe_chat 会在 result 里回带 retry_after_seconds,
+                        # 传给 _grow_backoff_locked 让 backoff 尊重 server Retry-After。
+                        result.get("retry_after_seconds"),
+                    ),
+                )
     except asyncio.CancelledError:
         # 客户端断开 HTTP(用户切页/关 tab/网络抖动)时 FastAPI 抛 CancelledError。
         # 此前 retry_now() 已把 state 置 HALF_OPEN,若不复位则 before_call 永久短路、
@@ -1497,26 +1516,21 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
             ),
         )
         raise
-    if result.get("ok"):
-        await cb.record_probe_result(True, None)
-    else:
-        code = result.get("code", "unreachable")
-        cat = (
-            ErrorCategory.CONFIG
-            if code in ("bad_key", "not_found", "rejected_authed")
-            else ErrorCategory.RECOVERABLE
-        )
+    except Exception as exc:
+        # URL 解析等异常可能发生在 probe 内部 try 之前;仅清位仍会卡在 HALF_OPEN。
+        # 先按既有失败记账回落,同时保留探测代数校验,避免覆盖新配置的恢复状态。
         await cb.record_probe_result(
             False,
             ClassifiedError(
-                code,
-                result.get("message", ""),
-                cat,
-                # rate_limited 时 probe_chat 会在 result 里回带 retry_after_seconds,
-                # 传给 _grow_backoff_locked 让 backoff 尊重 server Retry-After。
-                result.get("retry_after_seconds"),
+                "unreachable",
+                f"probe 抛异常({type(exc).__name__})",
+                ErrorCategory.RECOVERABLE,
             ),
         )
+        raise
+    finally:
+        # 配置读取、无 key 分支及失败记账本身抛异常时,也必须释放探测占位。
+        cb.clear_probe_in_flight()
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
 

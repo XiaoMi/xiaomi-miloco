@@ -158,7 +158,7 @@ async def test_open_config_refreshes_code_on_subsequent_config_error(cb):
 
 # ─── OPEN_CONFIG 逃生通道(慢速自动探测)───────────────────────────────────────
 #
-# 这三条守护本 PR 的核心新增:OPEN_CONFIG 不再是永久黑洞。缺了它们,谁把
+# 以下用例守护本 PR 的核心新增:OPEN_CONFIG 不再是永久黑洞。缺了它们,谁把
 # probe_due / try_arm_probe 里的 OPEN_CONFIG 分支删掉都不会有测试变红——
 # 上方 test_try_arm_probe_false_when_open_config 仍会因"周期未到"而 pass。
 # cb fixture 未传 config_probe_interval_sec,走默认 300s。
@@ -822,3 +822,50 @@ async def test_probe_result_without_reset_still_applies(cb, frozen_time):
     await cb.record_probe_result(False, _cfg("bad_key"))
     assert cb.state_for_test() == CircuitState.OPEN_CONFIG
     assert 299 <= cb.snapshot().next_probe_in_seconds <= 300
+
+
+@pytest.mark.parametrize("manual", [False, True])
+async def test_config_probe_reentry_preserves_episode_start(cb, frozen_time, monkeypatch, manual):
+    """同一轮配置故障连续探测失败,起点保留且每次续排完整慢周期。"""
+    monkeypatch.setattr(time, "time", lambda: frozen_time.now + 1000)
+    for _ in range(3):
+        await cb.record_failure(_cfg())
+    since = cb.snapshot().since_ms
+    for _ in range(2):
+        frozen_time.tick(301)
+        if manual:
+            await cb.retry_now()
+        else:
+            assert cb.try_arm_probe()
+            await cb.mark_half_open()
+        frozen_time.tick(2)
+        await cb.record_probe_result(False, _cfg())
+        assert cb.snapshot().since_ms == since
+        assert cb.snapshot().next_probe_in_seconds == 300
+
+
+async def test_new_config_episode_ignores_stale_half_open_origin(cb, frozen_time, monkeypatch):
+    """跨 CLOSED 的新故障重新计时,不读取上一轮 HALF_OPEN 的残值。"""
+    monkeypatch.setattr(time, "time", lambda: frozen_time.now + 1000)
+    for _ in range(3):
+        await cb.record_failure(_cfg())
+    old_since = cb.snapshot().since_ms
+    await cb.retry_now()
+    await cb.record_probe_result(True, None)
+    frozen_time.tick(100)
+    for _ in range(3):
+        await cb.record_failure(_cfg())
+    assert cb.snapshot().since_ms == old_since + 100_000
+
+
+async def test_recoverable_probe_to_config_starts_new_config_episode(cb, frozen_time, monkeypatch):
+    """从可恢复故障探出配置错误,配置故障起点从本次确认时计。"""
+    monkeypatch.setattr(time, "time", lambda: frozen_time.now + 1000)
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    old_since = cb.snapshot().since_ms
+    frozen_time.tick(10)
+    assert cb.try_arm_probe()
+    await cb.mark_half_open()
+    await cb.record_probe_result(False, _cfg())
+    assert cb.snapshot().since_ms == old_since + 10_000

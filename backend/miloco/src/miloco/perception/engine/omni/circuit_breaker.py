@@ -144,14 +144,14 @@ class OmniCircuitBreaker:
         self._probe_in_flight: bool = False
         # 探测代数:_transition_to_closed_locked 每次 +1;arm 探测(try_arm_probe /
         # retry_now / mark_half_open)时把当前值盖到 _probe_epoch。record_probe_result
-        # 发现两者不等,说明探测在飞期间发生过 CLOSED(改配置 / 测通 / 换档案),它测的
-        # 是旧配置,结果作废——否则迟到的 bad_key 会把刚修好的配置打回 OPEN_CONFIG 再锁
+        # 发现两者不等,说明探测在飞期间发生过 CLOSED(改配置 / 测通 / 换档案 / 并发成功),
+        # 结果已过期,应作废——否则迟到的 bad_key 会把刚修好的配置打回 OPEN_CONFIG 再锁
         # 一个慢周期。OPEN_CONFIG 参与自动探测之后,“后台探测在飞 + 用户正在改配置”
         # 恰是横条引导用户做的事,重叠不再是小概率。
         self._reset_epoch: int = 0
         self._probe_epoch: int = 0
-        # 进入 HALF_OPEN 前的来源态,仅供 snapshot() 决定 HALF_OPEN 的 UI 级别;
-        # 每次进 HALF_OPEN 都会重写,离开 HALF_OPEN 后的残值不会被读到。
+        # 进入 HALF_OPEN 前的来源态,供 UI 级别与配置故障重入时保留计时起点;
+        # 每次进 HALF_OPEN 都会重写,仅在当前状态为 HALF_OPEN 时读取,避免使用离开后的残值。
         self._half_open_from: CircuitState | None = None
         self._on_state_change: list[Callable[[HealthSnapshot], None]] = []
 
@@ -234,14 +234,14 @@ class OmniCircuitBreaker:
         with self._lock:
             self._last_probe_at = time.monotonic()
             self._last_probe_result = "ok" if ok else "fail"
-            # 过期探测:arm 之后发生过 CLOSED(reset_on_config_change 等),这次结果针对
-            # 的是旧配置,只做记账(last_probe_* / 清位),不改状态。只对 arm 过的探测
+            # 过期探测:arm 之后发生过 CLOSED(reset_on_config_change 等),这次结果
+            # 已过期,只做记账(last_probe_* / 清位),不改状态。只对 arm 过的探测
             # 判代数(_probe_in_flight 为 True 才盖过 _probe_epoch);未经 arm 直接调
             # 本方法的路径(仅测试)维持原语义。
             if self._probe_in_flight and self._probe_epoch != self._reset_epoch:
                 self._probe_in_flight = False
                 _emit_logger.info(
-                    "omni CB: 丢弃过期探测结果 ok=%s code=%s(探测期间配置已重置)",
+                    "omni CB: 丢弃过期探测结果 ok=%s code=%s(探测期间熔断已关闭或重置)",
                     ok,
                     err.code if err is not None else None,
                 )
@@ -447,8 +447,13 @@ class OmniCircuitBreaker:
         self._grow_backoff_locked(err)
 
     def _transition_to_open_config_locked(self, err: ClassifiedError) -> None:
+        continuing_config = self._state == CircuitState.OPEN_CONFIG or (
+            self._state == CircuitState.HALF_OPEN
+            and self._half_open_from == CircuitState.OPEN_CONFIG
+        )
+        if not continuing_config:
+            self._state_since = time.monotonic()
         self._state = CircuitState.OPEN_CONFIG
-        self._state_since = time.monotonic()
         self._current_code, self._current_message = err.code, err.message
         # 慢速自动探测逃生通道:固定周期(不指数增长——config 错不会因等得久而好转,
         # 周期本身已经够长)。record_probe_result 失败仍是 CONFIG 时会重入本函数,
