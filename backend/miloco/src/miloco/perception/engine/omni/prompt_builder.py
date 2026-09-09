@@ -670,6 +670,8 @@ def _render_examples(scene: SceneDescriptor) -> str:
     # caption 示范不该叫专名。库非空照旧用带名版——哪怕本轮无参考图、identities 已收敛成
     # unknown/no_person，名册里已确认成员仍该被 caption 叫真名（他们的在场结论来自前几窗
     # 落定的 state，不依赖本轮 gallery）。
+    # 残留窗口：库非空 + 本轮无参考图 + 名册恰好也没有已确认成员时，此窗同样产不出成员名，
+    # 却仍走带名版。属已知权衡（判据不看名册），代价与理由见 constants._EXAMPLE_CHAIN_NO_NAME。
     examples.append(
         _EXAMPLE_CHAIN_NO_NAME if scene.identity_library_empty else _EXAMPLE_CHAIN
     )
@@ -734,11 +736,13 @@ def _build_user_content(
 class _PreparedGallery:
     """本窗口 gallery 段的预备结果——「渲染」与「identities spec 选版」共用的唯一判据。
 
-    ``entries`` 非空 ⟺ 本轮 prompt 里真会出现 ``<gallery>`` 块。空有两种来源，对
+    ``entries`` 非空 ⟺ 本轮 prompt 里真会出现 ``<gallery>`` 块。空有三种来源，对
     调用方而言同解（本轮无参考图可比对 → 用精简版）：「全或无」放弃（某候选 person 的
-    body composite 取不到，原因已打进 ``event=fused_gallery_giveup`` 日志），以及
-    ``gallery_snapshot`` 本就为空（库非空但无可用样本）。调用方不据来源分流，故不携带
-    放弃原因字段——只写不读的状态会误导读者以为有人消费它。
+    body composite 取不到，原因已打进 ``event=fused_gallery_giveup`` 日志）、
+    ``gallery_snapshot`` 本就为空（库非空但无可用样本），以及 ``build_fused_payload``
+    在无候选 / 身份库为空时直接构造空实例、连 pre-flight 都不跑（与
+    ``SceneDescriptor.identity_match_disabled`` 字段说明的三来源对应）。调用方不据来源
+    分流，故不携带放弃原因字段——只写不读的状态会误导读者以为有人消费它。
     """
 
     entries: list[tuple[str, str, bytes, "bytes | None"]]  # (pid, label, body_jpg, face_jpg|None)
