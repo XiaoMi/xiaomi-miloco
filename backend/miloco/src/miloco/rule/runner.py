@@ -618,6 +618,9 @@ class RuleRunner:
 
         条件比的是两列: 旧的 ``perceive_device_ids`` 和 ``condition_dnf``。少了后者
         的话, 改一条 iot 规则的 did 之后新 did 的值与旧 did 的残留会在 OR 里并存。
+
+        丢状态的同时要把「进入动作已经派发过」这件事带过去, 见
+        ``_carry_entered_baseline``。
         """
         existing = self._rules.get(rule.id)
         if existing is not None:
@@ -644,8 +647,55 @@ class RuleRunner:
                 or duration_config_changed
                 or enabled_changed
             ):
+                # direction / enabled 变了不带: 那两种情形动作已经换了家或被停掉,
+                # 不该由旧基线再产一次边沿。
+                carry = (
+                    not direction_changed
+                    and not enabled_changed
+                    and self._has_dispatched_enter(existing)
+                )
                 self._reset_runtime_state(rule.id)
+                if carry:
+                    self._carry_entered_baseline(rule)
         self._rules[rule.id] = rule
+
+    def _has_dispatched_enter(self, rule: Rule) -> bool:
+        """这条 rule 此刻撑着它的 task 吗 —— 口径是「进入动作已经派发出去」。
+
+        排队中的退出抗抖算撑着: 退出边沿虽然发过了, on_exit 还没落地, 状态机那侧
+        仍在 on。
+
+        带 duration 的 session 看 ``state_duration_fired``: 它才是「on_enter 派发
+        过」的标记, ``last_rule_state`` 为真只说明条件成立、时长还没攒够。
+        """
+        state = self._state.get(rule.id)
+        if state is None:
+            return False
+        if (
+            state.exit_debounce_task is not None
+            and not state.exit_debounce_task.done()
+        ):
+            return True
+        if rule.duration_seconds:
+            return state.state_duration_fired
+        return state.last_rule_state
+
+    def _carry_entered_baseline(self, rule: Rule) -> None:
+        """换条件形状时把「已经进入」带到新状态上, 与 ``_rewind_abandoned_exit``
+        是同一条命题: 撤掉一个中间态要连聚合基线一起拨回。
+
+        换条件是一次配置变更、不是一次观测, 状态机那侧因此留在 on。基线跟着整份
+        状态清成假的话, 换完之后第一次观测到假与基线相等、命中 ``update_state``
+        里 ``old == new`` 的早返, 退出边沿再也产不出来 —— 会话型 task 卡在 on,
+        进入时下的设备指令永远收不回来。
+
+        带 duration 时还要一并置 ``state_duration_fired``: 退出边沿被
+        「没配对的 ENTERED」那道闸挡着, 不置位一样退不出去。
+        """
+        state = self._ensure_state(rule.id)
+        state.last_rule_state = True
+        if rule.duration_seconds:
+            state.state_duration_fired = True
 
     def remove_rule(self, rule_id: str) -> None:
         self._rules.pop(rule_id, None)

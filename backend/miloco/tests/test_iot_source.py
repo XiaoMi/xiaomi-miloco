@@ -192,6 +192,24 @@ async def test_offline_device_is_marked_unknown_not_false(store):
 
 
 @pytest.mark.asyncio
+async def test_a_device_absent_from_the_store_is_not_reported_as_offline(store):
+    """从未对齐 / 已被移出家庭 ≠ 设备报了离线: 两种故障、两种修法。
+
+    合成一个原因的话排障只会去查设备的电和网, 而这条 rule 其实已经永久不可能触发。
+    """
+    _prop(store, 1)
+    h = _Harness(store, [_ref()])
+
+    h.source.start()
+    await h.settle()
+
+    assert h.fed == []
+    assert h.source.diagnostics()["rules"]["r1"]["reason"] == (
+        DiagnosticReason.PATH_MISSING.value
+    )
+
+
+@pytest.mark.asyncio
 async def test_missing_leaf_is_marked_unknown(store):
     _online(store)
     h = _Harness(store, [_ref()])

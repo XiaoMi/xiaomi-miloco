@@ -402,6 +402,11 @@ class IotSource:
         成现读之后整条求值路径只有一个取值来源。
         """
         online = self._store.get(f"iot/device/{ref.did}/status/online", MISSING)
+        if online is MISSING:
+            # 容器里根本没有这个设备 (从未对齐 / 已被移出家庭) 与「设备报了离线」是
+            # 两种故障、两种修法: 后者查电和网, 前者这条 rule 已经永久不可能触发。
+            # 属性层已经这么分了, 设备层跟上。
+            return None, DiagnosticReason.PATH_MISSING
         if online is not True:
             return None, DiagnosticReason.DEVICE_OFFLINE
         current = self._store.get(f"iot/device/{ref.did}/prop/{ref.iid}", MISSING)

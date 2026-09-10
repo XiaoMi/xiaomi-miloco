@@ -2534,7 +2534,11 @@ class TestRuleRunnerConcurrencyAndEdgeCases:
     ):
         """Changing condition.perceive_device_ids must drop stale per-source
         state; otherwise an old source's True can keep the OR-aggregate stuck
-        true after it's been removed from the rule."""
+        true after it's been removed from the rule.
+
+        聚合基线不在此列: 它带的是「这条 rule 撑着 task」这个事实, 换条件形状不
+        改变它 —— 见 _carry_entered_baseline。这里要的是旧 source 不再参与聚合,
+        判据取聚合本身。"""
         rule = _make_state_rule(
             rule_id="rule-src",
             on_enter_actions=[_make_action(did="enter-d", iid="prop.2.1")],
@@ -2556,7 +2560,7 @@ class TestRuleRunnerConcurrencyAndEdgeCases:
         runner.add_rule(replaced)
         runner.set_task_actions('test_task-rule-src', {'on_enter_actions': [{'did': 'enter-d', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None})
         assert ("rule-src", "cam-002") not in runner._last_source_state
-        assert "rule-src" not in runner._last_rule_state
+        assert runner.is_condition_satisfied("rule-src") is None
 
 
 # ============================================================
@@ -3279,7 +3283,10 @@ class TestRuleRunnerStateDuration:
     async def test_state_duration_config_change_resets_state(
         self, runner_fast, mock_miot_proxy
     ):
-        """同 id add_rule 改 duration_seconds → window+fired 全清."""
+        """同 id add_rule 改 duration_seconds → 窗口清掉、重新累积。
+
+        「on_enter 已派发」不在此列: 清掉的话退出边沿会被「没配对的 ENTERED」
+        那道闸永久挡住, 会话卡在 on —— 见 _carry_entered_baseline。"""
         rule1 = _make_state_duration_rule(
             rule_id="rule-sd-cfg", duration_seconds=2, duration_ratio=1.0
         )
@@ -3302,7 +3309,7 @@ class TestRuleRunnerStateDuration:
             runner_fast.set_task_actions('test_task', {'on_enter_actions': [{'did': 'enter-d', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-d', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
             assert "rule-sd-cfg" not in runner_fast._duration_window
             assert "rule-sd-cfg" not in runner_fast._last_duration_round
-            assert "rule-sd-cfg" not in runner_fast._state_duration_fired
+            assert "rule-sd-cfg" in runner_fast._state_duration_fired
 
     @pytest.mark.asyncio
     async def test_state_duration_disable_enable_resets_state(

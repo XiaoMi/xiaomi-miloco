@@ -497,8 +497,11 @@ async def test_patch_can_replace_the_iot_condition(service):
 
 
 @pytest.mark.asyncio
-async def test_patch_replacing_the_condition_clears_the_runtime_state(service):
-    """改完条件项要清运行态：旧 did 的残留不能与新 did 的值在 OR 里并存。"""
+async def test_patch_replacing_the_condition_drops_the_old_source(service):
+    """改完条件项要清掉旧 did 的残留：它不能与新 did 的值在 OR 里并存。
+
+    聚合基线是另一回事, 换条件形状不动它 —— 见 _carry_entered_baseline。
+    """
     stored = _stored_iot_rule()
     service._repo.get_by_id = MagicMock(return_value=stored)
     # runner 里那份是独立对象 —— 生产里它来自 DB 的另一次构造。共用一个对象的话，
@@ -511,7 +514,8 @@ async def test_patch_replacing_the_condition_clears_the_runtime_state(service):
         "r1", RuleUpdate(condition_dnf=_iot_dnf(iid="5.1", value=2))
     )
 
-    assert "r1" not in service._runner._state
+    assert service._runner._state["r1"].sources == {}
+    assert service._runner.is_condition_satisfied("r1") is None
 
 
 @pytest.mark.asyncio
