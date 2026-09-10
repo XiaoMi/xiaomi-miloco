@@ -261,6 +261,71 @@ async def get_device_spec(did: str, current_user: str = Depends(verify_token)):
     return NormalResponse(code=0, message="ok", data=data)
 
 
+def build_state_stats(store, push_writer) -> dict:
+    """容器与推送写入器的计数。
+
+    **写入器缺席给空 dict，不抛。** 接线在 ``initialize()`` 里，而端点在那之前就可达
+    —— 抛 AttributeError 会让诊断接口在最需要它的时候（启动异常）反而用不了。
+    """
+    return {
+        "store": store.stats(),
+        "push": push_writer.stats() if push_writer is not None else {},
+    }
+
+
+def build_state_dump(store, pattern: str, limit: int) -> dict:
+    """按 pattern 取容器的文本转储，超长截断。
+
+    **截断而不是拒绝，但 ``total_lines`` 必须是截断前的真实行数、``truncated`` 必须
+    明说** —— 否则调用方会把截断后的 lines 当成整棵树。
+    """
+    lines = store.dump(pattern).splitlines()
+    total_lines = len(lines)
+    return {
+        "pattern": pattern,
+        "total_lines": total_lines,
+        "truncated": total_lines > limit,
+        "lines": lines[:limit],
+    }
+
+
+@router.get(
+    path="/state/stats",
+    summary="State container and push counters",
+    response_model=NormalResponse,
+)
+async def get_state_stats(current_user: str = Depends(verify_token)):
+    """容器与推送的计数。**debug 级日志**：这个端点天然会被轮询（判「推送通没通」就
+    是反复读它），一边 tail 日志排查一边轮询它，自己的轮询会刷进正在读的那份日志。"""
+    logger.debug("State stats API called, user=%s", current_user)
+    data = build_state_stats(manager.state_store, manager.iot_push_writer)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.get(
+    path="/state/dump",
+    summary="Dump the state container",
+    response_model=NormalResponse,
+)
+async def get_state_dump(
+    pattern: str = Query("**", description="路径 pattern，例如 iot/device/*/prop/*"),
+    limit: int = Query(500, ge=1, le=5000),
+    current_user: str = Depends(verify_token),
+):
+    """按 pattern 转储容器。比 stats 重、调用少，留一条 info 痕迹是合理的。"""
+    logger.info(
+        "State dump API called, user=%s, pattern=%s, limit=%d",
+        current_user,
+        pattern,
+        limit,
+    )
+    try:
+        data = build_state_dump(manager.state_store, pattern, limit)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return NormalResponse(code=0, message="ok", data=data)
+
+
 @router.post(
     path="/devices/{did}/control",
     summary="Control device property or action",

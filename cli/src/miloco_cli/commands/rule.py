@@ -36,6 +36,129 @@ def _save_rule_cursor(cursor_ms: int) -> None:
     atomic_write(_rule_cursor_file(), {"cursor_ms": cursor_ms})
 
 
+_IOT_OPS = ("eq", "ne", "gt", "gte", "lt", "lte")
+
+# MIoT 的 format 取值域。整数族全部按 int 解析；bool 只接受 true / false ——
+# 接受 1 / 0 会让「开关配了数值」这类错误在 CLI 层就溜过去。
+_IOT_INT_FORMATS = (
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+)
+
+
+def iot_condition_options(func):
+    """``--iot-did/-iid/-op/-value`` 四件套。create 与 update 共用一份。"""
+    options = (
+        click.option("--iot-did", "iot_did", default=None, help="设备 did"),
+        click.option(
+            "--iot-iid",
+            "iot_iid",
+            default=None,
+            help="属性 iid，形如 5.1（与状态容器的路径段一致）",
+        ),
+        click.option(
+            "--iot-op",
+            "iot_op",
+            default=None,
+            type=click.Choice(_IOT_OPS),
+            help="比较符",
+        ),
+        click.option(
+            "--iot-value",
+            "iot_value",
+            default=None,
+            help="阈值。类型按该属性 spec 的 format 解析",
+        ),
+    )
+    for option in reversed(options):
+        func = option(func)
+    return func
+
+
+def _iot_args_given(iot_did, iot_iid, iot_op, iot_value) -> bool:
+    """四个同时给或同时不给。给了一部分直接报错 —— 半套参数建不出条件项。"""
+    given = [x is not None for x in (iot_did, iot_iid, iot_op, iot_value)]
+    if any(given) and not all(given):
+        raise click.UsageError(
+            "--iot-did / --iot-iid / --iot-op / --iot-value 要么四个都给, 要么都不给"
+        )
+    return all(given)
+
+
+def _fetch_prop_format(did: str, iid: str) -> str:
+    """去 ``device spec`` 拿这条属性的 format。
+
+    **拿不到就报错退出，不猜类型。** 猜错的后果是规则建得成功、运行期恒判类型不兼容、
+    条件恒未就绪 —— 一个查起来很远的失败。
+    """
+    from miloco_cli.client import api_get
+
+    resp = api_get(f"/api/miot/devices/{did}/spec")
+    spec = ((resp or {}).get("data") or {}).get("spec") or {}
+    if not spec:
+        raise click.UsageError(f"拿不到设备 {did} 的 spec, 无法解析 --iot-value")
+    # CLI 参数用裸 siid.piid（与容器路径段一致），spec 输出里的键是 prop.<siid>.<piid>
+    entry = spec.get(f"prop.{iid}")
+    if not isinstance(entry, dict):
+        raise click.UsageError(f"设备 {did} 的 spec 里没有属性 prop.{iid}")
+    return str(entry.get("format") or "")
+
+
+def _parse_iot_value(raw: str, fmt: str, iid: str):
+    if fmt == "bool":
+        if raw.lower() not in ("true", "false"):
+            raise click.UsageError(
+                f"属性 prop.{iid} 是布尔, --iot-value 只接受 true / false"
+            )
+        return raw.lower() == "true"
+    if fmt in _IOT_INT_FORMATS:
+        try:
+            return int(raw)
+        except ValueError as e:
+            raise click.UsageError(
+                f"属性 prop.{iid} 是整数, --iot-value 解析失败"
+            ) from e
+    if fmt == "float":
+        try:
+            return float(raw)
+        except ValueError as e:
+            raise click.UsageError(
+                f"属性 prop.{iid} 是浮点, --iot-value 解析失败"
+            ) from e
+    if fmt == "string":
+        return raw
+    raise click.UsageError(
+        f"属性 prop.{iid} 的 format={fmt!r} 不是标量, 不能当 iot 条件项"
+    )
+
+
+def _build_iot_dnf(iot_did, iot_iid, iot_op, iot_value) -> dict:
+    fmt = _fetch_prop_format(iot_did, iot_iid)
+    value = _parse_iot_value(iot_value, fmt, iot_iid)
+    return {
+        "any_of": [
+            [
+                {
+                    "source_type": "iot",
+                    "spec": {
+                        "did": iot_did,
+                        "iid": iot_iid,
+                        "op": iot_op,
+                        "value": value,
+                    },
+                    "negate": False,
+                }
+            ]
+        ]
+    }
+
+
 @click.group("rule")
 def rule_group():
     """规则操作：列表 / 创建 / 更新 / 启用 / 禁用 / 删除 / 触发 / 日志 / 日志清理。"""
@@ -72,6 +195,27 @@ def rule_list(enabled_only, show_milestone, pretty):
     print_result(data, pretty)
 
 
+@rule_group.command("iot-diagnostics")
+@click.option("--pretty", is_flag=True)
+def rule_iot_diagnostics(pretty):
+    """iot 触发源的自述：每条条件项现在是真是假还是未就绪、为什么。
+
+    \b
+    reason 的取值：
+    - ok              正常求值
+    - device_offline  设备离线
+    - path_missing    容器里没有这条属性叶子
+    - eval_failed     类型不兼容，求值做不了
+    - not_seeded      还没算过
+
+    **consumer_alive 要单独看。** 消费协程一死，每条 rule 的 reason 都停在最后一次
+    求值时的 ok —— 而那正是最需要报警的时刻。
+    """
+    from miloco_cli.client import api_get
+
+    print_result(api_get(f"{API_PREFIX}/iot/diagnostics"), pretty=pretty)
+
+
 # ---------------------------------------------------------------------------
 # create
 # ---------------------------------------------------------------------------
@@ -92,7 +236,14 @@ def rule_list(enabled_only, show_milestone, pretty):
         "用户未明确指定设备时优先不填。"
     ),
 )
-@click.option("--condition", "query_text", required=True, help="触发条件描述（自然语言）")
+@click.option(
+    "--condition",
+    "query_text",
+    required=False,
+    default=None,
+    help="触发条件描述（自然语言）—— 摄像头视觉判定走这个",
+)
+@iot_condition_options
 @click.option(
     "--mode",
     "mode_value",
@@ -222,6 +373,10 @@ def rule_create(
     task_id,
     perceive_devices,
     query_text,
+    iot_did,
+    iot_iid,
+    iot_op,
+    iot_value,
     mode_value,
     direction_value,
     lifecycle_value,
@@ -245,6 +400,20 @@ def rule_create(
     miloco-create-task SKILL。
     """
     from miloco_cli.client import api_post
+
+    # ---- 0. 条件：--condition 与 iot 四件套恰好给一组 ----
+    # 这两条报的是**参数用法**，不是「条件不能为空」——真正拦住空条件的是服务端的
+    # 非空校验，那是必经处（API 直调绕过 CLI）。摘掉 required=True 之后有它在，
+    # 用户看到的是贴合 CLI 参数的错误，而不是一个从服务端回来的字段级报错。
+    iot_given = _iot_args_given(iot_did, iot_iid, iot_op, iot_value)
+    if query_text is not None and iot_given:
+        raise click.UsageError(
+            "--condition 与 iot 四件套不能一起给: 一条规则只有一个条件项"
+        )
+    if query_text is None and not iot_given:
+        raise click.UsageError(
+            "要给 --condition（摄像头视觉判定）或那四个 --iot-* 参数（设备属性变化）"
+        )
 
     # ---- 1. lifecycle ----
     if lifecycle_value == "temporary" and not terminate_when:
@@ -325,9 +494,10 @@ def rule_create(
         "mode": _DIRECTION_TO_MODE[direction],
         "direction": direction,
         "lifecycle": lifecycle_value,
+        # iot rule 的 condition 是占位: 设备列表留空、query 由服务端按谓词渲染。
         "condition": {
-            "perceive_device_ids": list(perceive_devices),
-            "query": query_text,
+            "perceive_device_ids": [] if iot_given else list(perceive_devices),
+            "query": "" if iot_given else query_text,
         },
         "actions": actions,
         "action_descriptions": list(action_descs),
@@ -338,6 +508,11 @@ def rule_create(
         "on_target_desc": on_target_desc,
         "terminate_when": terminate_when,
     }
+    if iot_given:
+        # iot rule 由 CLI 直接构造 condition_dnf —— 它没有旧字段要反推, DNF 就是它的
+        # 原始形态。omni rule 保持现状传 condition, 由服务端反推: 让 CLI 也构造的话,
+        # 「condition → DNF」会有第二份实现, 而 CLI 与 backend 跨进程没法共用函数。
+        payload["condition_dnf"] = _build_iot_dnf(iot_did, iot_iid, iot_op, iot_value)
     if exit_debounce_seconds is not None:
         payload["exit_debounce_seconds"] = exit_debounce_seconds
     if duration_seconds is not None:
@@ -353,6 +528,7 @@ def rule_create(
 @click.argument("rule_id")
 @click.option("--name", default=None, help="新规则名称")
 @click.option("--condition", "query_text", default=None, help="新触发条件")
+@iot_condition_options
 @click.option(
     "--source",
     "perceive_devices",
@@ -455,6 +631,10 @@ def rule_update(
     rule_id,
     name,
     query_text,
+    iot_did,
+    iot_iid,
+    iot_op,
+    iot_value,
     perceive_devices,
     mode_value,
     direction_value,
@@ -491,9 +671,15 @@ def rule_update(
     if duration_ratio is not None and (duration_ratio <= 0 or duration_ratio > 1.0):
         _exit_error("--duration-ratio must be in (0, 1]")
 
+    iot_given = _iot_args_given(iot_did, iot_iid, iot_op, iot_value)
+    if query_text is not None and iot_given:
+        raise click.UsageError("--condition 与 iot 四件套不能一起给: 改条件只有一条路")
+
     payload: dict = {}
     if name is not None:
         payload["name"] = name
+    if iot_given:
+        payload["condition_dnf"] = _build_iot_dnf(iot_did, iot_iid, iot_op, iot_value)
     if mode_value is not None or direction_value is not None:
         # 两个字段要一起改: mode 列 NOT NULL 且表达不了 exit, 只改一个会留下
         # 「mode=state 而 direction=exit」这种自相矛盾的行。

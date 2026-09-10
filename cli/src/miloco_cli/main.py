@@ -34,6 +34,7 @@ from miloco_cli.commands.rule import rule_group
 from miloco_cli.commands.scene import scene_group
 from miloco_cli.commands.scope import scope_group
 from miloco_cli.commands.service import service_group
+from miloco_cli.commands.state import state_group
 from miloco_cli.commands.task import task_group
 from miloco_cli.commands.time_compute import time_compute_cmd
 
@@ -94,6 +95,7 @@ cli.add_command(config_group)
 cli.add_command(debug_group)
 cli.add_command(notify_group)
 cli.add_command(scope_group)
+cli.add_command(state_group)
 cli.add_command(doctor_cmd)
 cli.add_command(monitor_group)
 cli.add_command(dashboard_cmd)

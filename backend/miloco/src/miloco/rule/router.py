@@ -115,6 +115,32 @@ async def get_all_rules(
 # ---- Logs (must be before /{rule_id} to avoid path conflict) ----
 
 
+def build_iot_diagnostics(iot_source) -> dict:
+    """iot 源的自述。源没接上来时给一份「没在跑」而不是抛。
+
+    容器接线在 ``initialize()`` 里，端点在那之前就可达 —— 抛异常会让诊断接口在最需要
+    它的时候反而用不了。
+    """
+    if iot_source is None:
+        return {"consumer_alive": False, "consumer_exit": "iot 源没有启动", "rules": {}}
+    return iot_source.diagnostics()
+
+
+@router.get(
+    "/iot/diagnostics",
+    summary="IoT trigger source diagnostics",
+    response_model=NormalResponse,
+)
+async def get_iot_diagnostics(current_user: str = Depends(verify_token)):
+    """每条 iot 条件项现在是真是假还是未就绪、为什么，以及消费协程还活着吗。
+
+    **debug 级日志**：读诊断不该在诊断对象的日志里留痕。
+    """
+    logger.debug("IoT diagnostics API called, user=%s", current_user)
+    data = build_iot_diagnostics(get_manager().rule_service.iot_source)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
 @router.get("/logs", summary="Get Rule Logs", response_model=NormalResponse)
 async def get_logs(
     limit: int = Query(10, ge=1, le=500, description="Number of recent logs"),
