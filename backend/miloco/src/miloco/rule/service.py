@@ -824,6 +824,15 @@ class RuleService:
         _validate_query_not_empty(rule.condition.query)
         if source_type == OMNI_SOURCE_TYPE:
             _validate_query_phrasing(rule.condition.query)
+        if source_type == IOT_SOURCE_TYPE and rule.duration_seconds:
+            # _evaluate_duration 的滑窗按墙上时钟分 round、采样断流用 0 补齐, 且窗口
+            # 未填满就早返。事件驱动的喂法填不满窗口 ——「空调开了两小时」这条规则永远
+            # 不会触发。拒绝比静默不触发好: 后者用户看不出来, 而且规则看起来配得完全
+            # 正确。iot 的「持续时长」单独立项。
+            raise ValidationException(
+                "iot 条件项不支持 duration_seconds: 累计滑窗要连续采样, "
+                "而属性是被推来的、填不满窗口, 规则会永远不触发"
+            )
 
     def _validate_condition_against_dnf(
         self, rule: Rule, source_type: str, stored_query: str | None

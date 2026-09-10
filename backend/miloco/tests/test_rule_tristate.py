@@ -239,3 +239,53 @@ async def test_debounce_rechecks_condition_before_firing(monkeypatch):
     await asyncio.sleep(0.05)
 
     assert events == ["ENTERED"]
+
+
+# ── 事件型 task：重新触发靠条件层 ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_event_type_rule_fires_again_after_the_condition_goes_false(monkeypatch):
+    """一条 enter 型的 iot rule 独占 task 时，runtime_state 恒 off，每次进信号都执行。
+
+    **必须走完整的假中间态**：只喂两次真是 STILL_IN，条件层压根不产生第二次边沿。
+    这是「第一次好用、之后再也不响」那个现象的判定点 —— 它依赖能收到「条件转假」的
+    那次推送。
+    """
+    rule = _rule(mode=RuleMode.EVENT)
+    runner = _runner([rule], monkeypatch)
+    runner.set_task_actions("t1", {"on_enter_desc": "播报"})
+    events: list[str] = []
+
+    async def _record(rule_, event, *_a, **_kw):
+        events.append(event.value)
+        return None
+
+    runner._fire = _record  # ty:ignore[invalid-assignment]
+
+    for value in (True, False, True):
+        await runner.update_state("r1", "cam1", value, "", skip_flicker=True)
+    await asyncio.sleep(0.05)
+
+    assert events == ["ENTERED", "ENTERED"]
+
+
+@pytest.mark.asyncio
+async def test_event_type_rule_does_not_fire_twice_without_the_false(monkeypatch):
+    """上一条的反向：不走假中间态就只有一次。两条一起才把「靠条件层重新触发」钉住。"""
+    rule = _rule(mode=RuleMode.EVENT)
+    runner = _runner([rule], monkeypatch)
+    runner.set_task_actions("t1", {"on_enter_desc": "播报"})
+    events: list[str] = []
+
+    async def _record(rule_, event, *_a, **_kw):
+        events.append(event.value)
+        return None
+
+    runner._fire = _record  # ty:ignore[invalid-assignment]
+
+    for _ in range(3):
+        await runner.update_state("r1", "cam1", True, "", skip_flicker=True)
+    await asyncio.sleep(0.05)
+
+    assert events == ["ENTERED"]

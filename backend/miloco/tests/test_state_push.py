@@ -9,8 +9,9 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from miloco.miot.state_push import SOURCE, IotPushWriter, write_online
+from miloco.miot.state_push import SOURCE, IotPushWriter, write_online, write_prop
 from miloco.state import MISSING, StateStore
+from miloco.utils.time_utils import now_ms
 
 
 @pytest.fixture
@@ -247,3 +248,52 @@ async def test_a_push_travels_from_the_sdk_callback_into_the_container(store):
 
     assert store.get("iot/device/d1/prop/2.1") == 26
     manager._prop_top_up.deinit()
+
+
+# ── 重连拉属性：不用旧值盖掉更新的值 ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_pull_does_not_overwrite_a_value_that_arrived_during_it(store):
+    """拉的往返中途推送到达的那条，不能被云端缓存里的旧值盖掉。
+
+    容器没有时间戳可仲裁的话盖完 last_reported 是当下，事后看不出来。
+    """
+    started = now_ms()
+    # 往返中途到达的推送：last_reported 不早于本次拉取开始
+    write_prop(store, "d1", "2.1", 30)
+
+    written = await _writer(store).write_pulled_props(
+        "d1", {"2.1": 26}, keep_reported_since=started
+    )
+
+    assert written == 0
+    assert store.get("iot/device/d1/prop/2.1") == 30
+
+
+@pytest.mark.asyncio
+async def test_a_pull_overwrites_a_value_older_than_the_pull(store):
+    """与上一条方向相反：断连前写下的旧值就是要被覆盖的那些。
+
+    判据写成「已经在树上就不写」时这条会红 —— 那正是上线补拉的判据，套到重连上会让
+    整条恢复路径空转。
+    """
+    write_prop(store, "d1", "2.1", 26)
+
+    written = await _writer(store).write_pulled_props(
+        "d1", {"2.1": 30}, keep_reported_since=now_ms() + 1000
+    )
+
+    assert written == 1
+    assert store.get("iot/device/d1/prop/2.1") == 30
+
+
+@pytest.mark.asyncio
+async def test_the_top_up_default_keeps_everything_already_in_the_tree(store):
+    """上线补拉不传 keep_reported_since：已经在树上的一条都不动。"""
+    write_prop(store, "d1", "2.1", 26)
+
+    written = await _writer(store).write_pulled_props("d1", {"2.1": 30})
+
+    assert written == 0
+    assert store.get("iot/device/d1/prop/2.1") == 26

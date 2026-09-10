@@ -998,6 +998,57 @@ def test_full_view_exposes_rule_direction(service):
     assert [b.direction for b in view.rule_briefs] == ["exit"]
 
 
+def test_an_iot_rule_stays_in_the_rule_briefs(real_db):
+    """iot rule 是住户自己的意图, 而且本次主场景是它独占一个 task —— 照达标规则那样
+    藏起来的话, 抽屉里那个 task 会走「无触发条件」那个分支, 而住户日志里又显示着它的
+    条件, 界面自相矛盾。
+
+    源字段一起断: 前端按它决定条件框能不能编辑。
+    """
+    from miloco.rule.schema import ConditionItem, RuleConditionDNF
+
+    service = _service_with_rule_stub(None)
+    _mk_task(service)
+    rule = Rule(
+        name="[t1] 门开了",
+        task_id="t1",
+        mode=RuleMode.EVENT,
+        condition=RuleCondition(perceive_device_ids=[], query="玄关门锁 门状态 = 开"),
+        condition_dnf=RuleConditionDNF(
+            any_of=[
+                [
+                    ConditionItem(
+                        source_type="iot",
+                        spec={"did": "d1", "iid": "5.1", "op": "eq", "value": 1},
+                    )
+                ]
+            ]
+        ),
+        action_descriptions=["播报"],
+    )
+    RuleRepo().create(rule)
+
+    view = service.get_full_view("t1")
+    assert [b.source_type for b in view.rule_briefs] == ["iot"]
+
+
+def test_an_omni_rule_reports_the_omni_source(real_db):
+    """与上一条方向相反：源字段恒 "iot" 或恒 "omni" 时只有一条会红。"""
+    service = _service_with_rule_stub(None)
+    _mk_task(service)
+    rule = Rule(
+        name="[t1] 有人",
+        task_id="t1",
+        mode=RuleMode.EVENT,
+        condition=RuleCondition(perceive_device_ids=["cam1"], query="有人经过"),
+        action_descriptions=["播报"],
+    )
+    RuleRepo().create(rule)
+
+    view = service.get_full_view("t1")
+    assert [b.source_type for b in view.rule_briefs] == ["omni"]
+
+
 def test_set_actions_clearing_a_static_slot_writes_empty_list(real_db):
     """``*_actions`` 三列是 NOT NULL —— 清空它们只能写空列表, 写 null 会直接崩。"""
     from miloco.task.schema import TaskActionsUpdateRequest

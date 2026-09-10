@@ -631,3 +631,29 @@ async def test_re_enabling_a_task_seeds_its_iot_rules(service, recording):
     assert recording.calls.index("reconfigure") < recording.calls.index(
         "seed_rules:['r1']"
     )
+
+
+@pytest.mark.asyncio
+async def test_duration_seconds_on_an_iot_rule_is_rejected(service):
+    """滑窗按墙上时钟分 round、断流用 0 补齐，事件驱动的喂法填不满窗口。
+
+    拒绝比静默不触发好：后者用户看不出来，而且规则看起来配得完全正确。
+    """
+    with pytest.raises(ValidationException, match="duration_seconds"):
+        await service.create_rule(_iot_rule(duration_seconds=120))
+
+
+@pytest.mark.asyncio
+async def test_duration_seconds_on_an_omni_rule_is_still_allowed(service):
+    """与上一条方向相反：判据写成「一律拒」时这条会红。"""
+    rule = Rule(
+        id="",
+        name="学习了两小时",
+        task_id="t1",
+        direction=RuleDirection.ENTER,
+        condition=RuleCondition(perceive_device_ids=["cam-001"], query="孩子在书桌前"),
+        action_descriptions=["播报"],
+        duration_seconds=120,
+    )
+
+    assert await service.create_rule(rule)
