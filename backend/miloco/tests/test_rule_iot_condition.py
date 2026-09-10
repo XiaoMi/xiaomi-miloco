@@ -32,9 +32,11 @@ _DOOR_STATUS = {
     "readable": False,
     "writeable": False,
     "notify": True,
+    # 真机 spec 的形状：name 是英文、description 是多语言转换后的文本。渲染给住户
+    # 看的那句要取后者 —— 只写一个字段的话「取错了字段」这件事分不出来。
     "value_list": [
-        {"name": "开", "value": 1},
-        {"name": "关", "value": 2},
+        {"name": "Open", "value": 1, "description": "开"},
+        {"name": "Close", "value": 2, "description": "关"},
     ],
 }
 _BATTERY = {
@@ -707,3 +709,28 @@ async def test_patching_an_omni_query_to_empty_is_rejected(service):
 
     with pytest.raises(ValidationException, match="不能为空"):
         await service.patch_rule("r1", RuleUpdate(condition={"query": "  "}))
+
+
+@pytest.mark.asyncio
+async def test_the_rendered_value_uses_the_translated_label(service):
+    """真机 spec 里 name 是英文（Open / Cool），description 才是住户看得懂的那个。
+
+    取错字段的话渲染出来是「玄关门锁 门 门状态 = Open」。
+    """
+    await service.create_rule(_iot_rule())
+
+    assert service._repo.create.call_args[0][0].condition.query.endswith("= 开")
+
+
+@pytest.mark.asyncio
+async def test_the_rendered_value_falls_back_to_the_english_name(service):
+    """标准库没收录那条枚举时只有英文名，那是上游数据的事 —— 退回它而不是显示裸数字。"""
+    spec = {k: dict(v) for k, v in _SPEC.items()}
+    spec["prop.5.1"]["value_list"] = [{"name": "Open", "value": 1}]
+    service._manager.miot_service.get_device_spec = AsyncMock(
+        return_value={"did": DID, "name": "玄关门锁", "spec": spec}
+    )
+
+    await service.create_rule(_iot_rule())
+
+    assert service._repo.create.call_args[0][0].condition.query.endswith("= Open")

@@ -99,12 +99,18 @@ def render_iot_condition(
 
 
 def _value_label(prop_entry: dict[str, Any], value: Any) -> str:
-    """枚举值换成它的名字，别的原样。``开`` 比 ``1`` 有意义得多。"""
+    """枚举值换成它的名字，别的原样。``制冷`` 比 ``1`` 有意义得多。
+
+    优先取 ``description``（多语言转换后的文本），退回 ``name``（spec 的英文名）——
+    这句是给住户看的。标准库没收录那条枚举时两者都是英文，那是上游数据的事。
+    """
     for choice in prop_entry.get("value_list") or []:
-        if isinstance(choice, dict) and choice.get("value") == value:
-            name = str(choice.get("name") or "").strip()
-            if name:
-                return name
+        if not isinstance(choice, dict) or choice.get("value") != value:
+            continue
+        for key in ("description", "name"):
+            label = str(choice.get(key) or "").strip()
+            if label:
+                return label
     return str(value)
 
 

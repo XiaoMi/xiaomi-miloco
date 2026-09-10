@@ -1998,7 +1998,11 @@ class MiotProxy:
                     ]
                 if s.value_list:
                     entry["value_list"] = [
-                        {"name": v.name, "value": v.value} for v in s.value_list
+                        # name 是 spec 的英文名（agent 认它）, description 是多语言
+                        # 转换后的文本（住户看它）。两个都带: 少了后者, 服务端渲染
+                        # 条件描述时只能拿英文名去拼一句给住户看的话。
+                        {"name": v.name, "value": v.value, "description": v.description}
+                        for v in s.value_list
                     ]
                 if s.type_name:
                     entry["type_name"] = s.type_name

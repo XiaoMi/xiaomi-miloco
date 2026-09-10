@@ -53,6 +53,31 @@ async def test_notify_reaches_spec_entry():
 
 
 @pytest.mark.asyncio
+async def test_enum_entries_carry_the_translated_label():
+    """spec 的 name 是英文（Open / Cool），description 才是住户看得懂的那个。
+
+    服务端渲染 iot 条件描述时取的是后者 —— entry 里不带它的话，渲染只能拿英文名
+    去拼一句给住户看的话。
+    """
+    from miot.spec import MIoTSpecValueListItem
+
+    prop = _lite(
+        "prop.0.2.2",
+        readable=True,
+        value_list=[
+            MIoTSpecValueListItem(name="Cool", value=1, description="制冷"),
+        ],
+    )
+    proxy = _proxy_with_spec({"prop.0.2.2": prop})
+
+    spec = await proxy._fetch_device_spec("urn:test:aircond")
+
+    assert spec["prop.2.2"]["value_list"] == [
+        {"name": "Cool", "value": 1, "description": "制冷"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_read_only_property_reports_notify_false():
     """能读但不推的属性 notify 为假 —— 与上一条一起，把这一位钉成真实的 access 位
     而不是恒真的占位。"""
