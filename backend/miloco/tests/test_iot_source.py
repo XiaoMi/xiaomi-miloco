@@ -433,3 +433,24 @@ async def test_the_reconnect_pull_is_delayed(store):
     await asyncio.sleep(0.02)
 
     assert h.pulls == []
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_summarises_by_reason(store):
+    """逐条看答不了「现在有几条规则因为设备离线而瞎着」，而那是上线后第一个会被
+    问到的。四种原因分开记，不合并成一句「未就绪」—— 排障方向完全不同。"""
+    _online(store, did="d1")
+    _prop(store, "on", did="d1")
+    _online(store, did="d2", value=False)
+    h = _Harness(
+        store,
+        [_ref("r1", did="d1", op="ne", value=1), _ref("r2", did="d2")],
+    )
+
+    h.source.start()
+    await h.settle()
+
+    assert h.source.diagnostics()["by_reason"] == {
+        "eval_failed": 1,
+        "device_offline": 1,
+    }

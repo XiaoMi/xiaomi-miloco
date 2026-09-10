@@ -396,11 +396,18 @@ class IotSource:
         次求值时的 ok，而那正是最需要报警的时刻。
         """
         consumer = self._consumer
+        by_reason: dict[str, int] = {}
+        for diagnostic in self._diagnostics.values():
+            key = diagnostic.reason.value
+            by_reason[key] = by_reason.get(key, 0) + 1
         return {
             "consumer_alive": consumer is not None and not consumer.done(),
             "consumer_exit": self._consumer_exit,
             "pending": len(self._pending),
             "indexed_rules": sum(len(v) for v in self._index.values()),
+            # 按原因汇总: 逐条看答不了「现在有几条规则因为设备离线而瞎着」, 而那是
+            # 这个功能上线后第一个会被问到的。
+            "by_reason": by_reason,
             "rules": {
                 rule_id: {
                     "value": d.value,
