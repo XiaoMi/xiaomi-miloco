@@ -54,6 +54,7 @@ user-facing text 仅在两个时机出现：
 1. 含 on-target-desc 时 task → record → rule 顺序完成装配：Y / N / NA
 2. 终态 §响应动作 同时含「触发后做什么」+「记录什么」：Y / N
 3. 每条装配提示「怎么改」字段给出用户可直接复述的短语：Y / N
+4. iot 规则的 did / iid / value 逐个抄自本轮 device spec 或设备目录的真实输出：Y / N / NA
 ```
 
 ## 装配提示元规则
@@ -129,7 +130,7 @@ Rule/Schedule/Record 是子组件存在性（Y/N）；Lifecycle 是 task 整体�
 
 **Y** = 用户描述需要系统**持续观察现实世界**才能触发的场景，含以下任一语义：
 
-- **环境状态变化**：人在/不在、设备开关状态、温度湿度烟雾等环境量异常
+- **环境状态变化**：人在/不在、设备开关状态、温度湿度烟雾等环境量异常（源走 §Rule.source 判，不默认摄像头）
 - **人体可观测动作或行为**：任何能被摄像头或麦克风识别的人体动作或姿态（瞬时如吃药/咳嗽/按门铃，持续如看书/写作业/玩手机）
 - **人身安全异常**：摔倒、入侵、求救、火灾相关
 - **计数/累计数字目标**：N 次/杯/个 或 累计 N 小时/分钟
@@ -258,7 +259,42 @@ temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性�
    - **持续行为 + 一次性通知**（写作业的时候告诉我 / 久坐 N 分钟提醒 / 看电视 N 分钟提醒 等；行为持续但响应是一次性 desc 通知）
    - **触发条件含持续时长** → 用 `duration_seconds` 表达，不改 direction
 
+### Rule.source（omni / iot）
+
+**第 1 步 · 找候选属性。禁止凭常识填 did / iid，只用本轮真实拿到的输出。**
+
+优先看 system context `## 设备目录` 段，找 access 含 `n` 的属性。缺失或未覆盖 → `miloco-cli device list`（**不带 `--room`**：房间名只能来自用户原话，本步推出来的房间名不算，也不许带到 §Rule.感知设备）+ 对候选设备跑 `miloco-cli device spec <did>`。
+
+access 列：`w` 可写 / `r` 可读 / `n` 设备主动推送。**只有 `r` 没有 `n` 的属性不能当触发源**，用它建规则会被拒。
+
+**第 2 步 · 判定**。判「答不答得了」只看命题里的**瞬时观测**：持续时长、累计次数都不参与，它们由 `duration_seconds` 或 record 表达，不在条件里（source=iot 时只能用 record，装法见 §Rule.duration_seconds）。「空调开着超过两小时」的瞬时观测是「空调开着」。
+
+| 情况 | source |
+|---|---|
+| 找到含 `n` 的属性，且它答的就是本命题 | `iot` + 触发装配提示（告知装到了哪台设备的哪条属性）|
+| 找到属性但它答的不是本命题（命题问人或行为，属性答设备自身状态）| `omni` |
+| 没找到 | `omni` |
+
+第 2 步只在第 1 步真的拿到输出之后判。设备目录里没有那类设备 = 没找到，不追问用户、不假设它存在。
+
+### Rule.condition.iot
+
+source=iot 时填，与 `--condition` 互斥（同时给会被拒）。四个 flag 同时给：
+
+| flag | 取值 |
+|---|---|
+| `--iot-did` | 设备 did |
+| `--iot-iid` | **裸 `<siid>.<piid>`**。`device spec` 输出的键是 `prop.<siid>.<piid>`，去掉 `prop.` 前缀 |
+| `--iot-op` | `eq` / `ne` / `gt` / `gte` / `lt` / `lte` |
+| `--iot-value` | 按该属性的 format：枚举填 spec 里的**数字**、不是名字；bool 只收 `true` / `false`；整数族填整数；float 填小数 |
+
+谓词必须**既可能成立、也可能不成立**。取值范围或枚举内恒真、恒假的都会被拒（`[0,100]` 上 `gt -1`、枚举 `{1,2}` 上 `eq 9`）。
+
+字符串和 bool 属性只能用 `eq` / `ne`。
+
 ### Rule.condition.query
+
+**本节仅 source=omni 时走。**
 
 **condition.query 是「判定 X 在发生」的视觉命题**——主语 + 谓语，主语类型由命题语义决定（person / object / scene）。
 
@@ -377,7 +413,9 @@ session + duration record 三 desc 分工：
 
 **跨次累计场景**（Record.duration）：duration_seconds 退化为 rule 层姿态稳定窗（推荐值见下方推荐表），业务时长由 `record.target_minutes` 表达。
 
-何时配：
+**source=iot 时本字段禁配**（传了会被拒）。命题含持续时长时时长改由 `Record.kind=duration` + `target_minutes` 承担（见 §达标通知机制），rule 侧不传 `--duration-seconds`，direction 按 §Rule.direction 判据 1 取 `session`。
+
+何时配（以下仅 source=omni）：
 
 1. 人身安全/紧急 → 禁配
 2. 瞬时存在态 / 瞬时动作（< 10s，如喝水 / 咳嗽 / 按门铃 / 仰卧起坐 / 计数型离散动作）→ **不配**
@@ -563,6 +601,8 @@ session + duration record 三 desc 分工：
 
 ### 感知设备（`--source`，可选）
 
+**source=iot 时整节跳过，不传 `--source`。**
+
 消费 §前置检查 §感知设备清单 拿到的 N：
 
 1. 已锁 `source_did[]`（非空）→ 直接当 `--source`
@@ -653,7 +693,8 @@ session + duration record 三 desc 分工：
 | `direction=enter` | `--direction enter` |
 | `direction=exit` | `--direction exit` |
 | `direction=session` | `--direction session` |
-| `condition.query` | `--condition "<query>"` |
+| `source=omni` + `condition.query` | `--condition "<query>"` |
+| `source=iot` | `--iot-did <did> --iot-iid <siid.piid> --iot-op <op> --iot-value <v>`（四个同时给，与 `--condition` 互斥）|
 | enter / exit + action JSON | `--action '<JSON>'`（落哪个槽由 direction 定，不用 `--on-exit-*`）|
 | enter / exit + desc | `--action-desc "<desc>"` |
 | 动作装在 task 上 / 出方向不做事 | 不传动作 flag |
@@ -666,6 +707,7 @@ session + duration record 三 desc 分工：
 | `exit_debounce_seconds=N` | `--exit-debounce-seconds N` |
 | 感知设备=`<DID>` | `--source <DID>` |
 | 感知设备=广播 | 不传 `--source` |
+| `source=iot` | 不传 `--source` |
 
 ## Record content JSON
 
@@ -995,3 +1037,45 @@ miloco-cli rule create --task-id movie_mode_gesture \
   --action '{"did":"<默认音箱 DID>","iid":"action.<siid>.<aiid>","params":["观影模式已就绪"],"idempotent":false,"cooldown_minutes":5}'
 ```
 
+### 例 13
+
+用户："客厅温度超过 28 度就开空调"
+
+推理：环境量异常 → §Rule?=Y；§Rule.source 第 1 步查设备目录，客厅温湿度传感器有 `temperature|rn|float|[-40,125;0.1]|℃` → 含 `n`，答的就是本命题 → source=iot + 触发装配提示；开空调是激活持续设备状态 → §Rule.direction 第 1 步判据 3=session + 默认补 on_exit 复位；命题无持续时长 → 不配 duration_seconds；无累计 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；§Rule.action 设备直控 → action JSON；source=iot → 不传 `--source`
+
+```
+Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
+Rule.source=iot · direction=session · on_enter/on_exit 均 action JSON
+iot 条件项：<客厅温湿度传感器 DID> · 2.1 · gt · 28.0
+```
+
+```bash
+miloco-cli task create --task-id living_room_cool --description "客厅超过 28 度自动开空调"
+miloco-cli rule create --task-id living_room_cool \
+  --name "[living_room_cool] 客厅高温开空调" \
+  --direction session \
+  --iot-did <客厅温湿度传感器 DID> --iot-iid 2.1 --iot-op gt --iot-value 28.0 \
+  --on-enter-action '{"did":"<客厅空调 DID>","iid":"prop.<siid>.<piid>","value":true,"idempotent":true}' \
+  --on-exit-action '{"did":"<客厅空调 DID>","iid":"prop.<siid>.<piid>","value":false,"idempotent":true}'
+```
+
+### 例 14
+
+用户："有人开门就告诉我"
+
+推理：§Rule.source 第 1 步查设备目录，无门锁 / 门窗传感器条目，跑 `device list` 全量仍无 → 没找到 → source=omni（**不假设家里有接进米家的门锁**）；用户原话没有房间词，第 1 步也没产生房间词 → §Rule.感知设备 不传 `--source`；「有人开门」是人的行为 → 走视觉命题；瞬时动作 → §Rule.direction 第 1 步判据 6=enter；无累计 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；通知类语义且未明示通道 → §通道反问；主语「有人」→ `任何人` + 触发装配提示；§Rule.感知设备 未指定房间 → 不传 `--source` + 触发装配提示
+
+```
+Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
+Rule.source=omni（设备目录里没有门相关的可推送属性）· direction=enter · action=desc
+感知设备：用户未指定房间 → 不传 --source
+```
+
+```bash
+miloco-cli task create --task-id door_open_alert --description "有人开门时通知"
+miloco-cli rule create --task-id door_open_alert \
+  --name "[door_open_alert] 有人开门" \
+  --direction enter \
+  --condition "任何人一只手握住门把手并向内或向外拉推，门扇与门框之间出现可见缝隙且缝隙持续增大；不含站在门前不接触门把手，不含手扶墙面或门框旁的开关面板" \
+  --action-desc "使用<通道>通知：有人开门"
+```
