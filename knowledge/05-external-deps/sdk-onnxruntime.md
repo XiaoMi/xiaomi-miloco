@@ -23,11 +23,13 @@ ONNX Runtime 是微软开源的跨平台推理引擎，支持运行 ONNX 格式�
 
 ### Session 创建与平台适配
 
-检测 / ReID 模型的 ONNX Runtime session 统一由 `make_session`（`perception/inference/ort_utils.py`）创建，集中控制线程数并按平台选择 Execution Provider：默认 CPU EP，`use_gpu` 且可用时优先 CUDA EP，Apple Silicon 上则优先 CoreML EP。
+检测 / ReID 模型的 ONNX Runtime session 统一由 `make_session`（`perception/inference/ort_utils.py`）创建，集中控制线程数并按平台选择 Execution Provider：默认 CPU EP，`use_gpu` 且可用时优先 CUDA EP，Apple Silicon 上则优先 CoreML EP，Linux x86_64（Intel / AMD）默认走 OpenVINO EP（AVX2/VNNI 指令集优化卷积/GEMM，无需代码感知）。
 
 ONNX Runtime 的 ARM CPU EP 默认走的 ArmKleidiAI 卷积路径曾存在 native workspace 内存不归还问题，长跑 RSS 单调上涨。当前稳定形态是从依赖层根治：将 onnxruntime 依赖下限抬到含上游修复的版本，覆盖所有走 CPU EP / KleidiAI 卷积的平台（含 Apple Silicon 上 CoreML 不支持算子的 CPU fallback、Linux ARM 等）。`make_session` 内的代码层防御——Apple Silicon 优先 CoreML EP 绕开该路径、并在支持的版本上追加关闭 KleidiAI 的 session 开关——保留作冗余兜底；CoreML 相对 CPU EP 的数值漂移在检测 / ReID 模型的业务阈值内可忽略，故未钉死计算单元。此为 ONNX Runtime SDK 侧的已知限制，属其责任边界。
 
 CoreML EP 另有一处上游已知限制：每建一个 InferenceSession 都会把 ONNX 子图序列化成 ~模型等大的中间 `.mlmodel` 文件写进系统 `$TMPDIR`，而删除只挂在底层 C++ 对象的析构链上——进程被强杀 / session 对象不及时释放即永久遗留（上游 `microsoft/onnxruntime#26023`，至今无修复）；感知侧高频重建 session 会把它放大到撑爆磁盘。这是 ORT / CoreML 侧的责任边界，代码层做有界兜底：给 CoreML session 挂按模型内容 hash 隔离的持久复用缓存目录（`ModelCacheDirectory`，需支持该 option 的较新 runtime，更低版本自动退回不带缓存的 plain CoreML），把中间文件从系统临时目录挪到自家缓存并跨 session / 进程复用——「无界泄漏」收敛为「每模型一份的有界 footprint」；内容 hash 规避上游缓存键不检测模型变更、原地换模型复用旧编译产物的坑。另加进程内一次的总量兜底清理（缓存超阈值则整目录清空重建，仅清自家独占缓存）。缓存逻辑全程 fail-safe，任何异常一律优雅退回无缓存的 plain CoreML，绝不因它拖垮感知推理。相关封装在 `perception/inference/ort_utils.py`。
+
+OpenVINO EP 同款有编译缓存复用与总量兜底清理（`cache_dir` 按模型内容 hash 分目录，降低 N100 低功耗核上 det+reid 的重启编译时延；`_sweep_cache_if_oversized_once` 与 CoreML 共用同一参数化实现，按缓存目录名隔离互不干扰）。OpenVINO EP 用自己的线程池（不读 `SessionOptions.intra_op_num_threads`），通过 `load_config: {"CPU":{"INFERENCE_NUM_THREADS": "4"}}` 显式对齐本模块「4 线程控尾延迟」的实测结论；`device_type` 默认 `CPU`（N100 无独显，核显与 CPU 共享内存带宽，GPU 插件收益有限），`use_gpu=True` 且无 CUDA EP 时改 `AUTO`（让有 Arc / 较新核显的机器自行吃 GPU，无可用 GPU 时 OpenVINO 自行退回 CPU，不会因机器没独显而建不出 session）。AMD x86_64 上 OpenVINO CPU 插件能跑（通用 oneDNN 路径）但未做基准，若实测更慢可用 `MILOCO_DISABLE_OPENVINO=1` 一键退回 CPU EP——依赖层 marker（PEP 508 无法表达 CPU 厂商）同样把所有 Linux x86_64 装上 onnxruntime-openvino wheel，既然体积代价已付，就让它默认也吃到加速。
 
 ### 安装时下载校验机制
 
