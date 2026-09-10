@@ -126,18 +126,33 @@ function MainApp() {
   const homeId: HomeId = "primary";
 
   // ── 数据加载（按当前家拉取；mock 家走 empty）─────────
-  // 不传 errorLabel：这份状态每 30s 重拉一次，后端挂着时会每 30s 弹一条警告，
-  // 而那种时候页面上其它请求各自都在报错，多这一条只是噪音。
-  const status = useAsync(() => getHomeStatus(homeId), [homeId]);
+  // 传 errorLabel：这份状态按固定间隔重拉，但提示是**边沿触发**的——useAsync 的
+  // 闸门只在「转入错误态」时放行一次，后端挂着并不会每轮弹一条。不传的话，页面
+  // 开着时后端中途不可达就完全无声：状态条保持上一份不变（这是刻意的，见下），
+  // 于是住户看到的是一切正常，而实际上已经拉不到任何新状态了。
+  const status = useAsync(() => getHomeStatus(homeId), [homeId], {
+    errorLabel: t("app.loadHomeStatusFail"),
+  });
   // 定时重拉。米家授权可能在页面开着的时候失效（令牌到期 + 云端拒绝续期），
   // 而 useAsync 只在 deps 变化时拉一次、全站也没有推送通道，不轮询的话状态条
-  // 会一直停在「已连」。30s 与 PerfPage 的既有轮询同档。重拉失败时 useAsync
-  // 只置 error、不清 data，因此状态条保持上一份而不是闪成「未连」——前提是
-  // 拉取真的抛错，这正是 realHomeStatus 在三路全灭时抛错的原因。
+  // 会一直停在「已连」。30s 与 PerfPage 的既有轮询同档；这个间隔不直接决定
+  // 打云端的频次——后端把那次校验按令牌指纹缓存了一分钟，多开页签也只合并成
+  // 一次。重拉失败时 useAsync 只置 error、不清 data，因此状态条保持上一份而不是
+  // 闪成「未连」——前提是拉取真的抛错，这正是 realHomeStatus 在三路全灭时抛错
+  // 的原因。
   const reloadStatus = status.reload;
   useEffect(() => {
-    const id = setInterval(reloadStatus, 30_000);
-    return () => clearInterval(id);
+    // 页签在后台时不轮询：这份状态背后是一次真实的云端校验，后台页签攒着打过去
+    // 只是白费配额；切回前台立刻补一次，住户看到的仍是新的。
+    const tick = () => {
+      if (!document.hidden) reloadStatus();
+    };
+    const id = setInterval(tick, 30_000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
   }, [reloadStatus]);
   const persons = useAsync(() => listPersons(homeId), [homeId], {
     errorLabel: t("app.loadPersonsFail"),

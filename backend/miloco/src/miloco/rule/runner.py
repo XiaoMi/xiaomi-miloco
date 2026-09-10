@@ -41,6 +41,7 @@ from miot.types import MIoTActionParam, MIoTGetPropertyParam, MIoTSetPropertyPar
 
 from miloco.database.rule_repo import RuleLogRepo
 from miloco.dispatch import dispatch_event
+from miloco.middleware.exceptions import MiotAuthUnavailableError
 from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
@@ -1429,9 +1430,14 @@ class RuleRunner:
         except Exception as e:
             # 场景不存在 / 不在允许的家庭 / SDK 抛错都归到这里；失败详情进
             # rule_log.execute_result，不吞。
-            logger.error(
-                "Failed to trigger scene %s (rule %s): %s", action.did, rule_id, e
-            )
+            # 授权失效不逐条告警：与紧邻的直控路径同一口径——失效是长期状态，
+            # 规则命中一次就下发一次，逐条打 ERROR 会把「什么时候失效」那一行
+            # 淹掉。被拒的这一次仍然可查：服务层已经落了一行写明原因的台账。
+            if not isinstance(e, MiotAuthUnavailableError):
+                logger.error(
+                    "Failed to trigger scene %s (rule %s): %s",
+                    action.did, rule_id, e,
+                )
             return RuleActionExecuteResult(
                 action=action, result=False, error=f"exception: {e}"
             )
@@ -1565,10 +1571,13 @@ class RuleRunner:
                 result_code=None, result_msg=None,
                 success=False, error=str(e), source="rule", source_id=rule_id,
             )
-            logger.error(
-                "Failed to execute action %s %s: %s",
-                action.did, action.iid, e,
-            )
+            # 拒绝本身在代理层的闸门处已经记过一条，这里再记就是重复；台账里的
+            # 那一行已经写明是被拒。失效是长期状态，而规则命中一次就下发一次。
+            if not isinstance(e, MiotAuthUnavailableError):
+                logger.error(
+                    "Failed to execute action %s %s: %s",
+                    action.did, action.iid, e,
+                )
             return RuleActionExecuteResult(
                 action=action, result=False, error=f"exception: {e}"
             )

@@ -59,6 +59,9 @@ def _make_service(tmp_path: Path) -> tuple[MiotService, _DBConnector]:
         ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
     }
     proxy = SimpleNamespace(
+        # 真实代理有这个判据，夹具也要有：缺了它，生产侧任何「先问一句能不能用」
+        # 的检查都会在这里撞 AttributeError，而那不是生产缺陷、是夹具没建模。
+        is_operational=True,
         _kv_repo=SimpleNamespace(
             db_connector=db,
             get=lambda key, default=None: store.get(key, default),
@@ -67,6 +70,11 @@ def _make_service(tmp_path: Path) -> tuple[MiotService, _DBConnector]:
         set_device_properties=AsyncMock(return_value=[{"code": 0, "siid": 2, "piid": 1}]),
         call_device_action=AsyncMock(return_value={"code": 0}),
         get_devices=AsyncMock(return_value={"dev1": SimpleNamespace(home_id="H1")}),
+        # 真实代理另有一对**不触发刷新**的取数口（降级态下写台账走它们，避免为一行
+        # 留痕去打一趟注定 401 的云端）。夹具让它们与上面那两个刷新口返回同一份，
+        # 缺了它们，被拒那条路会在这里撞 AttributeError。
+        cached_devices={"dev1": SimpleNamespace(home_id="H1")},
+        get_cached_camera=lambda did: None,
         get_device_properties=AsyncMock(
             return_value=[{"siid": 2, "piid": 1, "value": True, "code": 0}]
         ),

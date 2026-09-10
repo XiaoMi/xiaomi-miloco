@@ -719,6 +719,47 @@ class TestProbeBackend:
         assert state.error is not None
         assert "non-JSON" in state.error
 
+    def test_not_bound_still_carries_the_degraded_flag(self):
+        """后端报未绑定时，授权失效标记不能在取数这一层丢掉。
+
+        这个组合是后端真实会发出的：续期被云端永久拒绝之后，手上的访问令牌还能
+        再用一段时间，那段时间后端报已绑定 + 已失效；等访问令牌也过期，它改报
+        未绑定，而健康度仍然是降级。丢掉标记的后果不是少一行提示，而是判定那一层
+        「失效优先于未绑定」的分支顺序在它唯一真正需要生效的场景里失效——问题变
+        严重的那一刻退出码反而从 1 掉回 0，写成体检加告警的巡检在最该告警时停止
+        告警。
+
+        必须从**取数入口**驱动：手工拼一个状态对象只测得到判定那一层，而这个组合
+        恰恰只能由取数那一层产生。
+        """
+        responses = {
+            "/api/miot/status": _HTTPXBody({
+                "code": 0,
+                "data": {
+                    "is_bound": False,
+                    "max_enabled_cameras": 4,
+                    "auth_state": "degraded",
+                    "auth_degraded_since": 1_700_000_000,
+                },
+            })
+        }
+        with (
+            patch("miloco_cli.commands.doctor.load_config", return_value=_DEFAULT_CFG),
+            patch("miloco_cli.commands.doctor.httpx.Client",
+                  return_value=_mock_httpx(responses)),
+        ):
+            state = probe_backend()
+
+        assert state.account_bound is False, "前置：后端报的是未绑定"
+        assert state.auth_degraded is True, "失效标记在取数这一层被丢掉了"
+        assert state.auth_degraded_since == 1_700_000_000
+        # 把两层连起来断一次退出码语义：这一刻必须是 FAIL，不能退回 WARN
+        results = assess_backend(state)
+        account = next(r for r in results if r.name == "小米账号授权")
+        assert account.status == Status.FAIL, (
+            "未绑定 + 已失效时判成 WARN，退出码会从 1 掉回 0"
+        )
+
     def test_business_error_code_non_zero(self):
         responses = {"/api/miot/status": _HTTPXBody({"code": 3001, "message": "err", "data": None})}
         with (
@@ -861,8 +902,9 @@ class TestAssessBackend:
         assert account.status == Status.FAIL
         assert account.section == "miloco"
         assert "miloco-cli account bind" in account.fix_hint
-        # 说清影响范围，别让住户以为感知也停了
-        assert "感知" in account.message
+        # 说清影响范围：控制与感知都停了，别让住户以为只是控制不灵。断的是整句
+        # 而不是「感知」这个子串——子串在文案被改回「感知不受影响」时照样命中。
+        assert "设备控制与感知均已停止" in account.message
 
     def test_auth_degraded_still_fails_after_access_token_also_expires(self):
         """降级 + 未绑定同时成立时仍须判不通过——问题变严重的那一刻不该反而不报警。

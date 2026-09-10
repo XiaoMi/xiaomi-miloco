@@ -16,9 +16,12 @@ def _run(auth_data):
     """跑一次 _submit_authorize，返回 (是否拉过家庭列表, 是否写过启用家庭)。"""
     with (
         patch("miloco_cli.client.api_post", return_value=auth_data) as post,
+        # 只给一个家庭：给多个会落进「stdin 是不是终端」那一档——默认 pytest 下
+        # isatty 为假、自动选第一个所以看着没事，而 `pytest -s` 在真终端里 isatty
+        # 为真，用例会停在选家提示上等输入、整个套件挂住。本用例断言的是「有没有
+        # 再写一次家庭白名单」，与选家交互无关。
         patch("miloco_cli.client.api_get", return_value={"data": [
             {"home_id": "h1", "home_name": "客厅"},
-            {"home_id": "h2", "home_name": "父母家"},
         ]}) as get,
         patch("miloco_cli.client.api_put") as put,
     ):

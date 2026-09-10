@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 from miloco.middleware.exceptions import (
     BusinessException,
     ConflictException,
+    MiotAuthUnavailableError,
     ResourceNotFoundException,
     ValidationException,
 )
@@ -299,6 +300,15 @@ class RuleService:
         }
         if not wanted:
             return
+        # 授权失效要排在拉列表之前判：场景表要有效令牌才拉得到、且不落盘，降级态
+        # 重启后必然为空，往下走只会报「拿不到场景表」——那句话不假，但它把住户
+        # 引向「等一等再试」，而这件事需要他重新授权。与触发场景那条入口同一口径。
+        if not self._miot_proxy.is_operational:
+            raise MiotAuthUnavailableError(
+                "cannot verify scene IDs: Mi Home authorization is no longer "
+                "valid. Rebind in the web console, or run "
+                "`miloco-cli account bind`."
+            )
         all_scenes = (await self._miot_proxy.get_all_scenes()) or {}
         # 场景表拿不到(缓存空 + 刷新失败)时别谎报「你的 id 无效」——两种失败
         # 的修法完全不同。

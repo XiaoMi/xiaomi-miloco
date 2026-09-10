@@ -1455,6 +1455,28 @@ class MiotProxy:
             logger.error("Failed to get all scenes: %s", e)
             return None
 
+    @property
+    def cached_devices(self) -> dict[str, MIoTDeviceInfo]:
+        """已经在手的那份设备表——**不触发刷新**，纯内存读。
+
+        与 :meth:`get_devices` 的区别就在这一点，理由同 :attr:`cached_scenes`：
+        写一行台账要的是「手上已经知道什么」，为它去换一次注定 401 的请求，等于
+        住户每被拒一次就多一次无效云端调用。相机侧同款读取口是
+        :meth:`get_cached_camera`。
+        """
+        return self._device_info_dict
+
+    @property
+    def cached_scenes(self) -> dict[str, MIoTManualSceneInfo]:
+        """已经在手的那份场景表——**不触发刷新**，纯内存读。
+
+        与 :meth:`get_all_scenes` 的区别就在这一点：后者见缓存为空会去拉一次，
+        而降级态下那一次注定拿无效令牌打一趟云端、401 之后缓存依然为空。被拒的
+        路径要的是「手上已经知道什么」，为写一行台账去换一次必然失败的请求，等于
+        住户每点一次场景就多一次无效云端调用。
+        """
+        return self._scene_info_dict
+
     async def get_all_scenes(self) -> dict[str, MIoTManualSceneInfo] | None:
         if not self._scene_info_dict:
             await self.refresh_scenes()

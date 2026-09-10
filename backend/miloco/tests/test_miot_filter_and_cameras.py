@@ -294,6 +294,9 @@ def test_set_in_use_no_op_skips_kv_write():
 def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: _FakeKV | None = None) -> MiotService:
     kv = kv or _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
     proxy = SimpleNamespace(
+        # 真实代理有这个判据，夹具也要有：缺了它，生产侧任何「先问一句能不能用」
+        # 的检查都会在这里撞 AttributeError，而那不是生产缺陷、是夹具没建模。
+        is_operational=True,
         _kv_repo=SimpleNamespace(
             db_connector=SimpleNamespace(
                 execute_update=lambda *a, **kw: 0,
@@ -307,6 +310,11 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
         ),
         get_devices=AsyncMock(return_value=devices or {}),
         get_cameras=AsyncMock(return_value=cameras or {}),
+        # 真实代理另有一对**不触发刷新**的取数口（降级态下写台账走它们，避免为一行
+        # 留痕去打一趟注定 401 的云端）。夹具让它们与上面那两个刷新口返回同一份，
+        # 缺了它们，被拒那条路会在这里撞 AttributeError。
+        cached_devices=devices or {},
+        get_cached_camera=lambda did: (cameras or {}).get(did),
         refresh_devices=AsyncMock(return_value=None),
         refresh_cameras=AsyncMock(return_value=None),
         refresh_scenes=AsyncMock(return_value=None),

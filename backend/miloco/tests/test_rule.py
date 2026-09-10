@@ -282,6 +282,95 @@ async def test_rule_action_exception_ledger_keeps_attempted_value(
     assert kw["value_json"] == "true"
 
 
+@pytest.mark.asyncio
+async def test_refused_dispatch_is_not_logged_as_an_error(
+    runner, monkeypatch, mock_miot_proxy, caplog
+):
+    """授权失效被拒时不逐条打 ERROR——规则命中一次就下发一次，这是量最大的那条路。
+
+    失效是长期状态，逐条告警会把「什么时候失效」那一行淹掉；而拒绝本身在代理层的
+    闸门处已经记过一条，这里再记就是重复。台账照落且带「被拒」字样，事后仍分得清
+    「设备真的没响应」与「根本没发出去」。
+    """
+    import logging
+    from unittest.mock import AsyncMock as _AM
+
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+    from miloco.rule.schema import RuleAction
+
+    spy = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", spy)
+    mock_miot_proxy.set_device_properties = _AM(
+        side_effect=MiotAuthUnavailableError(
+            "set device properties refused: Mi Home authorization is no longer valid."
+        )
+    )
+
+    action = RuleAction(did="dev1", iid="prop.2.1", value=True, idempotent=False)
+    with caplog.at_level(logging.ERROR, logger="miloco.rule.runner"):
+        result = await runner._execute_action("rule-9", action)
+
+    assert result.result is False
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "被拒的下发不该逐条打 ERROR"
+    )
+    # 台账照落，且记明是被拒
+    spy.assert_awaited_once()
+    kw = spy.await_args.kwargs
+    assert kw["success"] is False
+    assert "refused" in (kw["error"] or ""), "台账要记明是被拒而非笼统失败"
+
+
+@pytest.mark.asyncio
+async def test_refused_scene_is_not_logged_as_an_error(
+    runner, monkeypatch, mock_miot_proxy, caplog
+):
+    """规则触发的场景被拒时同样不逐条打 ERROR——与紧邻的直控路径一个口径。
+
+    场景在服务层被拒时会抛出专门的异常；规则这一层若把它落进笼统兜底，就又变回
+    逐条告警，而这条路是量最大的下发路径之一。
+    """
+    import logging
+    from unittest.mock import AsyncMock as _AM
+
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+
+    monkeypatch.setattr(
+        "miloco.miot.service._trigger_scene",
+        _AM(side_effect=MiotAuthUnavailableError("execute scene refused: ...")),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="miloco.rule.runner"):
+        result = await runner._execute_action("rule-9", _make_scene_action())
+
+    assert result.result is False
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "被拒的场景不该逐条打 ERROR"
+    )
+
+
+@pytest.mark.asyncio
+async def test_ordinary_failure_is_still_logged_as_an_error(
+    runner, monkeypatch, mock_miot_proxy, caplog
+):
+    """反向：普通失败仍要打 ERROR——只验「被拒不打」的话，把整条日志删掉也是绿的。"""
+    import logging
+    from unittest.mock import AsyncMock as _AM
+
+    from miloco.rule.schema import RuleAction
+
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", _AM())
+    mock_miot_proxy.set_device_properties = _AM(side_effect=RuntimeError("net down"))
+
+    action = RuleAction(did="dev1", iid="prop.2.1", value=True, idempotent=False)
+    with caplog.at_level(logging.ERROR, logger="miloco.rule.runner"):
+        await runner._execute_action("rule-9", action)
+
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR], (
+        "普通失败仍然要打 ERROR"
+    )
+
+
 def _make_duration_rule(rule_id, duration_seconds):
     """STATE duration 规则；on_enter_desc 让 slot 非空。sample_interval 默认 3s，
     duration_seconds=3 → maxlen=1（首帧即达标 FIRED）；=6 → maxlen=2（首帧 COUNTING）。"""
@@ -4418,6 +4507,28 @@ class TestRuleServiceSceneIdExistence:
         rule = _make_static_rule(rule_id="", actions=[_make_scene_action("scene-1")])
         with pytest.raises(ValidationException, match=r"Scene list unavailable"):
             await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_degraded_auth_says_rebind_not_cache_empty(
+        self, service, mock_miot_proxy
+    ):
+        """降级态建规则要说「去重新授权」，不是「场景表拿不到」。
+
+        场景表要有效令牌才拉得到、且不落盘，降级态重启后必然为空——那句「拿不到
+        场景表」不假，但它把住户引向「等一等再试」，而这件事需要他重新授权。判定
+        必须排在拉列表之前，与触发场景那条入口同一口径。
+        """
+        from unittest.mock import AsyncMock as _AM
+
+        from miloco.middleware.exceptions import MiotAuthUnavailableError
+
+        mock_miot_proxy.is_operational = False
+        mock_miot_proxy.get_all_scenes = _AM(return_value={})
+        rule = _make_static_rule(rule_id="", actions=[_make_scene_action("scene-1")])
+        with pytest.raises(MiotAuthUnavailableError, match=r"Rebind"):
+            await service.create_rule(rule)
+        # 判为不可用就不该再去试云端——那一次注定拿不到。
+        assert not mock_miot_proxy.get_all_scenes.called
 
     @pytest.mark.asyncio
     async def test_patch_rule_also_validates_scene_id(self, service, mock_rule_repo):

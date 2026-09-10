@@ -185,14 +185,24 @@ async def _write_action_ledger(
         device_name: str | None = None
         room: str | None = None
         try:
-            dev = (await miot_proxy.get_devices()).get(did)
-            if dev is None and home_id is None:
-                # 摄像头只在 camera cache(control_device 的家庭校验同样两级查):
-                # 不回落会让摄像头动作 home_id=NULL,经查询侧 NULL 放行串到所有家。
-                # MIoTCameraInfo 继承 MIoTDeviceInfo,name/room_name/home_id 同字段。
-                # 仅在 home_id 未显式传入时才回落——get_cameras() cache miss 会触发
-                # 网络刷新,scene_trigger(did=scene_id、home 已传)不该为此买单。
-                dev = ((await miot_proxy.get_cameras()) or {}).get(did)
+            if miot_proxy.is_operational:
+                dev = (await miot_proxy.get_devices()).get(did)
+                if dev is None and home_id is None:
+                    # 摄像头只在 camera cache(control_device 的家庭校验同样两级查):
+                    # 不回落会让摄像头动作 home_id=NULL,经查询侧 NULL 放行串到所有家。
+                    # MIoTCameraInfo 继承 MIoTDeviceInfo,name/room_name/home_id 同字段。
+                    # 仅在 home_id 未显式传入时才回落——get_cameras() cache miss 会触发
+                    # 网络刷新,scene_trigger(did=scene_id、home 已传)不该为此买单。
+                    dev = ((await miot_proxy.get_cameras()) or {}).get(did)
+            else:
+                # 降级态下这两个取数口都会为一行台账去打一趟注定 401 的云端，而
+                # 缓存又填不回来——每一次被拒都重来一遍，还各自漏出一条
+                # WARNING / ERROR，把这条路径刻意压成 INFO 的噪声抬回去。只读手上
+                # 已有的，与 _degraded_scene_home 同一口径；那两级本来就填不回来，
+                # 所以命中率不会更差，省掉的纯粹是必然失败的那趟请求。
+                dev = miot_proxy.cached_devices.get(did)
+                if dev is None and home_id is None:
+                    dev = miot_proxy.get_cached_camera(did)
             if dev is not None:
                 device_name = getattr(dev, "name", None)
                 room = getattr(dev, "room_name", None)
@@ -200,8 +210,20 @@ async def _write_action_ledger(
                     # 未显式传入才从 cache 补。scene_trigger 的 did 是
                     # scene_id,cache 必 miss——那条路径由调用方带场景所属家传入。
                     home_id = getattr(dev, "home_id", None)
-        except Exception:
-            pass  # cache 解析失败不影响审计主体
+        except Exception as e:  # noqa: BLE001 - 解析失败不影响审计主体
+            logger.debug("action_ledger device lookup failed: %s", e)
+        if home_id is None:
+            # 降级态下上面那两级缓存都填不回来——填它们要走云端，而那正是被拒的
+            # 原因。缺了这一列的行会被查询侧的 NULL 放行捞进**每一个**家的合流页，
+            # 别家的设备号与「那个家授权坏了」就此跨家可见。
+            #
+            # 单独一段、不放在上面那个 try 里：那个 except 会把整段解析吞掉，兜底
+            # 若在里面就跟着被跳过，而设备表解析失败恰恰是最需要兜底的时候。这一层
+            # 读的是本地 KV，与设备表是两个独立的失败面。
+            try:
+                home_id = _sole_enabled_home(miot_proxy)
+            except Exception as e:  # noqa: BLE001 - 问不出归属也不该拖掉这一行审计
+                logger.debug("sole-enabled-home fallback failed: %s", e)
 
         client = get_metrics_client()
         if client is not None:
@@ -240,6 +262,27 @@ async def _write_action_ledger(
         logger.warning("action_ledger write failed (did=%s): %s", did, e)
 
 
+def _sole_enabled_home(miot_proxy: MiotProxy) -> str | None:
+    """问不出归属时的兜底：**只启用了一个家**的话，归属没有歧义。
+
+    不在启用家里的设备与场景本来就会被白名单挡掉，所以此时不会认错。多家同时启用
+    时仍然返回空——那一档要彻底堵住得改查询侧那条 NULL 放行的语义（给迁移前的老行
+    加标记列，只对带标记的行放行），会动一条已经稳定的查询语义，不在本次范围内。
+    """
+    enabled = allowed_home_ids(miot_proxy._kv_repo)
+    return next(iter(enabled)) if len(enabled) == 1 else None
+
+
+def _degraded_scene_home(miot_proxy: MiotProxy, scene_id: str) -> str | None:
+    """降级态下尽力问出这个场景属于哪个家：读**已经在手**的那份场景表。
+
+    刻意不走会触发刷新的那个取数口：降级态下那一次注定拿无效令牌打一趟云端、401
+    之后缓存依然为空，而住户每点一次场景就多一次。问不出时返回空，由台账函数那边
+    的兜底再接一手。
+    """
+    return getattr(miot_proxy.cached_scenes.get(scene_id), "home_id", None)
+
+
 async def _trigger_scene(
     miot_proxy: MiotProxy,
     scene_id: str,
@@ -258,6 +301,34 @@ async def _trigger_scene(
     # 异常路径也要能看到"当时想触发什么"(失败审计完整性)——scene_name
     # 在校验通过后、执行前就归一好,成功/异常两路复用。
     scene_value_json: str | None = None
+    # 授权失效排在下面所有前置检查之前判。降级态下拉场景列表本身就会被云端拒绝，
+    # 重启之后本地那份缓存是空的——先判存在性的话，住户点一个明明还在的场景，拿到
+    # 的是「场景不存在」，而真正的原因是需要重新授权。这与命令行体检把失效判定排在
+    # 「未绑定」之前是同一道理：前置检查抢在授权检查之前，会把真实原因盖掉。
+    if not miot_proxy.is_operational:
+        # 被拒的动作与真正失败的动作同样值得审计——与控制那条路同一口径。原因写在
+        # error 列、result_msg 留空：下游取「result_msg or error」，那一列有值就
+        # 再也看不到「被拒」。
+        #
+        # 家庭标识必须尽力带上，且不能靠台账函数的设备缓存回落——这条路的 did 是
+        # 场景号，那个回落必然 miss。查询侧对空家庭标识有一条刻意的放行（迁移前的
+        # 老行没有标记，严格等值会让它们在任何家的视图里蒸发），于是漏传的行会被
+        # 捞进**每一个**家的合流页：住户在自家台账里看到别家的场景号，以及「那个家
+        # 授权坏了」这件事。
+        await _write_action_ledger(
+            miot_proxy,
+            action_type="scene_trigger",
+            did=scene_id, iid=scene_id, value_json=None,
+            result_code=None, result_msg=None,
+            success=False,
+            error="refused: mi home authorization no longer valid",
+            source=source, source_id=source_id,
+            home_id=_degraded_scene_home(miot_proxy, scene_id),
+        )
+        raise MiotAuthUnavailableError(
+            "execute scene refused: Mi Home authorization is no longer valid. "
+            "Rebind in the web console, or run `miloco-cli account bind`."
+        )
     try:
         scenes = (await miot_proxy.get_all_scenes()) or {}
         if scene_id not in scenes:
@@ -1119,6 +1190,20 @@ class MiotService:
         # agent 当时试图设置什么值 / 播什么 TTS / 什么参数。
         attempted_value_json = _request_value_json(request)
         try:
+            # 授权失效排在家庭校验之前判。那道校验靠两份纯内存的设备缓存，而填满
+            # 它们要走云端——降级态下重启一次，缓存是空的且填不回来，先判归属的话
+            # 住户点一台明明还在的设备，拿到的是「设备不存在」，而真正的原因是需要
+            # 重新授权。与触发场景那条入口同一口径。
+            #
+            # 抛在 try 之内而不是之前：下面那个专门的 except 已经在落被拒的台账并
+            # 原样上抛，走它就不必再写第二处台账。代理层的闸门在别的调用路径上照样
+            # 会抛同一个异常，两者由同一个分支收口。
+            if not self._miot_proxy.is_operational:
+                raise MiotAuthUnavailableError(
+                    "device control refused: Mi Home authorization is no longer "
+                    "valid. Rebind in the web console, or run "
+                    "`miloco-cli account bind`."
+                )
             await self._assert_did_in_allowed_home(did)
 
             if request.type == "set_property":
@@ -1192,8 +1277,6 @@ class MiotService:
             )
             return {"result": result}
 
-        # 兜底：原写法 `except A, B:` 是 Python 2 语法，在 Python 3 上为 SyntaxError，
-        # 会导致本模块在 3.x 解释器下整个无法加载。修正为 Python 3 规范的元组捕获语法。
         except MiotAuthUnavailableError:
             # 授权已失效要**原样抛出**，别包成通用的「控制失败」——包了之后住户
             # 只看到「设备没反应」，不知道是要重新授权。留痕仍要落一行：被拒的
@@ -1207,6 +1290,8 @@ class MiotService:
                 success=False, error="refused: mi home authorization no longer valid",
             )
             raise
+        # 兜底：原写法 `except A, B:` 是 Python 2 语法，在 Python 3 上为 SyntaxError，
+        # 会导致本模块在 3.x 解释器下整个无法加载。修正为 Python 3 规范的元组捕获语法。
         except (ValidationException, ResourceNotFoundException):
             raise
         except Exception as e:

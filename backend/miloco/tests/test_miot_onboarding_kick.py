@@ -22,6 +22,14 @@ from miloco.miot.service import MiotService
 def _make_service() -> MiotService:
     """最小 stub proxy（LRUStore 构造只存引用，不打 DB）。"""
     proxy = SimpleNamespace(
+        # 真实代理有这个判据，夹具也要有：缺了它，生产侧任何「先问一句能不能用」
+        # 的检查都会在这里撞 AttributeError，而那不是生产缺陷、是夹具没建模。
+        is_operational=True,
+        # 真实代理另有一对**不触发刷新**的取数口（降级态下写台账走它们，避免为一行
+        # 留痕去打一趟注定 401 的云端）。夹具让它们与上面那两个刷新口返回同一份，
+        # 缺了它们，被拒那条路会在这里撞 AttributeError。
+        cached_devices={},
+        get_cached_camera=lambda did: None,
         _kv_repo=SimpleNamespace(
             db_connector=SimpleNamespace(),
             delete=lambda key: True,

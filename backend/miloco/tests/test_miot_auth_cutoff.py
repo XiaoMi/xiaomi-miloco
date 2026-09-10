@@ -312,13 +312,14 @@ MUST_NOT_BE_GATED = {
     "get_miot_login_url": "生成重新授权的入口地址",
     "_do_authorize": "住户重新授权时换令牌",
     "_do_refresh_token": "续期本身，正是要靠它翻回正常态",
-    # 只读与订阅：失效后自然拿到 401 或空集，拦了不多一分信息；相机列表更是
-    # 要靠「拿到空集」把感知停下来，拦在前面反而少了那一步
+    # 只读与订阅：失效后自然拿到 401 或空集，拦了不多一分信息。感知的停止不靠
+    # 这一层——它由适配器在问云端**之前**判 is_operational 完成，见
+    # test_discover_returns_nothing_when_degraded。
     "get_device_properties": "读属性",
     "_fetch_device_spec": "读设备 spec",
     "check_token_valid": "查令牌是否还有效",
     "refresh_user_info": "读账号身份",
-    "refresh_cameras": "拉相机列表——空集正是感知停下的机制",
+    "refresh_cameras": "拉相机列表——重新授权与刷新账号信息都要调它，属恢复路径",
     "refresh_camera_online_status": "拉相机在线状态",
     "refresh_devices": "拉设备列表",
     "refresh_scenes": "拉场景列表",
