@@ -1381,13 +1381,15 @@ def _condition_to_dnf(raw: str | None) -> str:
         legacy = {}
     if not isinstance(legacy, dict):
         legacy = {}
-    try:
-        condition = RuleCondition(
-            perceive_device_ids=legacy.get("perceive_device_ids") or [],
-            query=legacy.get("query") or "",
-        )
-    except ValueError:
-        condition = RuleCondition(perceive_device_ids=[], query="")
+    # 逐字段清洗, 不靠整条构造成功: 半脏行 (设备列表是个字符串、query 是个数字) 上
+    # 整条降级会把另一个本来好的字段一起丢掉, 而旧实现是逐字段 `or` 兜底的。
+    dids = legacy.get("perceive_device_ids")
+    if not isinstance(dids, list) or any(not isinstance(d, str) for d in dids):
+        dids = []
+    query = legacy.get("query")
+    if not isinstance(query, str):
+        query = ""
+    condition = RuleCondition(perceive_device_ids=dids, query=query)
     return condition_to_dnf(condition).model_dump_json()
 
 

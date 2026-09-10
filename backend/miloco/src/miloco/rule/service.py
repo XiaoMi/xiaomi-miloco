@@ -39,7 +39,14 @@ from miloco.rule.condition import (
     render_iot_condition,
     single_item_of,
 )
-from miloco.rule.iot_source import SUPPORTED_OPS, value_family
+from miloco.rule.iot_source import (
+    BOOL_FAMILY,
+    NUMBER_FAMILY,
+    ORDERING_OPS,
+    STR_FAMILY,
+    SUPPORTED_OPS,
+    value_family,
+)
 from miloco.rule.record_source import (
     milestone_condition_dnf,
     milestone_legacy_condition,
@@ -96,11 +103,11 @@ _FORBIDDEN_QUERY_PREFIXES = (
 # MIoT 的 format 取值域里的标量那些。iids / array / struct 不在里面 —— 它们在容器里
 # 是元组或更复杂的形状，比较不出结果。
 _SCALAR_FORMAT_FAMILY = {
-    "bool": "bool",
-    "string": "str",
-    "float": "number",
+    "bool": BOOL_FAMILY,
+    "string": STR_FAMILY,
+    "float": NUMBER_FAMILY,
     **{
-        name: "number"
+        name: NUMBER_FAMILY
         for name in (
             "uint8",
             "uint16",
@@ -113,8 +120,6 @@ _SCALAR_FORMAT_FAMILY = {
         )
     },
 }
-
-_ORDERING_OPS = ("gt", "gte", "lt", "lte")
 
 
 def _validate_iot_value(entry: dict, op: str, value: Any, iid: str) -> None:
@@ -133,24 +138,65 @@ def _validate_iot_value(entry: dict, op: str, value: Any, iid: str) -> None:
         raise ValidationException(
             f"属性 prop.{iid} 的 format={fmt!r} 与 value={value!r} 类型不兼容"
         )
-    if family == "str" and op in _ORDERING_OPS:
+    if family is not NUMBER_FAMILY and op in ORDERING_OPS:
+        kind = "字符串" if family is STR_FAMILY else "开关"
         raise ValidationException(
-            f"属性 prop.{iid} 是字符串, 不支持 op={op!r} 这种大小比较"
+            f"属性 prop.{iid} 是{kind}, 不支持 op={op!r} 这种大小比较"
         )
 
     choices = entry.get("value_list") or []
     if choices:
         allowed = {c.get("value") for c in choices if isinstance(c, dict)}
-        if op in ("eq", "ne") and value not in allowed:
-            raise ValidationException(
-                f"value={value!r} 不在属性 prop.{iid} 的取值列表里: "
-                f"{sorted(allowed, key=repr)}"
-            )
+        if op in ("eq", "ne"):
+            if value not in allowed:
+                raise ValidationException(
+                    f"value={value!r} 不在属性 prop.{iid} 的取值列表里: "
+                    f"{sorted(allowed, key=repr)}"
+                )
+            return
+        # 枚举上的大小比较按它实际的取值域判，判据与 value_range 同一条
+        numeric = sorted(v for v in allowed if isinstance(v, (int, float)))
+        if numeric:
+            _validate_satisfiable(numeric[0], numeric[-1], op, value, iid)
         return
 
     value_range = entry.get("value_range")
     if isinstance(value_range, (list, tuple)) and len(value_range) >= 2:
         _validate_against_range(value_range, op, value, iid)
+
+
+def _validate_satisfiable(low, high, op: str, value: Any, iid: str) -> None:
+    """大小比较必须**既可能成立、也可能不成立**。端点含在内（MIoT 的区间是闭区间）。
+
+    只判一个方向的话另一个方向的配置错误会溜过去：区间 ``[-40,125]`` 上 ``gt -100``
+    恒真，seed 那一刻产生一次凭空的进入边沿、之后再没有边沿；而 ``lt -100`` 恒假，
+    永远不触发。两种都看不出来，规则本身看起来配得完全正常。
+
+    值本身不必可达 —— ``gt 3`` 在步长为 5 的区间上是有意义的（设备报 5 时成立），
+    所以这里不查步长。
+    """
+    can_be_true = {
+        "gt": high > value,
+        "gte": high >= value,
+        "lt": low < value,
+        "lte": low <= value,
+    }[op]
+    if not can_be_true:
+        raise ValidationException(
+            f"属性 prop.{iid} 的取值范围是 [{low}, {high}], "
+            f"没有任何取值满足 {op} {value!r}"
+        )
+    can_be_false = {
+        "gt": low <= value,
+        "gte": low < value,
+        "lt": high >= value,
+        "lte": high > value,
+    }[op]
+    if not can_be_false:
+        raise ValidationException(
+            f"属性 prop.{iid} 的取值范围是 [{low}, {high}], "
+            f"每个取值都满足 {op} {value!r} —— 这个条件恒成立"
+        )
 
 
 def _validate_against_range(value_range, op: str, value: Any, iid: str) -> None:
@@ -164,19 +210,8 @@ def _validate_against_range(value_range, op: str, value: Any, iid: str) -> None:
     """
     low, high = value_range[0], value_range[1]
     step = value_range[2] if len(value_range) > 2 else None
-    if op in _ORDERING_OPS:
-        # 区间整体都满足不了这个谓词时才拒。端点含在内。
-        possible = {
-            "gt": high > value,
-            "gte": high >= value,
-            "lt": low < value,
-            "lte": low <= value,
-        }[op]
-        if not possible:
-            raise ValidationException(
-                f"属性 prop.{iid} 的取值范围是 [{low}, {high}], "
-                f"没有任何取值满足 {op} {value!r}"
-            )
+    if op in ORDERING_OPS:
+        _validate_satisfiable(low, high, op, value, iid)
         return
 
     if not (low <= value <= high):
@@ -193,6 +228,21 @@ def _validate_against_range(value_range, op: str, value: Any, iid: str) -> None:
             f"value={value!r} 落不到属性 prop.{iid} 的步长上 "
             f"(从 {low} 起每 {step} 一档)"
         )
+
+
+def _sync_legacy_condition_from(rule: Rule) -> None:
+    """整项替换 DNF 之后，把旧 ``condition`` 列照 DNF 那一项的 spec 对齐。
+
+    不写死占位: 紧接着那道「condition 与 DNF 要对得上」的校验会拿服务端自己刚清空的
+    值去比, omni 无论怎么传都过不了, 而报错指向一个调用方根本没碰的字段。
+
+    服务端渲染的那些源不必单独分支 —— 它们的 spec 里没有这两个键, 回填出来的正是空
+    占位, 而 ``query`` 随后由渲染覆盖。
+    """
+    item = single_item_of(rule.condition_dnf)
+    spec = (item.spec or {}) if item is not None else {}
+    rule.condition.perceive_device_ids = list(spec.get("perceive_device_ids") or [])
+    rule.condition.query = str(spec.get("query") or "")
 
 
 def _reject_task_move(previous_task_id: str, new_task_id: str) -> None:
@@ -263,6 +313,19 @@ def _validate_rule_consistency(rule: Rule) -> None:
     """
     # condition.query 的两条校验 (非空 / 措辞) 不在这里 —— 它们必须排在服务端渲染
     # 之后, 见 RuleService._prepare_condition 的五步。
+
+    if rule.resolved_source_type == IOT_SOURCE_TYPE and rule.duration_seconds:
+        # _evaluate_duration 的滑窗按墙上时钟分 round、采样断流用 0 补齐, 且窗口未填满
+        # 就早返。事件驱动的喂法填不满窗口 ——「空调开了两小时」这条规则永远不会触发。
+        # 拒绝比静默不触发好: 后者用户看不出来, 而且规则看起来配得完全正确。
+        #
+        # 装在这里而不是条件项那五步里: 那五步只在 PATCH 真的碰了条件时才跑, 而
+        # `rule update --duration-seconds` 一个条件字段都不碰。本函数是三条写入路径
+        # 的必经处。
+        raise ValidationException(
+            "iot 条件项不支持 duration_seconds: 累计滑窗要连续采样, "
+            "而属性是被推来的、填不满窗口, 规则会永远不触发"
+        )
 
     if rule.resolved_direction is RuleDirection.MILESTONE:
         raise ValidationException(
@@ -824,15 +887,6 @@ class RuleService:
         _validate_query_not_empty(rule.condition.query)
         if source_type == OMNI_SOURCE_TYPE:
             _validate_query_phrasing(rule.condition.query)
-        if source_type == IOT_SOURCE_TYPE and rule.duration_seconds:
-            # _evaluate_duration 的滑窗按墙上时钟分 round、采样断流用 0 补齐, 且窗口
-            # 未填满就早返。事件驱动的喂法填不满窗口 ——「空调开了两小时」这条规则永远
-            # 不会触发。拒绝比静默不触发好: 后者用户看不出来, 而且规则看起来配得完全
-            # 正确。iot 的「持续时长」单独立项。
-            raise ValidationException(
-                "iot 条件项不支持 duration_seconds: 累计滑窗要连续采样, "
-                "而属性是被推来的、填不满窗口, 规则会永远不触发"
-            )
 
     def _validate_condition_against_dnf(
         self, rule: Rule, source_type: str, stored_query: str | None
@@ -904,8 +958,19 @@ class RuleService:
 
         from miloco.manager import get_manager
 
-        # did 是不是当前作用域内的设备由这个入口的 did 解析顺带答了。
-        device = await get_manager().miot_service.get_device_spec(did)
+        manager = get_manager()
+        # **`get_device_spec` 答不了作用域**: 它走 `get_devices()`, 那是账号全量, 过滤
+        # 由各调用方自己做 (同文件的 control_device 就为此额外查了一次)。而容器的三条
+        # 写入通道都按启用家庭过滤, 所以未启用家庭的设备那条叶子永远不进容器 —— 规则
+        # 建得成功、恒 path_missing、永远不触发。
+        #
+        # 入口能穷举 (create / PUT / PATCH 三条都走 _prepare_condition, 迁移与代建都不
+        # 产 iot 条件项), 所以这道闸放在写入时。
+        if did not in await manager.miot_proxy.devices_in_current_home():
+            raise ValidationException(
+                f"设备 {did!r} 不在当前启用的家庭里, 它的属性不会进状态容器"
+            )
+        device = await manager.miot_service.get_device_spec(did)
         spec = device.get("spec") or {}
         if not spec:
             # 拿不到 spec 与「这台设备真没属性」在调用侧长得一模一样, 不区分 ——
@@ -1196,8 +1261,7 @@ class RuleService:
                 )
             # 整项替换。合并没有定义 —— 合并到哪一层、any_of 的第几项，都答不上来。
             existing.condition_dnf = update.condition_dnf
-            existing.condition.perceive_device_ids = []
-            existing.condition.query = ""
+            _sync_legacy_condition_from(existing)
 
         if "condition" in fields:
             # condition 不允许显式置 null：Rule.condition 必填，整体清空没语义。

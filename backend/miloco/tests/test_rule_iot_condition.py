@@ -127,6 +127,7 @@ def service(monkeypatch):
     manager.miot_service.get_device_spec = AsyncMock(
         return_value={"did": DID, "name": "玄关门锁", "spec": dict(_SPEC)}
     )
+    manager.miot_proxy.devices_in_current_home = AsyncMock(return_value={DID: object()})
     monkeypatch.setattr("miloco.manager.get_manager", lambda: manager)
     svc._manager = manager
     return svc
@@ -734,3 +735,126 @@ async def test_the_rendered_value_falls_back_to_the_english_name(service):
     await service.create_rule(_iot_rule())
 
     assert service._repo.create.call_args[0][0].condition.query.endswith("= Open")
+
+
+@pytest.mark.asyncio
+async def test_a_device_outside_the_enabled_homes_is_rejected(service):
+    """`get_device_spec` 答不了作用域 —— 它走 `get_devices()`，那是账号全量。
+
+    而容器三条写入通道都按启用家庭过滤，所以这条叶子永远不进容器：规则建得成功、
+    恒 path_missing、永远不触发，而 `device spec <did>` 查得到它（那条不按家庭过滤），
+    两头对不上。
+    """
+    service._manager.miot_proxy.devices_in_current_home = AsyncMock(return_value={})
+
+    with pytest.raises(ValidationException, match="启用的家庭"):
+        await service.create_rule(_iot_rule())
+
+
+@pytest.mark.asyncio
+async def test_patch_can_add_duration_to_an_iot_rule_is_rejected(service):
+    """`rule update --duration-seconds` 一个条件字段都不碰，所以这道闸不能装在条件项
+    那五步里 —— 那五步只在 PATCH 真的碰了条件时才跑。
+    """
+    service._repo.get_by_id = MagicMock(return_value=_stored_iot_rule())
+
+    with pytest.raises(ValidationException, match="duration_seconds"):
+        await service.patch_rule("r1", RuleUpdate(duration_seconds=7200))
+
+
+@pytest.mark.asyncio
+async def test_patch_can_replace_an_omni_rules_condition_dnf(service):
+    """omni 也走得通这条路：无条件写占位的话，紧接着那道一致性校验会拿服务端自己刚
+    清空的值去比，omni 无论怎么传都过不了，而报错指向调用方没碰的字段。
+    """
+    omni = Rule(
+        id="r1",
+        name="有人经过",
+        task_id="t1",
+        direction=RuleDirection.ENTER,
+        condition=RuleCondition(perceive_device_ids=["cam-001"], query="有人经过"),
+        action_descriptions=["播报"],
+    )
+    service._repo.get_by_id = MagicMock(return_value=omni)
+    new_dnf = RuleConditionDNF(
+        any_of=[
+            [
+                ConditionItem(
+                    source_type="omni",
+                    spec={"perceive_device_ids": ["cam-001"], "query": "有人在门口"},
+                )
+            ]
+        ]
+    )
+
+    assert await service.patch_rule("r1", RuleUpdate(condition_dnf=new_dnf))
+
+    stored = service._repo.update.call_args[0][0]
+    assert stored.condition.query == "有人在门口"
+    assert stored.condition.perceive_device_ids == ["cam-001"]
+
+
+# ── 谓词既要可能成立、也要可能不成立 ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_tautology_on_a_range_is_rejected(service):
+    """区间 [-40,125] 上 gt -100 恒真：seed 那一刻产生一次凭空的进入边沿，之后再没有
+    边沿。只判「可能成立」那一个方向的话它溜过去。"""
+    with pytest.raises(ValidationException, match="恒成立"):
+        await service.create_rule(
+            _iot_rule(dnf=_iot_dnf(iid="2.1", op="gt", value=-100.0))
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_satisfiable_range_predicate_is_allowed(service):
+    """与上一条方向相反：判据写成「一律拒大小比较」时这条会红。"""
+    assert await service.create_rule(
+        _iot_rule(dnf=_iot_dnf(iid="2.1", op="gt", value=26.0))
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_tautology_on_an_enum_is_rejected(service):
+    """枚举 {1,2} 上 gte 0 恒真。此前枚举分支对大小比较直接放行。"""
+    with pytest.raises(ValidationException, match="恒成立"):
+        await service.create_rule(_iot_rule(dnf=_iot_dnf(iid="5.1", op="gte", value=0)))
+
+
+@pytest.mark.asyncio
+async def test_an_unsatisfiable_enum_predicate_is_rejected(service):
+    """同一个枚举上 gt 9 恒假 —— 两个方向都要拦。"""
+    with pytest.raises(ValidationException, match="没有任何取值"):
+        await service.create_rule(_iot_rule(dnf=_iot_dnf(iid="5.1", op="gt", value=9)))
+
+
+@pytest.mark.asyncio
+async def test_a_satisfiable_enum_predicate_is_allowed(service):
+    assert await service.create_rule(
+        _iot_rule(dnf=_iot_dnf(iid="5.1", op="gte", value=2))
+    )
+
+
+@pytest.mark.asyncio
+async def test_ordering_op_on_a_bool_property_is_rejected(service):
+    """开关属性配大小比较 —— 与字符串同一个理由：它不是有序量。
+
+    §4.6 把 bool 单独分族就是为了挡「开关配了数值阈值」，但 `gte false` 两侧同族、
+    过得了族检查。
+    """
+    spec = {k: dict(v) for k, v in _SPEC.items()}
+    spec["prop.9.1"] = {
+        "description": "灯 开关",
+        "format": "bool",
+        "notify": True,
+        "readable": True,
+    }
+    service._manager.miot_service.get_device_spec = AsyncMock(
+        return_value={"did": DID, "name": "玄关门锁", "spec": spec}
+    )
+
+    with pytest.raises(ValidationException, match="开关"):
+        await service.create_rule(
+            _iot_rule(dnf=_iot_dnf(iid="9.1", op="gte", value=False))
+        )

@@ -34,8 +34,13 @@ SUPPORTED_OPS: dict[str, Any] = {
     "lte": operator.le,
 }
 
-# 数值 / 布尔 / 字符串三族，跨族即不兼容。
-_NUMBER, _BOOL, _STR = "number", "bool", "str"
+# 数值 / 布尔 / 字符串三族，跨族即不兼容。创建校验那侧按 spec 的 format 判族，
+# 与这里的值判族要用同一套名字 —— 各写一份的话任一侧改名，全部 iot rule 都会被判
+# 「类型不兼容」而拒，而错误文案指向的是用户填的值。
+NUMBER_FAMILY, BOOL_FAMILY, STR_FAMILY = "number", "bool", "str"
+_NUMBER, _BOOL, _STR = NUMBER_FAMILY, BOOL_FAMILY, STR_FAMILY
+
+ORDERING_OPS = _ORDERING_OPS
 
 
 class EvalFailed(Exception):
@@ -206,6 +211,7 @@ class IotSource:
         self._pull_running = False
         self._pull_rerun_requested = False
         self._pull_task: asyncio.Task | None = None
+        self._stopped = False
 
     # ── 生命周期 ────────────────────────────────────────────────
 
@@ -226,14 +232,23 @@ class IotSource:
         self._consumer = asyncio.create_task(self._consume())
 
     async def stop(self) -> None:
+        """退订 → 停消费协程与在飞的拉取，并等它们真的停下来。
+
+        等，是因为消费协程可能正停在 ``await feed`` 里：取消要等它下一次被调度才生
+        效，不等的话它可能落在容器 stop 之后，等于关机过程中还在派发一次动作。
+        """
+        self._stopped = True
         for unsubscribe in self._unsubscribes:
             unsubscribe()
         self._unsubscribes.clear()
-        for task in (self._consumer, self._pull_task):
-            if task is not None and not task.done():
-                task.cancel()
+        tasks = [t for t in (self._consumer, self._pull_task) if t is not None]
         self._consumer = None
         self._pull_task = None
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     # ── 索引与 seed ─────────────────────────────────────────────
 
@@ -251,6 +266,11 @@ class IotSource:
             by_device.setdefault(ref.did, []).append(ref.rule_id)
         self._index = index
         self._by_device = by_device
+        # 诊断只说现有的规则。留着已删规则的条目会让排障时看到一条不存在的规则，
+        # 而按原因汇总的那份计数也会被它污染。
+        live = {rule_id for ids in index.values() for rule_id in ids}
+        self._diagnostics = {k: v for k, v in self._diagnostics.items() if k in live}
+        self._last_change = {k: v for k, v in self._last_change.items() if k in live}
 
     def seed(self, rule_ids: Iterable[str]) -> None:
         """把一批 rule 放进待算集合 —— seed 是一个动作，不是一个时刻。
@@ -296,17 +316,18 @@ class IotSource:
         self.seed(rule_ids)
 
     def _on_online_change(self, change) -> None:
-        """设备从离线转回在线时，没有任何东西会触发重新求值。
+        """在线标志一变就重算，**两个方向都要**。
 
-        离线期间不会有属性推送；上线补拉只补容器里**缺失**的叶子，而属性叶子还在
-        （离线前写的旧值），所以不补、没有 change。
+        转假：离线期间不会有属性推送，没有别的东西会来告诉规则「这台设备现在瞎了」，
+        条件会一直停在离线前那个值、还报着 ok。
 
-        触发条件是「online 转为真」，**含 old is MISSING**：切作用域后 clear 删掉了
-        online 叶子，重新对齐写回来时是「从不存在变成真」，只判 False→True 会漏掉这
-        一整类。
+        转真：上线补拉只补容器里**缺失**的叶子，而属性叶子还在（离线前写的旧值），
+        所以不补、没有 prop change —— 光靠属性订阅是回不来的。
+
+        不判具体值：转真那一侧要认「从不存在变成真」（切作用域后 clear 删掉了 online
+        叶子，重新对齐写回来是这一形态），转假那一侧要认删除；把两边的形态各列一遍
+        就是三份判据。求值本来就现读 online，一律重算最省事也最不容易漏。
         """
-        if change.new is not True:
-            return
         did = _split_online_path(change.path)
         if did is None:
             return
@@ -428,7 +449,9 @@ class IotSource:
         能拉回来是因为断连和设备离线不是一回事：我们的 MQTT 断了，设备到云端那段没
         断，云端缓存是新的。
         """
-        if self._pull_props is None:
+        if self._pull_props is None or self._stopped:
+            # 关闭窗口里到达的重连不能再起拉取: 15 秒后它会对着正在拆的 proxy 读云端、
+            # 往已经 stop 的容器里写。
             return
         if self._pull_running:
             self._pull_rerun_requested = True

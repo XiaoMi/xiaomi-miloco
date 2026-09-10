@@ -80,6 +80,7 @@ async def wired(monkeypatch):
     manager.miot_service.get_device_spec = AsyncMock(
         return_value={"did": DID, "name": "玄关门锁", "spec": dict(_SPEC)}
     )
+    manager.miot_proxy.devices_in_current_home = AsyncMock(return_value={DID: object()})
     monkeypatch.setattr("miloco.manager.get_manager", lambda: manager)
 
     fired: list[str] = []

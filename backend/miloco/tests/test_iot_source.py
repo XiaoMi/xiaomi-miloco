@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 from miloco.rule.iot_source import DiagnosticReason, IotRef, IotSource
@@ -97,15 +98,32 @@ async def test_startup_seeds_the_current_value(store):
 @pytest.mark.asyncio
 async def test_subscribe_happens_before_the_startup_seed(store):
     """两者之间落地的变更既不在这一轮 seed 里、也不在订阅里的话，要等属性下一次
-    变化才被看见。"""
+    变化才被看见。
+
+    **顺序要在 `start()` 内部观测。** 在它返回之后再写属性的话，两种顺序下订阅都已
+    经装好了，那条变更必然被接住 —— 断言分不开对错。
+    """
     _online(store)
     h = _Harness(store, [_ref()])
+    order: list[str] = []
+    real_subscribe = store.subscribe
+
+    def spy_subscribe(pattern, callback):
+        order.append("subscribe")
+        return real_subscribe(pattern, callback)
+
+    store.subscribe = spy_subscribe  # ty:ignore[invalid-assignment]
+    real_seed_all = h.source.seed_all
+
+    def spy_seed_all():
+        order.append("seed")
+        real_seed_all()
+
+    h.source.seed_all = spy_seed_all  # ty:ignore[invalid-assignment]
+
     h.source.start()
-    _prop(store, 1)
 
-    await h.settle()
-
-    assert ("r1", True) in h.fed
+    assert order.index("subscribe") < order.index("seed")
 
 
 # ── 现读，不读 change.new ─────────────────────────────────────────────
@@ -223,6 +241,45 @@ async def test_deleting_the_container_does_not_feed_false(store):
 
 
 @pytest.mark.asyncio
+async def test_going_offline_triggers_a_re_evaluation(store):
+    """设备转离线时没有别的东西会来告诉规则「这台设备现在瞎了」。
+
+    离线期间不会有属性推送，所以只订阅「转真」的话，条件会一直停在离线前那个值、
+    还报着 ok —— §4.7 承诺的「离线后不再拿过期的 True 拦住一次正常进入」就不成立。
+    """
+    _online(store)
+    _prop(store, 1)
+    h = _Harness(store, [_ref()])
+    h.source.start()
+    await h.settle()
+    assert h.fed == [("r1", True)]
+
+    _online(store, value=False)
+    await h.settle()
+
+    assert h.unknown == [("r1", "d1")]
+    assert h.source.diagnostics()["rules"]["r1"]["reason"] == (
+        DiagnosticReason.DEVICE_OFFLINE.value
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_online_leaf_also_triggers_a_re_evaluation(store):
+    """切作用域时 clear 删掉 online 叶子，也是「这台设备现在瞎了」。"""
+    _online(store)
+    _prop(store, 1)
+    h = _Harness(store, [_ref()])
+    h.source.start()
+    await h.settle()
+    h.unknown.clear()
+
+    store.delete("iot/device/d1/status/online", source="test")
+    await h.settle()
+
+    assert h.unknown == [("r1", "d1")]
+
+
+@pytest.mark.asyncio
 async def test_coming_back_online_triggers_a_re_evaluation(store):
     """离线期间没有属性推送，上线补拉也只补缺失的叶子 —— 没有任何东西会触发重算。"""
     _online(store, value=False)
@@ -279,20 +336,30 @@ async def test_seeding_a_new_rule_uses_the_value_already_in_the_tree(store):
 
 
 @pytest.mark.asyncio
-async def test_seeding_rebuilds_the_index_first(store):
-    """先重建索引再 seed：反过来的话两步之间到达的变更查不到这条 rule，被丢掉。"""
+async def test_seeding_a_rule_also_makes_future_changes_wake_it(store):
+    """`seed_rule` 除了算一次现值，还要重建索引 —— 索引让**未来的**变更找得到它。
+
+    只 seed 不重建索引的话，这条 rule 算完这一次就再也不会被唤醒了。断的是第二次
+    写入（seed 之后的那次）有没有把它算到：只断第一次的话，seed 自己就够了，索引
+    重建做没做都是绿的。
+
+    两步的先后在这里不可观测（`seed_rule` 全同步，中间插不进东西），所以不断顺序。
+    """
     _online(store)
+    _prop(store, 2)
     h = _Harness(store, [])
     h.source.start()
     await h.settle()
 
     h.refs.append(_ref())
-    h.source.rebuild_index()
+    h.source.seed_rule("r1")
+    await h.settle()
+    assert h.fed == [("r1", False)]
+
     _prop(store, 1)
-    h.source.seed(["r1"])
     await h.settle()
 
-    assert ("r1", True) in h.fed
+    assert h.fed == [("r1", False), ("r1", True)]
 
 
 # ── 消费协程的韧性 ────────────────────────────────────────────────────
@@ -349,18 +416,24 @@ async def test_one_rule_failing_does_not_stop_the_others(store):
 
 
 @pytest.mark.asyncio
-async def test_a_rule_deleted_mid_batch_is_skipped(store):
-    """批次拿到手之后那条 rule 可能已经被删了。取不到就 KeyError 的话这条会红。"""
+async def test_a_rule_deleted_mid_batch_is_skipped(store, caplog):
+    """批次拿到手之后那条 rule 可能已经被删了 —— 那是正常路径，不是异常。
+
+    **断的是没有异常留痕。** `_evaluate_one` 整个包在 except 里，所以「干净跳过」和
+    「抛了被吞掉」在 fed 和 consumer_alive 上给同样的结果，只有日志分得开。
+    """
     _online(store)
     _prop(store, 1)
     _prop(store, 80, iid="4.1")
     h = _Harness(store, [_ref(), _ref("r2", iid="4.1", value=80)])
     h.source.start()
     h.refs = [r for r in h.refs if r.rule_id != "r1"]
-    await h.settle()
+    with caplog.at_level(logging.ERROR, logger="miloco.rule.iot_source"):
+        await h.settle()
 
     assert h.fed == [("r2", True)]
     assert h.source.diagnostics()["consumer_alive"] is True
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
 
 
 @pytest.mark.asyncio
@@ -454,3 +527,35 @@ async def test_diagnostics_summarises_by_reason(store):
         "eval_failed": 1,
         "device_offline": 1,
     }
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_drop_rules_that_are_gone(store):
+    """排障时看到一条已经不存在的规则会指错方向，按原因汇总的计数也被它污染。"""
+    _online(store)
+    _prop(store, 1)
+    h = _Harness(store, [_ref()])
+    h.source.start()
+    await h.settle()
+    assert "r1" in h.source.diagnostics()["rules"]
+
+    h.refs.clear()
+    h.source.rebuild_index()
+
+    diag = h.source.diagnostics()
+    assert diag["rules"] == {}
+    assert diag["by_reason"] == {}
+
+
+@pytest.mark.asyncio
+async def test_a_reconnect_after_stop_does_not_pull(store):
+    """关闭窗口里到达的重连: 15 秒后它会对着正在拆的 proxy 读云端、往已 stop 的容器写。"""
+    _online(store)
+    h = _Harness(store, [_ref()])
+    h.source.start()
+    await h.source.stop()
+
+    h.source.on_mips_connect()
+    await asyncio.sleep(0.05)
+
+    assert h.pulls == []

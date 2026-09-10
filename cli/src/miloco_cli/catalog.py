@@ -316,6 +316,13 @@ def _is_iid_action(iid: str) -> bool:
     return iid.startswith("action.")
 
 
+ACCESS_LEGEND = (
+    "w=可写 / r=可读 / n=设备主动推送 / x=动作（可组合，如 wrn；- = 都不是）"
+)
+"""access 位的含义。目录图例与 ``device spec`` 的表头共用这一份 —— 各写一份的话，
+放开 notify-only 属性之后目录里会出现图例没定义的标记，agent 只能猜。"""
+
+
 def _access_of(entry: dict) -> str:
     """prop 的 access 位。空 access 给 ``-``，不给 ``r``。
 
@@ -589,7 +596,7 @@ _FORMAT_LEGEND = [
     "#   spec_name：prop / action 的名字，作为 miloco-cli device (control / props / action) 第二个参数；",
     "#     形如 on / brightness / play-text；同名冲突时自动带 @<子设备描述> 后缀消歧，如 on@左键",
     "#   行尾 ``  # 注释``（如有）：人类可读的中文说明，传入 cli 时忽略",
-    "#   access：权限，必选；只能取 wr=读写 / w=只写 / r=只读（不能 control）/ x=可执行（仅 action）四值",
+    f"#   access：权限，必选；{ACCESS_LEGEND}",
     "#   format：值的数据类型，可选；取值如 bool / uint8 / int8 / float 等",
     "#   constraint：数值约束；格式 1：范围 [min,max;step]；格式 2：枚举 Cool=2,Heat=5",
     "#   in_params：动作入参类型说明（name:format,..），CLI 调用时只按顺序传值，不传参数名",

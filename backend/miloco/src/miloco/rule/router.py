@@ -137,7 +137,8 @@ async def get_iot_diagnostics(current_user: str = Depends(verify_token)):
     **debug 级日志**：读诊断不该在诊断对象的日志里留痕。
     """
     logger.debug("IoT diagnostics API called, user=%s", current_user)
-    data = build_iot_diagnostics(get_manager().rule_service.iot_source)
+    service = get_manager().rule_service
+    data = build_iot_diagnostics(service.iot_source if service is not None else None)
     return NormalResponse(code=0, message="ok", data=data)
 
 

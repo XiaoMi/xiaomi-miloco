@@ -672,8 +672,12 @@ def rule_update(
         _exit_error("--duration-ratio must be in (0, 1]")
 
     iot_given = _iot_args_given(iot_did, iot_iid, iot_op, iot_value)
-    if query_text is not None and iot_given:
-        raise click.UsageError("--condition 与 iot 四件套不能一起给: 改条件只有一条路")
+    # --source 也会让 payload 带上 condition (见下面那个 if), 所以它一样与 iot 四件套
+    # 互斥 —— 只看 --condition 的话这一组会走到服务端才被拒。
+    if (query_text is not None or perceive_devices) and iot_given:
+        raise click.UsageError(
+            "--condition / --source 与 iot 四件套不能一起给: 改条件只有一条路"
+        )
 
     payload: dict = {}
     if name is not None:
