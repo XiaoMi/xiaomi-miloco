@@ -172,6 +172,43 @@ class DiagnosticReason(str, Enum):
     NOT_SEEDED = "not_seeded"
 
 
+def _diagnostics_report(
+    *,
+    consumer_alive: bool,
+    consumer_exit: str,
+    pending: int,
+    indexed_rules: int,
+    by_reason: dict[str, int],
+    rules: dict,
+) -> dict:
+    """诊断输出的键集合只在这里定义。
+
+    源没接上时也要给一份同形的（见 ``source_not_running``）：形状随时机变的话，
+    按固定键取值的调用方恰好在最该看诊断的时候拿到 KeyError。参数全部必填 ——
+    加一个键时每个调用方都得跟着改，漏改是 TypeError 而不是静默少一个键。
+    """
+    return {
+        "consumer_alive": consumer_alive,
+        "consumer_exit": consumer_exit,
+        "pending": pending,
+        "indexed_rules": indexed_rules,
+        "by_reason": by_reason,
+        "rules": rules,
+    }
+
+
+def source_not_running(reason: str) -> dict:
+    """源没接上时的诊断。抛异常会让诊断接口在最需要它的时候反而用不了。"""
+    return _diagnostics_report(
+        consumer_alive=False,
+        consumer_exit=reason,
+        pending=0,
+        indexed_rules=0,
+        by_reason={},
+        rules={},
+    )
+
+
 @dataclass
 class _RuleDiagnostic:
     value: bool | None = None
@@ -441,15 +478,15 @@ class IotSource:
         for diagnostic in self._diagnostics.values():
             key = diagnostic.reason.value
             by_reason[key] = by_reason.get(key, 0) + 1
-        return {
-            "consumer_alive": consumer is not None and not consumer.done(),
-            "consumer_exit": self._consumer_exit,
-            "pending": len(self._pending),
-            "indexed_rules": sum(len(v) for v in self._index.values()),
+        return _diagnostics_report(
+            consumer_alive=consumer is not None and not consumer.done(),
+            consumer_exit=self._consumer_exit,
+            pending=len(self._pending),
+            indexed_rules=sum(len(v) for v in self._index.values()),
             # 按原因汇总: 逐条看答不了「现在有几条规则因为设备离线而瞎着」, 而那是
             # 这个功能上线后第一个会被问到的。
-            "by_reason": by_reason,
-            "rules": {
+            by_reason=by_reason,
+            rules={
                 rule_id: {
                     "value": d.value,
                     "reason": d.reason.value,
@@ -458,7 +495,7 @@ class IotSource:
                 }
                 for rule_id, d in sorted(self._diagnostics.items())
             },
-        }
+        )
 
     # ── MQTT 重连：拉属性，不是 re-seed ─────────────────────────
 

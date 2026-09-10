@@ -264,8 +264,8 @@ async def get_device_spec(did: str, current_user: str = Depends(verify_token)):
 def build_state_stats(store, push_writer) -> dict:
     """容器与推送写入器的计数。
 
-    **写入器缺席给空 dict，不抛。** 接线在 ``initialize()`` 里，而端点在那之前就可达
-    —— 抛 AttributeError 会让诊断接口在最需要它的时候（启动异常）反而用不了。
+    **写入器缺席给空 dict，不抛。** ``manager.iot_push_writer`` 在 ``initialize()``
+    跑完之前是 None，抛 AttributeError 会让诊断接口在最需要它的时候反而用不了。
     """
     return {
         "store": store.stats(),

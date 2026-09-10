@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from miloco.miot.router import build_state_dump, build_state_stats
+from miloco.rule.iot_source import IotSource
 from miloco.rule.router import build_iot_diagnostics
 from miloco.state import StateStore
 
@@ -25,8 +26,8 @@ def _store_with(leaves: int) -> StateStore:
 
 
 def test_stats_without_a_writer_gives_an_empty_dict():
-    """接线在 initialize() 里，端点在那之前就可达 —— 抛 AttributeError 会让诊断接口
-    在最需要它的时候（启动异常）反而用不了。"""
+    """写入器在 initialize() 跑完之前是 None —— 抛 AttributeError 会让诊断接口在最
+    需要它的时候反而用不了。"""
     data = build_state_stats(_store_with(1), None)
 
     assert data["push"] == {}
@@ -63,6 +64,20 @@ def test_iot_diagnostics_without_a_source_says_it_is_not_running():
 
     assert data["consumer_alive"] is False
     assert data["consumer_exit"]
+
+
+def test_iot_diagnostics_keeps_one_shape_whether_the_source_is_up():
+    """两个分支同形。少几个键的那一份会让按固定键取值的调用方拿到 KeyError，
+    而拿不到的正是「源根本没起来」这一刻。"""
+    source = IotSource(
+        store=StateStore(),
+        feed=lambda *a, **k: None,
+        mark_unknown=lambda *a: None,
+        iot_refs=lambda: [],
+        ref_of_rule=lambda _rule_id: None,
+    )
+
+    assert set(build_iot_diagnostics(None)) == set(source.diagnostics())
 
 
 def test_iot_diagnostics_passes_the_source_report_through():

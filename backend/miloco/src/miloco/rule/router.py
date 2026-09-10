@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.middleware.exceptions import BusinessException
+from miloco.rule.iot_source import source_not_running
 from miloco.rule.schema import (
     Rule,
     RuleDirection,
@@ -119,11 +120,11 @@ async def get_all_rules(
 def build_iot_diagnostics(iot_source) -> dict:
     """iot 源的自述。源没接上来时给一份「没在跑」而不是抛。
 
-    容器接线在 ``initialize()`` 里，端点在那之前就可达 —— 抛异常会让诊断接口在最需要
-    它的时候反而用不了。
+    ``rule_service`` 的类型上非空、实际在 ``initialize()`` 跑完之前是 None，所以这里
+    自己兜一道；两个分支同形由 ``source_not_running`` 保证。
     """
     if iot_source is None:
-        return {"consumer_alive": False, "consumer_exit": "iot 源没有启动", "rules": {}}
+        return source_not_running("iot 源没有启动")
     return iot_source.diagnostics()
 
 

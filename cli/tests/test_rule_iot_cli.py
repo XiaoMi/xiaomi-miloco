@@ -177,6 +177,33 @@ def test_iot_args_build_the_condition_dnf(runner):
     assert item["spec"] == {"did": "d1", "iid": "5.1", "op": "eq", "value": 1}
 
 
+def test_iot_args_on_update_replace_the_condition_dnf(runner):
+    """改 iot 规则的条件走 update 侧的四件套 —— 它是 crud-ops 修改表给 iot 指的路，
+    而同一张表对 omni 指的 ``--condition`` 在 iot 上会被服务端拒。"""
+    with (
+        patch("miloco_cli.client.api_get", return_value=_SPEC),
+        patch("miloco_cli.client.api_patch", return_value=_OK) as patch_call,
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "rule", "update", "r-1",
+                "--iot-did", "d1",
+                "--iot-iid", "3.1",
+                "--iot-op", "gt",
+                "--iot-value", "30.0",
+            ],
+        )
+
+    assert result.exit_code == 0
+    payload = patch_call.call_args[0][1]
+    item = payload["condition_dnf"]["any_of"][0][0]
+    assert item["spec"] == {"did": "d1", "iid": "3.1", "op": "gt", "value": 30.0}
+    # 占位 condition 只在 create 侧发: PATCH 带上它会撞服务端「非 omni 不能改
+    # condition.query」那道闸。
+    assert "condition" not in payload
+
+
 def test_iot_rule_sends_a_placeholder_condition(runner):
     """iot rule 的 condition 是占位：设备列表留空、query 由服务端渲染。"""
     _result, post = _create(
