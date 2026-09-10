@@ -244,13 +244,36 @@ def test_condition_satisfied_is_none_when_state_exists_but_no_source(monkeypatch
     assert runner.is_condition_satisfied("r1") is None
 
 
-def test_condition_satisfied_reflects_last_rule_state(monkeypatch):
+def test_condition_satisfied_computes_from_sources(monkeypatch):
+    """现算三值 OR，不读 last_rule_state —— 后者只在聚合确定时更新。"""
     r = _rule()
     runner = _runner([r], monkeypatch)
     runner._ensure_source("r1", "cam1")
 
     assert runner.is_condition_satisfied("r1") is False
-    runner._state["r1"].last_rule_state = True
+    runner._ensure_source("r1", "cam1").last_bool = True
+    assert runner.is_condition_satisfied("r1") is True
+
+
+def test_condition_satisfied_is_none_after_source_marked_unknown(monkeypatch):
+    """置未知之后要报"不知道"，不是报假 —— None 与 False 都是 falsy，断 None。"""
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    runner._ensure_source("r1", "cam1").last_bool = True
+
+    runner.mark_source_unknown("r1", "cam1")
+
+    assert runner.is_condition_satisfied("r1") is None
+
+
+def test_condition_satisfied_ignores_unknown_when_another_source_is_true(monkeypatch):
+    """三值 OR：任一为真就是真，未知不把它拉下来。"""
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    runner._ensure_source("r1", "cam1").last_bool = True
+    runner._ensure_source("r1", "cam2")
+    runner.mark_source_unknown("r1", "cam2")
+
     assert runner.is_condition_satisfied("r1") is True
 
 
@@ -343,8 +366,7 @@ def test_entry_blocked_when_exit_condition_true_end_to_end(monkeypatch):
     exit_rule.direction = RuleDirection.EXIT
     runner = _runner([enter_rule, exit_rule], monkeypatch)
     sm = _attach(runner, "t1", [enter_rule, exit_rule], _TASK_DESC)
-    runner._ensure_source("r_exit", "cam1")
-    runner._state["r_exit"].last_rule_state = True
+    runner._ensure_source("r_exit", "cam1").last_bool = True
 
     assert runner._state_machine_allows(enter_rule, RuleEvent.ENTERED) is False
     assert sm.runtime_state("t1") is TaskRuntimeState.OFF

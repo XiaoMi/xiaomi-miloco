@@ -31,6 +31,7 @@ import logging
 import time
 import uuid
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Mapping
 
@@ -222,9 +223,36 @@ def _is_milestone(rule: Rule) -> bool:
     return _slot_for(rule, RuleEvent.ENTERED) is ActionSlot.ON_TARGET
 
 
+def or3(values: Iterable[bool | None]) -> bool | None:
+    """三值 OR：任一为真则真；否则有未知就是未知；全假才是假；空集合是未知。
+
+    第二行是这个函数存在的理由：``any([None, False])`` 得出 False，而正确答案是
+    未知 —— 那个未知的 source 可能是真，按假算会产生一次凭空的退出边沿。
+
+    输入全是确定值时结果与 ``any()`` 逐位相同。
+    """
+    seen_unknown = False
+    empty = True
+    for value in values:
+        empty = False
+        if value is True:
+            return True
+        if value is None:
+            seen_unknown = True
+    if empty or seen_unknown:
+        return None
+    return False
+
+
 @dataclass
 class PerSourceState:
-    last_bool: bool = False
+    # None = 未就绪（「不知道」）。与 False（「知道它是假」）是两件事：假驱动退出
+    # 边沿，不知道不该驱动任何东西。只有 mark_source_unknown 会写 None。
+    #
+    # 新建的 source 是 False 而不是 None：它随即就被喂上真实值，而「一条 rule 有没有
+    # 被观测过」由 is_condition_satisfied 的空 sources 分支回答。默认给 None 会让
+    # update_state 里几条早返路径留下一个未知 source，把整条 rule 的判定冻住。
+    last_bool: bool | None = False
     pending_exit: bool = False
     pending_enter: bool = False
 
@@ -363,13 +391,37 @@ class RuleRunner:
     def is_condition_satisfied(self, rule_id: str) -> bool | None:
         """该 rule 的条件现在是不是真。``None`` = 未就绪。
 
-        判"未就绪"用的是"有没有任何 source 被观测过", 而不是 last_rule_state 的
-        初值 False —— 后者分不出"观测到假"和"还没观测"。
+        一条 source 都没有 = 这条 rule 还没开始工作；有 source 但其中有未知（设备
+        离线、叶子没了、求值失败）= 这条 rule 现在瞎着。两者都答"不知道"。
+
+        **现算，不读 ``last_rule_state``。** 后者只在聚合结果确定时更新，它记的是
+        「最后一个确定的聚合结果」、供 diff 产边沿用；设备离线之后读它拿到的是离线前
+        那个确定值，未知就表达不出来了。两者用途不同，不共用一个值。
         """
         state = self._state.get(rule_id)
         if state is None or not state.sources:
             return None
-        return state.last_rule_state
+        return or3(src.last_bool for src in state.sources.values())
+
+    def mark_source_unknown(self, rule_id: str, source_did: str) -> None:
+        """把一个 source 置成未就绪。源层在设备离线 / 叶子被删 / 求值失败时调。
+
+        **一并撤掉这条 rule 已排队的 exit 抗抖。** 序列「条件为真 → 变假、排入 exit
+        debounce → 设备离线、置未知」之后，那个 timer 仍会到点执行 on_exit —— 未知
+        驱动了动作，正是三态要禁止的事。
+
+        不喂假：假会驱动退出边沿。
+        """
+        src = self._ensure_source(rule_id, source_did)
+        src.last_bool = None
+        src.pending_exit = False
+        state = self._state[rule_id]
+        pending = state.exit_debounce_task
+        state.exit_debounce_task = None
+        state.exit_debounce_at = None
+        if pending is not None and not pending.done():
+            pending.cancel()
+        self._clear_pending_source_enter(rule_id)
 
     # ---- Legacy field views (test / rule_tester compatibility) ----
     #
@@ -702,7 +754,12 @@ class RuleRunner:
             src.last_bool = current_bool
 
             rule_state = self._state[rule_id]
-            new_rule_state = any(s.last_bool for s in rule_state.sources.values())
+            aggregated = or3(s.last_bool for s in rule_state.sources.values())
+            if aggregated is None:
+                # 别的 source 处于未知：这一轮不参与判定。不 diff、不更新
+                # last_rule_state —— 按假算会产生一次凭空的退出边沿。
+                return out(TriggerOutcome.NOT_FIRED)
+            new_rule_state = aggregated
             old_rule_state = rule_state.last_rule_state
             rule_state.last_rule_state = new_rule_state
 
@@ -1086,6 +1143,17 @@ class RuleRunner:
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
+            return
+        # 复查当前聚合态。取消与到点是竞态：mark_source_unknown 撤 timer 时这个协程
+        # 可能已经醒过来、越过了 cancel 点，只靠取消挡不住这一次。
+        if self.is_condition_satisfied(rule.id) is None:
+            logger.info(
+                "EXIT_DEBOUNCE_ABANDONED: rule=%s name=%s 条件已转未就绪",
+                rule.id, rule.name,
+            )
+            rs = self._ensure_state(rule.id)
+            rs.exit_debounce_task = None
+            rs.exit_debounce_at = None
             return
         # Cleanup before firing so a re-entry during fire doesn't see stale handle
         rs = self._ensure_state(rule.id)
