@@ -170,6 +170,13 @@ _FIRE_PREAMBLE_WITH_RECORD = """**处理流程**：（按时间序 1→2→3 执
 辅助工具：派生量历史 / 跨窗口查询用 compute <task_id> [--window all|day|week|month] [--date YYYY-MM-DD]；所有 CLI 响应自带 derived 字段直接读，禁止心算。"""
 
 
+# 停用多久之内还认为"设备上那份设置仍是我们留下的那份", 超过就只清账、不动设备。
+# 判据本该是拿下发值与设备现值比对, 状态容器可信之后换回来的位置就是这里; 在那之前
+# 用失去观察的时长当替代指标 —— 间隔短则现状大概率没被人动过。
+# 故意不做成配置项: 要调就改这里发版, 依据是超时那条日志攒出来的时长分布。
+OWED_EXIT_RESEND_WINDOW_MS = 15 * 60 * 1000
+
+
 # 状态机判定为"该 fire"的结论。其余 (已在态内 / 被对侧条件拦住 / 不在会话中)
 # 都不 fire。
 _FIRING_OUTCOMES = frozenset(
@@ -286,6 +293,13 @@ class RuleRunner:
         # 是派生量、无人直接写 (§19.9)。放内存是因为 get_enabled_rules 每个判定
         # 周期都要走一遍, 不能查 DB。
         self._paused_tasks: set[str] = set()
+        # 对外下过进入动作、还没下过对应退出动作的 task。运行态是观测的投影, 而
+        # 进入动作在设备上留下的那份设置要等退出动作来改回去 —— 停用把运行态清成
+        # off 不会顺带把设备改回去, 所以这笔账要另记。
+        self._owed_exit: set[str] = set()
+        # 欠着账被停用的时刻 (ms)。不读 task.paused_at: 那一列在启用那一刻就被
+        # 写回 NULL, 等结算时去读只会读到空。
+        self._owed_exit_paused_at: dict[str, int] = {}
 
         # record 源。达标判断的全部逻辑在它里面, runner 只在 session 边界通知它。
         self._record_source = RecordSource(
@@ -560,6 +574,10 @@ class RuleRunner:
         """
         if paused:
             self._paused_tasks.add(task_id)
+            if task_id in self._owed_exit:
+                # 已经记着一个时刻就不覆盖: "停用 → 启用 → 没结算完又停用 → 再启用"
+                # 这条路上要按第一次欠账算, 否则失去观察的时长会算短。
+                self._owed_exit_paused_at.setdefault(task_id, now_ms())
             for rule in self._rules.values():
                 if rule.task_id == task_id:
                     self._reset_runtime_state(rule.id)
@@ -568,6 +586,102 @@ class RuleRunner:
 
     def is_task_paused(self, task_id: str) -> bool:
         return task_id in self._paused_tasks
+
+    # ---- 欠下的那次退出 ----
+
+    def owed_exit_paused_at(self, task_id: str) -> int | None:
+        """这个 task 是不是欠着一次退出被停用的; 是则返回停用时刻。"""
+        return self._owed_exit_paused_at.get(task_id)
+
+    def drop_owed_exit(self, task_id: str) -> None:
+        """账不欠了 —— 结清、放弃或 task 没了。"""
+        self._owed_exit.discard(task_id)
+        self._owed_exit_paused_at.pop(task_id, None)
+
+    def end_owed_exit_pause(self, task_id: str) -> None:
+        """这一轮结算收工, 但账还欠着 —— 等真正的退出动作来结。"""
+        self._owed_exit_paused_at.pop(task_id, None)
+
+    def _note_owed_exit(
+        self, task_id: str, slot: ActionSlot | None, *, dispatched: bool
+    ) -> None:
+        """记下这个 task 刚走过哪一侧的边界。
+
+        两侧的判据不对称, 是有意的:
+
+        - 清账不看有没有东西可下发, 也不看现在还有没有出路径。走过退出这一侧,
+          这一轮就结束了; 挂上和记账一样的闸, 就会出现"退出真的走完了、账还欠着",
+          之后一次停用启用就把运行态凭空补回 on。
+        - 记账要求确实下发过, 且这个 task 得有出路径。进入槽是空的等于设备上没留下
+          任何要复位的东西; 事件型 task 没有出路径, 运行态恒 ``off``, 谈不上在态。
+        """
+        if slot is ActionSlot.ON_EXIT:
+            self.drop_owed_exit(task_id)
+            return
+        if slot is not ActionSlot.ON_ENTER or not dispatched:
+            return
+        sm = self._state_machine
+        if sm is None or not sm.has_exit_path(task_id):
+            return
+        self._owed_exit.add(task_id)
+        # 新的一次进入让上一轮停用留下的结算作废。
+        self._owed_exit_paused_at.pop(task_id, None)
+
+    def _settle_owed_exit(self, rule: Rule) -> None:
+        """启用后第一次拿到确定的条件值时, 结算停用期间欠下的那次退出。
+
+        **只有 session 方向参与**: 它的条件为假就等于"该退出了"。exit 方向的条件为
+        假是"还没到该退出的时候", 拿它当退出依据极性正好反; enter + exit 形态的欠账
+        由启用时恢复运行态来结 (``TaskStateMachine.resume_session``)。
+
+        条件仍为真时不做任何特殊处理, 尤其不压掉随后那次 ``on_enter``。
+        """
+        paused_at = self._owed_exit_paused_at.get(rule.task_id)
+        if paused_at is None:
+            return
+        if rule.resolved_direction is not RuleDirection.SESSION:
+            return
+        if not self._all_sources_reported(rule):
+            return
+        if self._state[rule.id].last_rule_state:
+            self.end_owed_exit_pause(rule.task_id)
+            return
+
+        lost_sight_ms = now_ms() - paused_at
+        lost_sight_seconds = lost_sight_ms // 1000
+        self.drop_owed_exit(rule.task_id)
+        if lost_sight_ms >= OWED_EXIT_RESEND_WINDOW_MS:
+            logger.info(
+                "OWED_EXIT_EXPIRED: task=%s 失去观察 %d 秒, 超过 %d 秒的窗口, "
+                "不补发退出动作",
+                rule.task_id,
+                lost_sight_seconds,
+                OWED_EXIT_RESEND_WINDOW_MS // 1000,
+            )
+            return
+        if self.dispatch_task_action(
+            rule.task_id, ActionSlot.ON_EXIT.value, context="owed_exit_resend"
+        ):
+            logger.info(
+                "OWED_EXIT_RESENT: task=%s 失去观察 %d 秒, 补发退出动作",
+                rule.task_id,
+                lost_sight_seconds,
+            )
+
+    def _all_sources_reported(self, rule: Rule) -> bool:
+        """这条 rule 声明的感知源是不是每一个都已经报过至少一次。
+
+        比"``is_condition_satisfied`` 不返回 ``None``"严一档。那个只要有一个源报过
+        就给结论, 而 OR 聚合下先到的那个报假不代表整条为假 —— 据此补发退出, 等另一
+        个源随后报真又会进一次, 设备来回动一趟。
+        """
+        state = self._state.get(rule.id)
+        if state is None:
+            return False
+        declared = rule.condition.perceive_device_ids
+        if not declared:
+            return bool(state.sources)
+        return all(did in state.sources for did in declared)
 
     @property
     def state_machine(self) -> TaskStateMachine | None:
@@ -705,6 +819,10 @@ class RuleRunner:
             new_rule_state = any(s.last_bool for s in rule_state.sources.values())
             old_rule_state = rule_state.last_rule_state
             rule_state.last_rule_state = new_rule_state
+
+            # 必须排在下面那道早返之前: 停用期间条件层被清成假, 启用后喂假是
+            # old == new, 边沿永远不来 —— 而那正是欠账最该被结算的一帧。
+            self._settle_owed_exit(rule)
 
             if old_rule_state == new_rule_state:
                 return out(
@@ -1152,7 +1270,9 @@ class RuleRunner:
         "on_target": RuleEvent.TARGET_FIRED,
     }
 
-    def dispatch_task_action(self, task_id: str, slot_name: str) -> bool:
+    def dispatch_task_action(
+        self, task_id: str, slot_name: str, context: str | None = None
+    ) -> bool:
         """状态机自己发起的动作 —— 没有上游边沿, 由本函数补出一次 fire。
 
         用在 §19.5 重新配置时的强制 ``on_exit`` 与 §5 的手动注入。感知路径不走
@@ -1190,7 +1310,7 @@ class RuleRunner:
             rule,
             event,
             [],
-            f"task_state_machine_{slot_name}",
+            context or f"task_state_machine_{slot_name}",
             action_slot=ActionSlot(slot_name),
         )
         return True
@@ -1442,7 +1562,11 @@ class RuleRunner:
         action_slot: ActionSlot | None = None,
     ) -> RuleExecuteResult | None:
         """Pick the slot for (mode, event), execute, write log."""
-        slot = self._select_slot(rule, event, action_slot)
+        boundary_slot = action_slot or _slot_for(rule, event)
+        slot = self._select_slot(rule, event, boundary_slot)
+        # 记在这里而不是状态机的派发点: 感知边沿那条路进状态机时带 dispatch=False,
+        # 那一层在生产路径上一次都不派发, 挂上去等于整个机制静默失效。
+        self._note_owed_exit(rule.task_id, boundary_slot, dispatched=slot is not None)
         if slot is None:
             logger.debug(
                 "rule %s event %s: empty slot, skipping", rule.id, event.value
