@@ -222,7 +222,7 @@ def _render_device_spec(dev: dict) -> str:
     out.append("# 按 service 分组")
     out.append("# prop.iid    spec_name|access|format|constraint|unit")
     out.append("# action.iid  spec_name|x|in_params")
-    out.append("# access：wr=读写 / w=只写 / r=只读 / x=动作")
+    out.append("# access：w=可写 / r=可读 / n=设备主动推送 / x=动作（可组合，如 wrn）")
 
     iid_to_key = _resolve_keys_for_device(spec)
 

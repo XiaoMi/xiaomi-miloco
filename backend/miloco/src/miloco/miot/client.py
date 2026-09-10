@@ -1968,6 +1968,7 @@ class MiotProxy:
                     "format": s.format,
                     "writeable": s.writeable,
                     "readable": s.readable,
+                    "notify": s.notify,
                 }
                 if s.unit:
                     entry["unit"] = s.unit
