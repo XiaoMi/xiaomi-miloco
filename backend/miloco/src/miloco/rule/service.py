@@ -356,7 +356,9 @@ def _validate_rule_consistency(rule: Rule) -> None:
 # ---- Service factory -------------------------------------------------------
 
 
-async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
+async def init_rule_service(
+    miot_proxy: MiotProxy, state_store=None, pull_props=None
+) -> RuleService:
     from miloco.config import get_settings
     from miloco.task_record.service import TaskRecordService
 
@@ -372,6 +374,9 @@ async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
         task_record_service=task_record_service,
     )
     attach_task_state_machine(rule_runner, rule_repo)
+    if state_store is not None:
+        # 排在状态机接管之后: 源起来就 seed, 而 seed 会一路走到 task 状态机。
+        rule_runner.attach_iot_source(state_store, pull_props)
 
     return RuleService(
         rule_repo,
@@ -1013,6 +1018,10 @@ class RuleService:
         # 顺序要紧: 先把动作写进 task 列, 再 reconfigure —— 后者刷的是 task 列的快照
         self.sync_rule_actions_to_task(rule)
         self.reconfigure_task(rule.task_id)
+        # seed 必须排在 reconfigure 之后: 挂在 add_rule 里的话, 新建一条「条件已经
+        # 为真」的 iot rule 会立刻产生 ENTERED, 而此刻 task 还没登记新拓扑、动作快照
+        # 也还没同步 —— 动作被跳过, 而且之后属性不再变化就不会补发。
+        self._runner.seed_iot_rule(rule_id)
         logger.info("Rule created: %s", rule_id)
         return rule_id
 
@@ -1102,6 +1111,7 @@ class RuleService:
             self.reconfigure_task(rule.task_id)
             if previous.task_id != rule.task_id:
                 self.reconfigure_task(previous.task_id)
+            self._runner.seed_iot_rule(rule.id)
         return success
 
     async def patch_rule(self, rule_id: str, update: RuleUpdate) -> bool:
@@ -1293,6 +1303,7 @@ class RuleService:
             if previous.task_id != existing.task_id:
                 # 原 task 少了一条 rule, 拓扑得跟着变 —— 与删 rule 同一条路径。
                 self.reconfigure_task(previous.task_id)
+            self._runner.seed_iot_rule(rule_id)
         return success
 
     async def delete_rule(self, rule_id: str) -> bool:
@@ -1346,6 +1357,11 @@ class RuleService:
     def decision_tracker(self):
         """给 task 层读判定摘要用。没接管时为 None。"""
         return self._runner.tracker
+
+    @property
+    def iot_source(self):
+        """iot 源。容器没接上来时是 None（单测和退化启动）。"""
+        return self._runner.iot_source
 
     @property
     def runner_state_machine(self):
@@ -1656,6 +1672,11 @@ class RuleService:
             # 失败模式、同一份修法。必须排在 reconfigure 之后: 代建的那条 rule 可能
             # 正是它刚补上的。
             _seed_reached_targets(self._runner, task_id)
+            # iot 同一个失败模式: 停用清掉了条件层状态, 属性持续为真的话没有任何变更
+            # 到达, rule 永远等不到 ENTERED。**不放 reconfigure_task 里 record_source
+            # .arm 那一位** —— 那里被 `runtime_state is ON` 守着, 而 suspend 停用时
+            # 已经把运行态置成 OFF, 重新启用走到那儿时守卫恒假。
+            self._runner.seed_iot_rules_of_task(task_id)
             return
         self._runner.record_source.disarm(task_id)
         # 不派发 on_exit 是对的 (见 suspend), 但计时段的收尾也挂在那个槽上, 得自

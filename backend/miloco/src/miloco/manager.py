@@ -16,7 +16,7 @@ from miloco.home_profile.service import HomeProfileService
 from miloco.miot.client import MiotProxy
 from miloco.miot.mips_listeners import PropTopUpListener
 from miloco.miot.service import MiotService
-from miloco.miot.state_align import align_iot_state, read_missing_props
+from miloco.miot.state_align import align_iot_state, read_missing_props, read_props
 from miloco.miot.state_push import IotPushWriter
 from miloco.node_monitor import NodeKind, NodeName, get_monitor
 from miloco.perception import init_perception_module
@@ -26,6 +26,7 @@ from miloco.rule.service import RuleService, init_rule_service
 from miloco.rule.terminate_evaluator import TerminateEvaluator
 from miloco.state import StateStore
 from miloco.task.service import TaskService
+from miloco.utils.time_utils import now_ms
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ class Manager:
             cls._instance._state_store = StateStore()
             cls._instance._iot_push_writer = None
             cls._instance._prop_top_up = None
+            # 重连回调在 _wire_iot_push 里就接上了，那时 rule_service 还没建。
+            cls._instance._rule_service = None
             # did → 本代已补拉次数。切作用域时清空（对齐也是一代跑一次，口径一致）
             cls._instance._top_up_attempts = {}
             # 对齐窗口里被早退掉的补拉需求。对齐完成后补一轮；切作用域时连同额度一起清
@@ -99,6 +102,7 @@ class Manager:
             self._iot_push_writer.on_device_props
         )
         self._miot_proxy.add_device_state_listener(self._prop_top_up.on_event)
+        self._miot_proxy.add_mips_connect_listener(self._on_mips_reconnected)
 
     async def _top_up_props(self, did: str) -> int:
         """设备转上线时补拉它在容器里缺的属性。返回写进去的条数。
@@ -150,6 +154,39 @@ class Manager:
         if not values:
             return 0
         return await self._iot_push_writer.write_pulled_props(did, values)
+
+    def _on_mips_reconnected(self) -> None:
+        """MQTT 重连 —— 通知 iot 源去拉它关心的那几条属性。
+
+        接线排在 rule_service 之前（``_wire_iot_push`` 在 ``initialize`` 里更早），
+        所以这里每次现取而不是构造时抓一份。
+        """
+        service = getattr(self, "_rule_service", None)
+        source = service.iot_source if service is not None else None
+        if source is not None:
+            source.on_mips_connect()
+
+    async def _pull_iot_props(self, did: str, iids: list[str]) -> int:
+        """MQTT 重连之后，把 iot 条件项引用的那几条属性从云端拉回来。
+
+        与上线补拉的区别是范围与覆盖判据：那个补容器里**缺**的叶子，这个按 iid 拉已
+        经在树上的那几条 —— 断连期间的变化推送丢了，而叶子还在（停在断连前的旧值），
+        按「缺不缺」算的话一条都不会拉。
+
+        能拉回来是因为断连和设备离线不是一回事：我们的 MQTT 断了，设备到云端那段没
+        断，云端缓存里是新值。
+
+        `keep_reported_since` 取本次拉取开始的时刻：往返期间到达的推送更新，不覆盖。
+        """
+        if self._iot_push_writer is None:
+            return 0
+        started_ms = now_ms()
+        values = await read_props(self._miot_proxy, did, iids)
+        if not values:
+            return 0
+        return await self._iot_push_writer.write_pulled_props(
+            did, values, keep_reported_since=started_ms
+        )
 
     async def _drain_pending_top_ups(self) -> None:
         """把对齐窗口里记下的补拉补一轮。
@@ -293,7 +330,9 @@ class Manager:
 
         # Initialize rule module
         async with mon.track_async(NodeName.RULE_SERVICE, "init"):
-            self._rule_service = await init_rule_service(self._miot_proxy)
+            self._rule_service = await init_rule_service(
+                self._miot_proxy, self._state_store, self._pull_iot_props
+            )
 
         async with mon.track_async(NodeName.TERMINATE_EVALUATOR, "init"):
             self._terminate_evaluator = TerminateEvaluator(self._rule_service)

@@ -45,7 +45,7 @@ from miloco.dispatch import dispatch_event
 from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
-from miloco.rule.iot_source import iot_ref_of
+from miloco.rule.iot_source import IotSource, iot_ref_of
 from miloco.rule.record_source import RECORD_SOURCE_DID, RecordSource, record_ref_of
 from miloco.rule.schema import (
     IOT_SOURCE_TYPE,
@@ -324,6 +324,8 @@ class RuleRunner:
             self._feed_record,
             self._record_refs_of_task,
         )
+        # iot 源。要等容器和拉属性的入口接上来才建, 见 attach_iot_source。
+        self._iot_source: IotSource | None = None
 
         logger.info("RuleRunner init, rules: %d", len(self._rules))
 
@@ -368,6 +370,74 @@ class RuleRunner:
             rule_id, RECORD_SOURCE_DID, value,
             context="record", skip_flicker=True, extra_metadata=metadata,
         )
+
+    # ---- iot 源接线 ----
+
+    def attach_iot_source(self, store, pull_props=None) -> IotSource:
+        """建 iot 源并启动。由 ``init_rule_service`` 在容器就绪之后调。
+
+        源层拿不到 rule 表, 所以条件项由 runner 这一侧枚举 —— 与 record 源同样的
+        分工。不按 enabled 过滤: 停用判断在 ``update_state`` 入口, 那是唯一一处。
+        """
+        source = IotSource(
+            store=store,
+            feed=self._feed_iot,
+            mark_unknown=self.mark_source_unknown,
+            iot_refs=self._iot_refs,
+            pull_props=pull_props,
+        )
+        self._iot_source = source
+        source.start()
+        return source
+
+    @property
+    def iot_source(self) -> IotSource | None:
+        return self._iot_source
+
+    def _iot_refs(self):
+        for rule in self._rules.values():
+            ref = iot_ref_of(rule)
+            if ref is not None:
+                yield ref
+
+    def iot_refs_of_task(self, task_id: str) -> list[str]:
+        """该 task 名下带 iot 条件项的 rule_id。task 重新启用时按它 seed。"""
+        return [
+            rule.id
+            for rule in self._rules.values()
+            if rule.task_id == task_id and iot_ref_of(rule) is not None
+        ]
+
+    def seed_iot_rule(self, rule_id: str) -> None:
+        """一条 rule 的配置变了 —— 索引让**未来的**变更找得到它, 但它对**已经在树
+        上的值**一无所知。凡是「rule 的有效性发生变化」的地方都要跟一次 seed。"""
+        if self._iot_source is not None:
+            self._iot_source.seed_rule(rule_id)
+
+    def seed_iot_rules_of_task(self, task_id: str) -> None:
+        if self._iot_source is not None:
+            self._iot_source.seed_rules(self.iot_refs_of_task(task_id))
+
+    async def _feed_iot(self, rule_id: str, value: bool) -> None:
+        """把 iot 源算出的 bool 交给条件层。
+
+        ``skip_flicker``: iot 的值不会抖, 而它每次翻转只喂一次 —— 留观察窗会把这一次
+        吸收掉, 条件永久停在旧值。与 record 源同一个理由。
+        """
+        await self.update_state(
+            rule_id,
+            self._iot_source_did(rule_id),
+            value,
+            context="iot",
+            skip_flicker=True,
+        )
+
+    def _iot_source_did(self, rule_id: str) -> str:
+        rule = self._rules.get(rule_id)
+        ref = iot_ref_of(rule) if rule is not None else None
+        # 真实 did: 一条 rule 一个条件项时 OR 退化成单元素 (无害), 而将来打开多设备
+        # OR 时键的语义不用改 —— 改过一次之后存量运行态与新代码的键对不上。
+        return ref.did if ref is not None else "iot"
 
     # ---- task 状态机接管 (expand-contract 阶段 A) ----
 
@@ -553,6 +623,8 @@ class RuleRunner:
     def remove_rule(self, rule_id: str) -> None:
         self._rules.pop(rule_id, None)
         self._reset_runtime_state(rule_id)
+        if self._iot_source is not None:
+            self._iot_source.rebuild_index()
 
     def _ensure_state(self, rule_id: str) -> RuleRuntimeState:
         state = self._state.get(rule_id)

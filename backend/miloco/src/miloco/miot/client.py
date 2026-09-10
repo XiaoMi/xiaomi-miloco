@@ -341,6 +341,10 @@ class MiotProxy:
         # re-OAuth 重建 client 后不用重新注册
         self._state_listeners: list[Callable[[Any], Awaitable[None]]] = []
         self._props_listeners: list[Callable[[Any], Awaitable[None]]] = []
+        # MQTT 重连的多消费方。SDK 那一层是单槽 (register_mips_connect_callback),
+        # 已经被本类的 refresh_devices 占着 —— 别的消费方直接注册会把设备刷新覆盖掉。
+        # 形状照 add_device_state_listener。
+        self._mips_connect_listeners: list[Callable[[], None]] = []
 
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
@@ -516,7 +520,7 @@ class MiotProxy:
         # disconnect window may have caused us to miss events. Registered AFTER
         # init_async on purpose: the first connect during setup should not
         # pre-empt the initial full refresh done by refresh_miot_info below.
-        self._miot_client.register_mips_connect_callback(self.refresh_devices)
+        self._miot_client.register_mips_connect_callback(self._on_mips_connected)
         await self.refresh_miot_info()
 
         if self._token_refresh_task:
@@ -1307,6 +1311,22 @@ class MiotProxy:
     ) -> None:
         """加一个属性推送的消费方。多次调用按注册顺序全部收到。"""
         self._props_listeners.append(callback)
+
+    def add_mips_connect_listener(self, callback: Callable[[], None]) -> None:
+        """加一个 MQTT 重连的消费方。回调是同步的, 自己排后台任务。
+
+        一个消费方抛异常不影响其余, 也不影响 refresh_devices —— 它们互不知情。
+        """
+        self._mips_connect_listeners.append(callback)
+
+    async def _on_mips_connected(self) -> None:
+        """SDK 单槽回调的唯一占用方: 先刷设备表, 再通知各个 listener。"""
+        await self.refresh_devices()
+        for callback in self._mips_connect_listeners:
+            try:
+                callback()
+            except Exception as e:
+                logger.error("mips-connect listener failed: %s", e)
 
     async def _fan_out(
         self, listeners: list[Callable[[Any], Awaitable[None]]], msg: Any, label: str

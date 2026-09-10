@@ -190,6 +190,7 @@ async def test_the_manager_wires_both_push_lanes_into_the_container(store):
     proxy = object.__new__(MiotProxy)
     proxy._state_listeners = []
     proxy._props_listeners = []
+    proxy._mips_connect_listeners = []
 
     async def devices_in_current_home():
         return {"d1": SimpleNamespace(home_id="H1")}
@@ -222,6 +223,7 @@ async def test_a_push_travels_from_the_sdk_callback_into_the_container(store):
     proxy = object.__new__(MiotProxy)
     proxy._state_listeners = []
     proxy._props_listeners = []
+    proxy._mips_connect_listeners = []
 
     async def devices_in_current_home():
         return {"d1": SimpleNamespace(home_id="H1")}

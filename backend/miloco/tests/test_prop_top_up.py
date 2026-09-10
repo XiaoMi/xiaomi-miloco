@@ -200,6 +200,7 @@ def _wired_proxy_from(store, fake, *, home=("d1",), online=True):
     proxy = object.__new__(MiotProxy)
     proxy._state_listeners = []
     proxy._props_listeners = []
+    proxy._mips_connect_listeners = []
     proxy._camera_info_dict = {}
     proxy._device_info_dict = {}
     proxy._cameras_loaded = True

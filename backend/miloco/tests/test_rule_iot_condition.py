@@ -571,3 +571,63 @@ async def test_patch_rejects_changing_the_task(service):
 
     with pytest.raises(ValidationException, match="移到"):
         await service.patch_rule("r1", RuleUpdate(task_id="t2"))
+
+
+# ── seed 的落点（§4.9）────────────────────────────────────────────────
+
+
+class _RecordingIotSource:
+    """只记 seed 调用与它们相对于 reconfigure 的先后。"""
+
+    def __init__(self):
+        self.calls: list[str] = []
+
+    def seed_rule(self, rule_id):
+        self.calls.append(f"seed_rule:{rule_id}")
+
+    def seed_rules(self, rule_ids):
+        self.calls.append(f"seed_rules:{sorted(rule_ids)}")
+
+    def rebuild_index(self):
+        pass
+
+
+@pytest.fixture
+def recording(service):
+    source = _RecordingIotSource()
+    service._runner._iot_source = source
+    original = service.reconfigure_task
+    service.reconfigure_task = lambda *a, **kw: source.calls.append("reconfigure")
+    yield source
+    service.reconfigure_task = original
+
+
+@pytest.mark.asyncio
+async def test_create_seeds_after_the_task_topology_is_ready(service, recording):
+    """seed 挂在 add_rule 里的话，新建一条「条件已经为真」的 iot rule 会立刻产生
+    ENTERED，而此刻 task 还没登记新拓扑、动作快照也还没同步 —— 动作被跳过，之后
+    属性不再变化就不会补发。
+    """
+    await service.create_rule(_iot_rule())
+
+    assert recording.calls == ["reconfigure", "seed_rule:new-rule-id"]
+
+
+@pytest.mark.asyncio
+async def test_re_enabling_a_task_seeds_its_iot_rules(service, recording):
+    """停用清掉了条件层状态。属性持续为真的话没有任何变更到达，rule 永远等不到
+    ENTERED。
+
+    落点在 apply_task_status 的 active 分支，**不在 reconfigure_task 里
+    record_source.arm 那一位** —— 那里被 `runtime_state is ON` 守着，而 suspend
+    停用时已经把运行态置成 OFF，重新启用走到那儿时守卫恒假。
+    """
+    stored = _stored_iot_rule()
+    service._runner.add_rule(stored)
+
+    service.apply_task_status("t1", active=True)
+
+    assert "seed_rules:['r1']" in recording.calls
+    assert recording.calls.index("reconfigure") < recording.calls.index(
+        "seed_rules:['r1']"
+    )
