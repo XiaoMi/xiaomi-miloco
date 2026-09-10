@@ -281,6 +281,8 @@ def _reject_task_move(previous_task_id: str, new_task_id: str) -> None:
     不去**。
 
     换 task 本来就该算一条新规则：删了重建。
+
+    **调用点之后可以直接假定 task_id 没变**，不要再写「task 变了就……」的分支。
     """
     if new_task_id and previous_task_id != new_task_id:
         raise ValidationException(
@@ -1203,13 +1205,10 @@ class RuleService:
             # 已经不属于它的 rule。
             if (
                 previous.resolved_direction is not rule.resolved_direction
-                or previous.task_id != rule.task_id
             ):
                 self._clear_task_slots(previous)
             self.sync_rule_actions_to_task(rule)
             self.reconfigure_task(rule.task_id)
-            if previous.task_id != rule.task_id:
-                self.reconfigure_task(previous.task_id)
             self._runner.seed_iot_rule(rule.id)
         return success
 
@@ -1393,10 +1392,9 @@ class RuleService:
             self._runner.add_rule(existing)
             moved_home = (
                 previous.resolved_direction is not existing.resolved_direction
-                or previous.task_id != existing.task_id
             )
             if moved_home:
-                # 换方向或改挂 task = 这份动作整体换了个家。旧的那份必须清 ——
+                # 换方向 = 这份动作整体换了个家。旧的那份必须清 ——
                 # 留着就是一份没有 rule 认领、也再没人读得到的动作; 新的那份必须
                 # 写 —— 不写就是"规则照常触发、一个动作都选不到", 读侧只认 task
                 # 列、不看 rule 行。这里不传动过的字段: 动作字段本身没变,
@@ -1407,9 +1405,6 @@ class RuleService:
                 # 带上这次动过的字段: 只透传被动过的槽, 别的槽保留 task 侧那份
                 self.sync_rule_actions_to_task(existing, fields)
             self.reconfigure_task(existing.task_id)
-            if previous.task_id != existing.task_id:
-                # 原 task 少了一条 rule, 拓扑得跟着变 —— 与删 rule 同一条路径。
-                self.reconfigure_task(previous.task_id)
             self._runner.seed_iot_rule(rule_id)
         return success
 

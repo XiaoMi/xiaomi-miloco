@@ -364,8 +364,12 @@ class IotSource:
                 # 取出集合是 swap 不是遍历它本身：feed 是 await，每次 await 的那一刻
                 # 同步回调都可能往里再放东西，直接迭代活集合会 RuntimeError。
                 batch, self._pending = self._pending, set()
+                # 一批只取一次条件项，逐条取会把整批变成 O(n²)：批量唤醒（启动补种、
+                # 重连补拉、切家庭）是常规路径不是极端情况。不存成字段 —— 那就是同
+                # 一份配置的第二个副本，正是 rebuild_index 拒绝放谓词的那个理由。
+                refs = {ref.rule_id: ref for ref in self._iot_refs()}
                 for rule_id in batch:
-                    await self._evaluate_one(rule_id)
+                    await self._evaluate_one(rule_id, refs)
         except asyncio.CancelledError:
             self._consumer_exit = "cancelled"
             raise
@@ -374,14 +378,14 @@ class IotSource:
             logger.exception("iot 源的消费协程退出, 全部 iot 条件从此不再更新")
             raise
 
-    async def _evaluate_one(self, rule_id: str) -> None:
+    async def _evaluate_one(self, rule_id: str, refs: dict[str, IotRef]) -> None:
         """单条 rule 的失败不许带走循环。
 
         取不到 rule 就跳过（批次拿到手之后它可能已经被删了）；求值与 feed 各自兜住
         异常 —— 抛出去打掉的是消费协程，也就是整条 iot 链，而且是静默的。
         """
         try:
-            ref = self._ref_of(rule_id)
+            ref = refs.get(rule_id)
             if ref is None:
                 return
             value, reason = self._evaluate(ref)
@@ -392,12 +396,6 @@ class IotSource:
             await self._feed(rule_id, value)
         except Exception:
             logger.exception("iot 源求值 rule %s 失败, 本次不喂", rule_id)
-
-    def _ref_of(self, rule_id: str) -> IotRef | None:
-        for ref in self._iot_refs():
-            if ref.rule_id == rule_id:
-                return ref
-        return None
 
     def _evaluate(self, ref: IotRef) -> tuple[bool | None, DiagnosticReason]:
         """求值。``None`` = 未就绪，调用方置未知而不是喂假。

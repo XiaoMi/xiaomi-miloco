@@ -387,8 +387,9 @@ class Rule(BaseModel):
         与 ``resolved_direction`` 同构, 也同样是普通 ``@property`` —— 不进
         ``model_dump()``。dump 之后再按键取会拿到 ``None``。
 
-        ``condition_dnf`` 为空时回退 omni。这个回退今天是主路径而不是兜底: CLI
-        建 rule 时不传这一列, 所以新建的每条 rule 它都是 NULL。
+        ``condition_dnf`` 为空时回退 omni。**这条回退只兜迁移前的存量行**: 创建
+        路径第一步会无条件补齐这一列 (``_prepare_condition``), 落库也写它
+        (``rule_repo``), 所以经服务端建出来的 rule 走不到这个分支。
         """
         dnf = self.condition_dnf
         if dnf is None or not dnf.any_of:

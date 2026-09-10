@@ -207,9 +207,43 @@ async def test_orphaned_debounce_does_not_fire_after_condition_recovers(monkeypa
     await runner.update_state("r1", "cam1", True, "", skip_flicker=True)
     await asyncio.sleep(0.05)
 
-    # 条件确实重新进入了一次（未知期间聚合没更新，恢复为真是一次真跳变），断的是
-    # 那次退出没有被 fire。
-    assert "EXITED" not in events
+    # 撤抗抖时基线已拨回真，所以恢复为真是 STILL_IN 而不是一次新的进入 —— 两条
+    # 一起断：那次退出没被 fire，进入动作也没重复发。
+    assert events == ["ENTERED"]
+
+
+@pytest.mark.asyncio
+async def test_exit_still_happens_after_the_device_returns_with_the_same_false(
+    monkeypatch,
+):
+    """抗抖窗口里掉线、设备带同一个假值回来 —— 那次退出必须补上。
+
+    撤抗抖时不把聚合基线拨回真的话，基线停在假、设备回来时聚合也是假，命中
+    `old == new` 的早返：退出边沿再也不产生，会话型 task 永久卡在 on。
+    """
+    rule = _rule(
+        mode=RuleMode.STATE,
+        on_enter_desc="进",
+        on_exit_desc="出",
+        exit_debounce_seconds=0,
+    )
+    runner = _runner([rule], monkeypatch)
+    runner.set_task_actions("t1", {"on_enter_desc": "进", "on_exit_desc": "出"})
+    events: list[str] = []
+
+    async def _record(rule_, event, *_a, **_kw):
+        events.append(event.value)
+        return None
+
+    runner._fire = _record  # ty:ignore[invalid-assignment]
+
+    await runner.update_state("r1", "cam1", True, "", skip_flicker=True)
+    await runner.update_state("r1", "cam1", False, "", skip_flicker=True)
+    runner.mark_source_unknown("r1", "cam1")
+    await runner.update_state("r1", "cam1", False, "", skip_flicker=True)
+    await asyncio.sleep(0.05)
+
+    assert events == ["ENTERED", "EXITED"]
 
 
 @pytest.mark.asyncio
@@ -239,6 +273,42 @@ async def test_debounce_rechecks_condition_before_firing(monkeypatch):
     await asyncio.sleep(0.05)
 
     assert events == ["ENTERED"]
+
+
+@pytest.mark.asyncio
+async def test_exit_still_happens_after_the_recheck_abandons_it(monkeypatch):
+    """到点侧自己放弃那一次退出之后，聚合基线也要跟着拨回真。
+
+    与置未知那一侧同一个命题，只是走的是竞态输掉、由到点侧兜住的那条路：不拨的话
+    设备带同一个假值回来时命中 `old == new` 的早返，这次退出永远补不上。
+    """
+    rule = _rule(
+        mode=RuleMode.STATE,
+        on_enter_desc="进",
+        on_exit_desc="出",
+        exit_debounce_seconds=0,
+    )
+    runner = _runner([rule], monkeypatch)
+    runner.set_task_actions("t1", {"on_enter_desc": "进", "on_exit_desc": "出"})
+    events: list[str] = []
+
+    async def _record(rule_, event, *_a, **_kw):
+        events.append(event.value)
+        return None
+
+    runner._fire = _record  # ty:ignore[invalid-assignment]
+
+    await runner.update_state("r1", "cam1", True, "", skip_flicker=True)
+    await runner.update_state("r1", "cam1", False, "", skip_flicker=True)
+    runner._state["r1"].sources["cam1"].last_bool = None
+    await asyncio.sleep(0.05)
+    # 先钉住这条用例真的走了放弃分支, 否则下面断的可能是另一条路。
+    assert events == ["ENTERED"]
+
+    await runner.update_state("r1", "cam1", False, "", skip_flicker=True)
+    await asyncio.sleep(0.05)
+
+    assert events == ["ENTERED", "EXITED"]
 
 
 # ── 事件型 task：重新触发靠条件层 ─────────────────────────────────────

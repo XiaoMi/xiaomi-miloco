@@ -490,11 +490,27 @@ class RuleRunner:
         src.pending_exit = False
         state = self._state[rule_id]
         pending = state.exit_debounce_task
+        if pending is not None:
+            if not pending.done():
+                pending.cancel()
+            self._rewind_abandoned_exit(state)
+        self._clear_pending_source_enter(rule_id)
+
+    def _rewind_abandoned_exit(self, state: RuleRuntimeState) -> None:
+        """放弃一次「退出边沿已经发出、动作还没落地」的抗抖: 清掉抗抖记录, 并把聚合
+        基线拨回那次边沿之前。
+
+        不拨回去这个中间态就固化了 —— 设备带同一个假值回来时聚合与基线相等、命中
+        `old == new` 的早返, 这次退出永远补不上; 带真值回来时假→真被当成一次新的
+        进入, 进入动作重复发。
+
+        拨回的目标恒为真: 抗抖只可能由一次真→假的边沿排出来。
+
+        cancel 归调用方 —— 到点那一侧走进来时那个 task 就是自己, 不能 cancel 自己。
+        """
         state.exit_debounce_task = None
         state.exit_debounce_at = None
-        if pending is not None and not pending.done():
-            pending.cancel()
-        self._clear_pending_source_enter(rule_id)
+        state.last_rule_state = True
 
     # ---- Legacy field views (test / rule_tester compatibility) ----
     #
@@ -1245,9 +1261,7 @@ class RuleRunner:
                 "EXIT_DEBOUNCE_ABANDONED: rule=%s name=%s 条件已转未就绪",
                 rule.id, rule.name,
             )
-            rs = self._ensure_state(rule.id)
-            rs.exit_debounce_task = None
-            rs.exit_debounce_at = None
+            self._rewind_abandoned_exit(self._ensure_state(rule.id))
             return
         # Cleanup before firing so a re-entry during fire doesn't see stale handle
         rs = self._ensure_state(rule.id)
