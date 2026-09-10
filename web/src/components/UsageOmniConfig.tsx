@@ -11,7 +11,7 @@
  * 保存写 config.json,感知下个推理周期热生效(免重启);api_key 打码、留空=沿用原 key。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   OMNI_CONFIG_STALE_EVENT,
@@ -23,8 +23,10 @@ import {
   listOmniModels,
   testOmniConfig,
 } from "@/api";
-import type { OmniConfigState, OmniProfile, OmniTestResult } from "@/lib/types";
+import type { OmniConfigState, OmniHealth, OmniProfile, OmniTestResult } from "@/lib/types";
 import { IconX, IconEye, IconEyeOff, IconChevronDown, IconChevronUp } from "@/lib/icons";
+import { relativeTime, smartTimeLabel } from "@/lib/relativeTime";
+import { placePopover } from "@/lib/popoverPlace";
 import { toast } from "./Toast";
 
 const INPUT_CLS =
@@ -61,6 +63,25 @@ const SEV_CLASS: Record<Severity, string> = {
   ok: "text-success",
   warn: "text-warning",
   error: "text-error",
+};
+
+// 模型列的状态标记:形状 + 颜色双编码(色弱也能辨认),判断顺序见 markerStateOf。
+type MarkerState = "testing" | "err" | "warn" | "ok" | "fail" | "untested";
+const MARKER_GLYPH: Record<MarkerState, string> = {
+  testing: "◌",
+  err: "✕",
+  warn: "▲",
+  ok: "●",
+  fail: "✕",
+  untested: "○",
+};
+const MARKER_CLASS: Record<MarkerState, string> = {
+  testing: "text-text-tertiary animate-pulse",
+  err: "text-error",
+  warn: "text-warning",
+  ok: "text-success",
+  fail: "text-error",
+  untested: "text-text-tertiary",
 };
 
 // 拉模型/测试失败的机器码 → 该错误属于哪个表单字段(就近显示,而非全堆模型框下)。
@@ -191,13 +212,16 @@ export function UsageOmniConfig() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<OmniTestResult | null>(null);
-  // 列表行内「测试」:正在测的 label + 各行结果
+  // 列表行内「测试」:正在测的 label(结果落在后端 last_verified,测完 load() 刷新即可,不再本地缓存)
   const [rowTesting, setRowTesting] = useState<string | null>(null);
-  const [rowTestResults, setRowTestResults] = useState<Record<string, OmniTestResult>>({});
   const [activating, setActivating] = useState<string | null>(null); // 正在「启用前测试+启用」的 label
   const [deactivating, setDeactivating] = useState<string | null>(null); // 正在「停用」的 label
-  // 连接状态列被截断时,锚定元素底部的全文浮层(fixed 定位,免原生 title 延迟、不被表格 overflow 裁剪)
-  const [tip, setTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  // 模型列状态标记的悬浮气泡:锚定元素底部的全文浮层(fixed 定位,免原生 title 延迟、不被表格 overflow 裁剪)。
+  // anchor 记锚点视口坐标 + 待展示文案,pos 由 layout effect 量出气泡真实尺寸后经 placePopover 算出
+  // (下方装不下就翻上方,两轴夹回视口内,与 UsageUrlChip 的清理菜单同一套算法)。
+  const [tipAnchor, setTipAnchor] = useState<{ rect: DOMRect; lines: string[] } | null>(null);
+  const [tipPos, setTipPos] = useState<{ left: number; top: number } | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
   // 删除确认弹窗(web 风格,代替 window.confirm):待删项 + 删除中
   const [deleteTarget, setDeleteTarget] = useState<OmniProfile | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -211,12 +235,19 @@ export function UsageOmniConfig() {
     return () => window.removeEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
   }, []);
 
-  async function load() {
+  // silent = true:失败只弹 toast,不写 loadErr(用于行内操作后的刷新,避免一次网络抖动
+  // 就把整张卡片(表头/全部档案行/操作按钮)替换成错误页,导致用户再无可点元素恢复)。
+  async function load(opts?: { silent?: boolean }) {
     try {
       setState(await getOmniConfig());
       setLoadErr(null);
     } catch (e) {
-      setLoadErr(e instanceof Error ? e.message : t("usage.configLoadError"));
+      const msg = e instanceof Error ? e.message : t("usage.configLoadError");
+      if (opts?.silent) {
+        toast(msg, "danger");
+      } else {
+        setLoadErr(msg);
+      }
     }
   }
 
@@ -319,13 +350,6 @@ export function UsageOmniConfig() {
       setState(s);
       setAdding(false);
       setEditing(null);
-      // 保存后清掉该条旧的行内测试结果(key/model 可能已变,旧 ✓ 会误导)。
-      if (target)
-        setRowTestResults((m2) => {
-          const next = { ...m2 };
-          delete next[target];
-          return next;
-        });
       toast(t("usage.saveSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.saveFailed"), "danger");
@@ -368,39 +392,36 @@ export function UsageOmniConfig() {
     }
   }
 
-  // 列表行内「测试」:对已存档的该条按 label 测(用存档 key,无需带 key),结果就地显示。
+  // 列表行内「测试」:对已存档的该条按 label 测(用存档 key,无需带 key)。结果由后端写入
+  // 该档案的 last_verified,测完 load() 刷新一次即可让模型列的标记 + 气泡吃到最新结果。
   async function onTestRow(p: OmniProfile) {
     setRowTesting(p.label);
-    setRowTestResults((m) => {
-      const next = { ...m };
-      delete next[p.label];
-      return next;
-    });
     try {
       const res = await testOmniConfig({ label: p.label, model: p.model, base_url: p.base_url });
-      setRowTestResults((m) => ({ ...m, [p.label]: res }));
-      // 测通当前生效那套时,后端已主动清熔断,前端触发一次 refetch 刷新 health,
-      // 让状态列从"熔断红/黄"变回"测试结果"。stale 事件复用配置变更通道。
-      if (res.ok && p.active) {
-        window.dispatchEvent(new Event(OMNI_CONFIG_STALE_EVENT));
+      // 测通当前生效那套时,后端已主动清熔断;结果落在 last_verified/health,
+      // 统一靠下面这次 load() 刷新即可让标记从"熔断红/黄"变回测试结果,
+      // 不再额外派发 stale 事件(否则其 listener 会再触发一次 load(),一次点击两个并发 GET)。
+      await load({ silent: true });
+      // 部分失败(如 no_key)后端不落 last_verified,标记不会变化,靠这条 toast 兜底反馈;
+      // 与 onActivate 的「不可启用」toast 共用同一套 testReason 文案。
+      if (severityOf(res) !== "ok") {
+        toast(testReason(res), severityOf(res) === "warn" ? "warn" : "danger");
       }
     } catch (e) {
-      setRowTestResults((m) => ({
-        ...m,
-        [p.label]: { ok: false, message: e instanceof Error ? e.message : t("usage.testFailed") },
-      }));
+      toast(e instanceof Error ? e.message : t("usage.testFailed"), "danger");
     } finally {
       setRowTesting(null);
     }
   }
 
   // 启用前先跑一次测试(用存档 key 真正探测模型):仅「连接正常」(✓绿)才放行启用;否则不启用,
-  // 顶部 toast 给出原因,并把结果写进该行「连接状态」列(原因文案与状态列一致)。
+  // 顶部 toast 给出原因。测试结果落在后端 last_verified,测完统一 load() 刷新,让模型列的
+  // 标记 + 气泡跟上(无论最终是否放行启用)。
   async function onActivate(p: OmniProfile) {
     setActivating(p.label);
     try {
       const res = await testOmniConfig({ label: p.label, model: p.model, base_url: p.base_url });
-      setRowTestResults((m) => ({ ...m, [p.label]: res }));
+      await load({ silent: true });
       if (severityOf(res) !== "ok") {
         toast(`${t("usage.cannotEnable")}：${testReason(res)}`, severityOf(res) === "warn" ? "warn" : "danger");
         return;
@@ -434,11 +455,6 @@ export function UsageOmniConfig() {
     setDeleting(true);
     try {
       setState(await deleteOmniConfig({ label: p.label }));
-      setRowTestResults((m) => {
-        const next = { ...m };
-        delete next[p.label];
-        return next;
-      });
       toast(t("usage.deleteSuccess"), "ok");
       setDeleteTarget(null);
     } catch (e) {
@@ -448,25 +464,122 @@ export function UsageOmniConfig() {
     }
   }
 
-  // 连接状态列被截断时的悬浮全文:锚定元素底部的 fixed 浮层(避开表格 overflow 裁剪、无原生 title 延迟)。
-  function showTip(e: React.MouseEvent<HTMLElement>) {
-    const el = e.currentTarget;
-    if (el.scrollWidth > el.clientWidth) {
-      const r = el.getBoundingClientRect();
-      setTip({ text: el.textContent ?? "", x: r.left, y: r.bottom + 4 });
-    }
+  // 模型列状态标记的悬浮气泡:锚定元素底部的 fixed 浮层(避开表格 overflow 裁剪、无原生 title 延迟)。
+  // 鼠标移上去就弹,不等文字被截断。
+  function showTip(e: React.MouseEvent<HTMLElement> | React.FocusEvent<HTMLElement>, lines: string[]) {
+    setTipAnchor({ rect: e.currentTarget.getBoundingClientRect(), lines });
   }
   function hideTip() {
-    setTip(null);
+    setTipAnchor(null);
+    setTipPos(null);
   }
 
-  // 测试结果的本地化文案(无图标/延迟);供「不可启用」toast 与状态列共用。
+  // fixed 定位在滚动后会失锚(页面滚了,气泡不动)→ 直接关掉,不做跟随;
+  // 与 UsageUrlChip 的落法一致,避免同一张表两处浮层滚动行为不一致。
+  useEffect(() => {
+    if (!tipAnchor) return;
+    window.addEventListener("scroll", hideTip, true);
+    window.addEventListener("resize", hideTip);
+    return () => {
+      window.removeEventListener("scroll", hideTip, true);
+      window.removeEventListener("resize", hideTip);
+    };
+  }, [tipAnchor]);
+
+  // 量出气泡真实尺寸之后再定位:下方装不下就翻到上方,两轴夹回视口内(placePopover)。
+  useLayoutEffect(() => {
+    if (!tipAnchor || !tipRef.current) return;
+    const box = tipRef.current.getBoundingClientRect();
+    const next = placePopover(
+      tipAnchor.rect,
+      { width: box.width, height: box.height },
+      { width: window.innerWidth, height: window.innerHeight },
+      { gap: 4, edge: 8, align: "left" },
+    );
+    setTipPos((p) => (p && p.left === next.left && p.top === next.top ? p : next));
+  }, [tipAnchor]);
+
+  // 该行模型列标记状态:先到先得,依次判断测试中 / active 行的熔断 error / warn /
+  // last_verified 成功 / last_verified 失败 / 从未验证过。
+  function markerStateOf(p: OmniProfile, health: OmniHealth | undefined): MarkerState {
+    if (rowTesting === p.label || activating === p.label) return "testing";
+    if (p.active && health && health.state !== "ok") {
+      return health.state === "error" ? "err" : "warn";
+    }
+    if (p.last_verified && p.last_verified.ok) return "ok";
+    if (p.last_verified && !p.last_verified.ok) {
+      // 与 severityOf 共用同一套三档口径:鉴权过但探测被拒(rejected_authed)算 warn,不算 fail。
+      return p.last_verified.code && TEST_WARN_CODES.has(p.last_verified.code) ? "warn" : "fail";
+    }
+    return "untested";
+  }
+
+  // relativeTime 只在一小时内返回真正的相对量(刚刚 / N 分钟前),再往前返回的
+  // 是"11:32"、"昨天 11:32"、"9 月 8 日"这类绝对写法,与 smartTimeLabel 的
+  // 输出重复,补进括号只是把同一个时刻换个格式再写一遍。
+  function lastVerifiedLine(atMs: number): string {
+    const abs = smartTimeLabel(atMs);
+    const withinHour = Date.now() - atMs < 3600_000;
+    return withinHour
+      ? t("usage.tipLastVerified", { time: abs, rel: relativeTime(atMs) })
+      : t("usage.tipLastVerifiedAbs", { time: abs });
+  }
+
+  // 该标记对应的悬浮气泡内容(只放表格里没有的信息:不重复 Base URL / 模型名 / API Key)。
+  function tipLinesOf(p: OmniProfile, health: OmniHealth | undefined, st: MarkerState): string[] {
+    if (st === "testing") return [t("usage.tipTesting")];
+    if (st === "err" || (st === "warn" && health && health.state !== "ok")) {
+      const h = health!;
+      const reason =
+        h.code && h.code !== "http_error"
+          ? t(`omniHealth.codes.${h.code}`, { defaultValue: h.message })
+          : h.message;
+      const failures =
+        h.consecutive_failures > 0
+          ? ` · ${t("omniHealth.failuresCount", { n: h.consecutive_failures })}`
+          : "";
+      const lines = [reason + failures];
+      if (h.last_probe_at_ms) {
+        lines.push(
+          t("usage.tipLastVerified", {
+            time: smartTimeLabel(h.last_probe_at_ms),
+            rel: relativeTime(h.last_probe_at_ms),
+          }),
+        );
+      }
+      if (st === "warn" && h.next_probe_in_seconds != null) {
+        lines.push(t("usage.tipNextRetry", { n: h.next_probe_in_seconds }));
+      }
+      return lines;
+    }
+    if (st === "ok") {
+      const lv = p.last_verified!;
+      const latency = lv.latency_ms != null ? ` · ${lv.latency_ms}ms` : "";
+      return [
+        `${t("usage.tipAvailable")}${latency}`,
+        lastVerifiedLine(lv.at_ms),
+      ];
+    }
+    if (st === "fail" || st === "warn") {
+      // warn 走到这里说明是 last_verified 的 rejected_authed(health 未处于 error/warn,
+      // 即非 active 行,或 active 行熔断已 CLOSED),与上面 health 分支互斥。
+      const lv = p.last_verified!;
+      const k = lv.code ? OMNI_CODE_KEY[lv.code] : undefined;
+      return [
+        k ? t(k) : lv.message,
+        lastVerifiedLine(lv.at_ms),
+      ];
+    }
+    return [t("usage.tipUntested"), t("usage.tipUntestedHint")];
+  }
+
+  // 测试结果的本地化文案(无图标/延迟);供「不可启用」与行内「测试」失败 toast 共用。
   function testReason(res: OmniTestResult): string {
     const k = res.code ? OMNI_CODE_KEY[res.code] : undefined;
     return k ? t(k) : res.message;
   }
 
-  // 测试结果统一展示文案(✓/⚠/✗ + 本地化 + 延迟);行内状态列与表单底部共用,避免两处渲染漂移。
+  // 测试结果统一展示文案(✓/⚠/✗ + 本地化 + 延迟);表单底部展示测试结果用。
   function testResultText(res: OmniTestResult): string {
     const lat = res.latency_ms != null ? ` · ${res.latency_ms}ms` : "";
     return `${SEV_GLYPH[severityOf(res)]} ${testReason(res)}${lat}`;
@@ -535,7 +648,6 @@ export function UsageOmniConfig() {
                       <th className="text-left px-5 md:px-6 py-2">{t("usage.colModel")}</th>
                       <th className="text-left px-3 py-2">{t("usage.baseUrlLabel")}</th>
                       <th className="text-left px-3 py-2">{t("usage.colApiKey")}</th>
-                      <th className="text-left px-3 py-2 w-44">{t("usage.colStatus")}</th>
                       <th className="text-left px-5 md:px-6 py-2">{t("usage.colAction")}</th>
                     </tr>
                   </thead>
@@ -543,117 +655,104 @@ export function UsageOmniConfig() {
                     {profiles.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={5}
+                          colSpan={4}
                           className="px-5 md:px-6 py-5 text-center text-text-tertiary"
                         >
                           {t("usage.emptyProfiles")}
                         </td>
                       </tr>
                     ) : (
-                      profiles.map((p) => (
-                        <tr
-                          key={p.label}
-                          className={`border-b border-border last:border-b-0 ${
-                            p.active ? "bg-brand-soft" : ""
-                          }`}
-                        >
-                          <td className="px-5 md:px-6 py-2.5 num text-text-primary">
-                            {p.model}
-                            {p.active && (
-                              <span className="ml-2 align-middle inline-block rounded px-1.5 py-0.5 bg-brand-primary text-white text-caption">
-                                {t("usage.activeTag")}
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-3 py-2.5 num text-text-tertiary">{p.base_url}</td>
-                          <td className="px-3 py-2.5 num text-text-tertiary">
-                            {p.has_key ? p.api_key_masked : t("usage.notConfigured")}
-                          </td>
-                          {/* 连接状态列:默认「未测试」;点行内「测试」就地刷新;定宽截断,溢出 hover 看全文 */}
-                          {/* 固定宽 w-44 单行截断(列宽恒定不横向挤压);文字被截断时鼠标悬浮即时弹出
-                              锚定元素底部的 fixed 浮层显示全文(避开表格 overflow 裁剪、无原生 title 延迟) */}
-                          <td className="px-3 py-2.5">
-                            {/* active 行且 health 非 ok:优先显实时熔断状态,覆盖手动测试结果
-                                (health 是真实运行时反映,手动测试是快照)。 */}
-                            {p.active && state.active.health && state.active.health.state !== "ok" ? (
+                      profiles.map((p) => {
+                        // active 行才有熔断器 health,非 active 行只看 last_verified 快照。
+                        const health = p.active ? state.active.health : undefined;
+                        const st = markerStateOf(p, health);
+                        return (
+                          <tr
+                            key={p.label}
+                            className={`border-b border-border last:border-b-0 ${
+                              p.active ? "bg-brand-soft" : ""
+                            }`}
+                          >
+                            <td className="px-5 md:px-6 py-2.5 num text-text-primary">
+                              {/* 状态标记(形状+颜色)+ 模型名:鼠标移上去就弹气泡,内容见 tipLinesOf */}
                               <span
-                                className={`block w-44 truncate ${SEV_CLASS[state.active.health.state === "error" ? "error" : "warn"]}`}
-                                onMouseEnter={showTip}
+                                className="inline-flex items-center gap-1.5"
+                                onMouseEnter={(e) => showTip(e, tipLinesOf(p, health, st))}
                                 onMouseLeave={hideTip}
                               >
-                                {SEV_GLYPH[state.active.health.state === "error" ? "error" : "warn"]}{" "}
-                                {/* backend message 硬编码中文,英文界面走 codes i18n;
-                                    http_error 带动态状态码不走 codes,直接显 message。 */}
-                                {state.active.health.code && state.active.health.code !== "http_error"
-                                  ? t(`omniHealth.codes.${state.active.health.code}`, {
-                                      defaultValue: state.active.health.message,
-                                    })
-                                  : state.active.health.message}
-                                {state.active.health.consecutive_failures > 0 && (
-                                  <> · {t("omniHealth.failuresCount", { n: state.active.health.consecutive_failures })}</>
-                                )}
-                              </span>
-                            ) : rowTesting === p.label ? (
-                              <span className="block w-44 truncate text-text-tertiary">{t("usage.testing")}</span>
-                            ) : rowTestResults[p.label] ? (
-                              <span
-                                className={`block w-44 truncate ${SEV_CLASS[severityOf(rowTestResults[p.label])]}`}
-                                onMouseEnter={showTip}
-                                onMouseLeave={hideTip}
-                              >
-                                {testResultText(rowTestResults[p.label])}
-                              </span>
-                            ) : (
-                              <span className="block w-44 truncate text-text-tertiary">{t("usage.statusUntested")}</span>
-                            )}
-                          </td>
-                          <td className="px-5 md:px-6 py-2.5 text-left whitespace-nowrap">
-                            <div className="inline-flex items-center gap-3 align-middle">
-                              {p.active ? (
-                                <button
-                                  type="button"
-                                  onClick={() => onDeactivate(p)}
-                                  disabled={deactivating === p.label}
-                                  className="hover:bg-error-bg text-error border border-error rounded-md px-2.5 py-1 disabled:opacity-60"
+                                <span
+                                  role="img"
+                                  tabIndex={0}
+                                  className={`inline-block w-3 text-center leading-none rounded-sm focus-visible:ring-2 focus-visible:ring-brand-primary focus-visible:outline-none ${MARKER_CLASS[st]}`}
+                                  aria-label={tipLinesOf(p, health, st).join(t("usage.ariaSep"))}
+                                  onFocus={(e) => showTip(e, tipLinesOf(p, health, st))}
+                                  onBlur={hideTip}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Escape") hideTip();
+                                  }}
                                 >
-                                  {deactivating === p.label ? t("usage.deactivating") : t("usage.deactivate")}
-                                </button>
-                              ) : (
-                                <button
-                                  type="button"
-                                  onClick={() => onActivate(p)}
-                                  disabled={activating === p.label}
-                                  className="hover:bg-brand-soft text-brand-primary border border-brand-primary rounded-md px-2.5 py-1 disabled:opacity-60"
-                                >
-                                  {activating === p.label ? t("usage.testing") : t("usage.activate")}
-                                </button>
+                                  {MARKER_GLYPH[st]}
+                                </span>
+                                {p.model}
+                              </span>
+                              {p.active && (
+                                <span className="ml-2 align-middle inline-block rounded px-1.5 py-0.5 bg-brand-primary text-white text-caption">
+                                  {t("usage.activeTag")}
+                                </span>
                               )}
-                              <button
-                                type="button"
-                                onClick={() => onTestRow(p)}
-                                disabled={rowTesting === p.label}
-                                className="text-text-secondary hover:text-brand-primary disabled:opacity-60"
-                              >
-                                {rowTesting === p.label ? t("usage.testing") : t("usage.test")}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => startEdit(p)}
-                                className="text-text-secondary hover:text-brand-primary"
-                              >
-                                {t("usage.edit")}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setDeleteTarget(p)}
-                                className="text-text-tertiary hover:text-error"
-                              >
-                                {t("usage.delete")}
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))
+                            </td>
+                            <td className="px-3 py-2.5 num text-text-tertiary">{p.base_url}</td>
+                            <td className="px-3 py-2.5 num text-text-tertiary">
+                              {p.has_key ? p.api_key_masked : t("usage.notConfigured")}
+                            </td>
+                            <td className="px-5 md:px-6 py-2.5 text-left whitespace-nowrap">
+                              <div className="inline-flex items-center gap-3 align-middle">
+                                {p.active ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => onDeactivate(p)}
+                                    disabled={deactivating === p.label}
+                                    className="hover:bg-error-bg text-error border border-error rounded-md px-2.5 py-1 disabled:opacity-60"
+                                  >
+                                    {deactivating === p.label ? t("usage.deactivating") : t("usage.deactivate")}
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => onActivate(p)}
+                                    disabled={activating === p.label}
+                                    className="hover:bg-brand-soft text-brand-primary border border-brand-primary rounded-md px-2.5 py-1 disabled:opacity-60"
+                                  >
+                                    {activating === p.label ? t("usage.testing") : t("usage.activate")}
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => onTestRow(p)}
+                                  disabled={rowTesting === p.label}
+                                  className="text-text-secondary hover:text-brand-primary disabled:opacity-60"
+                                >
+                                  {rowTesting === p.label ? t("usage.testing") : t("usage.test")}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => startEdit(p)}
+                                  className="text-text-secondary hover:text-brand-primary"
+                                >
+                                  {t("usage.edit")}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setDeleteTarget(p)}
+                                  className="text-text-tertiary hover:text-error"
+                                >
+                                  {t("usage.delete")}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
@@ -800,13 +899,21 @@ export function UsageOmniConfig() {
         </div>
       )}
 
-      {/* 连接状态列截断时的全文浮层:fixed 锚定元素底部,瞬时出现、不被表格 overflow 裁剪 */}
-      {tip && (
+      {/* 模型列状态标记的悬浮气泡:fixed 锚定元素,鼠标移上去瞬时出现、不被表格 overflow 裁剪;
+          落点未算出前先摆到锚点下方并隐形,量完真实高度后再用 placePopover 定最终位置 */}
+      {tipAnchor && (
         <div
-          className="fixed z-[70] max-w-xs rounded-md bg-bg-secondary border border-border shadow-md px-2.5 py-1.5 text-caption text-text-primary pointer-events-none"
-          style={{ left: tip.x, top: tip.y }}
+          ref={tipRef}
+          className="fixed z-[70] max-w-xs rounded-md bg-bg-secondary border border-border shadow-md px-2.5 py-1.5 text-caption text-text-primary pointer-events-none space-y-0.5"
+          style={{
+            left: tipPos ? tipPos.left : tipAnchor.rect.left,
+            top: tipPos ? tipPos.top : tipAnchor.rect.bottom + 4,
+            visibility: tipPos ? undefined : "hidden",
+          }}
         >
-          {tip.text}
+          {tipAnchor.lines.map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
         </div>
       )}
 

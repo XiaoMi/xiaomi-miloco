@@ -53,6 +53,19 @@ def client(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     reset_settings()
+
+    # 验证记录读写要用到 manager.kv_repo;端到端测试只挂 router、不过 lifespan,
+    # manager 单例的 _kv_repo 平时由 Manager.initialize() 灌注,这里补齐一份绑定到
+    # 本用例 MILOCO_HOME 的 KVRepo。用 monkeypatch 而非裸赋值:退出时自动还原成
+    # 进入前的值(而不是一律拍成 None,把 None 泄漏给后续用例)。
+    import miloco.database.connector as _connector_module
+    from miloco.admin.router import manager as _manager
+    from miloco.database.kv_repo import KVRepo as _KVRepo
+
+    monkeypatch.setattr(_connector_module, "db_connector", None)
+    _connector_module.init_database()
+    monkeypatch.setattr(_manager, "_kv_repo", _KVRepo(), raising=False)
+
     app = FastAPI()
     app.include_router(router, prefix="/api")
     yield TestClient(app)
