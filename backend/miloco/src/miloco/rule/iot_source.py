@@ -105,6 +105,23 @@ def value_family(value: Any) -> str | None:
     return None
 
 
+def _is_bool_reported_as_number(current: Any, expected: Any) -> bool:
+    """阈值是布尔、设备把它报成了 0 / 1 —— 同一个值的另一种上报形态。
+
+    这类设备存在的判断记在 ``StateStore._same`` 的 docstring 里。当成脏数据的话规则
+    会停在 ``eval_failed``、一次都不触发，而住户看到的是一条描述完全正常的规则 ——
+    痕迹只留在日志和诊断出口里。
+
+    只放行数字往布尔这一个方向。反方向没有同样紧的护栏 —— 布尔恒可转成 1 / 0，放行
+    等于把「亮度属性报了个 True」这种真脏数据变成一个错的比较结果。
+    """
+    return (
+        value_family(expected) is _BOOL
+        and value_family(current) is _NUMBER
+        and current in (0, 1)
+    )
+
+
 def compare(current: Any, op: str, expected: Any) -> bool:
     """按谓词求值。类型不兼容抛 ``EvalFailed``。
 
@@ -118,6 +135,8 @@ def compare(current: Any, op: str, expected: Any) -> bool:
     func = SUPPORTED_OPS.get(op)
     if func is None:
         raise EvalFailed(f"不支持的运算符 {op!r}")
+    if _is_bool_reported_as_number(current, expected):
+        current = bool(current)
     left, right = value_family(current), value_family(expected)
     if left is None or right is None or left != right:
         raise EvalFailed(

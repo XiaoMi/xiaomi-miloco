@@ -54,7 +54,7 @@ user-facing text 仅在两个时机出现：
 1. 含 on-target-desc 时 task → record → rule 顺序完成装配：Y / N / NA
 2. 终态 §响应动作 同时含「触发后做什么」+「记录什么」：Y / N
 3. 每条装配提示「怎么改」字段给出用户可直接复述的短语：Y / N
-4. iot 规则的 did / iid / value 逐个抄自本轮 device spec 或设备目录的真实输出：Y / N / NA
+4. iot 规则的 iid 抄自本轮 `device spec` 输出，did / value 抄自本轮真实输出：Y / N / NA
 ```
 
 ## 装配提示元规则
@@ -263,7 +263,9 @@ temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性�
 
 **第 1 步 · 找候选属性。禁止凭常识填 did / iid，只用本轮真实拿到的输出。**
 
-优先看 system context `## 设备目录` 段，找 access 含 `n` 的属性。缺失或未覆盖 → `miloco-cli device list`（**不带 `--room`**：房间名只能来自用户原话，本步推出来的房间名不算，也不许带到 §Rule.感知设备）+ 对候选设备跑 `miloco-cli device spec <did>`。
+先看 system context `## 设备目录` 段，按 access 含 `n` 筛候选设备与属性名。目录缺失或未覆盖 → `miloco-cli device list`（**不带 `--room`**：房间名只能来自用户原话，本步推出来的房间名不算，也不许带到 §Rule.感知设备）。
+
+**选定设备之后必须跑 `miloco-cli device spec <did>`**：`--iot-iid` 的值只能从 `device spec` 输出的行首列 `prop.<siid>.<piid>` 抄，去掉 `prop.` 前缀。设备目录只用来筛候选，不作为 iid 的来源。
 
 access 列：`w` 可写 / `r` 可读 / `n` 设备主动推送。**只有 `r` 没有 `n` 的属性不能当触发源**，用它建规则会被拒。
 
@@ -616,7 +618,9 @@ session + duration record 三 desc 分工：
 
 ### 动作设备（`--action` JSON 的 did）
 
-优先看 system context `## 设备目录` 段。缺失或未覆盖 → `device list --room` + `device spec <did>` 拿 iid。iid 格式为 `prop.<siid>.<piid>`（属性直控）或 `action.<siid>.<aiid>`（method call，如 TTS），从 `device spec` 输出行首列直接复制真实数字。
+先看 system context `## 设备目录` 段筛设备。缺失或未覆盖 → `device list --room`。
+
+**选定设备之后必须跑 `device spec <did>` 拿 iid**：格式为 `prop.<siid>.<piid>`（属性直控）或 `action.<siid>.<aiid>`（method call，如 TTS），只能从 `device spec` 输出行首列直接复制真实数字。设备目录不作为 iid 的来源。
 
 **`cooldown_minutes` 取值**（`idempotent:false` 必配）：紧急报警 1-5 / 日常提醒 5-30 / 欢迎播报 30-60；类别内下限=低频触发，上限=高频重复触发。
 
@@ -1041,12 +1045,12 @@ miloco-cli rule create --task-id movie_mode_gesture \
 
 用户："客厅温度超过 28 度就开空调"
 
-推理：环境量异常 → §Rule?=Y；§Rule.source 第 1 步查设备目录，客厅温湿度传感器有 `temperature|rn|float|[-40,125;0.1]|℃` → 含 `n`，答的就是本命题 → source=iot + 触发装配提示；开空调是激活持续设备状态 → §Rule.direction 第 1 步判据 3=session + 默认补 on_exit 复位；命题无持续时长 → 不配 duration_seconds；无累计 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；§Rule.action 设备直控 → action JSON；source=iot → 不传 `--source`
+推理：环境量异常 → §Rule?=Y；§Rule.source 第 1 步查设备目录，客厅温湿度传感器有 `temperature|rn|float|[-40,125;0.1]|℃` → 含 `n`，答的就是本命题 → 选定这台设备，跑 `miloco-cli device spec <客厅温湿度传感器 DID>` 从行首列抄 iid → source=iot + 触发装配提示；开空调是激活持续设备状态 → §Rule.direction 第 1 步判据 3=session + 默认补 on_exit 复位；命题无持续时长 → 不配 duration_seconds；无累计 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；§Rule.action 设备直控 → action JSON；source=iot → 不传 `--source`
 
 ```
 Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
 Rule.source=iot · direction=session · on_enter/on_exit 均 action JSON
-iot 条件项：<客厅温湿度传感器 DID> · 2.1 · gt · 28.0
+iot 条件项：<客厅温湿度传感器 DID> · <siid>.<piid> · gt · 28.0
 ```
 
 ```bash
@@ -1054,7 +1058,7 @@ miloco-cli task create --task-id living_room_cool --description "客厅超过 28
 miloco-cli rule create --task-id living_room_cool \
   --name "[living_room_cool] 客厅高温开空调" \
   --direction session \
-  --iot-did <客厅温湿度传感器 DID> --iot-iid 2.1 --iot-op gt --iot-value 28.0 \
+  --iot-did <客厅温湿度传感器 DID> --iot-iid <siid>.<piid> --iot-op gt --iot-value 28.0 \
   --on-enter-action '{"did":"<客厅空调 DID>","iid":"prop.<siid>.<piid>","value":true,"idempotent":true}' \
   --on-exit-action '{"did":"<客厅空调 DID>","iid":"prop.<siid>.<piid>","value":false,"idempotent":true}'
 ```

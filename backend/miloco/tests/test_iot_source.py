@@ -220,6 +220,29 @@ async def test_type_mismatch_is_marked_unknown_not_true(store):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reported, expected", [(1, True), (0, False)])
+async def test_a_bool_property_reported_as_a_number_still_evaluates(
+    store, reported, expected
+):
+    """设备把布尔属性报成 0 / 1 —— 同一个值的另一种上报形态，不是脏数据。
+
+    判成不兼容的话这条规则永久停在 eval_failed、一次都不触发，而住户看到的是一条
+    描述完全正常的规则。
+
+    **两个取值都要测**：只测 1 的话「归一成 bool」被改成「恒为真」照样通过。
+    """
+    _online(store)
+    _prop(store, reported)
+    h = _Harness(store, [_ref(op="eq", value=True)])
+
+    h.source.start()
+    await h.settle()
+
+    assert h.fed == [("r1", expected)]
+    assert h.source.diagnostics()["rules"]["r1"]["reason"] == DiagnosticReason.OK.value
+
+
+@pytest.mark.asyncio
 async def test_deleting_the_container_does_not_feed_false(store):
     """切家庭那一刻全屋条件项同时收到删除。喂假 = 一批退出边沿。"""
     _online(store)

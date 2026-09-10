@@ -478,3 +478,66 @@ def test_attach_registers_direction_from_db(tmp_path, monkeypatch):
     assert rule.direction is RuleDirection.SESSION
     assert runner._state_machine_allows(rule, RuleEvent.ENTERED) is True
     assert runner._state_machine.runtime_state("t1") is TaskRuntimeState.ON
+
+
+# ── reconfigure: 配置变了、现实没变 ───────────────────────────────────
+
+
+async def _session_task_turned_on(monkeypatch):
+    """把一个会话型 task 沿真实路径推到 ``on``, 返回 (runner, sm, 拓扑, 派发记录)。"""
+    rule = _rule("r-ses", mode=RuleMode.STATE)
+    runner = _runner([rule], monkeypatch)
+    dispatched: list[tuple[str, ActionSlot]] = []
+    sm = TaskStateMachine(
+        is_condition_satisfied=runner.is_condition_satisfied,
+        dispatch_action=lambda tid, slot, _p: dispatched.append((tid, slot)),
+    )
+    runner.attach_state_machine(sm)
+    runner.set_task_actions("t1", {"on_enter_desc": "进", "on_exit_desc": "出"})
+    directions = derive_directions([("r-ses", RuleDirection.SESSION.value)])
+    sm.register_task("t1", directions)
+    runner._execute_dynamic = _never_dispatch  # ty:ignore[invalid-assignment]
+
+    for _ in range(3):
+        await runner.update_state("r-ses", "cam1", True, "")
+    await asyncio.sleep(0.05)
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+    dispatched.clear()
+    return runner, sm, directions, dispatched
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_keeps_a_task_on_while_its_iot_device_is_offline(monkeypatch):
+    """离线是"不知道", 不是"会话结束"。
+
+    误发的 on_exit 是真会对外下指令的, 而 runner 侧的边沿缓存没被清过 —— 设备回来时
+    属性没变就只产 STILL_IN, 这个 task 再也不会 enter。
+    """
+    runner, sm, directions, dispatched = await _session_task_turned_on(monkeypatch)
+
+    runner.mark_source_unknown("r-ses", "cam1")
+    assert runner.is_condition_satisfied("r-ses") is None
+
+    sm.reconfigure("t1", directions)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_turns_a_task_off_when_the_session_condition_is_false(
+    monkeypatch,
+):
+    """上一条的反向: 明确观测到不成立时照样退。
+
+    两条一起才把判据钉在"是不是明确的假"上, 而不是"是不是真"或者恒真。
+    """
+    runner, sm, directions, dispatched = await _session_task_turned_on(monkeypatch)
+
+    runner._ensure_source("r-ses", "cam1").last_bool = False
+    assert runner.is_condition_satisfied("r-ses") is False
+
+    sm.reconfigure("t1", directions)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert dispatched == [("t1", ActionSlot.ON_EXIT)]
