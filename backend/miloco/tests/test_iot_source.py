@@ -36,9 +36,14 @@ class _Harness:
             feed=self._feed,
             mark_unknown=lambda rid, did: self.unknown.append((rid, did)),
             iot_refs=lambda: list(self.refs),
+            ref_of_rule=self._ref_of_rule,
             pull_props=self._pull,
             reconnect_pull_delay=0.01,
         )
+
+    def _ref_of_rule(self, rule_id: str) -> IotRef | None:
+        """与生产同构：现读 ``self.refs``，不留快照 —— 测试才删得掉批中途的那条。"""
+        return next((r for r in self.refs if r.rule_id == rule_id), None)
 
     async def _feed(self, rule_id: str, value: bool) -> None:
         self.fed.append((rule_id, value))
@@ -240,6 +245,36 @@ async def test_a_bool_property_reported_as_a_number_still_evaluates(
 
     assert h.fed == [("r1", expected)]
     assert h.source.diagnostics()["rules"]["r1"]["reason"] == DiagnosticReason.OK.value
+
+
+@pytest.mark.asyncio
+async def test_a_rule_deleted_mid_batch_leaves_no_diagnostic(store):
+    """批次拿到手之后规则被删 —— 不求值、不往诊断里留条目。
+
+    ``remove_rule`` 会先 ``rebuild_index`` 把它的诊断条目剪掉，而这一批的求值发生在
+    那之后：按批取一次条件项快照的话它会被写回去，排障时看到一条不存在的规则、按原因
+    汇总那份计数也被它污染。
+
+    **两条 rule 互删对方**，所以不依赖批次集合的遍历顺序 —— 先跑的那条把后跑的删掉。
+    """
+    for did in ("d1", "d2"):
+        _online(store, did=did)
+        _prop(store, 1, did=did)
+    h = _Harness(store, [_ref("r1", did="d1"), _ref("r2", did="d2")])
+
+    async def _delete_the_other(rule_id: str, value: bool) -> None:
+        h.fed.append((rule_id, value))
+        other = "r2" if rule_id == "r1" else "r1"
+        h.refs = [r for r in h.refs if r.rule_id != other]
+        h.source.rebuild_index()
+
+    h.source._feed = _delete_the_other
+
+    h.source.start()
+    await h.settle()
+
+    assert len(h.fed) == 1
+    assert list(h.source.diagnostics()["rules"]) == [h.fed[0][0]]
 
 
 @pytest.mark.asyncio

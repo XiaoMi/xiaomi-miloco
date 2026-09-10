@@ -45,7 +45,7 @@ from miloco.dispatch import dispatch_event
 from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
-from miloco.rule.iot_source import IotSource, iot_ref_of
+from miloco.rule.iot_source import IotRef, IotSource, iot_ref_of
 from miloco.rule.record_source import RECORD_SOURCE_DID, RecordSource, record_ref_of
 from miloco.rule.schema import (
     IOT_SOURCE_TYPE,
@@ -384,6 +384,7 @@ class RuleRunner:
             feed=self._feed_iot,
             mark_unknown=self.mark_source_unknown,
             iot_refs=self._iot_refs,
+            ref_of_rule=self._iot_ref_of_rule,
             pull_props=pull_props,
         )
         self._iot_source = source
@@ -399,6 +400,17 @@ class RuleRunner:
             ref = iot_ref_of(rule)
             if ref is not None:
                 yield ref
+
+    def _iot_ref_of_rule(self, rule_id: str) -> IotRef | None:
+        """一条 rule 现在盯着哪条属性。**现读，不留快照。**
+
+        求值时按 rule_id 扫一遍全部条件项的话，批量唤醒（启动补种、重连补拉、切家庭）
+        会变成 O(n²)；而按批取一次快照又会让批内被删掉的 rule 仍被求值 —— 它拿不到
+        动作（``update_state`` 有 rule 不存在的守卫），但会往诊断里写回一条已经被
+        ``rebuild_index`` 剪掉的条目。字典现读两头都占。
+        """
+        rule = self._rules.get(rule_id)
+        return iot_ref_of(rule) if rule is not None else None
 
     def iot_refs_of_task(self, task_id: str) -> list[str]:
         """该 task 名下带 iot 条件项的 rule_id。task 重新启用时按它 seed。"""
@@ -433,8 +445,7 @@ class RuleRunner:
         )
 
     def _iot_source_did(self, rule_id: str) -> str:
-        rule = self._rules.get(rule_id)
-        ref = iot_ref_of(rule) if rule is not None else None
+        ref = self._iot_ref_of_rule(rule_id)
         # 真实 did: 一条 rule 一个条件项时 OR 退化成单元素 (无害), 而将来打开多设备
         # OR 时键的语义不用改 —— 改过一次之后存量运行态与新代码的键对不上。
         return ref.did if ref is not None else "iot"
