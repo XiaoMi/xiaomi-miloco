@@ -353,7 +353,14 @@ class Manager:
     # Repo layer access properties
     @property
     def kv_repo(self) -> KVRepo:
-        return self._kv_repo
+        kv_repo = getattr(self, "_kv_repo", None)
+        if kv_repo is None:
+            raise RuntimeError(
+                "manager.kv_repo 在 Manager.initialize() 之前被访问 —— "
+                "此时 kv 表尚未创建,静默建一份会得到空缓存(读全默认值、写全失败)。"
+                "请把调用挪到 lifespan 之后,或在测试里显式注入 _kv_repo。"
+            )
+        return kv_repo
 
     @property
     def meaningful_events_dao(self):
