@@ -4,6 +4,7 @@
 以及 person router 检测器单例在 settings reset 后失效。均为纯逻辑,不建真实
 CoreML session(不依赖 CoreML EP / 真实模型推理)。
 """
+
 from __future__ import annotations
 
 import threading
@@ -112,6 +113,9 @@ def test_reset_hook_invalidates_detector_singleton(iso_home, monkeypatch):
 
 def test_openvino_disabled_by_env_var(monkeypatch):
     """MILOCO_DISABLE_OPENVINO=1 时 _openvino_disabled() 返回 True。"""
+    # 先清宿主环境残留(开发者可能在 shell profile 里设了逃生开关),
+    # 否则"默认不禁用"断言会因无关环境变量假红。
+    monkeypatch.delenv("MILOCO_DISABLE_OPENVINO", raising=False)
     assert ort_utils._openvino_disabled() is False  # 默认不禁用
     monkeypatch.setenv("MILOCO_DISABLE_OPENVINO", "1")
     assert ort_utils._openvino_disabled() is True
@@ -121,24 +125,49 @@ def test_openvino_disabled_by_env_var(monkeypatch):
     assert ort_utils._openvino_disabled() is False
 
 
-def test_intel_platform_detection(monkeypatch):
-    """platform.machine() 为 x86_64/AMD64 时 _IS_INTEL_PLATFORM 为 True。"""
-    import platform as _plat
+@pytest.fixture
+def reloadable_ort_utils(monkeypatch):
+    """允许用例 patch platform + reload 重算模块级常量,退出时无条件复原。
 
-    monkeypatch.setattr(_plat, "machine", lambda: "x86_64")
-    # 重新加载模块以应用 patch(模块级常量)
+    monkeypatch 的 teardown 只还原 platform.machine/system 本身,不会重新
+    reload 模块;中间 assert 失败时 ort_utils._IS_INTEL_PLATFORM 会永久停在
+    patch 后的值,污染后续用例。本 fixture 把 undo + reload 放进 teardown,
+    保证失败路径也走到。
+    """
     import importlib
 
+    yield
+    monkeypatch.undo()
+    importlib.reload(ort_utils)
+
+
+def test_intel_platform_detection(reloadable_ort_utils, monkeypatch):
+    """platform.machine() 为 x86_64 + GenuineIntel 时 _IS_INTEL_PLATFORM 为 True。"""
+    import importlib
+    import pathlib
+    import platform as _plat
+
+    # 伪装 /proc/cpuinfo 含 GenuineIntel(非 Linux 会被 _is_intel_cpu 提前拦掉,
+    # 所以同时把 system 伪成 Linux)。
+    _orig_read_text = pathlib.Path.read_text
+
+    def _fake_read_text(self, encoding=None, errors=None):
+        # 用 name 比对而非完整路径:Windows 上 Path("/proc/cpuinfo") 的 str 是
+        # \proc\cpuinfo(反斜杠),as_posix 才是 /proc/cpuinfo;name 跨平台一致。
+        if self.name == "cpuinfo":
+            return "vendor_id\t: GenuineIntel\n"
+        return _orig_read_text(self, encoding=encoding, errors=errors)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", _fake_read_text)
+    monkeypatch.setattr(_plat, "system", lambda: "Linux")
+
+    monkeypatch.setattr(_plat, "machine", lambda: "x86_64")
     importlib.reload(ort_utils)
     assert ort_utils._IS_INTEL_PLATFORM is True
 
     monkeypatch.setattr(_plat, "machine", lambda: "arm64")
     importlib.reload(ort_utils)
     assert ort_utils._IS_INTEL_PLATFORM is False
-
-    # 恢复(避免影响其他测试)
-    monkeypatch.undo()
-    importlib.reload(ort_utils)
 
 
 def test_make_session_prefers_openvino_on_intel(monkeypatch, tmp_path):
@@ -155,11 +184,16 @@ def test_make_session_prefers_openvino_on_intel(monkeypatch, tmp_path):
         lambda: ["CPUExecutionProvider", "OpenVINOExecutionProvider"],
     )
     monkeypatch.delenv("MILOCO_DISABLE_OPENVINO", raising=False)
+    monkeypatch.setattr(
+        ort_utils, "_openvino_cache_dir", lambda p: str(tmp_path / "ov_cache")
+    )
 
     captured = {}
 
     def _fake_session(*args, **kwargs):
-        captured["providers"] = kwargs.get("providers", args[2] if len(args) > 2 else [])
+        captured["providers"] = kwargs.get(
+            "providers", args[2] if len(args) > 2 else []
+        )
         return object()
 
     monkeypatch.setattr(ort_utils.ort, "InferenceSession", _fake_session)
@@ -169,11 +203,19 @@ def test_make_session_prefers_openvino_on_intel(monkeypatch, tmp_path):
     ort_utils.make_session(str(model))
 
     providers = captured["providers"]
-    assert providers[0] == (
-        "OpenVINOExecutionProvider",
-        {"device_type": "CPU"},
-    )
+    # OpenVINO 排第一、CPU 兜底排第二
+    assert providers[0][0] == "OpenVINOExecutionProvider"
     assert providers[1] == "CPUExecutionProvider"
+    ov_opts = providers[0][1]
+    assert ov_opts["device_type"] == "CPU"
+    # 线程数对齐:load_config 里 INFERENCE_NUM_THREADS 应等于默认 4
+    import json as _json
+
+    assert _json.loads(ov_opts["load_config"]) == {
+        "CPU": {"INFERENCE_NUM_THREADS": "4"}
+    }
+    # cache_dir 是优化项(准备失败时可能缺),只校验存在性、不校验具体路径
+    assert "cache_dir" in ov_opts
 
 
 def test_make_session_falls_back_to_cpu_when_openvino_missing(monkeypatch, tmp_path):
@@ -193,7 +235,9 @@ def test_make_session_falls_back_to_cpu_when_openvino_missing(monkeypatch, tmp_p
     captured = {}
 
     def _fake_session(*args, **kwargs):
-        captured["providers"] = kwargs.get("providers", args[2] if len(args) > 2 else [])
+        captured["providers"] = kwargs.get(
+            "providers", args[2] if len(args) > 2 else []
+        )
         return object()
 
     monkeypatch.setattr(ort_utils.ort, "InferenceSession", _fake_session)
@@ -222,7 +266,9 @@ def test_make_session_falls_back_to_cpu_when_openvino_disabled(monkeypatch, tmp_
     captured = {}
 
     def _fake_session(*args, **kwargs):
-        captured["providers"] = kwargs.get("providers", args[2] if len(args) > 2 else [])
+        captured["providers"] = kwargs.get(
+            "providers", args[2] if len(args) > 2 else []
+        )
         return object()
 
     monkeypatch.setattr(ort_utils.ort, "InferenceSession", _fake_session)

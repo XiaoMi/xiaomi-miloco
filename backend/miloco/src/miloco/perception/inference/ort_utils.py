@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import platform
 import shutil
@@ -22,15 +23,37 @@ _DEFAULT_NUM_THREADS = 4
 # Apple Silicon 上 CPU EP 默认走 ArmKleidiAI::MlasConv,每次 Conv 推理分配
 # native workspace 不归还,长跑 RSS 单调上涨。CoreML EP 走 ANE/GPU 绕开此路径。
 # Intel Mac 上 CoreML EP 反而更慢,需要按 arch 区分。
-_IS_APPLE_SILICON = (
-    platform.system() == "Darwin" and platform.machine() == "arm64"
-)
+_IS_APPLE_SILICON = platform.system() == "Darwin" and platform.machine() == "arm64"
 
-# Intel 平台(x86_64/AMD64)默认启用 OpenVINO EP 做硬件加速:
+
+def _is_intel_cpu() -> bool:
+    """x86_64 且 CPU 厂商为 Intel。AMD 上 OpenVINO 未做基准,不默认开启。
+
+    读 /proc/cpuinfo 的 vendor_id 行(含 "GenuineIntel")。非 Linux / 读不到时
+    保守返回 False(走 CPU EP),不冒 AMD 上静默变慢的风险。
+    """
+    if platform.machine() not in ("x86_64", "AMD64"):
+        return False
+    if platform.system() != "Linux":
+        # 非 Linux(如 Windows)无 /proc/cpuinfo;Windows 上依赖层已不装
+        # onnxruntime-openvino(marker 收窄到 linux),这里保守 False 即可。
+        return False
+    try:
+        return "GenuineIntel" in Path("/proc/cpuinfo").read_text(errors="ignore")
+    except OSError:
+        return False
+
+
+# Intel 平台(x86_64)默认启用 OpenVINO EP 做硬件加速:
 # N100/Alder Lake-N 等 Intel CPU 可用 OpenVINO CPU EP 的 AVX2/VNNI 优化。
 # N100 无独立 GPU,集成 UHD 性能有限且共享内存带宽,故固定走 OpenVINO CPU EP。
 # 通过环境变量 MILOCO_DISABLE_OPENVINO=1 可强制回退 CPU EP。
-_IS_INTEL_PLATFORM = platform.machine() in ("x86_64", "AMD64", "x86", "i386", "i686")
+#
+# 严格判定 Intel 厂商(读 /proc/cpuinfo 的 vendor_id):AMD 的 x86_64 不默认开启
+# OpenVINO——OpenVINO CPU 插件在 AMD 上能跑(通用 oneDNN 路径)但未做基准,可能比
+# 原生 CPU EP 更慢,且日志只打印 providers 看不出差异。AMD 用户若想主动尝试,可设
+# MILOCO_FORCE_OPENVINO=1 覆盖此判定。
+_IS_INTEL_PLATFORM = platform.machine() in ("x86_64", "AMD64") and _is_intel_cpu()
 
 # CoreML EP 每建一个 InferenceSession 都会把 ONNX 子图序列化成一个 ~模型等大的
 # 中间 .mlmodel 写进 $TMPDIR,且删除只挂在 C++ Execution 析构链上——进程被
@@ -40,6 +63,10 @@ _IS_INTEL_PLATFORM = platform.machine() in ("x86_64", "AMD64", "x86", "i386", "i
 # 成"每模型一份的有界 footprint"。cache 子目录按模型内容 hash 隔离,规避 ORT 自身
 # cache key 不检测内容变更(原地换模型会复用旧编译产物)的坑。
 _COREML_CACHE_DIRNAME = "coreml_cache"
+
+# OpenVINO EP 同款编译缓存:跨 session/进程复用图编译产物,降低重启启动时延
+# (N100 低功耗核上 det+reid 编译是秒级阻塞)。与 CoreML cache 分目录、互不干扰。
+_OPENVINO_CACHE_DIRNAME = "openvino_cache"
 
 # 兜底:cache 目录总大小超过 models_dir 下所有 onnx 之和的这个倍数时整目录清空
 # 重建。全清是安全操作(下次 session 重编译一次而已,不会用错模型),故阈值可保守。
@@ -68,11 +95,23 @@ def _openvino_disabled() -> bool:
     """环境变量 MILOCO_DISABLE_OPENVINO=1/true/yes 时强制禁用 OpenVINO EP。
 
     用于现场排障:OpenVINO 在某些模型/驱动组合上可能行为异常,留一条
-    不重启改代码的逃生通道。
+    不重启改代码的逃生通道。优先级高于 MILOCO_FORCE_OPENVINO。
     """
     import os
 
     val = os.environ.get("MILOCO_DISABLE_OPENVINO", "").strip().lower()
+    return val in ("1", "true", "yes")
+
+
+def _openvino_forced() -> bool:
+    """环境变量 MILOCO_FORCE_OPENVINO=1/true/yes 时,即便非 Intel 也启用 OpenVINO。
+
+    为 AMD x86_64 用户预留的主动开关:OpenVINO CPU 插件在 AMD 上能跑(通用 oneDNN
+    路径)但未做基准,默认不开;用户自行对比后若更快,可设此变量强制启用。
+    """
+    import os
+
+    val = os.environ.get("MILOCO_FORCE_OPENVINO", "").strip().lower()
     return val in ("1", "true", "yes")
 
 
@@ -119,6 +158,23 @@ def _model_cache_dir(model_path: str) -> Path:
     return cache_dir
 
 
+def _openvino_cache_dir(model_path: str) -> Path:
+    """该模型的 OpenVINO 编译缓存目录(openvino_cache/<content-hash>/),已确保存在。
+
+    与 CoreML 路径同款按内容 hash 分目录:模型原地换代 → hash 变 → 新目录,
+    天然规避复用旧编译产物。
+    """
+    from miloco.config import get_settings
+
+    cache_dir = (
+        get_settings().directories.workspace_dir
+        / _OPENVINO_CACHE_DIRNAME
+        / _hash_model_file(model_path)
+    )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
 def _sweep_coreml_cache_if_oversized_once() -> None:
     """进程内一次:cache 目录总量超阈值则整目录清空重建。失败只告警不阻断启动。"""
     if _cache_swept.is_set():
@@ -157,9 +213,7 @@ def _sweep_coreml_cache_if_oversized_once() -> None:
                     base / 1e6,
                 )
         except Exception:
-            _LOGGER.warning(
-                "CoreML cache 兜底清理失败(忽略,不影响启动)", exc_info=True
-            )
+            _LOGGER.warning("CoreML cache 兜底清理失败(忽略,不影响启动)", exc_info=True)
         finally:
             # set 移到清理完成之后:并发 make_session 的其它线程在快速路径见到未 set
             # 时会进锁阻塞,直到 rmtree 结束才放行,兑现「首个 session 创建前清完」
@@ -183,6 +237,10 @@ def make_session(
     """
     providers = ["CPUExecutionProvider"]
     available = ort.get_available_providers()
+    # 提前算:OpenVINO 分支要把同一个值透传给 EP 侧线程池,不能等到
+    # SessionOptions 才算(EP 侧默认 8,与本文件顶部"4 线程控尾延迟"的实测
+    # 结论不一致;不显式对齐会让模型主体按 8 线程跑、尾延迟恶化)。
+    threads = num_threads if num_threads is not None else _DEFAULT_NUM_THREADS
     if use_gpu and "CUDAExecutionProvider" in available:
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     # Apple Silicon 即使 use_gpu=False 也走 CoreML — 主要目的是绕开 CPU EP
@@ -225,24 +283,37 @@ def make_session(
             "Check onnxruntime wheel build options.",
             available,
         )
-    # Intel 平台(x86_64/AMD64):N100/Alder Lake-N 等芯片走 OpenVINO EP 做硬件加速。
+    # Intel 平台(x86_64 + GenuineIntel)或显式 force 时,走 OpenVINO EP 做硬件加速。
     # OpenVINO CPU EP 自动利用 AVX2/VNNI 指令集优化卷积/GEMM,无需代码感知。
     # 若用户显式禁用(环境变量)或 runtime 未带 OpenVINO EP,则静默回退 CPU EP。
     elif (
-        _IS_INTEL_PLATFORM
+        (_IS_INTEL_PLATFORM or _openvino_forced())
         and "OpenVINOExecutionProvider" in available
         and not _openvino_disabled()
     ):
+        # OpenVINO EP 用自己的线程池,不读 SessionOptions.intra_op_num_threads
+        # (EP 侧默认 8);不显式对齐,本文件顶部"4 线程控尾延迟"的实测结论在
+        # Intel 路径上只对 CPU EP 回落算子生效,模型主体不受约束。
+        # load_config 是 ORT 1.23+ 的推荐写法(num_of_threads 已 deprecated);
+        # 键名 INFERENCE_NUM_THREADS 控制 CPU 设备的推理线程数。
+        ov_opts: dict = {
+            "device_type": "CPU",
+            "load_config": json.dumps({"CPU": {"INFERENCE_NUM_THREADS": str(threads)}}),
+        }
+        # cache_dir 复用编译产物,降低重启启动时延;与 CoreML 同款按内容 hash
+        # 分目录。缓存是优化,准备失败只告警、退回无 cache 模式,绝不拖垮推理。
+        try:
+            ov_opts["cache_dir"] = str(_openvino_cache_dir(model_path))
+        except Exception:
+            _LOGGER.warning(
+                "OpenVINO cache 目录准备失败,退回无 cache 模式", exc_info=True
+            )
         providers = [
-            (
-                "OpenVINOExecutionProvider",
-                {"device_type": "CPU"},
-            ),
+            ("OpenVINOExecutionProvider", ov_opts),
             "CPUExecutionProvider",
         ]
 
     opts = ort.SessionOptions()
-    threads = num_threads if num_threads is not None else _DEFAULT_NUM_THREADS
     opts.intra_op_num_threads = threads
     opts.inter_op_num_threads = threads
 

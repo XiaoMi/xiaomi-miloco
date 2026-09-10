@@ -1141,8 +1141,8 @@ dependencies = [
     { name = "httpx" },
     { name = "miloco-miot" },
     { name = "numpy" },
-    { name = "onnxruntime", marker = "platform_machine != 'AMD64' and platform_machine != 'x86_64'" },
-    { name = "onnxruntime-openvino", marker = "platform_machine == 'AMD64' or platform_machine == 'x86_64'" },
+    { name = "onnxruntime", marker = "python_full_version >= '3.14' or platform_machine != 'x86_64' or sys_platform != 'linux'" },
+    { name = "onnxruntime-openvino", marker = "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "opencv-python-headless" },
     { name = "pi-heif" },
     { name = "pillow" },
@@ -1163,8 +1163,8 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "miloco-miot", editable = "miot" },
     { name = "numpy", specifier = ">=2.2.0" },
-    { name = "onnxruntime", marker = "platform_machine != 'AMD64' and platform_machine != 'x86_64'", specifier = ">=1.24.0" },
-    { name = "onnxruntime-openvino", marker = "platform_machine == 'AMD64' or platform_machine == 'x86_64'", specifier = ">=1.24.1" },
+    { name = "onnxruntime", marker = "python_full_version >= '3.14' or platform_machine != 'x86_64' or sys_platform != 'linux'", specifier = ">=1.27.0" },
+    { name = "onnxruntime-openvino", marker = "python_full_version < '3.14' and platform_machine == 'x86_64' and sys_platform == 'linux'", specifier = ">=1.24.1" },
     { name = "opencv-python-headless", specifier = ">=4.13.0.92" },
     { name = "pi-heif", specifier = ">=1.4.0" },
     { name = "pillow", specifier = ">=12.2.0" },
@@ -1479,11 +1479,8 @@ dependencies = [
 ]
 wheels = [
     { url = "https://files.pythonhosted.org/packages/99/16/69ca742f0b65c40d4de3ff44bb6abc23c47b23e932bc901116176ae69922/onnxruntime_openvino-1.24.1-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:3007c803634cc69c6d52af1dea7ce729d9bb62b9a11070fd2f959119199007a8", size = 84430935, upload-time = "2026-02-26T13:44:32.193Z" },
-    { url = "https://files.pythonhosted.org/packages/aa/73/619bb416bbfc40aebdd493fd6800d2637359294fe683d8a6bae3ff8d869a/onnxruntime_openvino-1.24.1-cp311-cp311-win_amd64.whl", hash = "sha256:8042698232bf67f1f6b219c2b07728d7ae7ddff17d8524588de3675480609aef", size = 13655357, upload-time = "2026-02-26T13:44:35.555Z" },
     { url = "https://files.pythonhosted.org/packages/50/cf/17ba72de2df0fcba349937d2788f154397bbc2d1a2d67772a97e26f6bc5f/onnxruntime_openvino-1.24.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:d617fac2f59a6ab5ea59a788c3e1592240a129642519aaeaa774761dfe35150e", size = 84433207, upload-time = "2026-02-26T13:44:41.395Z" },
-    { url = "https://files.pythonhosted.org/packages/59/37/d301f2c68b19a9485ed5db3047e0fb52478f3e73eb08c7d2a7c61be7cc1c/onnxruntime_openvino-1.24.1-cp312-cp312-win_amd64.whl", hash = "sha256:f186335a9c9b255633275290da7521d3d4d14c7773fee3127bfa040234d3fa5a", size = 13658075, upload-time = "2026-02-26T13:44:44.905Z" },
     { url = "https://files.pythonhosted.org/packages/08/07/f225999919f56506b603aaa3ff837ad563ab26f86906ed7fa7e5abcd849e/onnxruntime_openvino-1.24.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:2c3bb73e68ac27f4891af8a595c1faf574ec68b772e6583c90a0b997a1822782", size = 84433183, upload-time = "2026-02-26T13:44:50.254Z" },
-    { url = "https://files.pythonhosted.org/packages/3e/92/46ae2cd565961a89189900f385bb2f13a9fa731ea4674001d23720fbb1e0/onnxruntime_openvino-1.24.1-cp313-cp313-win_amd64.whl", hash = "sha256:434bf49aa71393c577a456c9d76c98e6d6958a833fa0876793e3d5437b5a511a", size = 13658485, upload-time = "2026-02-26T13:44:53.889Z" },
 ]
 
 [[package]]
