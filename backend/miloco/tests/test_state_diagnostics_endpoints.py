@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from miloco.miot.router import build_state_dump, build_state_stats
 from miloco.rule.router import build_iot_diagnostics
 from miloco.state import StateStore
@@ -68,3 +69,35 @@ def test_iot_diagnostics_passes_the_source_report_through():
     source = SimpleNamespace(diagnostics=lambda: {"consumer_alive": True, "rules": {}})
 
     assert build_iot_diagnostics(source)["consumer_alive"] is True
+
+
+# ── 错误路径 ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_pattern_becomes_a_400(monkeypatch):
+    """本模块的 HTTPException 是 miloco 自己那个 `(message, status_code)`，不是
+    FastAPI 的 `(status_code, detail)` —— 传错会 TypeError 变 500。
+
+    这条错误路径此前没有任何测试走过：`build_state_dump` 的单测只喂合法 pattern。
+    """
+    from miloco.middleware.exceptions import BadRequestException
+    from miloco.miot import router as miot_router
+
+    # state_store 是只读 property，改它背后那个字段
+    monkeypatch.setattr(miot_router.manager, "_state_store", _store_with(1))
+
+    # 末段落在中间节点、一片叶子都没收到 —— snapshot 对这种 pattern 抛 ValueError
+    with pytest.raises(BadRequestException) as excinfo:
+        await miot_router.get_state_dump(
+            pattern="iot/device/d0", limit=10, current_user="u"
+        )
+
+    assert excinfo.value.http_status == 400
+
+
+def test_safe_log_strips_newlines():
+    """用户可控的值里带换行符就能伪造出一整行日志。"""
+    from miloco.utils.common import safe_log
+
+    assert safe_log("a\r\nERROR fake line") == "a ERROR fake line"
