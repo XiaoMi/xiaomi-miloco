@@ -128,6 +128,9 @@ class RuleBrief(BaseModel):
     # enter / exit / session / milestone。enter 与 exit 的 mode 都是 event, 不带
     # 这个字段就分不出一条 rule 是把 task 推进去还是推出来。
     direction: str = "enter"
+    # omni / record / iot。前端按它决定条件框能不能编辑 —— 非 omni 的条件是服务端
+    # 按谓词渲染的, PATCH 会被拒, 不带这个字段界面上就是一个能编辑、提交必失败的框。
+    source_type: str = "omni"
     actions_desc: list[str] = Field(default_factory=list)
 
 

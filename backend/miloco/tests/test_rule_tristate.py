@@ -83,8 +83,12 @@ async def test_unknown_source_does_not_produce_exit_edge(monkeypatch):
     """一真一未知 → 真；真的那个转假之后 → 未知，不是假，所以不产退出边沿。"""
     # debounce 归零：留着默认的 60 秒，EXITED 在用例时间尺度内永远不 fire，
     # 断言无论改动对错都成立。
-    rule = _rule(mode=RuleMode.STATE, on_enter_desc="进", on_exit_desc="出",
-                 exit_debounce_seconds=0)
+    rule = _rule(
+        mode=RuleMode.STATE,
+        on_enter_desc="进",
+        on_exit_desc="出",
+        exit_debounce_seconds=0,
+    )
     runner = _runner([rule], monkeypatch)
     # 动作装在 task 上；没有槽的话 _fire 直接空转，断言就分不开对错了。
     runner.set_task_actions("t1", {"on_enter_desc": "进", "on_exit_desc": "出"})
@@ -113,8 +117,12 @@ async def test_all_false_still_produces_exit_edge(monkeypatch):
     """上一条的反向：没有未知时，转假照样退出。两条一起才把判据钉在「有没有未知」上。"""
     # debounce 归零：留着默认的 60 秒，EXITED 在用例时间尺度内永远不 fire，
     # 断言无论改动对错都成立。
-    rule = _rule(mode=RuleMode.STATE, on_enter_desc="进", on_exit_desc="出",
-                 exit_debounce_seconds=0)
+    rule = _rule(
+        mode=RuleMode.STATE,
+        on_enter_desc="进",
+        on_exit_desc="出",
+        exit_debounce_seconds=0,
+    )
     runner = _runner([rule], monkeypatch)
     # 动作装在 task 上；没有槽的话 _fire 直接空转，断言就分不开对错了。
     runner.set_task_actions("t1", {"on_enter_desc": "进", "on_exit_desc": "出"})
@@ -143,8 +151,12 @@ async def test_marking_unknown_cancels_queued_exit_debounce(monkeypatch):
 
     不撤的话 timer 到点仍会 fire，等于未知驱动了动作。
     """
-    rule = _rule(mode=RuleMode.STATE, on_enter_desc="进", on_exit_desc="出",
-                 exit_debounce_seconds=0)
+    rule = _rule(
+        mode=RuleMode.STATE,
+        on_enter_desc="进",
+        on_exit_desc="出",
+        exit_debounce_seconds=0,
+    )
     runner = _runner([rule], monkeypatch)
     # 动作装在 task 上；没有槽的话 _fire 直接空转，断言就分不开对错了。
     runner.set_task_actions("t1", {"on_enter_desc": "进", "on_exit_desc": "出"})
@@ -173,8 +185,12 @@ async def test_orphaned_debounce_does_not_fire_after_condition_recovers(monkeypa
     孤儿 timer 躲得开后续 ENTERED 的取消（句柄已经不在了），到点复查又看到条件已
     恢复为真 —— 于是在条件为真的时候 fire 一次退出。
     """
-    rule = _rule(mode=RuleMode.STATE, on_enter_desc="进", on_exit_desc="出",
-                 exit_debounce_seconds=0)
+    rule = _rule(
+        mode=RuleMode.STATE,
+        on_enter_desc="进",
+        on_exit_desc="出",
+        exit_debounce_seconds=0,
+    )
     runner = _runner([rule], monkeypatch)
     runner.set_task_actions("t1", {"on_enter_desc": "进", "on_exit_desc": "出"})
     events: list[str] = []
@@ -201,8 +217,12 @@ async def test_debounce_rechecks_condition_before_firing(monkeypatch):
     """到点侧要自己复查一次。撤 timer 与 timer 到点是竞态，只靠撤挡不住已经醒来的
     那一次 —— 这里绕过 mark_source_unknown 直接置未知，模拟撤晚了。
     """
-    rule = _rule(mode=RuleMode.STATE, on_enter_desc="进", on_exit_desc="出",
-                 exit_debounce_seconds=0)
+    rule = _rule(
+        mode=RuleMode.STATE,
+        on_enter_desc="进",
+        on_exit_desc="出",
+        exit_debounce_seconds=0,
+    )
     runner = _runner([rule], monkeypatch)
     runner.set_task_actions("t1", {"on_enter_desc": "进", "on_exit_desc": "出"})
     events: list[str] = []

@@ -613,11 +613,11 @@ def test_on_target_creates_milestone_rule(v2_db):
     conn.close()
 
 
-def test_milestone_legacy_condition_uses_unreachable_did(v2_db):
-    """补建的 milestone rule 在旧 condition 列上填一个不存在的 did。
+def test_milestone_legacy_condition_has_no_device(v2_db):
+    """补建的 milestone rule 在旧 condition 列上不填设备。
 
-    阶段 A 不删列, 万一退回旧代码, 旧代码只认 perceive_device_ids —— 留空会让
-    它把"累计达标"当视觉 query 塞进每台摄像头的 prompt。
+    达标不看摄像头。收口之后感知先按 resolved_source_type 过滤，这条 rule 根本
+    不进那个循环，那一列填什么都不影响它 —— 填一个假 did 只会误导下一个人。
     """
     _seed(
         v2_db,
@@ -634,7 +634,7 @@ def test_milestone_legacy_condition_uses_unreachable_did(v2_db):
         "SELECT condition FROM rule WHERE task_id='t1' AND direction='milestone'"
     ).fetchone()
     legacy = json.loads(milestone["condition"])
-    assert legacy["perceive_device_ids"] == ["__milestone_no_camera__"]
+    assert legacy["perceive_device_ids"] == []
     conn.close()
 
 

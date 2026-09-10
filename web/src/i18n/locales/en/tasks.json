@@ -57,6 +57,7 @@
     "example1": "Help me watch that my kid practices piano 30 minutes a day and remind me when done",
     "example2": "Remind the elder at home to measure blood pressure once a day",
     "example3": "Let me know if a window is left open when nobody's home",
-    "viewExamples": "How to add a task"
+    "viewExamples": "How to add a task",
+    "triggerNotEditable": "This condition is generated from a device property and cannot be edited here."
   }
 }

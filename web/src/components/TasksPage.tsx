@@ -27,6 +27,7 @@ import {
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
+import { ruleConditionIsEditable } from "@/lib/ruleBrief";
 import type {
   Task,
   TaskBoundaryActions,
@@ -309,6 +310,7 @@ function RuleBriefCard({
   onDraftChange: (value: string) => void;
 }) {
   const actions = splitActions(rule.actionsDesc);
+  const conditionIsReadOnly = !ruleConditionIsEditable(rule);
   return (
     <div className="rounded-xl bg-bg-primary border border-border overflow-hidden">
       <div className="px-3.5 py-3 border-b border-border">
@@ -322,7 +324,7 @@ function RuleBriefCard({
             {t("tasks.triggerCondition")}
           </div>
         </div>
-        {editing ? (
+        {editing && !conditionIsReadOnly ? (
           <>
             <textarea
               value={draft}
@@ -340,9 +342,16 @@ function RuleBriefCard({
             </p>
           </>
         ) : (
-          <div className="text-body text-text-primary leading-relaxed break-words">
-            {rule.query}
-          </div>
+          <>
+            <div className="text-body text-text-primary leading-relaxed break-words">
+              {rule.query}
+            </div>
+            {editing && conditionIsReadOnly && (
+              <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
+                {t("tasks.triggerNotEditable")}
+              </p>
+            )}
+          </>
         )}
       </div>
       {/* 动作只在 rule 自己带的时候显示。多条规则的 task 动作按设计不落在 rule 上,

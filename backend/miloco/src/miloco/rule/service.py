@@ -1188,8 +1188,8 @@ class RuleService:
         """这条代建规则的形状还是当前这一版吗。
 
         比的是求值真正读的那几样: 条件项 (``record_ref_of`` 只看 source_type 与
-        spec)、旧 condition 列上的哨兵 did (填别的会让这条 rule 被当成视觉 query
-        塞进摄像头 prompt)、名字 (判重名的键)。阈值不在里面 —— 它本来就不进形状。
+        spec)、旧 condition 列上的设备列表、名字 (判重名的键)。阈值不在里面 ——
+        它本来就不进形状。
         """
         want = self._build_milestone_rule(rule.task_id)
         return (

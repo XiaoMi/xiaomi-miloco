@@ -221,6 +221,15 @@ class RuleCondition(BaseModel):
     query: str = Field(..., description="Natural language condition description")
 
 
+OMNI_SOURCE_TYPE = "omni"
+RECORD_SOURCE_TYPE = "record"
+IOT_SOURCE_TYPE = "iot"
+
+KNOWN_SOURCE_TYPES = frozenset({OMNI_SOURCE_TYPE, RECORD_SOURCE_TYPE, IOT_SOURCE_TYPE})
+"""已经实现了求值的源。不在里面的一律拒, 不静默当 omni ——
+一条 presence 条件项被塞进摄像头 prompt 时, 错误现象离根因很远。"""
+
+
 class ConditionItem(BaseModel):
     """一个触发源上的一个条件。
 
@@ -370,6 +379,24 @@ class Rule(BaseModel):
 
     created_at: str | None = Field(None, description="Creation time (ISO 8601)")
     updated_at: str | None = Field(None, description="Last update time (ISO 8601)")
+
+    @property
+    def resolved_source_type(self) -> str:
+        """这条 rule 归哪个源。判源的代码全部走它, 不许再有第二份。
+
+        与 ``resolved_direction`` 同构, 也同样是普通 ``@property`` —— 不进
+        ``model_dump()``。dump 之后再按键取会拿到 ``None``。
+
+        ``condition_dnf`` 为空时回退 omni。这个回退今天是主路径而不是兜底: CLI
+        建 rule 时不传这一列, 所以新建的每条 rule 它都是 NULL。
+        """
+        dnf = self.condition_dnf
+        if dnf is None or not dnf.any_of:
+            return OMNI_SOURCE_TYPE
+        for conjunction in dnf.any_of:
+            for item in conjunction:
+                return item.source_type
+        return OMNI_SOURCE_TYPE
 
     @property
     def resolved_direction(self) -> RuleDirection:

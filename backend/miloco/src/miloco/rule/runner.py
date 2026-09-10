@@ -45,8 +45,11 @@ from miloco.dispatch import dispatch_event
 from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
+from miloco.rule.iot_source import iot_ref_of
 from miloco.rule.record_source import RECORD_SOURCE_DID, RecordSource, record_ref_of
 from miloco.rule.schema import (
+    IOT_SOURCE_TYPE,
+    RECORD_SOURCE_TYPE,
     SCENE_IID,
     Rule,
     RuleAction,
@@ -510,19 +513,24 @@ class RuleRunner:
     def add_rule(self, rule: Rule) -> None:
         """Insert or replace a rule.
 
-        When replacing an existing rule whose ``direction`` or
-        ``condition.perceive_device_ids`` changed, drop the per-rule runtime
-        state (last_source/rule_state, pending_exit, action_cooldown). Keeping
-        stale state across a shape change can resurrect old EXIT debounces
-        or skew the next OR-aggregation.
+        When replacing an existing rule whose ``direction`` or condition
+        changed, drop the per-rule runtime state (last_source/rule_state,
+        pending_exit, action_cooldown). Keeping stale state across a shape
+        change can resurrect old EXIT debounces or skew the next
+        OR-aggregation.
+
+        条件比的是两列: 旧的 ``perceive_device_ids`` 和 ``condition_dnf``。少了后者
+        的话, 改一条 iot 规则的 did 之后新 did 的值与旧 did 的残留会在 OR 里并存。
         """
         existing = self._rules.get(rule.id)
         if existing is not None:
             # 判 direction 而不是 mode: enter 与 exit 的 mode 都是 event, 只看
             # mode 的话这两者互换时状态不会清, 旧的防抖和聚合结果会留下来。
             direction_changed = existing.resolved_direction != rule.resolved_direction
-            sources_changed = set(existing.condition.perceive_device_ids) != set(
-                rule.condition.perceive_device_ids
+            sources_changed = (
+                set(existing.condition.perceive_device_ids)
+                != set(rule.condition.perceive_device_ids)
+                or existing.condition_dnf != rule.condition_dnf
             )
             duration_config_changed = (
                 existing.duration_seconds != rule.duration_seconds
@@ -812,11 +820,11 @@ class RuleRunner:
         - No EXIT synthesis. The follow-up EXITED event must come from real
           perception; for state-mode rules this means on_exit / debounce will
           not fire just because you triggered.
-        - The ``source_did`` written here (``condition.perceive_device_ids[0]``
-          or ``"manual"``) does not match the ``"perception"`` key the
-          production perception client uses. After a manual trigger,
-          OR-aggregation sees both keys, which can keep a state-mode rule
-          stuck at ENTERED until the runner is rebuilt (process restart).
+        - The ``source_did`` is picked per source so it lands on the same
+          OR key production uses. It still falls back to ``"manual"`` for an
+          omni rule with an empty device list; that key is never fed again, so
+          OR-aggregation keeps a state-mode rule stuck at ENTERED until the
+          runner is rebuilt (process restart).
 
         Returns the execution result, or None when the rule is missing,
         disabled, or has an empty ENTER slot.
@@ -830,11 +838,7 @@ class RuleRunner:
             return None
 
         # Bridge: update state machine so future events diff correctly
-        source_did = (
-            rule.condition.perceive_device_ids[0]
-            if rule.condition.perceive_device_ids
-            else "manual"
-        )
+        source_did = self._manual_source_did(rule)
         src = self._ensure_source(rule_id, source_did)
         src.last_bool = True
         state = self._state[rule_id]
@@ -851,6 +855,24 @@ class RuleRunner:
         return await self._fire(
             rule, RuleEvent.ENTERED, sources, context, str(uuid.uuid4())
         )
+
+    def _manual_source_did(self, rule: Rule) -> str:
+        """手动触发往 OR 里塞的那个键。**必须与该源真实使用的键一致。**
+
+        对不上的话 OR 里会多出一个再也不会被喂的永真键, rule 永久卡在 on。收口前
+        非 omni 的源躲开这件事全靠 ``perceive_device_ids`` 恰好是空的 —— 那会退化成
+        ``"manual"``, 正是这个失败模式。
+        """
+        source_type = rule.resolved_source_type
+        if source_type == RECORD_SOURCE_TYPE:
+            return RECORD_SOURCE_DID
+        if source_type == IOT_SOURCE_TYPE:
+            ref = iot_ref_of(rule)
+            if ref is not None:
+                return ref.did
+        if rule.condition.perceive_device_ids:
+            return rule.condition.perceive_device_ids[0]
+        return "manual"
 
     # ---- EVENT duration sliding-window evaluator ----
 

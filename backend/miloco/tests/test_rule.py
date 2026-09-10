@@ -3764,9 +3764,7 @@ def _make_milestone_rule(rule_id="rule-ms", task_id=TASK_ID, on_target_desc=None
         direction=RuleDirection.MILESTONE,
         lifecycle=RuleLifecycle.PERMANENT,
         enabled=True,
-        condition=RuleCondition(
-            perceive_device_ids=["__milestone_no_camera__"], query="累计达标",
-        ),
+        condition=RuleCondition(perceive_device_ids=[], query="累计达标"),
         condition_dnf=RuleConditionDNF(any_of=[[ConditionItem(
             source_type="record",
             spec={"task_id": task_id, "kind": "duration", "op": ">=",

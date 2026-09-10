@@ -43,8 +43,7 @@ def _make_rule(rule_id="rule-ms", source_type="record", spec=None, task_id=TASK_
         task_id=task_id,
         mode=RuleMode.EVENT,
         direction=RuleDirection.MILESTONE,
-        condition=RuleCondition(perceive_device_ids=["__milestone_no_camera__"],
-                                query="累计达标"),
+        condition=RuleCondition(perceive_device_ids=[], query="累计达标"),
         condition_dnf=RuleConditionDNF(any_of=[[item]]),
     )
 
@@ -398,21 +397,18 @@ class TestMilestoneReconcile:
             "op": ">=",
         }
 
-    def test_rebuilds_when_the_sentinel_did_is_wrong(self):
-        """哨兵 did 也算形状。
+    def test_rebuilds_when_the_device_list_is_not_empty(self):
+        """设备列表也算形状。达标不看摄像头，那一列必须是空的。
 
-        那一列填了真实 did 或留空, 只认它的旧代码会把"累计达标"当成一句视觉
-        query 塞进摄像头 prompt —— 见 MILESTONE_SENTINEL_DID。
+        存量库里是哨兵 did 的那批走同一条路被重建 —— 形状不是当前这一版就删了重来。
         """
         wrong = _make_rule()
-        wrong.condition.perceive_device_ids = ["cam-001"]
+        wrong.condition.perceive_device_ids = ["__milestone_no_camera__"]
         svc, repo = _rule_service("duration", (60, 0), rules=[wrong])
         svc.reconcile_milestone_rule(TASK_ID)
 
         repo.delete.assert_called_once_with("rule-ms")
-        assert repo.create.call_args[0][0].condition.perceive_device_ids == [
-            "__milestone_no_camera__"
-        ]
+        assert repo.create.call_args[0][0].condition.perceive_device_ids == []
 
     def test_deletes_when_the_target_action_is_cleared(self):
         svc, repo = _rule_service(
