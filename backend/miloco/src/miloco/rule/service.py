@@ -16,6 +16,7 @@ Reference: rule-design.md §6.1
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -199,6 +200,31 @@ def _validate_satisfiable(low, high, op: str, value: Any, iid: str) -> None:
         )
 
 
+def _is_on_step_grid(low, value, step) -> bool:
+    """``value`` 落在从 ``low`` 起、每 ``step`` 一档的格子上吗。
+
+    浮点取模的误差会把合法值判成越界，按 step 的量级取绝对容差。
+    """
+    offset = value - low
+    remainder = offset - round(offset / step) * step
+    return abs(remainder) <= abs(step) * 1e-6
+
+
+def _reachable_high(low, high, step) -> Any:
+    """最大的可达值。上界不一定落在步长格上：``[0,100,3]`` 上设备最多报到 99。
+
+    最小值那侧不用收 —— 偏移恒为 0，永远在格上。
+
+    在格上就原样返回，判据与步长可达校验共用一份 —— 商的浮点误差足以凭空少一档
+    （``0.3 / 0.1`` 算出来是 2.9999…，向下取整会把上界从 0.3 收成 0.2）。
+    """
+    if not step:
+        return high
+    if _is_on_step_grid(low, high, step):
+        return high
+    return low + math.floor((high - low) / step) * step
+
+
 def _validate_against_range(value_range, op: str, value: Any, iid: str) -> None:
     """校验的是「这个谓词有没有可能成立」，不是「这个值本身可达」。
 
@@ -211,7 +237,9 @@ def _validate_against_range(value_range, op: str, value: Any, iid: str) -> None:
     low, high = value_range[0], value_range[1]
     step = value_range[2] if len(value_range) > 2 else None
     if op in ORDERING_OPS:
-        _validate_satisfiable(low, high, op, value, iid)
+        # 拿声明的上界判会把恒假的 `gt 99` 与恒真的 `lte 99` 一起放行 —— 正是本函数
+        # 要拦的那两种，而设备根本报不出 100。
+        _validate_satisfiable(low, _reachable_high(low, high, step), op, value, iid)
         return
 
     if not (low <= value <= high):
@@ -220,10 +248,7 @@ def _validate_against_range(value_range, op: str, value: Any, iid: str) -> None:
         )
     if not step:
         return
-    offset = value - low
-    # 浮点取模的误差会把合法值判成越界, 按 step 的量级取绝对容差。
-    remainder = offset - round(offset / step) * step
-    if abs(remainder) > abs(step) * 1e-6:
+    if not _is_on_step_grid(low, value, step):
         raise ValidationException(
             f"value={value!r} 落不到属性 prop.{iid} 的步长上 "
             f"(从 {low} 起每 {step} 一档)"

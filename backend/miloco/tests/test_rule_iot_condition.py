@@ -815,6 +815,67 @@ async def test_a_satisfiable_range_predicate_is_allowed(service):
     )
 
 
+def _with_unaligned_range(service):
+    """装一条上界不落在步长格上的属性：``[0,100,3]`` 的最大可达值是 99。"""
+    spec = {k: dict(v) for k, v in _SPEC.items()}
+    spec["prop.8.1"] = {
+        "description": "风扇 档位",
+        "format": "uint8",
+        "notify": True,
+        "readable": True,
+        "value_range": [0, 100, 3],
+    }
+    service._manager.miot_service.get_device_spec = AsyncMock(
+        return_value={"did": DID, "name": "玄关门锁", "spec": spec}
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_upper_bound_does_not_excuse_a_dead_predicate(service):
+    """上界 100 报不出来，所以 gt 99 恒假 —— 拿声明的上界判会放行。"""
+    _with_unaligned_range(service)
+
+    with pytest.raises(ValidationException, match="没有任何取值"):
+        await service.create_rule(
+            _iot_rule(dnf=_iot_dnf(iid="8.1", op="gt", value=99))
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_unreachable_upper_bound_does_not_excuse_a_tautology(service):
+    """同一个上界的反向：能报出来的都 <= 99，所以 lte 99 恒真。"""
+    _with_unaligned_range(service)
+
+    with pytest.raises(ValidationException, match="恒成立"):
+        await service.create_rule(
+            _iot_rule(dnf=_iot_dnf(iid="8.1", op="lte", value=99))
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_upper_bound_on_the_step_grid_is_kept_as_declared(service):
+    """上界在格上就原样用。``0.3 / 0.1`` 算出来是 2.9999…，向下取整会把上界收成 0.2，
+    于是 gt 0.25 被误判成恒假 —— 一条正常配置建不出来。
+
+    没有这条，``_reachable_high`` 去掉在格判断也会全绿。
+    """
+    spec = {k: dict(v) for k, v in _SPEC.items()}
+    spec["prop.8.1"] = {
+        "description": "加湿器 出雾量",
+        "format": "float",
+        "notify": True,
+        "readable": True,
+        "value_range": [0, 0.3, 0.1],
+    }
+    service._manager.miot_service.get_device_spec = AsyncMock(
+        return_value={"did": DID, "name": "玄关门锁", "spec": spec}
+    )
+
+    assert await service.create_rule(
+        _iot_rule(dnf=_iot_dnf(iid="8.1", op="gt", value=0.25))
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_tautology_on_an_enum_is_rejected(service):
     """枚举 {1,2} 上 gte 0 恒真。此前枚举分支对大小比较直接放行。"""

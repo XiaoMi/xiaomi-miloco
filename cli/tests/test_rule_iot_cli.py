@@ -93,6 +93,51 @@ def test_both_condition_and_iot_args_is_an_error(runner):
     assert "不能一起给" in result.output
 
 
+def test_source_with_iot_args_is_an_error_on_create(runner):
+    """--source 与 iot 四件套同给要报错, 不能把设备列表静默清掉。
+
+    **断 post 没被调用** —— 静默清空那版本会成功建出一条规则、退出码 0。
+    """
+    result, post = _create(
+        runner,
+        "--source",
+        "cam-001",
+        "--iot-did",
+        "d1",
+        "--iot-iid",
+        "5.1",
+        "--iot-op",
+        "eq",
+        "--iot-value",
+        "1",
+    )
+
+    assert "--source" in result.output and "不能一起给" in result.output
+    assert not post.called
+
+
+def test_source_with_iot_args_is_an_error_on_update(runner):
+    """同一道判据在 update 侧也要生效 —— 两侧共用一份, 各装一份就会漏。"""
+    with (
+        patch("miloco_cli.client.api_get", return_value=_SPEC),
+        patch("miloco_cli.client.api_patch", return_value=_OK) as patch_call,
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "rule", "update", "r-1",
+                "--source", "cam-001",
+                "--iot-did", "d1",
+                "--iot-iid", "5.1",
+                "--iot-op", "eq",
+                "--iot-value", "1",
+            ],
+        )
+
+    assert "--source" in result.output and "不能一起给" in result.output
+    assert not patch_call.called
+
+
 def test_partial_iot_args_is_an_error(runner):
     """半套参数建不出条件项。"""
     result, _post = _create(runner, "--iot-did", "d1", "--iot-iid", "5.1")

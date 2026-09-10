@@ -81,6 +81,18 @@ def iot_condition_options(func):
     return func
 
 
+def _reject_mixed_condition_args(query_text, perceive_devices, iot_given) -> None:
+    """视觉那组条件参数与 iot 四件套互斥。
+
+    ``--source`` 也算在这一组里：组装 payload 时它跟着 ``iot_given`` 一起被清空，
+    不拦的话用户显式给的设备列表静默消失，而同样的组合在服务端是报错。
+    """
+    if iot_given and (query_text is not None or perceive_devices):
+        raise click.UsageError(
+            "--condition / --source 与 iot 四件套不能一起给: 一条规则只有一个条件项"
+        )
+
+
 def _iot_args_given(iot_did, iot_iid, iot_op, iot_value) -> bool:
     """四个同时给或同时不给。给了一部分直接报错 —— 半套参数建不出条件项。"""
     given = [x is not None for x in (iot_did, iot_iid, iot_op, iot_value)]
@@ -406,10 +418,7 @@ def rule_create(
     # 非空校验，那是必经处（API 直调绕过 CLI）。摘掉 required=True 之后有它在，
     # 用户看到的是贴合 CLI 参数的错误，而不是一个从服务端回来的字段级报错。
     iot_given = _iot_args_given(iot_did, iot_iid, iot_op, iot_value)
-    if query_text is not None and iot_given:
-        raise click.UsageError(
-            "--condition 与 iot 四件套不能一起给: 一条规则只有一个条件项"
-        )
+    _reject_mixed_condition_args(query_text, perceive_devices, iot_given)
     if query_text is None and not iot_given:
         raise click.UsageError(
             "要给 --condition（摄像头视觉判定）或那四个 --iot-* 参数（设备属性变化）"
@@ -672,12 +681,7 @@ def rule_update(
         _exit_error("--duration-ratio must be in (0, 1]")
 
     iot_given = _iot_args_given(iot_did, iot_iid, iot_op, iot_value)
-    # --source 也会让 payload 带上 condition (见下面那个 if), 所以它一样与 iot 四件套
-    # 互斥 —— 只看 --condition 的话这一组会走到服务端才被拒。
-    if (query_text is not None or perceive_devices) and iot_given:
-        raise click.UsageError(
-            "--condition / --source 与 iot 四件套不能一起给: 改条件只有一条路"
-        )
+    _reject_mixed_condition_args(query_text, perceive_devices, iot_given)
 
     payload: dict = {}
     if name is not None:
