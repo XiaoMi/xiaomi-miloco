@@ -455,6 +455,9 @@ class RuleUpdate(BaseModel):
     lifecycle: RuleLifecycle | None = Field(None)
     enabled: bool | None = Field(None)
     condition: RuleConditionUpdate | None = Field(None)
+    # 整项替换, 不做部分合并 —— ``condition`` 那个字段能部分合并是因为它是两个独立
+    # 标量, 而 DNF 是一个结构, 「合并到哪一层」答不上来。
+    condition_dnf: RuleConditionDNF | None = Field(None)
     actions: list[RuleAction] | None = Field(None)
     action_descriptions: list[str] | None = Field(None)
     on_enter_actions: list[RuleAction] | None = Field(None)

@@ -1229,56 +1229,40 @@ class TestRuleServicePatch:
         )
 
     @pytest.mark.asyncio
-    async def test_patch_moving_out_is_not_blocked(
+    async def test_patch_moving_to_another_task_is_rejected(
         self, service, mock_rule_repo, mock_task_repo
     ):
-        """挪家时清的是旧家的槽, 所以要查旧家的兄弟。
+        """跨 task 移动一律拒。
 
-        两家的兄弟不同才分得开: 旧家有一条靠那份动作活着的 enter 规则, 新家没有。
-        查新家的话这次搬家会被放行, 而旧家那条从此静默不做事。
+        那条收尾链有两处会漏: 旧 task 强制 on_exit 时代表 rule 在 runner 里已经
+        属于新 task、动作槽也清了, 那次退出动作丢掉; 而 add_rule 的 reset 条件不含
+        task_id, rule 在旧 task 里已为真的话, 新拓扑起始 off、喂真时没有跳变,
+        新 task 也进不去。
         """
         r1 = _make_dynamic_rule(rule_id="r1", task_id=TASK_ID)
-        naked = _make_dynamic_rule(
-            rule_id="r2", task_id=TASK_ID, name=_name(TASK_ID, "naked"), descriptions=[]
-        )
-        by_task = {TASK_ID: [r1, naked], "new_task": []}
         mock_rule_repo.get_by_id.return_value = r1
-        mock_rule_repo.list_by_task.side_effect = lambda tid: list(by_task.get(tid, []))
-        mock_task_repo.get_full_view.side_effect = lambda tid: {
-            "actions": {"on_enter_desc": "1. 开灯"} if tid == TASK_ID else {}
-        }
+        mock_rule_repo.list_by_task.return_value = [r1]
+        mock_task_repo.get_full_view.return_value = {"actions": {}}
         service._require_task_exists = lambda _tid: None
 
-        assert await service.patch_rule("r1", RuleUpdate(task_id="new_task")) is True
+        with pytest.raises(ValidationException, match="移到"):
+            await service.patch_rule("r1", RuleUpdate(task_id="new_task"))
 
     @pytest.mark.asyncio
-    async def test_patch_moving_to_another_task_is_not_blocked(
+    async def test_patch_keeping_the_same_task_id_is_not_a_move(
         self, service, mock_rule_repo, mock_task_repo
     ):
-        """改挂 task 时, 旧 task 腾出的槽不能算到新 task 头上。
+        """带上与现值相同的 task_id 不算移动 —— 全量回传是最自然的用法。
 
-        读出来的槽是 rule.task_id (新家) 的, 而 _slots_cleared_by 查的是
-        previous.task_id (旧家) —— 叠上去会把一次合法的搬家判成"新家的进入槽
-        将被清空", 400 拦下。
+        与上一条方向相反: 判据写成「给了 task_id 就拒」时这条会红。
         """
-        # 三个条件缺一不可, 否则走不到目标分支: 起点在旧 task (否则 moved_home
-        # 为假)、previous 自己带动作 (否则 _slots_cleared_by 返空集, 守卫有没有
-        # 都一样)、合并后 rule 没动作 (否则闸在第一关就 return)。
-        moving = _make_dynamic_rule(rule_id="r1", task_id=TASK_ID)
-        mock_rule_repo.get_by_id.return_value = moving
-        mock_rule_repo.list_by_task.return_value = [moving]
-        # 新家的进入槽有动作; 旧家管的也叫 on_enter, 名字一样但不是同一个 task。
-        mock_task_repo.get_full_view.return_value = {
-            "actions": {"on_enter_desc": "开台灯"}
-        }
+        r1 = _make_dynamic_rule(rule_id="r1", task_id=TASK_ID)
+        mock_rule_repo.get_by_id.return_value = r1
+        mock_rule_repo.list_by_task.return_value = [r1]
+        mock_task_repo.get_full_view.return_value = {"actions": {}}
         service._require_task_exists = lambda _tid: None
 
-        assert (
-            await service.patch_rule(
-                "r1", RuleUpdate(task_id="new_task", action_descriptions=[])
-            )
-            is True
-        )
+        assert await service.patch_rule("r1", RuleUpdate(task_id=TASK_ID)) is True
 
     @pytest.mark.asyncio
     async def test_patch_keeps_passing_when_the_slot_survives(
@@ -5579,12 +5563,16 @@ class TestTaskRuleSetWiring:
         算进去的话「变更前」也带着这条、也非法，这次真撞上的独占就被当成存量放行。
         """
         previous = self._rule("r1", RuleDirection.ENTER, task_id="task-other")
-        mock_rule_repo.get_by_id.return_value = previous
         mock_rule_repo.list_by_task.return_value = [
             self._rule("r-ses", RuleDirection.SESSION)
         ]
+        # 直接调这道闸, 不走 update_rule: 跨 task 移动在更前面就被 _reject_task_move
+        # 拒了, 从那条路进来走不到这里。放开移动的那天这个分支必须还是对的, 所以
+        # 用例留着。
         with pytest.raises(ValidationException, match="独占"):
-            await service.update_rule(self._rule("r1", RuleDirection.ENTER))
+            service._validate_task_rule_set(
+                self._rule("r1", RuleDirection.ENTER), previous
+            )
 
     @pytest.mark.asyncio
     async def test_an_already_illegal_task_can_still_be_patched(

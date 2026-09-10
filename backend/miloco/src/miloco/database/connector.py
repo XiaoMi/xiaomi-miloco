@@ -16,12 +16,13 @@ from contextlib import contextmanager
 from typing import Any
 
 from miloco.config import get_settings
+from miloco.rule.condition import condition_to_dnf
 from miloco.rule.record_source import (
     milestone_condition_dnf,
     milestone_legacy_condition,
     milestone_rule_name,
 )
-from miloco.rule.schema import RuleDirection, task_rule_set_error
+from miloco.rule.schema import RuleCondition, RuleDirection, task_rule_set_error
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -1364,7 +1365,12 @@ def _join_action_descriptions(raw: str | None) -> str | None:
 
 
 def _condition_to_dnf(raw: str | None) -> str:
-    """旧 condition → 1×1 DNF。解析失败退化成空 query 的 omni 条件项。
+    """旧 condition → 1×1 DNF 的 JSON 串。解析失败退化成空 query 的 omni 条件项。
+
+    形状本身由 ``rule.condition.condition_to_dnf`` 出, 与创建路径共用同一份 —— 两处
+    各写一份的话, 从旧库升上来的 rule 与新建的 rule 分流结果会不同, 而这种差异从
+    规则本身看不出来。本函数只做迁移这一侧特有的两件事: JSON 串的进出, 以及把异常
+    吞成降级值。
 
     不抛异常: 解析失败的是存量脏数据, 按 §10.1 丢错误条目继续跑, 由迁移后校验
     处置受影响的 task, 而不是卡住整个启动。
@@ -1375,15 +1381,14 @@ def _condition_to_dnf(raw: str | None) -> str:
         legacy = {}
     if not isinstance(legacy, dict):
         legacy = {}
-    item = {
-        "source_type": "omni",
-        "spec": {
-            "perceive_device_ids": legacy.get("perceive_device_ids") or [],
-            "query": legacy.get("query") or "",
-        },
-        "negate": False,
-    }
-    return json.dumps({"any_of": [[item]]}, ensure_ascii=False)
+    try:
+        condition = RuleCondition(
+            perceive_device_ids=legacy.get("perceive_device_ids") or [],
+            query=legacy.get("query") or "",
+        )
+    except ValueError:
+        condition = RuleCondition(perceive_device_ids=[], query="")
+    return condition_to_dnf(condition).model_dump_json()
 
 
 def _rule_to_task_actions(

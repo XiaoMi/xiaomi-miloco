@@ -71,8 +71,12 @@ STATE_REFRESH_SOURCE = "iot_refresh"
 _RECONCILE_CONCURRENCY = 16
 
 
-def _is_subscribable_did(did: str) -> bool:
-    """did 能否用于拼 MQTT topic:带 '/' 会打断 topic 路径与解码正则。"""
+def is_subscribable_did(did: str) -> bool:
+    """did 能否用于拼 MQTT topic:带 '/' 会打断 topic 路径与解码正则。
+
+    公开的是因为建 iot 规则时要用同一份判据 —— 挂在不可订阅的 did 上的规则会落库
+    成功但永远没有输入。写第二份的话两侧会漂移。
+    """
     return "/" not in did
 
 
@@ -1354,20 +1358,18 @@ class MiotProxy:
 
         Dids containing '/' (Huami/Zepp-bridged sub-devices) are skipped:
         the '/' breaks the topic path AND the decoder regex — see
-        _is_subscribable_did. (An older note here claimed 0x87 rejection; that
+        is_subscribable_did. (An older note here claimed 0x87 rejection; that
         is UNVERIFIED, same origin as the disproven blt.* observation.)
         """
         skipped = [
-            did for did in self._device_info_dict if not _is_subscribable_did(did)
+            did for did in self._device_info_dict if not is_subscribable_did(did)
         ]
         if skipped:
             logger.debug(
                 "device-meta: skipping %d did(s) with '/': %s", len(skipped), skipped
             )
         await _reconcile_subscriptions(
-            lambda: {
-                did for did in self._device_info_dict if _is_subscribable_did(did)
-            },
+            lambda: {did for did in self._device_info_dict if is_subscribable_did(did)},
             self._subscribed_meta_dids,
             self._miot_client.sub_device_meta_async,
             self._miot_client.unsub_device_meta_async,
@@ -1393,7 +1395,7 @@ class MiotProxy:
         artifact), so subscribe them.
         """
         skipped = [
-            did for did in self._device_info_dict if not _is_subscribable_did(did)
+            did for did in self._device_info_dict if not is_subscribable_did(did)
         ]
         if skipped:
             logger.debug(
@@ -1402,9 +1404,7 @@ class MiotProxy:
                 skipped,
             )
         await _reconcile_subscriptions(
-            lambda: {
-                did for did in self._device_info_dict if _is_subscribable_did(did)
-            },
+            lambda: {did for did in self._device_info_dict if is_subscribable_did(did)},
             self._subscribed_device_state_dids,
             self._miot_client.sub_device_state_async,
             self._miot_client.unsub_device_state_async,
@@ -1429,16 +1429,14 @@ class MiotProxy:
         the '/' breaks the topic path AND the decoder regex.
         """
         skipped = [
-            did for did in self._device_info_dict if not _is_subscribable_did(did)
+            did for did in self._device_info_dict if not is_subscribable_did(did)
         ]
         if skipped:
             logger.debug(
                 "device-props: skipping %d did(s) with '/': %s", len(skipped), skipped
             )
         await _reconcile_subscriptions(
-            lambda: {
-                did for did in self._device_info_dict if _is_subscribable_did(did)
-            },
+            lambda: {did for did in self._device_info_dict if is_subscribable_did(did)},
             self._subscribed_props_dids,
             self._miot_client.sub_device_props_async,
             self._miot_client.unsub_device_props_async,

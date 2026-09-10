@@ -352,7 +352,6 @@ def rule_create(
 @rule_group.command("update")
 @click.argument("rule_id")
 @click.option("--name", default=None, help="新规则名称")
-@click.option("--task-id", "task_id", default=None, help="新 task_id")
 @click.option("--condition", "query_text", default=None, help="新触发条件")
 @click.option(
     "--source",
@@ -455,7 +454,6 @@ def rule_create(
 def rule_update(
     rule_id,
     name,
-    task_id,
     query_text,
     perceive_devices,
     mode_value,
@@ -496,8 +494,6 @@ def rule_update(
     payload: dict = {}
     if name is not None:
         payload["name"] = name
-    if task_id is not None:
-        payload["task_id"] = task_id
     if mode_value is not None or direction_value is not None:
         # 两个字段要一起改: mode 列 NOT NULL 且表达不了 exit, 只改一个会留下
         # 「mode=state 而 direction=exit」这种自相矛盾的行。
