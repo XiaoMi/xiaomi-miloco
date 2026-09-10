@@ -69,6 +69,7 @@ from miloco.miot.schema import (
     DeviceInfo,
     SceneInfo,
 )
+from miloco.utils.logger import cam_tag, log_safe
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +212,7 @@ async def _write_action_ledger(
                     # scene_id,cache 必 miss——那条路径由调用方带场景所属家传入。
                     home_id = getattr(dev, "home_id", None)
         except Exception as e:  # noqa: BLE001 - 解析失败不影响审计主体
-            logger.debug("action_ledger device lookup failed: %s", e)
+            logger.debug("action_ledger device lookup failed: %s", log_safe(e))
         if home_id is None:
             # 降级态下上面那两级缓存都填不回来——填它们要走云端，而那正是被拒的
             # 原因。缺了这一列的行会被查询侧的 NULL 放行捞进**每一个**家的合流页，
@@ -223,7 +224,7 @@ async def _write_action_ledger(
             try:
                 home_id = _sole_enabled_home(miot_proxy)
             except Exception as e:  # noqa: BLE001 - 问不出归属也不该拖掉这一行审计
-                logger.debug("sole-enabled-home fallback failed: %s", e)
+                logger.debug("sole-enabled-home fallback failed: %s", log_safe(e))
 
         client = get_metrics_client()
         if client is not None:
@@ -254,12 +255,13 @@ async def _write_action_ledger(
         logger.info(
             "action_ledger device=%s(did=%s room=%s) type=%s iid=%s success=%s "
             "reason=%s value_len=%d",
-            device_name or "?", did, room or "?", action_type, iid, success,
-            (result_msg or error or "ok"),
+            log_safe(device_name or "?"), log_safe(did), log_safe(room or "?"),
+            log_safe(action_type), log_safe(iid), log_safe(success),
+            log_safe(result_msg or error or "ok"),
             _truncate_value_len(value_json),
         )
     except Exception as e:  # noqa: BLE001 —— 审计 fail-open,绝不拖垮控制调用
-        logger.warning("action_ledger write failed (did=%s): %s", did, e)
+        logger.warning("action_ledger write failed (did=%s): %s", log_safe(did), log_safe(e))
 
 
 def _sole_enabled_home(miot_proxy: MiotProxy) -> str | None:
@@ -354,7 +356,8 @@ async def _trigger_scene(
             value_json=scene_value_json,
             result_code=None,
             result_msg=None if ok else "场景触发失败",
-            success=bool(ok), error=None,
+            success=bool(ok),
+            error=None,
             source=source, source_id=source_id,
             home_id=getattr(scenes[scene_id], "home_id", None),
         )
@@ -374,7 +377,7 @@ async def _trigger_scene(
         )
         raise
     except Exception as e:
-        logger.error("Failed to trigger scene %s: %s", scene_id, e)
+        logger.error("Failed to trigger scene %s: %s", log_safe(scene_id), log_safe(e))
         await _write_action_ledger(
             miot_proxy,
             action_type="scene_trigger",
@@ -453,7 +456,7 @@ class MiotService:
             for iid in iids:
                 self._lru.touch(did, iid)
         except Exception as e:
-            logger.warning("LRU touch failed for did=%s iids=%s: %s", did, iids, e)
+            logger.warning("LRU touch failed for did=%s iids=%s: %s", log_safe(did), log_safe(iids), log_safe(e))
 
     def _clear_account_scope_state(self) -> None:
         """Clear service-layer scope residue (called on account switch)."""
@@ -526,7 +529,14 @@ class MiotService:
         """
         prev_token: object = self._TOKEN_UNREAD
         try:
-            logger.info("authorize_with_code state=%s code=%s…", state, code[:8])
+            # state 是请求体里的自由字符串、没有字符集约束，而这一行打在
+            # check_state_async 校验它**之前**——不剥换行的话，调用方塞一个含换行
+            # 的值进来，日志里就多出一整行格式完全正常的记录。
+            logger.info(
+                "authorize_with_code state=%s code=%s…",
+                log_safe(state),
+                log_safe(code[:8]),
+            )
 
             # 必须早于交换：交换会覆写两处 uid 副本
             prev_uid = self._current_uid_from_kv()
@@ -936,9 +946,9 @@ class MiotService:
                 )
                 if not camera_img_seq:
                     logger.error(
-                        "get_miot_cameras_img, get recent camera img failed, did: %s, channel: %s",
-                        camera_channel.did,
-                        camera_channel.channel,
+                        "get_miot_cameras_img, get recent camera img failed, "
+                        "camera: %s",
+                        cam_tag(camera_channel.did, camera_channel.channel),
                     )
                     continue
 
@@ -1022,7 +1032,7 @@ class MiotService:
         """Start audio stream."""
         try:
             logger.info(
-                "Starting audio stream: camera_id=%s, channel=%s", camera_id, channel
+                "Starting audio stream: camera_id=%s, channel=%s", log_safe(camera_id), log_safe(channel)
             )
             await self._miot_proxy.start_camera_raw_audio_stream(
                 camera_id, channel, callback
@@ -1034,7 +1044,7 @@ class MiotService:
     async def stop_audio_stream(self, camera_id: str, channel: int):
         """Stop audio stream."""
         try:
-            logger.info("Stopping audio stream: camera_id=%s", camera_id)
+            logger.info("Stopping audio stream: camera_id=%s", log_safe(camera_id))
             await self._miot_proxy.stop_camera_raw_audio_stream(camera_id, channel)
         except Exception as e:
             logger.error("Failed to stop audio stream: %s", e)
@@ -1057,12 +1067,12 @@ class MiotService:
         try:
             logger.info(
                 "Starting decoded video stream: camera_id=%s, channel=%s",
-                camera_id, channel,
+                log_safe(camera_id), log_safe(channel),
             )
             if callback is None:
                 logger.info(
                     "No callback function, skipping registration: camera_id=%s",
-                    camera_id,
+                    log_safe(camera_id),
                 )
                 return -1
             return await self._miot_proxy.start_camera_decode_video_stream(
@@ -1079,7 +1089,7 @@ class MiotService:
         try:
             logger.info(
                 "Stopping decoded video stream: camera_id=%s, reg_id=%d",
-                camera_id, reg_id,
+                log_safe(camera_id), reg_id,
             )
             await self._miot_proxy.stop_camera_decode_video_stream(
                 camera_id, channel, reg_id
@@ -1295,7 +1305,7 @@ class MiotService:
         except (ValidationException, ResourceNotFoundException):
             raise
         except Exception as e:
-            logger.error("Failed to control device %s: %s", did, e)
+            logger.error("Failed to control device %s: %s", log_safe(did), log_safe(e))
             # 异常路径也落一行:success=0 + error + 尝试参数(失败审计完整性)
             await _write_action_ledger(
                 self._miot_proxy,
@@ -1347,7 +1357,7 @@ class MiotService:
         except (ValidationException, ResourceNotFoundException):
             raise
         except Exception as e:
-            logger.error("Failed to get device status %s: %s", did, e)
+            logger.error("Failed to get device status %s: %s", log_safe(did), log_safe(e))
             raise MiotServiceException(f"Failed to get device status: {str(e)}") from e
 
     # ─── scope: 家庭 / 相机接入范围 ──────────────────────────────────────────

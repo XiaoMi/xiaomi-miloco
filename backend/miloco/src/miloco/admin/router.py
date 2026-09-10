@@ -32,6 +32,7 @@ from miloco.observability import debug as debug_mod
 from miloco.perception.engine.omni import probe as _probe
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
+from miloco.utils.logger import log_safe
 from miloco.utils.paths import miloco_home
 
 logger = logging.getLogger(name=__name__)
@@ -50,7 +51,7 @@ async def get_system_status(current_user: str = Depends(verify_token)):
     - Perception model: whether a vision_understanding model is activated
     - Rule engine: whether running and how many rules are loaded
     """
-    logger.info("Get system status API called - User: %s", current_user)
+    logger.info("Get system status API called - User: %s", log_safe(current_user))
 
     # MiOT login status
     try:

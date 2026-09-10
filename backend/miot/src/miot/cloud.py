@@ -99,13 +99,18 @@ def _redact(data: Dict) -> str:
 def _redact_response(res_obj, res_str: str) -> str:
     """响应体转成可入日志的字符串。
 
-    令牌在 ``result`` 里，脱敏要下探一层。解析不出预期结构时（响应本就不合法
-    才走到这条路上）退回只报长度——宁可少一点排障信息，也不要把整个响应体
+    顶层与 ``result`` 两层都脱敏。只下探 ``result`` 是不够的:``find_oauth_error``
+    那一侧刻意「不做形状假设」,这里同样不该假设令牌只会出现在 ``result`` 里——
+    而本函数唯一的调用点正是「响应形状不合法」那条分支,扁平形状的响应
+    （``{"code":0,"access_token":...}``）恰恰因为「没有 result」才走到那里,
+    只脱敏 ``result`` 等于把令牌原文写进日志。
+
+    解析不出预期结构时退回只报长度——宁可少一点排障信息，也不要把整个响应体
     原样落盘，那里面可能有一枚可用的令牌。
     """
     if not isinstance(res_obj, dict):
         return f"<unparsable len={len(res_str or '')}>"
-    safe = dict(res_obj)
+    safe = _redact_map(res_obj)
     result = safe.get("result")
     if isinstance(result, dict):
         safe["result"] = _redact_map(result)
@@ -113,6 +118,46 @@ def _redact_response(res_obj, res_str: str) -> str:
         return json.dumps(safe, ensure_ascii=False)
     except (TypeError, ValueError):
         return f"<unserializable len={len(res_str or '')}>"
+
+
+def _redact_body(res_str: str) -> str:
+    """把**尚未解析**的响应体转成可入日志的字符串。
+
+    早退分支（401、非 200）手上只有原始文本，而那时的响应可能根本不是 JSON——
+    网关的 HTML 错误页、代理的转储都可能。先尝试解析，再交给 :func:`_redact_response`
+    统一处理；解析不出时它会退回只报长度。
+
+    抽成一处而不是在每个早退分支各写一遍：响应体怎么进日志只该有一个决定点，
+    否则下一条早退分支多半又是原样打印。
+    """
+    try:
+        parsed = json.loads(res_str)
+    except (TypeError, ValueError):
+        parsed = None
+    return _redact_response(parsed, res_str)
+
+
+def find_oauth_error(res_obj) -> Optional[Dict]:
+    """在换取令牌的响应里找出「凭据被拒绝」那一段，找不到返回 ``None``。
+
+    凭据被明确拒绝时的真实响应形状(实机抓到,勿凭想象改):
+      {"code":-6,
+       "message":"{\"error\":96009,\"error_description\":\"invalid refresh token\"}",
+       "result":{"error":96009,"error_description":"invalid refresh token",...}}
+    注意 error 在 **result 里**,顶层只有 code/message/result。只看顶层会一路
+    落进通用分支被当成未知错误,于是「凭据真失效」和「响应偶发不合法」在调用方
+    眼里完全一样——那正是要区分开的两件事。两个位置都查:顶层是为兼容可能的
+    另一种形状,**不做形状假设**。
+
+    提到模块级是为了让测试直接调它:判据复刻一份的话,实现改了形状假设而测试
+    还绿,那是空护栏。
+    """
+    err_obj = res_obj if isinstance(res_obj, dict) else {}
+    result_obj = err_obj.get("result")
+    for holder in (err_obj, result_obj if isinstance(result_obj, dict) else {}):
+        if holder.get("error") is not None:
+            return holder
+    return None
 
 
 class MIoTOAuth2Client:
@@ -229,7 +274,7 @@ class MIoTOAuth2Client:
             _LOGGER.error(
                 "unauthorized(401), oauth/get_token, %s -> %s",
                 _redact(data),
-                await http_res.text(encoding="utf-8"),
+                _redact_body(await http_res.text(encoding="utf-8")),
             )
             raise MIoTOAuth2Error(
                 "unauthorized(401)", MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED
@@ -239,21 +284,14 @@ class MIoTOAuth2Client:
                 "invalid http code %d, oauth/get_token, %s -> %s",
                 http_res.status,
                 _redact(data),
-                await http_res.text(encoding="utf-8"),
+                _redact_body(await http_res.text(encoding="utf-8")),
             )
             raise MIoTOAuth2Error(f"invalid http status code, {http_res.status}")
 
         res_str = await http_res.text()
         res_obj = json.loads(res_str)
-        # 凭据被明确拒绝时的真实响应形状(实机抓到,勿凭想象改):
-        #   {"code":-6,
-        #    "message":"{\"error\":96009,\"error_description\":\"invalid refresh token\"}",
-        #    "result":{"error":96009,"error_description":"invalid refresh token",...}}
-        # 注意 error 在 **result 里**,顶层只有 code/message/result。只看顶层
-        # 会一路落进下面的通用分支被当成 CODE_UNKNOWN,于是「凭据真失效」和
-        # 「响应偶发不合法」在调用方眼里完全一样——那正是要区分开的两件事。
-        # 两个位置都查:顶层是为兼容可能的另一种形状,不做形状假设。
-        # 本方法服务两条流程:请求体带 refresh_token 的是定时续期,带 code 的是
+        # 响应形状的识别见 find_oauth_error。这里只决定「报哪个码」:
+        # 本方法服务两条流程——请求体带 refresh_token 的是定时续期,带 code 的是
         # 首次/重新授权的授权码兑换。授权码同样一次性,停留过久或回调被刷第二次
         # 就会被拒。两条报同一个码,日志里「续期凭据失效」和「授权码已过期」就分
         # 不开,排障的人会去查错的链路。两个码都在永久失效集合内,续期侧判定不变。
@@ -262,15 +300,11 @@ class MIoTOAuth2Client:
             if isinstance(data, dict) and "refresh_token" in data
             else MIoTErrorCode.CODE_OAUTH_UNAUTHORIZED
         )
-        err_obj = res_obj if isinstance(res_obj, dict) else {}
-        result_obj = err_obj.get("result")
-        for holder in (err_obj, result_obj if isinstance(result_obj, dict) else {}):
-            if holder.get("error") is not None:
-                raise MIoTOAuth2Error(
-                    f"oauth/get_token rejected, error={holder.get('error')}, "
-                    f"description={holder.get('error_description')}",
-                    reject_code,
-                )
+        # **先认成功，认不出来才去归类失败。** 归类用的判据是「error 这个键的值不是
+        # None」，而 `error: 0` 表示「没有错误」是很常见的接口约定；排在成功判定之前
+        # 的话，一次**已经换回新令牌**的续期会被判成凭据永久失效——设备控制与感知
+        # 全停、住户被要求重新扫码，而手上那对新令牌根本没被用上。倒过来是零成本的：
+        # 真正的拒绝响应必然凑不齐可用的令牌对，照样落到下面去归类。
         if (
             not res_obj
             or res_obj.get("code", None) != 0
@@ -282,6 +316,13 @@ class MIoTOAuth2Client:
             or not res_obj["result"]["access_token"]
             or not res_obj["result"]["refresh_token"]
         ):
+            holder = find_oauth_error(res_obj)
+            if holder is not None:
+                raise MIoTOAuth2Error(
+                    f"oauth/get_token rejected, error={holder.get('error')}, "
+                    f"description={holder.get('error_description')}",
+                    reject_code,
+                )
             # 响应体同样要脱敏:这条分支的判据之一是「access_token 非空但
             # refresh_token 为空」,触发时响应里完全可能带着一枚可用的令牌,
             # 而这个异常消息会进日志。只脱敏请求体等于留了另一半口子。
@@ -475,7 +516,7 @@ class MIoTHttpClient:
                 "mihome api get unauthorized(401), %s, %s -> %s",
                 url_path,
                 params,
-                await http_res.text(encoding="utf-8"),
+                _redact_body(await http_res.text(encoding="utf-8")),
             )
             raise MIoTHttpError(
                 "mihome api get failed, unauthorized(401)",
@@ -487,7 +528,7 @@ class MIoTHttpClient:
                 http_res.status,
                 url_path,
                 params,
-                await http_res.text(encoding="utf-8"),
+                _redact_body(await http_res.text(encoding="utf-8")),
             )
             raise MIoTHttpError(
                 f"mihome api get failed, {http_res.status}, {url_path}, {params}"
@@ -521,7 +562,7 @@ class MIoTHttpClient:
                 url_path,
                 data,
                 _redact_map(self.__api_request_headers),
-                await http_res.text(encoding="utf-8"),
+                _redact_body(await http_res.text(encoding="utf-8")),
             )
             raise MIoTHttpError(
                 "mihome api get failed, unauthorized(401)",
@@ -534,7 +575,7 @@ class MIoTHttpClient:
                 url_path,
                 data,
                 _redact_map(self.__api_request_headers),
-                await http_res.text(encoding="utf-8"),
+                _redact_body(await http_res.text(encoding="utf-8")),
             )
             raise MIoTHttpError(
                 f"mihome api post failed, {http_res.status}, {url_path}, {data}"
