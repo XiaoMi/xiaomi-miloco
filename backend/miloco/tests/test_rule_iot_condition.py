@@ -657,3 +657,53 @@ async def test_duration_seconds_on_an_omni_rule_is_still_allowed(service):
     )
 
     assert await service.create_rule(rule)
+
+
+@pytest.mark.asyncio
+async def test_patch_cannot_edit_the_query_of_an_iot_rule(service):
+    """非 omni rule 的 query 是服务端渲染的占位，放行的话用户输入会被下一次渲染
+    静默覆盖。错误文案要指向「改条件走 condition_dnf」，不是「换了触发源」。"""
+    service._repo.get_by_id = MagicMock(return_value=_stored_iot_rule())
+
+    with pytest.raises(ValidationException, match="condition_dnf"):
+        await service.patch_rule("r1", RuleUpdate(condition={"query": "门开了"}))
+
+
+@pytest.mark.asyncio
+async def test_patch_can_still_edit_the_query_of_an_omni_rule(service):
+    """与上一条方向相反：这是住户在抽屉里改触发条件的正规路径。"""
+    omni = Rule(
+        id="r1",
+        name="有人经过",
+        task_id="t1",
+        direction=RuleDirection.ENTER,
+        condition=RuleCondition(perceive_device_ids=["cam-001"], query="有人经过"),
+        action_descriptions=["播报"],
+    )
+    service._repo.get_by_id = MagicMock(return_value=omni)
+
+    assert await service.patch_rule(
+        "r1", RuleUpdate(condition={"query": "有人在门口停留"})
+    )
+
+    stored = service._repo.update.call_args[0][0]
+    assert stored.condition.query == "有人在门口停留"
+    assert stored.condition_dnf.any_of[0][0].spec["query"] == "有人在门口停留"
+
+
+@pytest.mark.asyncio
+async def test_patching_an_omni_query_to_empty_is_rejected(service):
+    """空 query 的校验在 create 与 update 两条路上各要有一条 —— PATCH 走的是另一个
+    分支（只校验这次真的动了的字段），create 那条绿不代表 update 也拦。"""
+    omni = Rule(
+        id="r1",
+        name="有人经过",
+        task_id="t1",
+        direction=RuleDirection.ENTER,
+        condition=RuleCondition(perceive_device_ids=["cam-001"], query="有人经过"),
+        action_descriptions=["播报"],
+    )
+    service._repo.get_by_id = MagicMock(return_value=omni)
+
+    with pytest.raises(ValidationException, match="不能为空"):
+        await service.patch_rule("r1", RuleUpdate(condition={"query": "  "}))

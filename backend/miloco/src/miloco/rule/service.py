@@ -1205,6 +1205,15 @@ class RuleService:
                 raise ValidationException(
                     "condition cannot be cleared (rule must have a condition)"
                 )
+            if existing.resolved_source_type != OMNI_SOURCE_TYPE:
+                # 非 omni rule 的这两列是占位: query 由服务端按谓词渲染、设备列表恒
+                # 空。放行的话用户的输入会被下一次渲染静默覆盖。改条件走
+                # --condition-dnf(CLI 的 --iot-* 四件套)。
+                raise ValidationException(
+                    f"source_type={existing.resolved_source_type} 的规则不能改 "
+                    "condition.query / perceive_device_ids: 它的条件由服务端按谓词"
+                    "渲染。改条件请改 condition_dnf。"
+                )
             # PATCH 语义：只合并 update.condition 里**显式置值**的字段，
             # 缺失字段保留 existing 的值。这样 `--condition "X"` 不带 `--source`
             # 时不会因为 RuleCondition 必填校验直接 422。
