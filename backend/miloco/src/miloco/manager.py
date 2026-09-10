@@ -379,6 +379,11 @@ class Manager:
 
     @property
     def rule_service(self) -> RuleService:
+        """**类型标注是乐观的**：``initialize()`` 跑完之前实际是 None。
+
+        端点路径上取不到 None（启动段没跑完时端口还没 listen），但启动早期就接上的
+        回调（``_on_mips_reconnected``）必须自己判空。
+        """
         return self._rule_service
 
     @property

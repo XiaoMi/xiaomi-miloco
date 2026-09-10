@@ -26,8 +26,7 @@ def _store_with(leaves: int) -> StateStore:
 
 
 def test_stats_without_a_writer_gives_an_empty_dict():
-    """写入器在 initialize() 跑完之前是 None —— 抛 AttributeError 会让诊断接口在最
-    需要它的时候反而用不了。"""
+    """摘成纯函数就是为了不起整个 Manager 也能覆盖到这个分支。"""
     data = build_state_stats(_store_with(1), None)
 
     assert data["push"] == {}
@@ -59,7 +58,7 @@ def test_dump_does_not_claim_truncation_when_it_fits():
 
 
 def test_iot_diagnostics_without_a_source_says_it_is_not_running():
-    """源没接上来时给一份「没在跑」而不是抛 —— 同上一条的理由。"""
+    """源没接上来时给一份「没在跑」而不是抛。"""
     data = build_iot_diagnostics(None)
 
     assert data["consumer_alive"] is False

@@ -264,8 +264,10 @@ async def get_device_spec(did: str, current_user: str = Depends(verify_token)):
 def build_state_stats(store, push_writer) -> dict:
     """容器与推送写入器的计数。
 
-    **写入器缺席给空 dict，不抛。** ``manager.iot_push_writer`` 在 ``initialize()``
-    跑完之前是 None，抛 AttributeError 会让诊断接口在最需要它的时候反而用不了。
+    **写入器缺席给空 dict，不抛。** 生产 HTTP 路径打不到这个分支：``_wire_iot_push()``
+    在 ``initialize()`` 里无条件跑，而 uvicorn 是 lifespan 启动段跑完才绑监听端口。留
+    着是为了这个函数能脱离 Manager 单测 —— 别照它给 ``initialize()`` 里赋的其它服务
+    也补一圈判空。
     """
     return {
         "store": store.stats(),

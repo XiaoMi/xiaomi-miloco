@@ -120,8 +120,9 @@ async def get_all_rules(
 def build_iot_diagnostics(iot_source) -> dict:
     """iot 源的自述。源没接上来时给一份「没在跑」而不是抛。
 
-    ``rule_service`` 的类型上非空、实际在 ``initialize()`` 跑完之前是 None，所以这里
-    自己兜一道；两个分支同形由 ``source_not_running`` 保证。
+    那个分支生产 HTTP 路径打不到：``rule_service`` 在 lifespan 的 ``initialize()`` 里
+    就建好，而端口是启动段跑完才 listen。留着是为了这个函数能脱离 Manager 单测；两个
+    分支同形由 ``source_not_running`` 保证。
     """
     if iot_source is None:
         return source_not_running("iot 源没有启动")

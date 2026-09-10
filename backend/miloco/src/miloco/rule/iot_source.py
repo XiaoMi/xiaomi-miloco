@@ -198,7 +198,8 @@ def _diagnostics_report(
 
 
 def source_not_running(reason: str) -> dict:
-    """源没接上时的诊断。抛异常会让诊断接口在最需要它的时候反而用不了。"""
+    """源没接上时的诊断：给一份「没在跑」而不是抛，形状与 ``IotSource.diagnostics()``
+    同出一处。"""
     return _diagnostics_report(
         consumer_alive=False,
         consumer_exit=reason,
