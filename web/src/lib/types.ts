@@ -831,7 +831,7 @@ export interface TaskRecordSummary {
 // 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
 // 规则方向：条件成立时对 task 意味着什么。milestone 由服务端维护、后端已过滤，
 // 不会出现在这里。
-export type TaskRuleDirection = "enter" | "exit" | "session";
+export type TaskRuleDirection = "enter" | "exit" | "session" | "guard";
 
 // 触发源。omni 是摄像头视觉判定，iot 是设备属性变化，record 是累计量达标。
 export type TaskRuleSourceType = "omni" | "iot" | "record";

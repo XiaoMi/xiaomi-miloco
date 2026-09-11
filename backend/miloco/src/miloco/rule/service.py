@@ -333,6 +333,31 @@ def _validate_lifecycle(rule: Rule) -> None:
         raise ValidationException("lifecycle=temporary requires terminate_when")
 
 
+def _validate_guard(rule: Rule) -> None:
+    """前提规则只提供条件, 动作与累计窗口都禁配。
+
+    都是"配了静默不生效"那一类 —— 拒绝比让用户对着一条看起来完全正确的规则找原因好。
+    """
+    if (
+        rule.actions
+        or rule.action_descriptions
+        or rule.on_enter_actions
+        or rule.on_enter_desc
+        or rule.on_exit_actions
+        or rule.on_exit_desc
+        or rule.on_target_desc
+    ):
+        raise ValidationException(
+            "前提规则不执行动作: 它的两个边沿都不产信号。动作配在同 task 的"
+            "进入规则上, 前提只决定那次进入放不放行"
+        )
+    if rule.duration_seconds:
+        raise ValidationException(
+            "前提规则不支持 duration_seconds: 回查读的是条件的当前值, "
+            "累计滑窗只作用在触发路径上"
+        )
+
+
 def _validate_rule_consistency(rule: Rule) -> None:
     """Apply V3 validation matrix to a fully-formed Rule.
 
@@ -360,6 +385,9 @@ def _validate_rule_consistency(rule: Rule) -> None:
             "不接受手工创建。配达标通知: "
             'miloco-cli task set-actions <task_id> --on-target-desc "..."'
         )
+
+    if rule.resolved_direction is RuleDirection.GUARD:
+        _validate_guard(rule)
 
     # ---- 2. mode matrix（执行路径由 actions / action_descriptions 哪个非空决定）----
     if rule.mode == RuleMode.EVENT:
@@ -501,6 +529,10 @@ def _rule_action_slots(
     direction = rule.resolved_direction
     if direction is RuleDirection.MILESTONE:
         # 达标动作在 task 列上, milestone rule 自己的动作字段恒空。
+        return {}
+    if direction is RuleDirection.GUARD:
+        # 前提不做事, 也就不认领槽。落进下面按方向选槽的分支会写进 on_enter ——
+        # 同 task 那条真正的进入规则的动作会被它清掉。
         return {}
     if direction is RuleDirection.SESSION:
         # 达标槽 rule 侧只有 desc 一列, 静态那列恒空 —— 这正说明它管辖达标槽时

@@ -44,6 +44,8 @@ import type {
   OmniModelsResult,
   UpgradeCheck,
   UpgradeStatus,
+  TaskRuleDirection,
+  TaskRuleSourceType,
 } from "@/lib/types";
 
 // backend NormalResponse 包装：{ code, message, data }
@@ -2207,8 +2209,8 @@ interface BackendTaskSummary {
   rule_briefs?: {
     rule_id: string;
     query: string;
-    direction?: "enter" | "exit" | "session";
-    source_type?: "omni" | "iot" | "record";
+    direction?: TaskRuleDirection;
+    source_type?: TaskRuleSourceType;
     actions_desc?: string[];
   }[];
   actions?: {

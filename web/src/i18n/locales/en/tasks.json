@@ -44,6 +44,7 @@
     "directionEnter": "Enter",
     "directionExit": "Exit",
     "directionSession": "Session",
+    "directionGuard": "Guard",
     "noRules": "No linked rules yet (may still be waiting for the Agent to wire it up)",
     "rulesManagedHint": "Trigger conditions are editable and take effect right after saving. Actions and push notifications are created and managed by the Agent; chat with it to adjust.",
     "editTitle": "Edit task",

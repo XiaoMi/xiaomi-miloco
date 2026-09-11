@@ -560,12 +560,16 @@ def test_unregister_clears_everything():
 
 
 def test_slot_for_edge_full_table():
-    """四个方向 × 两种边沿的全表。这是 ③→④ 的唯一契约, 写死不靠推导。"""
+    """③→④ 的全表。方向取自枚举, 不在这里抄第二份清单。
+
+    加了方向却没在 ``slot_for_edge`` 里给它分支时这条会红 —— 尾部兜底返的是进入
+    槽, 不红的话新方向会静默变成触发器。
+    """
     from miloco.task.state_machine import slot_for_edge
 
     table = {
-        (d, k.value): slot_for_edge(d, k)
-        for d in ("enter", "exit", "session", "milestone")
+        (d.value, k.value): slot_for_edge(d.value, k)
+        for d in RuleDirection
         for k in (SignalKind.ENTERED, SignalKind.EXITED)
     }
     assert table == {
@@ -577,6 +581,8 @@ def test_slot_for_edge_full_table():
         ("session", "exited"): ActionSlot.ON_EXIT,
         ("milestone", "entered"): ActionSlot.ON_TARGET,
         ("milestone", "exited"): None,
+        ("guard", "entered"): None,
+        ("guard", "exited"): None,
     }
 
 
@@ -628,3 +634,16 @@ def test_reconfigure_exits_an_enter_exit_task_whose_exit_condition_is_true():
 
     assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
     assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+def test_both_direction_enums_carry_the_same_members():
+    """task 层与 rule 层各有一份同名不同类的 ``RuleDirection``。
+
+    只给一边加成员时 ``slot_for_edge`` 收到的字符串匹配不上任何分支, 落进尾部兜底
+    当成进入信号 —— 新方向静默变成触发器。
+    """
+    from miloco.rule.schema import RuleDirection as RuleSideDirection
+
+    assert {d.value for d in RuleDirection} == {
+        d.value for d in RuleSideDirection
+    }

@@ -266,11 +266,12 @@ def rule_iot_diagnostics(pretty):
 @click.option(
     "--direction",
     "direction_value",
-    type=click.Choice(["enter", "exit", "session"]),
+    type=click.Choice(["enter", "exit", "session", "guard"]),
     default=None,
     help=(
         "边沿如何映射成 task 的进/出：enter 条件成立就把 task 推进去；"
-        "exit 条件成立就把 task 推出来；session 进入/退出配对。"
+        "exit 条件成立就把 task 推出来；session 进入/退出配对；"
+        "guard 只当前提，同 task 的规则要进入时它必须成立，自己不触发也不配动作。"
         "不传等价于 enter"
     ),
 )
@@ -430,7 +431,25 @@ def rule_create(
 
     # ---- 2. direction x action 矩阵 ----
     direction = _resolve_direction(direction_value, mode_value)
-    if direction != "session":
+    if direction == "guard":
+        # 口径同服务端 _validate_guard。拦在这里只为省掉那次往返 —— 少了这一支,
+        # guard 会落进下面那支, 而它是按 enter / exit 写的、放行 --action。
+        if (
+            actions_raw
+            or action_descs
+            or on_enter_actions_raw
+            or on_enter_desc
+            or on_exit_actions_raw
+            or on_exit_desc
+            or on_target_desc
+        ):
+            _exit_error(
+                "direction=guard must not set any action; "
+                "put them on the enter rule of the same task"
+            )
+        if duration_seconds is not None:
+            _exit_error("direction=guard must not set --duration-seconds")
+    elif direction != "session":
         # 单方向的 rule 只有一个边沿, 动作填在 --action / --action-desc 上;
         # 落 on_enter 还是 on_exit 由 direction 决定, 不用另一套 flag。
         if (
@@ -554,9 +573,9 @@ def rule_create(
 @click.option(
     "--direction",
     "direction_value",
-    type=click.Choice(["enter", "exit", "session"]),
+    type=click.Choice(["enter", "exit", "session", "guard"]),
     default=None,
-    help="变更方向：enter / exit / session",
+    help="变更方向：enter / exit / session / guard（guard 只当前提，不触发也不配动作）",
 )
 @click.option(
     "--lifecycle",
@@ -604,7 +623,7 @@ def rule_create(
     "duration_seconds",
     type=int,
     default=None,
-    help="条件需持续该时长才算成立（秒）。三个方向都生效（语义见 rule create help）",
+    help="条件需持续该时长才算成立（秒）。guard 不支持（其余方向的语义见 rule create help）",
 )
 @click.option(
     "--duration-ratio",
@@ -956,6 +975,7 @@ _DIRECTION_TO_MODE = {
     "enter": "event",
     "exit": "event",
     "session": "state",
+    "guard": "event",
 }
 _MODE_TO_DIRECTION = {"event": "enter", "state": "session"}
 

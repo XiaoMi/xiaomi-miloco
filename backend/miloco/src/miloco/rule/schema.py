@@ -48,6 +48,7 @@ class RuleDirection(str, Enum):
     EXIT = "exit"
     SESSION = "session"
     MILESTONE = "milestone"
+    GUARD = "guard"
 
 
 _MODE_TO_DIRECTION: dict[str, RuleDirection] = {
@@ -55,13 +56,14 @@ _MODE_TO_DIRECTION: dict[str, RuleDirection] = {
     RuleMode.STATE.value: RuleDirection.SESSION,
 }
 
-# 反向: direction 是权威, mode 跟着它推。exit / milestone 在 mode 里没有对应项,
-# 存一个自洽的占位值。
+# 反向: direction 是权威, mode 跟着它推。exit / milestone / guard 在 mode 里没有
+# 对应项, 存一个自洽的占位值。
 _DIRECTION_TO_MODE: dict[RuleDirection, RuleMode] = {
     RuleDirection.ENTER: RuleMode.EVENT,
     RuleDirection.EXIT: RuleMode.EVENT,
     RuleDirection.SESSION: RuleMode.STATE,
     RuleDirection.MILESTONE: RuleMode.EVENT,
+    RuleDirection.GUARD: RuleMode.EVENT,
 }
 
 class RuleLifecycle(str, Enum):
@@ -262,8 +264,15 @@ def task_rule_set_error(
     **达标规则不算数**: 它是服务端按 task 的达标配置维护的派生物, 不是用户建的
     规则。算进来的话"只挂一条达标规则"会被判成"没有进路径", 而每个配了达标通知的
     task 装配途中都会经过这个状态 —— 免责条款一放行, 这道闸对它们就永久失效了。
+
+    **前提规则同样不算数**: 它两个方向都不是, 留在集合里会让 session + 前提被判成
+    "session 没有独占"。
     """
-    directions = [d for d in directions if d is not RuleDirection.MILESTONE]
+    directions = [
+        d
+        for d in directions
+        if d not in (RuleDirection.MILESTONE, RuleDirection.GUARD)
+    ]
     if not directions:
         # 装配是分步的, task 可以暂时一条 rule 都没有。
         return None

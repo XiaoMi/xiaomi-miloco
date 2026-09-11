@@ -1263,7 +1263,7 @@ class RuleRunner:
 
         # EXITED
         if rule.resolved_direction is not RuleDirection.SESSION:
-            # 只有 session 的退出边沿有意义: enter / exit / milestone 都是单方向,
+            # 只有 session 的退出边沿有意义: 别的方向都是单方向的,
             # slot_for_edge 对它们的 EXITED 返 None, 走下去也选不到槽。
             return TriggerOutcome.NOT_FIRED
 
