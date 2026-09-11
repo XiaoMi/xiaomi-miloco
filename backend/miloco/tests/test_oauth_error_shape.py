@@ -917,17 +917,76 @@ def test_a_successful_response_carrying_error_zero_is_not_a_rejection():
 
 
 def test_stripping_newlines_keeps_a_separator():
-    """剥换行要换成空格，不能直接删掉。
+    r"""剥换行要换成空格，不能直接删掉。
 
     删掉会把「关灯\n晚安」拼成「关灯晚安」，与一个真就叫那个名字的任务在日志里再也
     分不开，按名字 grep 会互相串；多行的异常消息同样会被拼成一串没有分隔的文字。
     而「不让它伪造出额外整行」这个目的，换成空格一样达成——这条钉的就是「别为了
     省一个字符把两个名字粘起来」。
+
+    两个字符要一视同仁：只对 ``\n`` 换空格、对孤立的 ``\r`` 删掉，等于「关灯\r晚安」
+    走的正是这里反对的那条路，而它恰是 ``\r`` 最常见的出现形态——终端回车、老式
+    Mac 换行、以及只带 ``\r`` 的异常消息。CRLF 则要整体只留**一个**分隔，拆成
+    两次换会平白多出一个空格。
     """
     from miloco.utils.logger import log_safe
 
     out = log_safe("关灯\n晚安")
     assert "\n" not in out and "\r" not in out, "整行伪造仍然要挡住"
     assert out == "关灯 晚安", "换成空格，而不是删掉"
+    assert log_safe("关灯\r晚安") == "关灯 晚安", "孤立回车同样要留分隔"
     assert log_safe("a\r\nb") == "a b", "回车换行一起来时也只留一个分隔"
+
+
+def test_only_one_newline_scrubber_exists():
+    """剥换行只许有一份实现，且必须是 :func:`log_safe`。
+
+    护栏对清洗函数的信任是按**名字**写死的（``WRAPPERS`` / ``SANITIZERS``），新写一份
+    私有副本不会被认出来——更糟的是「一半脱一半不脱」那条会**整条跳过**用了私有名字的
+    日志调用：只要有一个实参没被认作已清洗，这一行的检查就不做了，于是同一个函数里
+    「一个实参包了、另一个裸着」这种缺口会静静地躺在扫描范围之内。按名字信任只有在
+    「那个名字背后只有一份实现」时才成立，这条钉的就是那个前提。
+
+    判据是「模块级函数里 return 了一条字面量 ``replace`` 链」，刻意不是「函数名像不像
+    清洗函数」——名字是写的人随手起的，而判据一旦依赖它，下一次换名字就绕过去了。
+    也刻意不含 ``re.sub`` 那一族：按正则压平换行的那几处还兼做截断（模型输出进审计
+    日志），职责不同，并进来会改行为。
+    """
+    import ast
+    import pathlib
+
+    import miloco
+
+    def _scrubs(node: ast.AST) -> bool:
+        for r in ast.walk(node):
+            if not (isinstance(r, ast.Return) and r.value is not None):
+                continue
+            for c in ast.walk(r.value):
+                if (
+                    isinstance(c, ast.Call)
+                    and isinstance(c.func, ast.Attribute)
+                    and c.func.attr == "replace"
+                    and c.args
+                    and isinstance(c.args[0], ast.Constant)
+                    and isinstance(c.args[0].value, str)
+                    and ("\n" in c.args[0].value or "\r" in c.args[0].value)
+                ):
+                    return True
+        return False
+
+    root = pathlib.Path(miloco.__file__).parent
+    found: list[str] = []
+    for f in sorted(root.rglob("*.py")):
+        if "tests" in f.parts:
+            continue
+        tree = ast.parse(f.read_text(encoding="utf-8"))
+        for node in tree.body:  # 只看模块级：内联的那几处是各自的一次性用途，不成"副本"
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and _scrubs(node):
+                rel = f.relative_to(root).with_suffix("")
+                found.append(f"miloco.{'.'.join(rel.parts)}:{node.name}")
+
+    assert found == ["miloco.utils.logger:log_safe"], (
+        "剥换行的实现不止一份——多出来的那份不会被护栏按名字认出来，用它包过的日志调用"
+        f"会整条退出「一半脱一半不脱」的检查，请改成 import log_safe：{found}"
+    )
 
