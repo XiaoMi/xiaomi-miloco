@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from miloco.miot.client import refusal_reason_for
 from miloco.miot.schema import DeviceControlRequest
 from miloco.miot.service import MiotService
 from miloco.observability import metrics_client as mc
@@ -63,6 +64,9 @@ def _make_service(tmp_path: Path) -> MiotService:
         # 真实代理有这个判据，夹具也要有：缺了它，生产侧任何「先问一句能不能用」
         # 的检查都会在这里撞 AttributeError，而那不是生产缺陷、是夹具没建模。
         is_operational=True,
+        # 真实代理还有「有没有绑」这一档，以及据它分档的拒绝文案。夹具取生产那
+        # 份纯函数、不另写一份措辞——复刻件会与本体漂移，而漂移之后测试照样绿。
+        is_authenticated=True,
         _kv_repo=SimpleNamespace(
             db_connector=db,
             get=lambda key, default=None: store.get(key, default),
@@ -98,6 +102,11 @@ def _make_service(tmp_path: Path) -> MiotService:
             )
         }.get(did),
         execute_miot_scene=AsyncMock(return_value=True),
+    )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
     )
     return MiotService(miot_proxy=proxy)
 
@@ -438,6 +447,34 @@ async def test_refused_dispatch_makes_no_doomed_cloud_call(bound_client, tmp_pat
     assert not svc._miot_proxy.get_cameras.called
     assert not svc._miot_proxy.refresh_devices.called
     assert not svc._miot_proxy.refresh_cameras.called
+
+
+@pytest.mark.asyncio
+async def test_never_bound_is_not_reported_as_expired(bound_client, tmp_path):
+    """从未绑定 / 刚解绑的机器上，别把「没绑」说成「凭据失效」。
+
+    判据是「凭据存在**且**未被云端拒绝」的与，而解绑会清空凭据、同时把健康度复位
+    成全新的正常态——于是判据为假、降级却并没有发生。此时照搬「授权已失效」会让
+    三处同时错：文案让住户去「重新绑定」一个他没绑过的账号；台账的原因列写着凭据
+    失效；而同一行的授权状态列取的是健康度、写着正常，自相矛盾——网页那个失效角标
+    恰好按状态列判，于是住户看到的是一条毫无解释的失败记录。
+    """
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.is_operational = False
+    svc._miot_proxy.is_authenticated = False  # 没绑，而不是绑了但废了
+
+    with pytest.raises(MiotAuthUnavailableError) as e:
+        await svc.trigger_scene("scene1")
+    msg = str(e.value)
+    assert "not bound" in msg, "应当说「没绑定」"
+    assert "no longer valid" not in msg, "不该说成「凭据已失效」"
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert "not bound" in (r["error"] or ""), "台账的原因列同样要分档"
 
 
 @pytest.mark.asyncio

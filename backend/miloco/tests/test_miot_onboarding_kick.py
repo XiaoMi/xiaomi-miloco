@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from miloco.miot.client import refusal_reason_for
 from miloco.miot.service import MiotService
 
 
@@ -25,6 +26,9 @@ def _make_service() -> MiotService:
         # 真实代理有这个判据，夹具也要有：缺了它，生产侧任何「先问一句能不能用」
         # 的检查都会在这里撞 AttributeError，而那不是生产缺陷、是夹具没建模。
         is_operational=True,
+        # 真实代理还有「有没有绑」这一档，以及据它分档的拒绝文案。夹具取生产那
+        # 份纯函数、不另写一份措辞——复刻件会与本体漂移，而漂移之后测试照样绿。
+        is_authenticated=True,
         # 真实代理另有一对**不触发刷新**的取数口（降级态下写台账走它们，避免为一行
         # 留痕去打一趟注定 401 的云端）。夹具让它们与上面那两个刷新口返回同一份，
         # 缺了它们，被拒那条路会在这里撞 AttributeError。
@@ -41,6 +45,11 @@ def _make_service() -> MiotService:
         refresh_cameras=AsyncMock(),
         refresh_devices=AsyncMock(),
         refresh_scenes=AsyncMock(),
+    )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
     )
     return MiotService(miot_proxy=proxy)
 

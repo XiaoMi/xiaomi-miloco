@@ -915,3 +915,19 @@ def test_a_successful_response_carrying_error_zero_is_not_a_rejection():
     assert info.access_token == "at-new"
     assert info.refresh_token == "rt-new"
 
+
+def test_stripping_newlines_keeps_a_separator():
+    """剥换行要换成空格，不能直接删掉。
+
+    删掉会把「关灯\n晚安」拼成「关灯晚安」，与一个真就叫那个名字的任务在日志里再也
+    分不开，按名字 grep 会互相串；多行的异常消息同样会被拼成一串没有分隔的文字。
+    而「不让它伪造出额外整行」这个目的，换成空格一样达成——这条钉的就是「别为了
+    省一个字符把两个名字粘起来」。
+    """
+    from miloco.utils.logger import log_safe
+
+    out = log_safe("关灯\n晚安")
+    assert "\n" not in out and "\r" not in out, "整行伪造仍然要挡住"
+    assert out == "关灯 晚安", "换成空格，而不是删掉"
+    assert log_safe("a\r\nb") == "a b", "回车换行一起来时也只留一个分隔"
+

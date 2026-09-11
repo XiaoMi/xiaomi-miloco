@@ -28,6 +28,7 @@ from miloco.middleware.exceptions import (
     ValidationException,
 )
 from miloco.miot import filter as miot_filter
+from miloco.miot.client import refusal_reason_for
 from miloco.miot.service import MiotService
 
 
@@ -297,6 +298,9 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
         # 真实代理有这个判据，夹具也要有：缺了它，生产侧任何「先问一句能不能用」
         # 的检查都会在这里撞 AttributeError，而那不是生产缺陷、是夹具没建模。
         is_operational=True,
+        # 真实代理还有「有没有绑」这一档，以及据它分档的拒绝文案。夹具取生产那
+        # 份纯函数、不另写一份措辞——复刻件会与本体漂移，而漂移之后测试照样绿。
+        is_authenticated=True,
         _kv_repo=SimpleNamespace(
             db_connector=SimpleNamespace(
                 execute_update=lambda *a, **kw: 0,
@@ -321,6 +325,11 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
         # 默认：awake 缓存空（全部相机镜头态未知→None，不 gate）。需要构造镜头关闭的
         # 测试自行覆盖该 mock 返回 {did: False}。
         read_cameras_awake=AsyncMock(side_effect=lambda dids, **kw: {}),
+    )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
     )
     svc = MiotService(miot_proxy=proxy)
 
@@ -799,6 +808,11 @@ async def test_unbind_miot_clears_scope_config():
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
+    )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
     svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
@@ -840,6 +854,11 @@ async def test_unbind_miot_clears_scope_config_when_keys_absent():
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
+    )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
     svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
@@ -872,6 +891,11 @@ async def test_unbind_miot_scope_cleared_even_if_deinit_fails():
         init=AsyncMock(),
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
+    )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
     )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
@@ -927,6 +951,11 @@ def _authorize_fixture(kv, *, new_uid: str | None):
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
+    )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
     svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
@@ -950,6 +979,41 @@ def _lru_cleared(db_connector) -> bool:
         for c in db_connector.execute_update.call_args_list
         if "device_lru" in str(c)
     )
+
+
+@pytest.mark.asyncio
+async def test_same_account_rebind_keeps_scope_even_if_a_later_step_fails():
+    """同账号重绑时，收尾步骤抛异常不许把刚保住的配置清掉。
+
+    住户按界面提示点「重新绑定」走的正是同账号这条路。换票成功、身份比对相等之后
+    还要选家、刷三份缓存、起一轮状态对齐——其中选家那次写库与状态对齐都可能抛。
+    异常出口若只看「令牌变没变」，换票必然让它成立，于是这一档会被误伤：摄像头
+    停用集是「默认启用」语义，清掉等于把住户特意关掉的相机重新打开投喂，而他拿到
+    的只是一句「授权处理失败」。
+    """
+    kv = _scope_kv("same-uid")
+    kv.set(AuthConfigKeys.MIOT_TOKEN_INFO_KEY, json.dumps({"access_token": "old"}))
+    svc, proxy, _db = _authorize_fixture(kv, new_uid="same-uid")
+
+    async def _exchange(code, state):
+        # 换票成功：令牌必然换掉（异常出口那个判据因此恒真）
+        kv.set(AuthConfigKeys.MIOT_TOKEN_INFO_KEY, json.dumps({"access_token": "new"}))
+        return proxy.get_miot_auth_info.return_value
+
+    proxy.get_miot_auth_info = AsyncMock(side_effect=_exchange)
+    proxy.get_miot_auth_info.return_value = _authorize_fixture(kv, new_uid="same-uid")[
+        1
+    ].get_miot_auth_info.return_value
+    # 比对相等之后的收尾步骤抛错
+    svc._ensure_home_selected = AsyncMock(  # type: ignore[assignment]
+        side_effect=RuntimeError("database is locked")
+    )
+
+    with pytest.raises(MiotServiceException):
+        await svc.authorize_with_code(code="test_code", state="test_state")
+
+    assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H1"]
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)) == ["c1"]
 
 
 @pytest.mark.asyncio
@@ -1602,6 +1666,11 @@ async def test_authorize_with_code_auto_selects_first_home():
         refresh_scenes=AsyncMock(),
         get_devices=AsyncMock(return_value={"d1": _home("H1"), "d2": _home("H2")}),
         get_cameras=AsyncMock(return_value={}),
+    )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
     )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]

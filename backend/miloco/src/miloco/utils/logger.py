@@ -118,7 +118,11 @@ def log_safe(value: object) -> str:
     放在公共模块而不是某个接口文件里：同类的值不止出现在一处，而让别的模块去
     import 一个私有名字是更差的选择。
     """
-    return str(value).replace("\r", "").replace("\n", "")
+    # 换成**空格**而不是删掉：删掉会把「关灯\n晚安」拼成「关灯晚安」，与一个真就
+    # 叫那个名字的任务在日志里再也分不开，按名字 grep 会互相串；多行的异常消息
+    # 同样会被拼成一串没有分隔的文字。而「不让它伪造出额外整行」这个目的，换成
+    # 空格一样达成。
+    return str(value).replace("\r", "").replace("\n", " ")
 
 
 def cam_tag(camera_id: str, channel: int) -> str:

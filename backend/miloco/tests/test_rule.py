@@ -20,6 +20,7 @@ from miloco.middleware.exceptions import (
     ResourceNotFoundException,
     ValidationException,
 )
+from miloco.miot.client import refusal_reason_for
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
     ConditionItem,
@@ -169,6 +170,14 @@ MOCK_SCENES = ("scene-1", "scene-A", "scene-B", "scene-movie", "scene-real")
 @pytest.fixture
 def mock_miot_proxy():
     proxy = AsyncMock()
+    # 拒绝文案是**同步**方法：AsyncMock 会让它返回协程，抛出来的异常消息就成了
+    # "<coroutine object ...>"。取生产那份纯函数，别在夹具里另写措辞。
+    proxy.is_authenticated = True
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
+    )
     proxy.get_camera_dids = AsyncMock(return_value=["cam-001", "cam-002"])
     proxy.get_device_properties = AsyncMock(return_value=[{"code": 0, "value": False}])
     proxy.set_device_properties = AsyncMock(return_value=[{"code": 0}])

@@ -216,6 +216,27 @@ def build_sub_device_names(device: MIoTDeviceInfo) -> dict[str, str]:
     return normalize_sub_devices(device.sub_devices, device.name)
 
 
+def refusal_reason_for(
+    what: str, *, operational: bool, authenticated: bool
+) -> str | None:
+    """按「能不能用 / 有没有绑」给出拒绝文案；仍可用则返回 ``None``。
+
+    做成不依赖实例的纯函数，是为了让测试替身能取**同一份**实现：夹具里另写一份
+    措辞的话，它会与本体漂移，而漂移之后测试照样绿。
+    """
+    if operational:
+        return None
+    if not authenticated:
+        return (
+            f"{what} refused: Mi Home account is not bound. "
+            "Bind in the web console, or run `miloco-cli account bind`."
+        )
+    return (
+        f"{what} refused: Mi Home authorization is no longer valid. "
+        "Rebind in the web console, or run `miloco-cli account bind`."
+    )
+
+
 class MiotProxy:
     """Xiaomi IoT proxy class responsible for handling MIoT device related operations."""
 
@@ -430,19 +451,9 @@ class MiotProxy:
         列取的是健康度、写着正常，自相矛盾——网页台账页的失效角标恰好按那一列判，
         于是住户看到的是一条毫无解释的失败记录。
         """
-        if self.is_operational:
+        reason = self.refusal_reason(what)
+        if reason is None:
             return None
-        if self._oauth_info is None:
-            reason = (
-                f"{what} refused: Mi Home account is not bound. "
-                "Bind in the web console, or run `miloco-cli account bind`."
-            )
-            logger.info(reason)
-            return reason
-        reason = (
-            f"{what} refused: Mi Home authorization is no longer valid. "
-            "Rebind in the web console, or run `miloco-cli account bind`."
-        )
         # 记 INFO 而不是 WARNING：失效是长期状态（要住户动手才解得开），而下发的
         # 触发频率远高于定时续期——规则每命中一次就是一条，逐条 WARNING
         # 会把同期真正需要看的行淹掉，与续期失败那侧的重复日志限频纪律也不一致。
@@ -450,6 +461,18 @@ class MiotProxy:
         # 不进台账的那些则会把拒绝原样抛回调用点，住户在那里当场就看到。
         logger.info(reason)
         return reason
+
+    def refusal_reason(self, what: str) -> str | None:
+        """拒绝这件事的理由；仍可用则返回 ``None``。**只给文案，不记日志。**
+
+        单独拆出来，是因为下发面之外还有几处「先问一句能不能用」的前置检查（触发
+        场景、设备控制、建规则时校验场景号）各自判过同一个判据。措辞若也各写一份，
+        「没绑定 / 已失效」这道分档就只在闸门这一处成立，那几处仍会在从未绑定的
+        机器上让住户去「重新绑定」一个他没绑过的账号。
+        """
+        return refusal_reason_for(
+            what, operational=self.is_operational, authenticated=self.is_authenticated
+        )
 
     @classmethod
     async def create_miot_proxy(

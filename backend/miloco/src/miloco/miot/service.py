@@ -278,6 +278,18 @@ def _sole_enabled_home(miot_proxy: MiotProxy) -> str | None:
     return next(iter(enabled)) if len(enabled) == 1 else None
 
 
+def _refusal_ledger_reason(miot_proxy: MiotProxy) -> str:
+    """被拒那一行台账的原因列。与拒绝文案同一道分档。
+
+    没绑定时写成「凭据已失效」是自相矛盾的：同一行的授权状态列取的是健康度，
+    而解绑会把它复位成全新的正常态——两列对不上，网页那个失效角标又恰好按状态列
+    判，于是住户看到的是一条毫无解释的失败记录。
+    """
+    if not miot_proxy.is_authenticated:
+        return "refused: mi home account is not bound"
+    return "refused: mi home authorization no longer valid"
+
+
 def _degraded_scene_home(miot_proxy: MiotProxy, scene_id: str) -> str | None:
     """降级态下尽力问出这个场景属于哪个家：读**已经在手**的那份场景表。
 
@@ -326,13 +338,16 @@ async def _trigger_scene(
             did=scene_id, iid=scene_id, value_json=None,
             result_code=None, result_msg=None,
             success=False,
-            error="refused: mi home authorization no longer valid",
+            error=_refusal_ledger_reason(miot_proxy),
             source=source, source_id=source_id,
             home_id=_degraded_scene_home(miot_proxy, scene_id),
         )
+        # 措辞取代理层那一处：它把「从未绑定 / 刚解绑」与「绑着但凭据废了」分开
+        # 说，这里自己拼一份的话，没绑定的机器上会让住户去「重新绑定」一个他没绑
+        # 过的账号。
         raise MiotAuthUnavailableError(
-            "execute scene refused: Mi Home authorization is no longer valid. "
-            "Rebind in the web console, or run `miloco-cli account bind`."
+            miot_proxy.refusal_reason("execute scene")
+            or "execute scene refused: Mi Home authorization is no longer valid."
         )
     try:
         scenes = (await miot_proxy.get_all_scenes()) or {}
@@ -728,8 +743,16 @@ class MiotService:
             # 指向一个已不属于当前账号的家。身份未知一律按「换了账号」处理，与那道
             # 比对同向：跨账号残留的拾音白名单若在新账号下命中，会让住户从未授权的
             # 摄像头麦克风直接生效，那是唯一「误命中等于隐私泄露」的键。
-            if prev_token is not self._TOKEN_UNREAD and (
-                self._kv_repo.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY) != prev_token
+            # `same_account` 为真 = 身份**已经比对过且相等**，不属于上面说的「身份
+            # 未知」那一档。此时再清，会把刚刚刻意保住的接入配置抹掉，与「同账号
+            # 重绑保留配置」直接相反——而摄像头停用集是「默认启用」语义，清掉等于
+            # 把住户特意关掉的相机重新打开投喂，他看到的却只是一句「授权处理失败」。
+            # 换账号那一支在上面已经清过一次，这个出口真正唯一有价值的场景，是
+            # 「换票已成功、但身份还没比出来就抛了」。
+            if (
+                not same_account
+                and prev_token is not self._TOKEN_UNREAD
+                and self._kv_repo.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY) != prev_token
             ):
                 logger.warning(
                     "Authorization failed after the new token was already persisted; "
@@ -1340,9 +1363,9 @@ class MiotService:
             # 会抛同一个异常，两者由同一个分支收口。
             if not self._miot_proxy.is_operational:
                 raise MiotAuthUnavailableError(
-                    "device control refused: Mi Home authorization is no longer "
-                    "valid. Rebind in the web console, or run "
-                    "`miloco-cli account bind`."
+                    self._miot_proxy.refusal_reason("device control")
+                    or "device control refused: Mi Home authorization is no "
+                    "longer valid."
                 )
             await self._assert_did_in_allowed_home(did)
 
@@ -1435,7 +1458,8 @@ class MiotService:
                 did=did, iid=_request_iid(request),
                 value_json=attempted_value_json,
                 result_code=None, result_msg=None,
-                success=False, error="refused: mi home authorization no longer valid",
+                success=False,
+                error=_refusal_ledger_reason(self._miot_proxy),
             )
             raise
         # 兜底：原写法 `except A, B:` 是 Python 2 语法，在 Python 3 上为 SyntaxError，

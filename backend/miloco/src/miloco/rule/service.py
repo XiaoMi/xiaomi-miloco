@@ -646,9 +646,9 @@ class RuleService:
         # 引向「等一等再试」，而这件事需要他重新授权。与触发场景那条入口同一口径。
         if not self._miot_proxy.is_operational:
             raise MiotAuthUnavailableError(
-                "cannot verify scene IDs: Mi Home authorization is no longer "
-                "valid. Rebind in the web console, or run "
-                "`miloco-cli account bind`."
+                self._miot_proxy.refusal_reason("cannot verify scene IDs")
+                or "cannot verify scene IDs: Mi Home authorization is no longer"
+                " valid."
             )
         all_scenes = (await self._miot_proxy.get_all_scenes()) or {}
         # 场景表拿不到(缓存空 + 刷新失败)时别谎报「你的 id 无效」——两种失败

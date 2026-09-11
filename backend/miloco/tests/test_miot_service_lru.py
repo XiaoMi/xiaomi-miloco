@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from miloco.miot.client import refusal_reason_for
 from miloco.miot.schema import DeviceControlRequest, PropertyItem
 from miloco.miot.service import MiotService
 
@@ -62,6 +63,9 @@ def _make_service(tmp_path: Path) -> tuple[MiotService, _DBConnector]:
         # 真实代理有这个判据，夹具也要有：缺了它，生产侧任何「先问一句能不能用」
         # 的检查都会在这里撞 AttributeError，而那不是生产缺陷、是夹具没建模。
         is_operational=True,
+        # 真实代理还有「有没有绑」这一档，以及据它分档的拒绝文案。夹具取生产那
+        # 份纯函数、不另写一份措辞——复刻件会与本体漂移，而漂移之后测试照样绿。
+        is_authenticated=True,
         _kv_repo=SimpleNamespace(
             db_connector=db,
             get=lambda key, default=None: store.get(key, default),
@@ -79,6 +83,11 @@ def _make_service(tmp_path: Path) -> tuple[MiotService, _DBConnector]:
             return_value=[{"siid": 2, "piid": 1, "value": True, "code": 0}]
         ),
         get_readable_prop_iids=AsyncMock(return_value=["prop.2.1"]),
+    )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
     )
     return MiotService(miot_proxy=proxy), db
 
