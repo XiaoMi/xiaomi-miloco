@@ -993,7 +993,8 @@ class RuleService:
         """task 被删 —— 清掉所有 per-task 的内存态。
 
         rule 维度走 ``remove_rule_from_runner``, 它清不到按 task_id 存的那些:
-        状态机拓扑、运行态、判定跟踪、动作快照、停用标记、达标源的轮次计数。
+        状态机拓扑、运行态、判定跟踪、动作快照、停用标记、欠下的那次退出、达标源的
+        轮次计数。
         record timer 不在这里撤 —— 它按 rule_id 存, 逐条清 rule 时已经撤掉了。
 
         ``task_id`` 是用户自己起的名字, 删掉再用同名重建是正常操作 —— 不清的话新

@@ -61,14 +61,22 @@ def sent(monkeypatch):
     return captured
 
 
-def _rule(name, task_id, direction, dids=("cam1",)):
+@pytest.fixture
+def clock(monkeypatch):
+    """可控时钟。补发要熬过这条规则自己的退出防抖（默认一分钟），真等不现实。"""
+    now = [1_000_000_000]
+    monkeypatch.setattr(runner_module, "now_ms", lambda: now[0])
+    return now
+
+
+def _rule(name, task_id, direction, dids=("cam1",), exit_debounce_seconds=0):
     return Rule(
         name=name,
         task_id=task_id,
         mode=RuleMode.STATE if direction is RuleDirection.SESSION else RuleMode.EVENT,
         direction=direction,
         condition=RuleCondition(perceive_device_ids=list(dids), query="有人"),
-        exit_debounce_seconds=0,
+        exit_debounce_seconds=exit_debounce_seconds,
     )
 
 
@@ -108,13 +116,13 @@ def _iso_ms(text: str) -> int:
     return int(datetime.fromisoformat(text).timestamp() * 1000)
 
 
-def _init_duration_record(task_id="t1", started_minutes_ago=None):
+def _init_duration_record(task_id="t1", started_minutes_ago=None, content=None):
     from miloco.task_record.schema import RecordKind
     from miloco.task_record.service import TaskRecordService
     from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
     record = TaskRecordService()
-    record.init_record(task_id, RecordKind.DURATION, {})
+    record.init_record(task_id, RecordKind.DURATION, content or {})
     started_at = None
     if started_minutes_ago is not None:
         started_at = ms_to_iso_local(now_ms() - started_minutes_ago * 60 * 1000)
@@ -151,15 +159,15 @@ async def _pause_then_resume(service, runner, task_id="t1"):
 
 
 @pytest.fixture
-def reciprocal(env, sent):
+def reciprocal(env, sent, clock):
     service, runner, ids = _build([_rule("[t1] 观影", "t1", RuleDirection.SESSION)])
-    return service, runner, ids[0], sent
+    return service, runner, ids[0], sent, clock
 
 
 @pytest.mark.asyncio
 async def test_resends_exit_when_resumed_inside_the_window(reciprocal):
     """窗口内启用、人已经走了 → 退出动作补跑一次。"""
-    service, runner, rule_id, sent = reciprocal
+    service, runner, rule_id, sent, clock = reciprocal
     await _enter(runner, rule_id)
     assert _slot_texts(sent) == ["进入"]
 
@@ -168,6 +176,8 @@ async def test_resends_exit_when_resumed_inside_the_window(reciprocal):
     # 补发要发生在拿到观测之后, 不是停用或启用那一刻
     assert _slot_texts(sent) == ["进入"]
 
+    await _observe(runner, rule_id, "cam1", False)
+    clock[0] += 61 * 1000
     await _observe(runner, rule_id, "cam1", False)
 
     assert _slot_texts(sent) == ["进入", "退出"]
@@ -180,22 +190,23 @@ async def test_does_not_resend_after_the_window(reciprocal, monkeypatch):
     欠账记的是停用那一刻的意图, 隔太久现状多半已经被人动过, 补发是拿过期的意图
     覆盖现状。
     """
-    service, runner, rule_id, sent = reciprocal
+    service, runner, rule_id, sent, clock = reciprocal
     await _enter(runner, rule_id)
     monkeypatch.setattr(runner_module, "OWED_EXIT_RESEND_WINDOW_MS", 0)
 
     await _pause_then_resume(service, runner)
+    # 喂够让证据成立的观测, 这样拦住补发的只可能是窗口这一条
+    await _observe(runner, rule_id, "cam1", False)
+    clock[0] += 61 * 1000
     await _observe(runner, rule_id, "cam1", False)
 
     assert _slot_texts(sent) == ["进入"]
 
 
 @pytest.mark.asyncio
-async def test_expired_owed_exit_leaves_a_log(reciprocal, monkeypatch, caplog):
+async def test_expired_owed_exit_leaves_a_log(reciprocal, caplog):
     """超时不补发要留痕 —— 窗口该取多长, 依据就是这条日志攒出来的分布。"""
-    service, runner, rule_id, _sent = reciprocal
-    clock = [1_000_000_000]
-    monkeypatch.setattr(runner_module, "now_ms", lambda: clock[0])
+    service, runner, rule_id, _sent, clock = reciprocal
     await _enter(runner, rule_id)
     await _pause(service, runner)
     clock[0] += 3600 * 1000
@@ -212,9 +223,61 @@ async def test_expired_owed_exit_leaves_a_log(reciprocal, monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
+async def test_resend_needs_the_same_evidence_as_a_normal_exit(reciprocal):
+    """补发依据的"条件为假", 证据强度不能低于正常退出那条路。
+
+    正常退出要连续两帧为假才确认, 确认之后还要熬过这条规则的退出防抖。而停用把整条
+    规则的状态弹掉了, 启用后每个源的上一帧都是初值假 —— 那两道闸一道都不生效。住户
+    还在看电影、启用后第一帧恰好漏识, 就会当场把窗帘拉开。
+    """
+    service, runner, rule_id, sent, clock = reciprocal
+    debounce_ms = RuleRepo().get_by_id(rule_id).exit_debounce_seconds * 1000
+    await _enter(runner, rule_id)
+    await _pause(service, runner)
+    await _resume(service, runner)
+
+    await _observe(runner, rule_id, "cam1", False)
+    assert _slot_texts(sent) == ["进入"]
+
+    clock[0] += debounce_ms - 1000
+    await _observe(runner, rule_id, "cam1", False)
+    assert _slot_texts(sent) == ["进入"]
+
+    clock[0] += 2000
+    await _observe(runner, rule_id, "cam1", False)
+    assert _slot_texts(sent) == ["进入", "退出"]
+
+
+@pytest.mark.asyncio
+async def test_expires_without_waiting_for_a_source_that_never_reports(
+    env, sent, clock, caplog
+):
+    """声明的相机里有一台一直不上报 → 超过窗口就把账结掉, 别无声挂着。
+
+    超过窗口就不动设备了, 条件是真是假都不改变这个结论。等下去的话这笔账会永远悬着,
+    连超时那条日志都留不下 —— 而窗口该取多长全靠它攒出来的时长分布。
+    """
+    service, runner, ids = _build(
+        [_rule("[t1] 观影", "t1", RuleDirection.SESSION, dids=("cam1", "cam2"))]
+    )
+    rule_id = ids[0]
+    await _enter(runner, rule_id, "cam1")
+    await _pause(service, runner)
+    clock[0] += 3600 * 1000
+    await _resume(service, runner)
+
+    with caplog.at_level(logging.INFO, logger="miloco.rule.runner"):
+        await _observe(runner, rule_id, "cam1", False)
+
+    assert _slot_texts(sent) == ["进入"]
+    assert runner.owed_exit_paused_at("t1") is None
+    assert [r for r in caplog.records if "OWED_EXIT_EXPIRED" in r.getMessage()]
+
+
+@pytest.mark.asyncio
 async def test_pausing_dispatches_nothing(reciprocal):
     """停用那一刻不动设备。用户关掉自动化不该反过来被理解成"结束观影"。"""
-    service, runner, rule_id, sent = reciprocal
+    service, runner, rule_id, sent, clock = reciprocal
     await _enter(runner, rule_id)
 
     service.apply_task_status("t1", False)
@@ -230,7 +293,7 @@ async def test_condition_still_true_takes_the_normal_enter_path(reciprocal):
     压掉它会连带压掉计时段的开启: 段只能由 agent 收到 ``actual_started_at`` 之后
     去开, 不 fire 就永远不重开, 结果是在态却不再累计。
     """
-    service, runner, rule_id, sent = reciprocal
+    service, runner, rule_id, sent, clock = reciprocal
     _init_duration_record()
     await _enter(runner, rule_id)
 
@@ -250,7 +313,7 @@ async def test_resent_exit_carries_no_session_timestamp(reciprocal):
     计时段在停用那一刻已经由 ``close_active_session`` 结清了。补发再带上
     ``actual_exited_at``, agent 会照着调一次 session-end, 撞上"没有活跃段"报错。
     """
-    service, runner, rule_id, sent = reciprocal
+    service, runner, rule_id, sent, clock = reciprocal
     _init_duration_record()
     await _enter(runner, rule_id)
 
@@ -258,6 +321,8 @@ async def test_resent_exit_carries_no_session_timestamp(reciprocal):
     await _resume(service, runner)
     assert _slot_texts(sent) == ["进入"]
 
+    await _observe(runner, rule_id, "cam1", False)
+    clock[0] += 61 * 1000
     await _observe(runner, rule_id, "cam1", False)
 
     assert _slot_texts(sent) == ["进入", "退出"]
@@ -269,7 +334,7 @@ async def test_resent_exit_carries_no_session_timestamp(reciprocal):
 
 
 @pytest.mark.asyncio
-async def test_waits_until_every_source_has_reported(env, sent):
+async def test_waits_until_every_source_has_reported(env, sent, clock):
     """两台相机的规则, 只回来一台不算数。
 
     OR 聚合下先到的那台报假不代表整条为假 —— 据此补发退出, 等另一台随后报真又会
@@ -284,21 +349,24 @@ async def test_waits_until_every_source_has_reported(env, sent):
     await _pause_then_resume(service, runner)
 
     await _observe(runner, rule_id, "cam1", False)
+    clock[0] += 61 * 1000
+    await _observe(runner, rule_id, "cam1", False)
     assert _slot_texts(sent) == ["进入"]
 
+    await _observe(runner, rule_id, "cam2", False)
+    clock[0] += 61 * 1000
     await _observe(runner, rule_id, "cam2", False)
     assert _slot_texts(sent) == ["进入", "退出"]
 
 
 @pytest.mark.asyncio
-async def test_second_pause_keeps_the_first_moment(reciprocal, monkeypatch):
+async def test_second_pause_keeps_the_first_moment(reciprocal):
     """停用 → 启用 → 没结算完又停用 → 再启用: 按第一次欠账的时刻算。
 
     覆盖成第二次的话失去观察的时长会算短, 早就该作废的欠账反而落回窗口内。
     """
-    service, runner, rule_id, _sent = reciprocal
-    clock = [1_000_000]
-    monkeypatch.setattr(runner_module, "now_ms", lambda: clock[0])
+    service, runner, rule_id, _sent, clock = reciprocal
+    start = clock[0]
     await _enter(runner, rule_id)
 
     service.apply_task_status("t1", False)
@@ -309,7 +377,7 @@ async def test_second_pause_keeps_the_first_moment(reciprocal, monkeypatch):
     service.apply_task_status("t1", True)
     await runner.drain()
 
-    assert first == 1_000_000
+    assert first == start
     assert runner.owed_exit_paused_at("t1") == first
 
 
@@ -399,6 +467,34 @@ async def test_resume_reopens_the_duration_session(env, sent):
     # 一起算进累计。
     assert _iso_ms(reopened) > _iso_ms(started_at)
     assert _iso_ms(reopened) >= before_ms - 1000
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_reopen_a_completed_session(env, sent):
+    """今日已达标的 task, 恢复在态时不再开计时段。
+
+    达标之后 agent 那条路就不再调 session-end 了（意图里的处理流程第一步拦掉）, 这里
+    开的段没人收尾; 非 recurring 的行又不跨日切段, 派生累计会按「到现在」一直涨 ——
+    住户第二天打开看到的今日时长是几百分钟。
+    """
+    service, runner, ids = _build(
+        [
+            _rule("[t1] 比手势开灯", "t1", RuleDirection.ENTER, dids=("cam1",)),
+            _rule("[t1] 挥手关灯", "t1", RuleDirection.EXIT, dids=("cam2",)),
+        ]
+    )
+    record, _ = _init_duration_record(
+        started_minutes_ago=2, content={"target_minutes": 1}
+    )
+
+    await _enter(runner, ids[0], "cam1")
+    await _pause(service, runner)
+    assert record.get_active_record("t1")["record"]["status"] == "completed"
+
+    await _resume(service, runner)
+
+    assert runner.state_machine.runtime_state("t1") is TaskRuntimeState.ON
+    assert record.get_active_record("t1")["derived"]["active_session_start_at"] is None
 
 
 @pytest.mark.asyncio

@@ -244,6 +244,7 @@ class RuleRuntimeState:
     exit_debounce_at: float | None = None
     duration_window: "deque[int] | None" = None
     last_duration_round: int | None = None
+    owed_exit_false_since: int | None = None
     state_duration_fired: bool = False
     action_cooldown: dict[tuple[str, str], float] = field(default_factory=dict)
 
@@ -603,7 +604,7 @@ class RuleRunner:
         self._owed_exit_paused_at.pop(task_id, None)
 
     def _note_owed_exit(
-        self, task_id: str, slot: ActionSlot | None, *, dispatched: bool
+        self, task_id: str, slot: ActionSlot | None, *, has_action: bool
     ) -> None:
         """记下这个 task 刚走过哪一侧的边界。
 
@@ -612,13 +613,17 @@ class RuleRunner:
         - 清账不看有没有东西可下发, 也不看现在还有没有出路径。走过退出这一侧,
           这一轮就结束了; 挂上和记账一样的闸, 就会出现"退出真的走完了、账还欠着",
           之后一次停用启用就把运行态凭空补回 on。
-        - 记账要求确实下发过, 且这个 task 得有出路径。进入槽是空的等于设备上没留下
-          任何要复位的东西; 事件型 task 没有出路径, 运行态恒 ``off``, 谈不上在态。
+        - 记账要求槽里真有东西可下发, 且这个 task 得有出路径。进入槽是空的等于设备
+          上没留下任何要复位的东西; 事件型 task 没有出路径, 运行态恒 ``off``, 谈不上
+          在态。
+
+        不看下发成没成功: 与状态机"动作失败不反噬状态"同口径 —— 这笔账记的是我们下过
+        一次进入指令, 不是设备确认收到了。
         """
         if slot is ActionSlot.ON_EXIT:
             self.drop_owed_exit(task_id)
             return
-        if slot is not ActionSlot.ON_ENTER or not dispatched:
+        if slot is not ActionSlot.ON_ENTER or not has_action:
             return
         sm = self._state_machine
         if sm is None or not sm.has_exit_path(task_id):
@@ -641,32 +646,58 @@ class RuleRunner:
             return
         if rule.resolved_direction is not RuleDirection.SESSION:
             return
-        if not self._all_sources_reported(rule):
-            return
-        if self._state[rule.id].last_rule_state:
-            self.end_owed_exit_pause(rule.task_id)
-            return
 
+        state = self._state[rule.id]
         lost_sight_ms = now_ms() - paused_at
-        lost_sight_seconds = lost_sight_ms // 1000
-        self.drop_owed_exit(rule.task_id)
         if lost_sight_ms >= OWED_EXIT_RESEND_WINDOW_MS:
+            # 排在确定性之前: 超过窗口就不动设备了, 条件是真是假都不改变这个结论,
+            # 没什么可等的。排在后面的话, 声明的相机里有一台一直不上报, 这笔账会
+            # 永远悬着、连这条日志都留不下, 而窗口该取多长全靠它攒出来的分布。
+            self.drop_owed_exit(rule.task_id)
+            state.owed_exit_false_since = None
             logger.info(
                 "OWED_EXIT_EXPIRED: task=%s 失去观察 %d 秒, 超过 %d 秒的窗口, "
                 "不补发退出动作",
                 rule.task_id,
-                lost_sight_seconds,
+                lost_sight_ms // 1000,
                 OWED_EXIT_RESEND_WINDOW_MS // 1000,
             )
             return
+
+        if not self._all_sources_reported(rule):
+            return
+        if state.last_rule_state:
+            state.owed_exit_false_since = None
+            self.end_owed_exit_pause(rule.task_id)
+            return
+        if not self._absent_long_enough(rule, state):
+            return
+
+        self.drop_owed_exit(rule.task_id)
+        state.owed_exit_false_since = None
         if self.dispatch_task_action(
             rule.task_id, ActionSlot.ON_EXIT.value, context="owed_exit_resend"
         ):
             logger.info(
                 "OWED_EXIT_RESENT: task=%s 失去观察 %d 秒, 补发退出动作",
                 rule.task_id,
-                lost_sight_seconds,
+                lost_sight_ms // 1000,
             )
+
+    def _absent_long_enough(self, rule: Rule, state: RuleRuntimeState) -> bool:
+        """条件为假持续得够久了吗 —— 够久才拿它去动设备。
+
+        补发要的证据强度不能低于正常退出: 那条路上单帧为假不算数, 确认离开之后还要
+        再等 ``exit_debounce_seconds``。而停用把整条 rule 的状态弹掉了, 启用后每个源
+        的上一帧都是初值假, 那两道闸一道都不生效 —— 只能在这里自己看。
+
+        第一次确定为假只作起点、不下结论, 所以防抖再短也至少要两次观测。
+        """
+        now = now_ms()
+        if state.owed_exit_false_since is None:
+            state.owed_exit_false_since = now
+            return False
+        return now - state.owed_exit_false_since >= rule.exit_debounce_seconds * 1000
 
     def _all_sources_reported(self, rule: Rule) -> bool:
         """这条 rule 声明的感知源是不是每一个都已经报过至少一次。
@@ -1566,7 +1597,7 @@ class RuleRunner:
         slot = self._select_slot(rule, event, boundary_slot)
         # 记在这里而不是状态机的派发点: 感知边沿那条路进状态机时带 dispatch=False,
         # 那一层在生产路径上一次都不派发, 挂上去等于整个机制静默失效。
-        self._note_owed_exit(rule.task_id, boundary_slot, dispatched=slot is not None)
+        self._note_owed_exit(rule.task_id, boundary_slot, has_action=slot is not None)
         if slot is None:
             logger.debug(
                 "rule %s event %s: empty slot, skipping", rule.id, event.value
