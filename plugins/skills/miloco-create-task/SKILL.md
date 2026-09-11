@@ -427,13 +427,15 @@ session + duration record 三 desc 分工：
 
 ### Rule.duration_seconds
 
-**含义**：触发条件需要持续 N 秒才算成立。direction 无关修饰符（三个方向都可配）。
+**含义**：触发条件需要持续 N 秒才算成立。与 direction 无关，`guard` 除外。
 
 **单位**：CLI `--duration-seconds` 收**秒整数**。用户原话 N 分钟 → 装 `N×60`；N 小时 → 装 `N×3600`。同任务内 `record.target_minutes` 字段按分钟传，两者不混用。
 
 **单次时长跟踪场景**：duration_seconds 直接表达用户业务时长（CLI 上限 86400 = 24h）。**业务时长 > 24h 拒建**，回话告知用户改用跨次累计 record（Record.kind=duration）。装 > 12h（43200s）→ **触发装配提示**（内容："本 rule 跟踪时长较长，若 Miloco 服务期间重启，计时窗口会清零重新累计"）。
 
 **跨次累计场景**（Record.duration）：duration_seconds 退化为 rule 层姿态稳定窗（推荐值见下方推荐表），业务时长由 `record.target_minutes` 表达。
+
+**direction=guard 时本字段禁配**（传了会被拒）。
 
 **source=iot 时本字段禁配**（传了会被拒）。命题含持续时长时时长改由 `Record.kind=duration` + `target_minutes` 承担（见 §达标通知机制），rule 侧不传 `--duration-seconds`，direction 按 §Rule.direction 判据 1 取 `session`。
 
@@ -717,6 +719,7 @@ session + duration record 三 desc 分工：
 | `direction=enter` | `--direction enter` |
 | `direction=exit` | `--direction exit` |
 | `direction=session` | `--direction session` |
+| `direction=guard` | `--direction guard`（不传任何动作 flag、不传 `--duration-seconds`）|
 | `source=omni` + `condition.query` | `--condition "<query>"` |
 | `source=iot` | `--iot-did <did> --iot-iid <siid.piid> --iot-op <op> --iot-value <v>`（四个同时给，与 `--condition` 互斥）|
 | enter / exit + action JSON | `--action '<JSON>'`（落哪个槽由 direction 定，不用 `--on-exit-*`）|
