@@ -268,16 +268,16 @@ temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性�
 
 识别：用户原话含「如果 / 并且 / 前提是 / 只有…才」，且那半句说的是一个**状态**（设备开着、屋里有人），不是另一个触发事件，也不是要做的动作——"有人进客厅就开空调"里的"开空调"是动作，这条命题没有前提。
 
-装法：`miloco-cli rule create --direction guard`，条件参数与触发规则相同（`--condition` 或 `--iot-*` 四件套），**不传任何动作参数**；动作照常装在触发规则上。前提与触发规则的源可以不同——"空调开着但屋里没人就关掉"是 omni 触发（屋里没人）+ iot 前提（空调开着）。
+**会发生变化的那个观测当触发，作为背景状态的那个当前提。** "空调开着但屋里没人就关掉"是 omni 触发（屋里没人）+ iot 前提（空调开着）。
 
-**哪半句当触发不能随便挑**：前提只在触发规则的边沿那一刻被回查，而边沿只在条件由不成立变成成立的那一次产生。拿长期就是那个样子的那半句当触发，规则等不到边沿——"空调开着"当触发的话，只有"屋里已经没人、然后空调被打开"才响一次，而真实场景是空调一直开着、人走了。**会发生变化的那个观测当触发，作为背景状态的那个当前提。**
+装法：`miloco-cli rule create --direction guard`，条件参数与触发规则相同（`--condition` 或 `--iot-*` 四件套），**不传任何动作参数**；动作装在触发规则上。前提与触发规则的源可以不同。
 
-- 前提**只管进入**。task 进去之后前提不再成立不会把它推出来，要那个语义用 `--direction exit`。
-- 前提条件未就绪（设备离线 / 属性还没对齐）时**不允许进入**。
+- 前提只管进入。要「条件不再成立就退出」用 `--direction exit`。
+- 前提条件未就绪（设备离线 / 属性还没对齐）时不允许进入。
 - 前提不支持 `--duration-seconds`。
-- 同 task 多条前提**全部**成立才允许进入。
+- 同 task 多条前提全部成立才允许进入。
 
-顺序上先建前提、再建触发规则：反过来的话，两次调用之间触发规则是没有前提的，那几秒里条件成立就会无条件执行一次。
+先建前提、再建触发规则。
 
 ### Rule.source（omni / iot）
 
@@ -1108,7 +1108,7 @@ miloco-cli rule create --task-id door_open_alert \
 
 用户："有人进玄关而且门锁是开着的，就用音箱播报固定欢迎语"
 
-推理：「有人进玄关」到达/进入类瞬时事件 → §Rule?=Y；除触发观测外还有一个必须同时成立的状态「门锁是开着的」→ §Rule.direction=guard 拆出前提规则，会变化的观测（有人进玄关）当触发、背景状态（门锁开着）当前提；§Rule.source 第 1 步查设备目录，门锁的锁状态属性含 `n` 且答的就是「门锁开没开」→ 前提走 iot，跑 `miloco-cli device spec <门锁 DID>` 从行首列抄 iid；「进玄关」= 进 X，含强常识默认 → §Rule.direction 判据 4 = session + `on_exit` 留空；session + 瞬时进入事件 → §Rule.exit_debounce_seconds(瞬时事件防重复·长窗) = 1800 + 触发装配提示；无累计 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；「用音箱播报」已明示通道 → §通道反问 跳过；文案固定、不按上下文变 → §Rule.action(播固定文本) = action JSON（TTS 类：`iid` 走 `action.<siid>.<aiid>` 从 device spec 输出行首列复制，`params` 按 spec in_params 列填数组；TTS 读不到"播过没有"、做不了幂等比对 → `idempotent:false` + `cooldown_minutes`）；用户只说"固定欢迎语"没给文案 → 默认「欢迎回家」+ 触发装配提示；主语「有人」→ `任何人` + 触发装配提示；「玄关」有房间名且玄关摄像头按常识覆盖入户门 → §感知视角 路径 2 按常识默认装 + 触发装配提示 → 视角覆盖 → 含触发动作的命题；§Rule.感知设备 N 内按 room_name 匹配命中 1 台 → `--source <玄关摄像头 DID>`；前提不配动作、不配 duration_seconds，先建前提后建触发规则
+推理：「有人进玄关」到达/进入类瞬时事件 → §Rule?=Y；除触发观测外还有一个必须同时成立的状态「门锁是开着的」→ §Rule.direction=guard 拆出前提规则，会变化的观测（有人进玄关）当触发、背景状态（门锁开着）当前提；§Rule.source 第 1 步查设备目录，门锁的锁状态属性含 `n` 且答的就是「门锁开没开」→ 前提走 iot，跑 `miloco-cli device spec <门锁 DID>` 从行首列抄 iid；「进玄关」= 进 X，含强常识默认 → §Rule.direction 判据 4 = session + `on_exit` 留空；session + 瞬时进入事件 → §Rule.exit_debounce_seconds(瞬时事件防重复·长窗) = 1800 + 触发装配提示；无累计 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；「用音箱播报」已明示通道 → §通道反问 跳过；文案固定、不按上下文变 → §Rule.action(播固定文本) = action JSON（TTS 类：`iid` 走 `action.<siid>.<aiid>` 从 device spec 输出行首列复制，`params` 按 spec in_params 列填数组，`idempotent:false`，`cooldown_minutes=5`）；用户只说"固定欢迎语"没给文案 → 默认「欢迎回家」+ 触发装配提示；主语「有人」→ `任何人` + 触发装配提示；「玄关」有房间名且玄关摄像头按常识覆盖入户门 → §感知视角 路径 2 按常识默认装 + 触发装配提示 → 视角覆盖 → 含触发动作的命题；§Rule.感知设备 N 内按 room_name 匹配命中 1 台 → `--source <玄关摄像头 DID>`；前提不配动作、不配 duration_seconds，先建前提后建触发规则
 
 ```
 Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
