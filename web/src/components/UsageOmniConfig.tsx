@@ -25,6 +25,10 @@ import {
 } from "@/api";
 import type { OmniConfigState, OmniProfile, OmniTestResult } from "@/lib/types";
 import { IconX, IconEye, IconEyeOff, IconChevronDown, IconChevronUp } from "@/lib/icons";
+import {
+  findOmniProviderPreset,
+  OMNI_PROVIDER_PRESETS,
+} from "@/lib/omniPresets";
 import { toast } from "./Toast";
 
 const INPUT_CLS =
@@ -188,6 +192,7 @@ export function UsageOmniConfig() {
   const [modelsMsg, setModelsMsg] = useState<string | null>(null);
   const [modelsErr, setModelsErr] = useState(false); // modelsMsg 是否为错误(决定红色突出)
   const [modelsErrCode, setModelsErrCode] = useState<string | null>(null); // 错误机器码(决定就近显示在哪个字段)
+  const modelsReqId = useRef(0); // 只允许最后发起的模型目录请求写回表单状态
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<OmniTestResult | null>(null);
@@ -227,8 +232,25 @@ export function UsageOmniConfig() {
   const existing = profiles.find(
     (p) => p.base_url === baseUrl.trim() && p.model === model.trim(),
   );
+  const selectedPreset = findOmniProviderPreset(baseUrl);
+
+  function applyProviderPreset(id: string) {
+    const preset = OMNI_PROVIDER_PRESETS.find((item) => item.id === id);
+    modelsReqId.current += 1; // 使切换前由 blur 发起的请求立即失效
+    setModelsLoading(false); // 自定义预设不发新请求，需在此结束旧请求的 loading 状态
+    setBaseUrl(preset?.baseUrl ?? "");
+    if (preset) setModel(preset.model);
+    setModels([]);
+    setModelsMsg(null);
+    setModelsErr(false);
+    setModelsErrCode(null);
+    setTestResult(null);
+    if (preset?.baseUrl) void fetchModels(preset.baseUrl, apiKey, editing);
+  }
 
   function startAdd() {
+    modelsReqId.current += 1; // 防止上一个表单会话的请求回写新表单
+    setModelsLoading(false);
     setAdding(true);
     setEditing(null);
     setBaseUrl("");
@@ -262,6 +284,8 @@ export function UsageOmniConfig() {
   // 会回 bad_key,一打开编辑就误报红错)。
   async function fetchModels(bu: string, key: string, label?: string | null) {
     if (!bu.trim()) return;
+    const reqId = ++modelsReqId.current;
+    const isStale = () => reqId !== modelsReqId.current;
     setModelsLoading(true);
     setModelsMsg(null);
     setModelsErr(false);
@@ -272,6 +296,7 @@ export function UsageOmniConfig() {
         api_key: key.trim() || undefined,
         label: label || undefined,
       });
+      if (isStale()) return;
       if (res.ok) {
         setModels(res.models);
         if (!res.models.length) setModelsMsg(t("usage.modelsEmptyResult"));
@@ -283,12 +308,13 @@ export function UsageOmniConfig() {
         setModelsErrCode(res.code ?? null);
       }
     } catch (e) {
+      if (isStale()) return;
       setModels([]);
       setModelsMsg(e instanceof Error ? e.message : t("usage.modelsFetchFailed"));
       setModelsErr(true);
       setModelsErrCode("unreachable"); // 网络/解析异常归为 Base URL 不可达
     } finally {
-      setModelsLoading(false);
+      if (!isStale()) setModelsLoading(false);
     }
   }
 
@@ -676,6 +702,20 @@ export function UsageOmniConfig() {
                   <div className="md:col-span-2 text-caption text-text-secondary">
                     {editing ? t("usage.editFormHint") : t("usage.addFormHint")}
                   </div>
+                  <Field label={t("usage.providerPresetLabel")} className="md:col-span-2">
+                    <select
+                      value={selectedPreset?.id ?? "custom"}
+                      onChange={(event) => applyProviderPreset(event.target.value)}
+                      className={INPUT_CLS}
+                    >
+                      <option value="custom">{t("usage.providerPresetCustom")}</option>
+                      {OMNI_PROVIDER_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>
+                          {preset.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
                   <Field label={t("usage.baseUrlLabel")} className="md:col-span-2">
                     <input
                       value={baseUrl}
