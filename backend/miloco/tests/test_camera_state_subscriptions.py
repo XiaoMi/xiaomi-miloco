@@ -49,6 +49,7 @@ def _bare_proxy() -> MiotProxy:
     proxy._sub_sync_running = False
     proxy._miot_client = AsyncMock()
     proxy._camera_state_listener = SimpleNamespace(on_event=AsyncMock())
+    proxy._state_listeners = []
     return proxy
 
 

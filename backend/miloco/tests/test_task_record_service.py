@@ -337,6 +337,188 @@ class TestSession:
         assert view["record"]["target_minutes"] is None
 
 
+# ── close_active_session（停止观测时服务端自己收段） ─────────────────────────
+
+
+def _raw_active_start(db, task_id: str):
+    """绕开读取路径直连主表 —— 派生累计把「段收了」和「段还开着」算成同一个数。"""
+    with db.get_connection() as conn:
+        row = conn.execute(
+            "SELECT active_session_start_at FROM task_record_duration "
+            "WHERE task_id = ? AND archived_at IS NULL",
+            (task_id,),
+        ).fetchone()
+    return row["active_session_start_at"]
+
+
+def _settled_seconds(db, task_id: str) -> int:
+    with db.get_connection() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(duration_seconds), 0) AS s "
+            "FROM task_record_duration_session "
+            "WHERE task_id = ? AND archived_at IS NULL",
+            (task_id,),
+        ).fetchone()
+    return row["s"]
+
+
+def _session_rows(db, task_id: str) -> list:
+    """落账的段本身 —— 秒数被 max(..., 0) 夹过, 断总和分不出「没落账」和「落了
+    一条时间倒挂的」。"""
+    with db.get_connection() as conn:
+        return conn.execute(
+            "SELECT start_at, end_at FROM task_record_duration_session "
+            "WHERE task_id = ? AND archived_at IS NULL",
+            (task_id,),
+        ).fetchall()
+
+
+def _mark_task_paused(db, task_id: str) -> None:
+    with db.get_connection() as conn:
+        conn.execute(
+            "UPDATE task SET status = 'paused' WHERE task_id = ?", (task_id,)
+        )
+        conn.commit()
+
+
+class TestCloseActiveSession:
+    def test_settles_open_session(self, service, db, monkeypatch):
+        """起点留着就是「还在观测」, 落账秒数分开「收了段」和「把这段丢了」。"""
+        import miloco.task_record.service as record_module
+        from miloco.task_record.schema import RecordKind
+
+        _insert_task(db, "d1")
+        service.init_record("d1", RecordKind.DURATION, {"target_minutes": 60})
+        service.session_start("d1", at="2026-06-10T09:00:00+08:00")
+        # 结束时刻取自 _now_iso, 锁住它才能断精确秒数
+        monkeypatch.setattr(
+            record_module, "_now_iso", lambda: "2026-06-10T09:25:00+08:00"
+        )
+
+        assert service.close_active_session("d1") == 25 * 60
+
+        assert _raw_active_start(db, "d1") is None
+        assert _settled_seconds(db, "d1") == 25 * 60
+
+    def test_ignores_task_paused_guard(self, service, db):
+        """生产调用点在 task 表已写成 paused 之后 —— 照 session_end 的守卫走会
+        静默 noop, 段一直开着。"""
+        from miloco.task_record.schema import RecordKind
+
+        _insert_task(db, "d1")
+        service.init_record("d1", RecordKind.DURATION, {"target_minutes": 60})
+        service.session_start("d1", at="2026-06-10T09:00:00+08:00")
+        _mark_task_paused(db, "d1")
+
+        assert service.close_active_session("d1") is not None
+
+        assert _raw_active_start(db, "d1") is None
+
+    def test_no_open_session_returns_none(self, service, db):
+        from miloco.task_record.schema import RecordKind
+
+        _insert_task(db, "d1")
+        service.init_record("d1", RecordKind.DURATION, {"target_minutes": 60})
+
+        assert service.close_active_session("d1") is None
+        assert _settled_seconds(db, "d1") == 0
+
+    def test_non_duration_record_returns_none(self, service, db):
+        """停用走的是所有 task 共用的路径 —— 抛出去会让每次停用都刷一条错误日志。"""
+        from miloco.task_record.schema import RecordKind
+
+        _insert_task(db, "p1")
+        service.init_record(
+            "p1", RecordKind.PROGRESS, {"target": 8, "unit": "杯", "window": "day"}
+        )
+
+        assert service.close_active_session("p1") is None
+
+    def test_task_without_record_returns_none(self, service, db):
+        _insert_task(db, "bare")
+
+        assert service.close_active_session("bare") is None
+
+    def test_future_start_is_not_settled(self, service, db, monkeypatch):
+        """起点落在未来时不落账 —— 照落会写出一条 end 早于 start 的倒挂区间。"""
+        import miloco.task_record.service as record_module
+        from miloco.task_record.schema import RecordKind
+
+        _insert_task(db, "d1")
+        service.init_record("d1", RecordKind.DURATION, {"target_minutes": 60})
+        service.session_start("d1", at="2026-06-10T09:00:00+08:00")
+        monkeypatch.setattr(
+            record_module, "_now_iso", lambda: "2026-06-10T08:00:00+08:00"
+        )
+
+        assert service.close_active_session("d1") is None
+
+        assert _session_rows(db, "d1") == []
+        # 段留着: 时钟追上来之后 agent 那条路仍能正常收尾
+        assert _raw_active_start(db, "d1") is not None
+
+    def test_settled_seconds_reaching_target_marks_completed(
+        self, service, db, monkeypatch
+    ):
+        """住户看到的完成徽标读的是 record 状态, 不是派生累计 —— 收段把累计推过
+        目标, 徽标就得跟着亮。断在 list_active_summaries 上, 那是前端读的那张表。
+        """
+        import miloco.task_record.service as record_module
+        from miloco.task_record.schema import RecordKind
+
+        _insert_task(db, "d1")
+        service.init_record("d1", RecordKind.DURATION, {"target_minutes": 30})
+        service.session_start("d1", at="2026-06-10T09:00:00+08:00")
+        monkeypatch.setattr(
+            record_module, "_now_iso", lambda: "2026-06-10T09:35:00+08:00"
+        )
+
+        assert service.close_active_session("d1") == 35 * 60
+
+        assert service.list_active_summaries("day")["d1"].completed is True
+
+    def test_settled_seconds_below_target_stays_active(
+        self, service, db, monkeypatch
+    ):
+        """没到目标不能亮 —— 否则"收段就算完成"和"累计够了才算完成"分不开。"""
+        import miloco.task_record.service as record_module
+        from miloco.task_record.schema import RecordKind
+
+        _insert_task(db, "d1")
+        service.init_record("d1", RecordKind.DURATION, {"target_minutes": 30})
+        service.session_start("d1", at="2026-06-10T09:00:00+08:00")
+        monkeypatch.setattr(
+            record_module, "_now_iso", lambda: "2026-06-10T09:20:00+08:00"
+        )
+
+        assert service.close_active_session("d1") == 20 * 60
+
+        assert service.list_active_summaries("day")["d1"].completed is False
+
+    def test_recurring_reaching_target_stays_active(
+        self, service, db, monkeypatch
+    ):
+        """周期任务没有"完成"终点, 收段推过目标也不翻 —— 本周期已达标靠达标条件
+        项自身的边沿防重复, 翻了跨天归零反而要把它翻回来。"""
+        import miloco.task_record.service as record_module
+        from miloco.task_record.schema import RecordKind
+
+        _insert_task(db, "d1")
+        service.init_record(
+            "d1",
+            RecordKind.DURATION,
+            {"target_minutes": 30, "recurring_pattern": {"window": "day"}},
+        )
+        service.session_start("d1", at="2026-06-10T09:00:00+08:00")
+        monkeypatch.setattr(
+            record_module, "_now_iso", lambda: "2026-06-10T09:35:00+08:00"
+        )
+
+        assert service.close_active_session("d1") == 35 * 60
+
+        assert service.list_active_summaries("day")["d1"].completed is False
+
+
 # ── event_append ─────────────────────────────────────────────────────────────
 
 
@@ -1271,8 +1453,8 @@ class TestRecurringNeverCompleted:
     """recurring task 的 status 永远保持 active，达 target 不翻 completed。
 
     recurring 的语义是循环（每天/每周/每月重置），没有"完成"终点。
-    本周期内"已达标，不重复通知" 由 rule engine `_target_fired` 运行时
-    状态承担，跨周期 rollover 清零；不污染 DB status 字段。
+    本周期内"已达标，不重复通知" 由达标条件项自身的值承担（已经是真就产不出新
+    边沿），跨周期 rollover 把它翻假；不污染 DB status 字段。
     """
 
     def test_progress_recurring_keeps_active_when_target_reached(

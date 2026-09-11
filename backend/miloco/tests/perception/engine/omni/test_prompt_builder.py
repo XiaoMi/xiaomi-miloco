@@ -537,6 +537,65 @@ class TestAudioRoutePayload:
         assert audio_payload["system_prompt"] == audio_payload2["system_prompt"]
 
 
+class TestNoMediaBlockWarning:
+    """拼不出本窗媒体块时必须留痕——生产默认路径（fused + query）逐 route 覆盖。
+
+    与 fused video route 那条（``test_empty_window_guard.py::TestFusedNoMediaBlockWarning``）
+    共用 ``event=fused_no_media_block``，按一个 event 名 grep 就能盖住全部 route。
+    这类分支不在任何主路径上，不实际执行到就等于没写。
+    """
+
+    def test_fused_audio_route_warns_when_audio_unencodable(self, caplog):
+        """audio route 编不出音频 → 打 warning。
+
+        ``_encode_audio_only_mp4`` 对不足一个 AAC 帧的采样返回 None，此时 audio route 的
+        user_content 里一个媒体块都没有（这条路不渲染参考图），模型手里只剩时间和房间名。
+        """
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        ep = _audio_only_packet()
+        ep.audio_clip = np.zeros(512, dtype=np.int16)  # < 一个 AAC 帧 → 编不出
+
+        with caplog.at_level("WARNING"):
+            fused = build_fused_payload(
+                packets=[ep],
+                context=OmniContext(room_name="厨房"),
+                candidates=[],
+                gallery_snapshot={},
+            )
+
+        blocks = fused["messages"][-1]["content"]
+        assert not [b for b in blocks if b.get("type") == "input_audio"]
+        msg = next(
+            r.getMessage() for r in caplog.records
+            if "fused_no_media_block" in r.getMessage()
+        )
+        assert "route=audio" in msg
+        assert "room=厨房" in msg
+
+    def test_query_route_warns_when_video_unencodable(self, caplog):
+        """query 路径拼不出 video 块 → 打 warning。
+
+        query 只有 video 一个媒体块，拼不出就是纯文本问模型「现在怎么样」，而 prompt 里
+        还带着上一窗的 last_caption —— 用户直接读到没有本窗画面依据的现场描述。
+        """
+        from miloco.perception.engine.omni.prompt_builder import build_query_prompt
+
+        ep = _mock_edge_packet()
+        ep.all_frames = []  # _encode_batch_video 拿不到帧 → (None, None)
+
+        with caplog.at_level("WARNING"):
+            payload = build_query_prompt([ep], "厨房现在怎么样")
+
+        assert payload["video_base64"] is None
+        msg = next(
+            r.getMessage() for r in caplog.records
+            if "fused_no_media_block" in r.getMessage()
+        )
+        assert "route=query" in msg
+        assert "room=study-room" in msg
+
+
 class TestBuildMessagesContentBlocks:
     """omni_client._build_messages 块组装（audio vs video route）。"""
 

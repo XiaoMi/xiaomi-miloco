@@ -24,6 +24,7 @@ from miloco.perception.types import (
     AudioFrame,
     AudioStream,
     BatchedSnapshot,
+    DeviceSnapshot,
     MatchedRule,
     OnDemandPerceptionResult,
     RealtimePerceptionResult,
@@ -322,6 +323,8 @@ class PerceptionEngine(BasePerceptionEngine):
         self._audio_tail: dict[str, NDArray[np.int16]] = {}         # key: device_id
         # 拾音关闭已打过 INFO 的相机集合（防每窗刷屏；重新开启时移除、下次关闭再打）
         self._mic_off_logged: set[str] = set()
+        # 本窗无任何输入已打过 WARNING 的相机集合（同上防刷屏；该相机恢复出数据时移除）
+        self._empty_window_logged: set[str] = set()
         # 上一窗口末次被检帧（gate 预处理后的 448 灰度），visual gate 跨窗口比较用
         self._gate_prev_frames: dict[str, NDArray[np.uint8]] = {}   # key: device_id
         # visual / audio 最近通过的 monotonic ts,喂 gate hold 判定。
@@ -873,7 +876,8 @@ class PerceptionEngine(BasePerceptionEngine):
         self._global_frame_index = 0
         # 旧场景基准帧 vs 新场景首帧的 diff 不代表真实变化,清掉退化为冷启动语义
         self._gate_prev_frames.clear()
-        # hold 状态机一并清,首通后 6min 倒计时重启
+        # hold 状态机一并清,首通后按 gate.hold_duration_sec(默认 90s)重新起算
+        # (原注释写「6min」与配置不符,系历史遗留)
         self._gate_last_visual_pass_ts.clear()
         self._gate_last_audio_pass_ts.clear()
         self._gate_hold_active.clear()
@@ -964,6 +968,68 @@ class PerceptionEngine(BasePerceptionEngine):
             self._pending_speech.pop(did, None)
             self._pending_speech_rounds.pop(did, None)
 
+    def _drop_empty_snapshots(self, batch: BatchedSnapshot) -> None:
+        """剔除既无视频帧也无音频的 snapshot——「本窗没有输入」不是「本窗什么都没发生」。
+
+        必须在 ``_strip_unauthorized_voice_audio`` **之后**调用:视频轨在本窗无数据
+        (解码器等关键帧 / 缓冲区溢出清空 / 掉线重连)但音频轨有数据时,窗口靠音频通过了
+        ``stream_buffer`` 封窗、``DeviceSnapshot.has_data`` 与入口的 ``batch.empty``;
+        随后拾音未开启的相机音频被剥掉,这台相机这一窗就什么都不剩了,而入口那道
+        ``batch.empty`` 已经过去、没有复检。空 snapshot 继续往下走的后果是 gate hold 放行
+        空 packet → 编码层无帧不加 video 块 → 纯文本问模型场景,模型只能编。
+
+        语义上这一步是把 collector 本该做的过滤补回来:若拾音授权在采集层就生效,音频轨
+        根本不会给这个窗口投票,``collect_batch`` 会直接把该 device 过滤掉。
+
+        逐 snapshot 剔除而非整批判空:混合场景(cam A 零帧、cam B 正常)下整批判空挡不住 A,
+        而多相机同房间是常态。原地改 ``batch.snapshots``(同 ``_strip_unauthorized_voice_audio``
+        的惯例);剔完全空时调用方紧随其后的 ``batch.empty`` 自然返回。
+
+        **不变式**:被剔的 device 本轮不进 ``device_rule_map``,其规则状态桶保持上一帧、
+        不被推向 EXIT(duration 类规则会沿用上一窗结论直到该 device 恢复出数据)。这与采集层
+        ``collect_batch`` 对 ``has_data`` 为假的 device 整个过滤掉是同一语义——相机彻底离线
+        走的就是这条路径,本函数只是让「零帧 + 拾音关闭」与之对齐。
+        """
+        kept: list[DeviceSnapshot] = []
+        for snapshot in batch.snapshots:
+            did = snapshot.device.did
+            if snapshot.has_data:
+                # 该相机恢复出数据 → 移出已打日志集,下次再空时重新打一条
+                self._empty_window_logged.discard(did)
+                kept.append(snapshot)
+                continue
+            if did not in self._empty_window_logged:
+                logger.warning(
+                    "本窗无任何输入（无视频帧且无音频），跳过该相机 did=%s name=%s",
+                    did, snapshot.device.name,
+                )
+                self._empty_window_logged.add(did)
+        batch.snapshots[:] = kept
+
+    def _drop_frameless_snapshots(self, batch: BatchedSnapshot) -> None:
+        """query 路径专用:剔除无视频帧的 snapshot。
+
+        判据比 realtime 的 ``_drop_empty_snapshots``(「两个模态都没有」)更严,因为 query
+        路径**没有 audio route**:``build_query_prompt`` 只产出 ``video_base64``,而
+        ``_encode_video`` 对零帧直接返回 ``(None, None)`` —— 音频只作为 mp4 音轨随视频走,
+        零帧时连它一起丢。``_build_messages`` 两个 key 都拿不到就一个媒体块都不加,且无
+        warning。留着零帧 snapshot 的唯一效果,是让模型拿着上一窗的 ``last_caption`` 去回答
+        「现在怎么样」——用户直接读到的一句听起来正常、但没有本窗画面依据的现场描述。
+
+        realtime 侧不能用这个判据:那边零帧+音频过闸有 audio route 接住,按无帧剔除会误杀
+        拾音相机的纯音频感知。
+        """
+        kept: list[DeviceSnapshot] = []
+        for snapshot in batch.snapshots:
+            if snapshot.has_video:
+                kept.append(snapshot)
+                continue
+            logger.warning(
+                "主动查询：本窗无视频帧，跳过该相机 did=%s name=%s",
+                snapshot.device.did, snapshot.device.name,
+            )
+        batch.snapshots[:] = kept
+
     async def realtime_perceive(
         self,
         batch: BatchedSnapshot,
@@ -984,6 +1050,17 @@ class PerceptionEngine(BasePerceptionEngine):
         # 未开启拾音的相机在此整批剥音频（opt-in 第一道防线）；必须先于 contexts 构建
         # （pending_speech 注入）与 audio-tail 拼接，见 _strip_unauthorized_voice_audio。
         self._strip_unauthorized_voice_audio(batch)
+
+        # 剥完音频后复检：靠音频通过上面那道 batch.empty 的空帧窗口在此被剔除。
+        self._drop_empty_snapshots(batch)
+        if batch.empty:
+            # 返 skipped 结果而非 None：processor 拿到 None 会直接 return，走不到 cycle
+            # trace 发布，零帧窗口在 dashboard 上连行都不留、出现频率不可观测——而定位
+            # 这个 bug 本身就是靠数日志里的窗口数做出来的。与「全部 device 没过 gate」
+            # 同款收尾（那条路径本就产出 skipped=True + 一行 trace），口径保持一致。
+            # trace 里的 per-device 记录取自 processor 侧的 PerceptionBatch，不受这里
+            # 剔除 BatchedSnapshot.snapshots 影响。
+            return RealtimePerceptionResult(skipped=True)
 
         # 进入新一轮前先按 TTL 淘汰过期事件链
         now = time.monotonic()
@@ -1109,6 +1186,14 @@ class PerceptionEngine(BasePerceptionEngine):
         # 主动查询同样尊重 opt-in：未开启拾音的相机音频不进 query 视频
         # （_encode_video_mp4 对空 audio 自动出纯视频 mp4）。
         self._strip_unauthorized_voice_audio(batch)
+
+        # 剥完音频后复检。query 路径跳过 gate 且没有 audio route，零帧 snapshot 只能在
+        # 这里挡——否则 build_query_prompt 无帧不加任何媒体块，变成拿纯文本（外加上一窗的
+        # last_caption）去回答"房间里现在怎么样"。判据用「有没有画面」而非 realtime 的
+        # 「两个模态都没有」，理由见 _drop_frameless_snapshots。
+        self._drop_frameless_snapshots(batch)
+        if batch.empty:
+            return OnDemandPerceptionResult(answer="")
 
         # query 路径 omni 仍是 per-room 一次（产品语义：用户问"房间"，答案单份），
         # 需要 per-room 的 last_caption 作为参考。``_last_captions`` 已改 per-device，

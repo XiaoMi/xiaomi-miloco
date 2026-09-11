@@ -14,7 +14,7 @@ def runner():
 
 
 def test_create_posts_minimal_body(runner):
-    """方案 P：task create body 收窄为 ``{task_id, description}``。"""
+    """方案 P：task create body 收窄为 ``{task_id, description, lifecycle}``。"""
     with patch("miloco_cli.client.api_post") as mock_post:
         mock_post.return_value = {
             "code": 0,
@@ -28,7 +28,130 @@ def test_create_posts_minimal_body(runner):
         assert result.exit_code == 0, result.output
         path, body = mock_post.call_args.args
         assert path == "/api/tasks"
-        assert body == {"task_id": "t1", "description": "d"}
+        assert body == {
+            "task_id": "t1",
+            "description": "d",
+            "lifecycle": "permanent",
+        }
+
+
+def test_create_sends_temporary_lifecycle(runner):
+    """§Lifecycle 判据的结果必须落到 body 上 —— 不传的话 task 行恒 permanent。"""
+    with patch("miloco_cli.client.api_post") as mock_post:
+        mock_post.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group,
+            [
+                "create",
+                "--task-id",
+                "t1",
+                "--description",
+                "d",
+                "--lifecycle",
+                "temporary",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_post.call_args.args
+        assert body["lifecycle"] == "temporary"
+
+
+def test_create_omits_expiry_when_not_given(runner):
+    """不传就别把键塞进 body —— 显式 null 与"没传"在 backend 侧语义不同。"""
+    with patch("miloco_cli.client.api_post") as mock_post:
+        mock_post.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group, ["create", "--task-id", "t1", "--description", "d"]
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_post.call_args.args
+        assert "expires_at" not in body
+
+
+def test_create_sends_expiry_when_given(runner):
+    with patch("miloco_cli.client.api_post") as mock_post:
+        mock_post.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group,
+            [
+                "create",
+                "--task-id",
+                "t1",
+                "--description",
+                "d",
+                "--lifecycle",
+                "temporary",
+                "--expires-at",
+                "2026-06-10T23:59:59+08:00",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_post.call_args.args
+        assert body["expires_at"] == "2026-06-10T23:59:59+08:00"
+
+
+def test_create_strips_quotes_around_the_expiry(runner):
+    """agent 习惯给 ISO 加引号, 而 exec tool 把 command 当 argv 传、不解析 shell
+    引号 —— record 的 --at 早就为此剥了一层, 这个参数同类。"""
+    with patch("miloco_cli.client.api_post") as mock_post:
+        mock_post.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group,
+            [
+                "create",
+                "--task-id",
+                "t1",
+                "--description",
+                "d",
+                "--lifecycle",
+                "temporary",
+                "--expires-at",
+                '"2026-06-10T23:59:59+08:00"',
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_post.call_args.args
+        assert body["expires_at"] == "2026-06-10T23:59:59+08:00"
+
+
+def test_update_strips_quotes_around_the_expiry(runner):
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        mock_patch.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group,
+            ["update", "t1", "--expires-at", '"2026-06-11T23:59:59+08:00"'],
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_patch.call_args.args
+        assert body["expires_at"] == "2026-06-11T23:59:59+08:00"
+
+
+def test_create_rejects_expiry_on_permanent_locally(runner):
+    """本地就拦, 不发请求 —— 服务端也拒, 但那要等一个来回。"""
+    with patch("miloco_cli.client.api_post") as mock_post:
+        result = runner.invoke(
+            task_group,
+            [
+                "create",
+                "--task-id",
+                "t1",
+                "--description",
+                "d",
+                "--expires-at",
+                "2026-06-10T23:59:59+08:00",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "只能配 --lifecycle temporary" in result.output
+        mock_post.assert_not_called()
+
+
+def test_create_rejects_unknown_lifecycle(runner):
+    result = runner.invoke(
+        task_group,
+        ["create", "--task-id", "t1", "--description", "d", "--lifecycle", "forever"],
+    )
+    assert result.exit_code != 0
 
 
 def test_create_no_longer_accepts_refs(runner):
@@ -39,6 +162,54 @@ def test_create_no_longer_accepts_refs(runner):
     )
     assert result.exit_code != 0
     assert "No such option" in result.output or "no such option" in result.output.lower()
+
+
+def test_update_sends_only_the_flags_that_were_given(runner):
+    """partial: 没传的字段不进 body, 否则会把别的字段一起冲掉。"""
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        mock_patch.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group,
+            ["update", "t1", "--expires-at", "2026-06-11T23:59:59+08:00"],
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_patch.call_args.args
+        assert body == {"expires_at": "2026-06-11T23:59:59+08:00"}
+
+
+def test_update_clear_expiry_sends_explicit_null(runner):
+    """清空必须是显式 null —— 不传等于"这次不动它", 两者要分得开。"""
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        mock_patch.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group,
+            ["update", "t1", "--lifecycle", "permanent", "--clear-expires-at"],
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_patch.call_args.args
+        assert body == {"lifecycle": "permanent", "expires_at": None}
+
+
+def test_update_rejects_clear_with_a_value(runner):
+    result = runner.invoke(
+        task_group,
+        [
+            "update",
+            "t1",
+            "--expires-at",
+            "2026-06-11T23:59:59+08:00",
+            "--clear-expires-at",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "互斥" in result.output
+
+
+def test_update_rejects_an_empty_body(runner):
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        result = runner.invoke(task_group, ["update", "t1"])
+        assert result.exit_code != 0
+        mock_patch.assert_not_called()
 
 
 def test_update_uses_patch(runner):

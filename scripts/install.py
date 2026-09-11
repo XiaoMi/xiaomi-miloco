@@ -1291,8 +1291,34 @@ class Installer:
             )
         pkg = str(tgz_files[0])
 
+        # openclaw >= 2026.8 引入 capability consent：带 capabilities 的插件安装需
+        # --accept-capabilities；老版本无此旗标，探测 install --help 决定是否追加。
+        # 判定只看输出文本（与 sync-to-remote.sh 同口径），退出码/超时不参与匹配；
+        # 超时时已捕获的部分输出也参与匹配——help 文本打印出该旗标即代表支持。
+        accept = []
+        timed_out = False
+        try:
+            probe = subprocess.run(
+                ["openclaw", "plugins", "install", "--help"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            probe_out = f"{probe.stdout}\n{probe.stderr}"
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            probe_out = f"{out}\n{err}"
+        if "--accept-capabilities" in probe_out:
+            accept = ["--accept-capabilities"]
+        elif timed_out:
+            # 超时且没匹配到旗标：以空 accept 继续安装，8.x 上会被 consent 门拒——
+            # 提示实际原因免得误判成版本号问题。
+            self.ui.warn(self.ui.i18n.t("plugin.capability_probe_timeout"))
+
         self.ui.run_with_spinner(
-            ["openclaw", "plugins", "install", "--force", pkg],
+            ["openclaw", "plugins", "install", "--force", *accept, pkg],
             self.ui.i18n.t("plugin.installing"),
             text=True,
         )
@@ -1359,7 +1385,7 @@ class Installer:
             scripts/ / skills/，只能整段跳，由 POST_INSTALL_SKIP guard 兜底
           - **幂等重跑**：step 5 (config set) / 6 (.env) / 7 (backend 重启) / 8 (enable)
             —— 都是幂等的，重跑一遍保证状态收敛（代价是 step 7 会多一次 stop+3s+start）
-          - **本模式真正补齐**：1.6/1.75/1.9 env 持久化、4.7 ONNX 模型、8.5 disable 残留
+          - **本模式真正补齐**：1.6/1.75/1.9 env 持久化、4.7 感知模型、8.5 disable 残留
             清理、9 版本记录、10 cron reconcile、收尾 banner「hermes gateway restart」提示
 
         install-hermes.sh 由 build.sh::build_hermes 打进 miloco-hermes-plugin tarball，

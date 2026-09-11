@@ -12,6 +12,7 @@ import pytest
 from miloco.miot.result_codes import (
     _MIOT_OK_CODES,
     _MIOT_SPEC_CODES,
+    is_known_code,
     summarize_results,
 )
 
@@ -114,3 +115,16 @@ def test_unknown_negative_code_gets_generic_msg():
 
 def test_none_input_is_success():
     assert summarize_results(None) == (True, None, None)
+
+
+def test_known_code_is_recognized():
+    assert is_known_code(-704220043) is True
+
+
+def test_unknown_code_is_not():
+    assert is_known_code(-704010000) is False
+
+
+def test_success_code_is_not_a_failure_code():
+    """0 不是失败码，也就不该被当成「认识的失败码」。"""
+    assert is_known_code(0) is False

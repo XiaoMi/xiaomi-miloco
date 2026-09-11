@@ -93,3 +93,6 @@ eval/sampled_*.json
 
 # opengrep / semgrep 本地扫描产物（含全量命中片段与绝对路径），只在本地看，不入库。
 .opengrep-out/
+
+# scripts/build.sh 打包期临时备份的 package.json（正常退出被 mv 掉，硬杀时残留）
+*.build-bak

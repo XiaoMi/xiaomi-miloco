@@ -47,7 +47,9 @@ from .const import (
 )
 from .types import (
     MIoTDeviceBindEvent,
+    MIoTDevicePropsEvent,
     MIoTDeviceStateEvent,
+    MIoTPropChange,
     MIoTSceneChangedEvent,
     MipsConnectionError,
     MipsSubscribeRejectedError,
@@ -111,6 +113,18 @@ _TOPIC_DEVICE_STATE = re.compile(
     r"^device/([^/]+)/state/(" + "|".join(_DEVICE_STATE_OPS) + r")$"
 )
 
+# Device-level property push:
+# `device/{did}/up/properties_changed/{siid}/{piid}`.
+# Subscribed as ONE wildcard per did: property leaves are the (siid, piid)
+# cartesian product, so per-leaf subscribes are unbounded. The leaf-only
+# filter matches no published topic AND is rejected by the broker ACL with
+# 0x87; the broader `up/#` and `device/{did}/#` are rejected too. The trailing
+# ids are informational — the same ids repeat inside the payload, and the
+# decoder cross-checks them against each other.
+_TOPIC_DEVICE_PROPS = re.compile(
+    r"^device/([^/]+)/up/properties_changed(?:/(\d+)/(\d+))?$"
+)
+
 
 # Handler signatures accepted by sub_*_async methods. They receive a fully
 # decoded message object and may be sync or async — both are dispatched on the
@@ -118,6 +132,7 @@ _TOPIC_DEVICE_STATE = re.compile(
 BindHandler = Callable[[MIoTDeviceBindEvent], Union[None, Awaitable[None]]]
 SceneChangedHandler = Callable[[MIoTSceneChangedEvent], Union[None, Awaitable[None]]]
 DeviceStateHandler = Callable[[MIoTDeviceStateEvent], Union[None, Awaitable[None]]]
+PropsChangedHandler = Callable[[MIoTDevicePropsEvent], Union[None, Awaitable[None]]]
 MipsStateHandler = Callable[[bool], Union[None, Awaitable[None]]]
 # Fired when an unattended subscribe (no awaiter, e.g. the reconnect-time
 # re-issue in _on_connect) fails. Arg tuple = (topic, reason_code,
@@ -487,6 +502,22 @@ class MIoTMipsCloud:
     async def unsub_device_state_async(self, did: str) -> None:
         await self._unsubscribe_async(f"device/{did}/state/#")
 
+    async def sub_device_props_async(
+        self, did: str, handler: PropsChangedHandler
+    ) -> None:
+        """订阅一台设备的属性推送子树 `device/{did}/up/properties_changed/#`。
+
+        通配是必需的,不是省事:推送落在 `.../properties_changed/{siid}/{piid}`,
+        leaf-only 的 filter 匹配不到任何已发布 topic(见 _TOPIC_DEVICE_PROPS)。
+        """
+        decoder = self._make_device_props_decoder()
+        await self._subscribe_async(
+            f"device/{did}/up/properties_changed/#", handler, decoder
+        )
+
+    async def unsub_device_props_async(self, did: str) -> None:
+        await self._unsubscribe_async(f"device/{did}/up/properties_changed/#")
+
     # ------------------------------------------------------- subscribe core
 
     async def _subscribe_async(
@@ -518,6 +549,16 @@ class MIoTMipsCloud:
             # before this coroutine yields still finds the entry.
             sub = _Subscription(topic=topic, qos=qos, handler=handler, decoder=decoder)
             with self._subs_lock:
+                existing = self._subs.get(topic)
+                if existing is not None and existing.handler != handler:
+                    # 一个 topic 只挂一个 handler。两个消费方各订一份同 topic 时，
+                    # 后注册的会静默替换先注册的，先来的那个从此收不到推送 ——
+                    # 覆盖照做（行为不变），但必须留下痕迹
+                    _LOGGER.error(
+                        "subscription %s already has a different handler; "
+                        "the previous one will stop receiving pushes",
+                        topic,
+                    )
                 self._subs[topic] = sub
 
             result, mid = mqtt.subscribe(topic, qos=qos)
@@ -866,6 +907,80 @@ class MIoTMipsCloud:
                 event=op,  # type: ignore[arg-type]  # op ∈ {online,offline}
                 raw=raw if isinstance(raw, dict) else {},
                 timestamp_ms=_now_ms(),
+            )
+
+        return decode
+
+    @staticmethod
+    def _make_device_props_decoder() -> Callable[
+        [str, bytes], Optional[MIoTDevicePropsEvent]
+    ]:
+        # 订的是 `properties_changed/#` 通配,同一层将来出现别的 leaf 也会落进来,
+        # 所以 `if not m` 和 method 校验都是白名单,不是防御性冗余。
+        #
+        # 三个 id 在 topic 和 payload 里各有一份,这是白送的交叉校验:不一致会把一台
+        # 设备的值写到另一台的路径上。topic 只承载一对 (siid, piid),所以那一对只在
+        # payload 单条时校验,多条时无从对应。
+        def decode(topic: str, payload: bytes) -> Optional[MIoTDevicePropsEvent]:
+            m = _TOPIC_DEVICE_PROPS.match(topic)
+            if not m:
+                return None
+            did = m.group(1)
+            topic_iid = (
+                (int(m.group(2)), int(m.group(3))) if m.group(2) is not None else None
+            )
+            raw = _parse_json_payload(payload)
+            if not isinstance(raw, dict):
+                return None
+            if raw.get("method") != "properties_changed":
+                return None
+            params = raw.get("params")
+            if isinstance(params, dict):
+                entries = [params]
+            elif isinstance(params, list):
+                entries = [item for item in params if isinstance(item, dict)]
+            else:
+                return None
+            if any(
+                str(item.get("did")) != did
+                for item in entries
+                if item.get("did") is not None
+            ):
+                _LOGGER.warning(
+                    "properties_changed payload did contradicts topic did=%s", did
+                )
+                return None
+            changes: list[MIoTPropChange] = []
+            for item in entries:
+                try:
+                    siid = int(item["siid"])
+                    piid = int(item["piid"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if "value" not in item:
+                    # 与对齐侧同口径(state_align._read_values):没有 value 的不是
+                    # 「值为 None」,是一条残缺的推送。当成 None 写进容器会把真实值
+                    # 盖掉,而容器没有时间戳可仲裁、盖完 last_reported 是当下
+                    _LOGGER.warning(
+                        "properties_changed entry carries no value did=%s iid=prop.%s.%s",
+                        did,
+                        siid,
+                        piid,
+                    )
+                    continue
+                changes.append(
+                    MIoTPropChange(siid=siid, piid=piid, value=item["value"])
+                )
+            if not changes:
+                return None
+            if topic_iid is not None and len(changes) == 1:
+                if (changes[0].siid, changes[0].piid) != topic_iid:
+                    _LOGGER.warning(
+                        "properties_changed payload iid contradicts topic did=%s", did
+                    )
+                    return None
+            return MIoTDevicePropsEvent(
+                did=did, changes=changes, timestamp_ms=_now_ms(), raw=raw
             )
 
         return decode

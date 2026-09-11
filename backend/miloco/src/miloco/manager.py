@@ -5,6 +5,7 @@
 Service manager module
 """
 
+import asyncio
 import logging
 import uuid
 
@@ -13,16 +14,29 @@ from miloco.database.kv_repo import KVRepo, SystemConfigKeys
 from miloco.database.person_repo import PersonRepo
 from miloco.home_profile.service import HomeProfileService
 from miloco.miot.client import MiotProxy
+from miloco.miot.mips_listeners import PropTopUpListener
 from miloco.miot.service import MiotService
+from miloco.miot.state_align import align_iot_state, read_missing_props
+from miloco.miot.state_push import IotPushWriter
 from miloco.node_monitor import NodeKind, NodeName, get_monitor
 from miloco.perception import init_perception_module
 from miloco.perception.service import PerceptionService
 from miloco.person.service import PersonService
 from miloco.rule.service import RuleService, init_rule_service
 from miloco.rule.terminate_evaluator import TerminateEvaluator
+from miloco.state import StateStore
 from miloco.task.service import TaskService
 
 logger = logging.getLogger(__name__)
+
+# 同一作用域代内对同一台设备最多补拉几次。补拉的判据是「容器里没有这条叶子」，而永久
+# 不可读的属性永远不会进容器 —— 不限次的话，一台反复掉线的设备每次上线都会重新请求同一
+# 批读不到的属性，挤米家限频。留几次是为了瞬时不可读还有机会
+TOP_UP_MAX_ATTEMPTS = 3
+# 对齐失败后重试几次、首次等多久（之后逐次翻倍）。对齐是这一代属性的唯一来源，
+# 一次云端抖动不该让整代停在「未对齐」
+ALIGN_MAX_ATTEMPTS = 4
+ALIGN_RETRY_BASE_SEC: float = 30.0
 
 
 class Manager:
@@ -37,10 +51,190 @@ class Manager:
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
+            # 作用域代号：切换账号或家庭时 +1。对齐、属性推送、删除调和写容器之前都
+            # 比一次，比不上就整段放弃 —— 挡掉旧作用域迟到的写入。
+            # 只有切换编排递增它，且那段在一把锁里跑，没有第二个写者。
+            cls._instance._scope = 0
+            # 已对齐到哪一代。存代号不存布尔：代号一推进旧标记自动失效，
+            # 没有「谁负责重置」这个问题。初值取一个不可能等于真实代号的数
+            cls._instance._aligned_scope = -1
+            # 启动对齐的 task。挂在这里而不是 lifespan 的局部变量里，
+            # 切换编排才够得着去取消上一轮
+            cls._instance.state_align_task = None
+            # 容器在这里建、在 initialize() 里 start：切换编排够得着它的时候
+            # initialize() 不一定跑完，而没建起来的话编排会在清空那一步炸掉
+            cls._instance._state_store = StateStore()
+            cls._instance._iot_push_writer = None
+            cls._instance._prop_top_up = None
+            # did → 本代已补拉次数。切作用域时清空（对齐也是一代跑一次，口径一致）
+            cls._instance._top_up_attempts = {}
+            # 对齐窗口里被早退掉的补拉需求。对齐完成后补一轮；切作用域时连同额度一起清
+            cls._instance._top_up_pending = set()
         return cls._instance
 
     def __init__(self):
         pass
+
+    def _wire_iot_push(self) -> None:
+        """把两条推送接进状态容器。
+
+        写入器挂在 Manager 上是因为它要同时够得着容器和 proxy，别处都够不着其中一个；
+        订阅归 proxy，容器只是消费方之一。
+
+        单独一个方法是为了可测：漏挂一条 listener 的后果是推送静默不进容器，而
+        initialize() 整条在测试里跑不起来。
+        """
+        self._iot_push_writer = IotPushWriter(
+            self._state_store,
+            self._miot_proxy,
+            scope_is_aligned=self.scope_is_aligned,
+        )
+        # 上线补拉是上下线扇出的第二个消费方，与写入器互不知情：写入器只管把标志写进
+        # 容器，补拉只管把这台设备缺的属性补齐
+        self._prop_top_up = PropTopUpListener(top_up=self._top_up_props)
+        self._miot_proxy.add_device_state_listener(
+            self._iot_push_writer.on_device_state
+        )
+        self._miot_proxy.add_device_props_listener(
+            self._iot_push_writer.on_device_props
+        )
+        self._miot_proxy.add_device_state_listener(self._prop_top_up.on_event)
+
+    async def _top_up_props(self, did: str) -> int:
+        """设备转上线时补拉它在容器里缺的属性。返回写进去的条数。
+
+        **正确性不在这里，在写入器。** 写入的两道闸（本代已对齐 / 还在当前家庭）由
+        `IotPushWriter.write_pulled_props` 在写入的那一刻判，与推送共用一份 —— 补拉要打
+        一趟云端，往返期间设备可能搬出当前家庭（同一代之内、代号不变），在这里判是判不住
+        的。这个方法只做两件写入器管不了的事：
+
+        * **额度**：判据「容器里没有这条叶子」是代理指标，永久不可读的属性永远不会进
+          容器，不限次的话反复掉线的设备每次上线都重新请求同一批（见
+          TOP_UP_MAX_ATTEMPTS）。只在真打了云端时才算一次 —— 空跑消耗额度会把「留几次
+          给瞬时不可读」这个用意吃掉；
+        * **在线检查**：离线设备云端给的是缓存里的最后一次上报、可能任意旧，写进去会把
+          `last_reported` 刷成当下而响应不带时间戳，消费方看不出来 —— 对齐当初跳过离线
+          设备就是这个理由。这一条写入器判不了（它不知道这批值是拉来的还是推来的）。
+
+        「还在当前家庭」那道是纯**早退**，为的是省掉没必要的云端往返，不是闸 —— 真闸在
+        写入器里，删掉只会变慢。**「本代已对齐」那道除了早退还负责把这次需求记下来**
+        （对齐完成后由 `_drain_pending_top_ups` 补一轮）：对齐窗口里写进去的叶子会被对齐
+        的整台替换直接删掉，所以此刻不能写；但删掉这道会让窗口里上线的设备整代拿不到属性。
+        **在线检查那道也不能删**，它就是上面那条写入器管不了的事。
+        """
+        if not self.scope_is_aligned():
+            # 记下来而不是丢掉：对齐要跑一阵，期间上线的设备当初离线、不在对齐的请求名单
+            # 里，对齐自己不会给它写属性 —— 门开了没人再触发就整代只有在线标志
+            self._top_up_pending.add(did)
+            logger.debug("top-up: 本代还没对齐完，先记下 did=%s", did)
+            return 0
+        device = (await self._miot_proxy.devices_in_current_home()).get(did)
+        if device is None:
+            logger.debug("top-up: 不在当前家庭，跳过 did=%s", did)
+            return 0
+        if not getattr(device, "online", True):
+            logger.debug("top-up: 防抖窗口里又掉线了，跳过 did=%s", did)
+            return 0
+        used = self._top_up_attempts.get(did, 0)
+        if used >= TOP_UP_MAX_ATTEMPTS:
+            logger.debug("top-up: 本代额度已用完，跳过 did=%s", did)
+            return 0
+        scope_at_start = self._scope
+        requested, values = await read_missing_props(
+            self._state_store, self._miot_proxy, did
+        )
+        # 只给发起这次请求的那一代记账：往返期间切了作用域的话，计数表已经被
+        # begin_scope_switch 清过，这时写回去等于给新一代预扣一次
+        if requested and self._scope == scope_at_start:
+            self._top_up_attempts[did] = used + 1
+        if not values:
+            return 0
+        return await self._iot_push_writer.write_pulled_props(did, values)
+
+    async def _drain_pending_top_ups(self) -> None:
+        """把对齐窗口里记下的补拉补一轮。
+
+        逐台各自兜异常：一台失败不该让其余的跟着丢。三道早退仍由 `_top_up_props` 自己
+        判 —— 这批设备可能已经掉线、搬出当前家庭或用完额度。
+        """
+        pending, self._top_up_pending = self._top_up_pending, set()
+        for did in sorted(pending):
+            try:
+                await self._top_up_props(did)
+            except Exception as e:
+                logger.error("对齐后补拉失败 did=%s: %s", did, e, exc_info=True)
+
+    def deinit_iot_push(self) -> None:
+        """取消补拉的待触发计时器。
+
+        与 `MiotProxy.deinit` 里那四个 listener 同理：不取消的话，关闭期间计时器到点会
+        对着一个已经拆掉一半的 proxy 打云端、往已经 stop 的容器里写。
+        """
+        if self._prop_top_up is not None:
+            self._prop_top_up.deinit()
+
+    def current_scope(self) -> int:
+        return self._scope
+
+    def begin_scope_switch(self) -> int:
+        """代号 +1 并返回新值。唯一的递增入口。"""
+        self._scope += 1
+        self._top_up_attempts.clear()
+        self._top_up_pending.clear()
+        return self._scope
+
+    def mark_scope_aligned(self, scope: int) -> None:
+        """标记这一代已完成对齐。不是当前代就忽略 —— 那是迟到的旧对齐。"""
+        if scope == self._scope:
+            self._aligned_scope = scope
+
+    def scope_is_aligned(self) -> bool:
+        return self._aligned_scope == self._scope
+
+    def start_state_alignment(self) -> asyncio.Task | None:
+        """起一轮状态对齐，跑完把这一代标成已对齐。
+
+        句柄留在 state_align_task 上：下一次作用域切换必须先取消它，否则它会把旧
+        作用域的值写进刚清空重建的树。**重试也跑在这一个 task 里**，所以切换和关闭
+        那两条取消路径不用各自再认一遍。
+
+        初始化还没跑完时只记一条日志、不起对齐 —— 这一代因此停在「未对齐」，依赖它的
+        属性订阅门是关着的，正是安全的那一侧。
+        """
+        if not self._initialized:
+            logger.warning("初始化还没跑完，这一代不做状态对齐")
+            return None
+        scope = self._scope
+        proxy = self._miot_proxy
+
+        async def run() -> None:
+            # 失败的出口只有这一个（align_iot_state 内部把一切异常都收成假），所以重试
+            # 放在这里而不是逐个失败点
+            for attempt in range(ALIGN_MAX_ATTEMPTS):
+                # 等待放在开头而不是失败之后：放后面的话最后一次失败还要白等一轮才
+                # 报错，而循环本身已经把次数限住了，不需要第二处判「用完了没有」
+                if attempt:
+                    await asyncio.sleep(ALIGN_RETRY_BASE_SEC * 2 ** (attempt - 1))
+                if await align_iot_state(
+                    self._state_store,
+                    proxy,
+                    scope=scope,
+                    current_scope=self.current_scope,
+                ):
+                    self.mark_scope_aligned(scope)
+                    await self._drain_pending_top_ups()
+                    return
+                if scope != self._scope:
+                    # 换代了，新一代自己会起对齐，这里再重试只会往旧作用域写
+                    return
+            logger.error(
+                "align: 重试 %s 次仍未成功，这一代停在未对齐 —— 属性推送和上线补拉"
+                "都关着，容器里只有在线标志会更新",
+                ALIGN_MAX_ATTEMPTS,
+            )
+
+        self.state_align_task = asyncio.create_task(run())
+        return self.state_align_task
 
     async def initialize(self):
         """
@@ -53,6 +247,12 @@ class Manager:
             return
 
         logger.info("Manager initialization started")
+
+        # 容器本身在 __new__ 里就建好了，这里只是接上 event loop 开始投递。必须排在
+        # 所有写入方之前：没 start 的容器照样收值，但变更事件会被丢掉（只留一条告警和
+        # dropped 计数），等接了订阅方就是每次启动静默漏掉第一批边沿。
+        # 对齐由 start_state_alignment 起，关闭时 lifespan 取消，切换时编排取消
+        self._state_store.start()
 
         mon = get_monitor()
         mon.register(NodeName.CAMERA, NodeKind.SOURCE, watchdog_s=60)
@@ -80,6 +280,8 @@ class Manager:
                 kv_repo=self._kv_repo,
                 cloud_server=get_settings().miot.cloud_server,
             )
+
+        self._wire_iot_push()
 
         # Initialize all services
         self._miot_service = MiotService(
@@ -116,6 +318,14 @@ class Manager:
         self.device_uuid = device_uuid
 
     # Service access properties
+    @property
+    def state_store(self) -> StateStore:
+        return self._state_store
+
+    @property
+    def iot_push_writer(self) -> IotPushWriter | None:
+        return self._iot_push_writer
+
     @property
     def miot_service(self) -> MiotService:
         return self._miot_service
@@ -194,8 +404,10 @@ class Manager:
             kv = self._kv_repo
             svc = OnboardingTriggerService(
                 kv_repo=kv,
-                is_miot_ready=lambda: bool(kv.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY))
-                and bool(allowed_home_ids(kv)),
+                is_miot_ready=lambda: (
+                    bool(kv.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY))
+                    and bool(allowed_home_ids(kv))
+                ),
                 has_persons=lambda: bool(self._person_service.list_persons()),
                 has_profile_entries=lambda: bool(hp_store.load_profile().entries),
             )
@@ -215,6 +427,7 @@ class Manager:
             from miloco.perception.engine.identity.registration_session import (
                 RegistrationSessionManager,
             )
+
             lib = IdentityLibrary(resolve_library_root())
             rsm = RegistrationSessionManager(lib)
             self._register_session_manager = rsm

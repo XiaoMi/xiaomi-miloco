@@ -134,9 +134,9 @@ async def test_early_send_registers_pair_even_if_update_state_raises(proxy):
     """早送登记必须无条件、排在 update_state 之前（守住 _on_early_matched_rules 那条 invariant）。
 
     early_sent_rule_ids 除了去重，还兼职「抑制终态推退」——pair 并进 matched_pairs 后，
-    终态「未命中喂 False」循环才会放过它。若 update_state 抛异常（生产上 = on_target 规则
-    _schedule_target_timer_if_needed 里那处裸 DB 读，被 pipeline 整窗保护
-    吞掉）时 pair 漏登记，那条循环就会给刚 ENTER 真 fire 的 source 喂一帧 False、置起
+    终态「未命中喂 False」循环才会放过它。若 update_state 抛异常（生产上 = 条件层求值里
+    的裸 DB 读，被 pipeline 整窗保护吞掉）时 pair 漏登记，那条循环就会给刚 ENTER 真
+    fire 的 source 喂一帧 False、置起
     pending_exit、白吃掉单帧抗抖预算（下次真离开只需一帧就确认 EXIT）。这条 invariant 曾被
     「把登记挪到 update_state 之后」这一个改动静默破坏一整轮而全量测试无感——本用例就是针对
     那种改法的哨兵：把 _on_early_matched_rules 里 `early_sent_rule_ids[...] = None` 那行删掉
@@ -811,3 +811,38 @@ async def test_persist_mixed_window_excludes_voice_disabled_transcript():
     assert "开灯" not in kwargs["payload_json"]
     # 原 result 不被原地改
     assert len(result.speeches) == 1
+
+
+async def test_window_duration_survives_engine_dropping_snapshots(proxy):
+    """引擎原地剔空 batch.snapshots 后，窗口时长仍是真实值、不落 0。
+
+    engine/api.py 的 _drop_empty_snapshots 会原地改 batch.snapshots（沿用
+    _strip_unauthorized_voice_audio 的惯例）。窗口时长若在引擎返回之后才算，整批被剔空
+    时 max(..., default=0.0) 会落 0 → [perf] 打 RTF=0.000、traces_cycle 的 rtf 列全走
+    NULL 分支，正好废掉「整批剔空仍留一行 cycle trace」的意义。
+    """
+    from miloco.perception.types import DeviceSnapshot, PerceptionDevice
+
+    batch = BatchedSnapshot(
+        snapshots=[
+            DeviceSnapshot(
+                device=PerceptionDevice(did="cam", name="cam", device_type="camera"),
+                start_timestamp=1000.0,
+                end_timestamp=5000.0,
+            )
+        ],
+        captured_at=0.0,
+    )
+
+    async def engine_realtime(b, *args, **kwargs):
+        b.snapshots[:] = []  # 模拟 _drop_empty_snapshots 整批剔空
+        return RealtimePerceptionResult(skipped=True)
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    result, *_ = await proxy._realtime_perceive_impl(
+        batch, [], 0, 0.0, asyncio.get_running_loop(), [],
+    )
+
+    assert result is not None
+    assert result.timing["_window_duration_ms"] == 4000.0

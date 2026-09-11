@@ -150,8 +150,8 @@ def test_fresh_build_lands_on_baseline_form(fresh_db):
     from miloco.database.connector import get_db_connector
 
     with get_db_connector().get_connection() as conn:
-        # 落到**当前基线**版本。这里不写字面量：v3 起 fresh-build 会一路走到
-        # 最新版，写死数字每加一版就要改一次，而这条断言真正想说的是
+        # 落到**当前基线**版本。这里不写字面量：fresh-build 会一路走到最新版，
+        # 写死数字每加一版就要改一次，而这条断言真正想说的是
         # 「新建库不该停在中间某一版」。
         assert (
             conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
@@ -515,7 +515,7 @@ def test_migrate_is_skipped_on_baseline_db(fresh_db):
             == 1
         )
         # fresh-build 出来就是基线版本，第二次 init 时步进循环无级可跑；
-        # 这里比基线而不是写死的数，加 v4 时这条不用改。
+        # 这里比基线而不是写死的数，加新一级时这条不用改。
         assert (
             conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
         )
@@ -527,7 +527,7 @@ def test_migrate_is_skipped_on_baseline_db(fresh_db):
 def _pin_user_version_to_2(db_file) -> None:
     """把库钉回 v2 —— rollback_v2_to_v1 只处理这一级，它不认识更高版本的 schema。
 
-    启动路径会把库一路推到当前基线（现在是 v3），而这个反向迁移只回退 v2 引入的那些
+    启动路径会把库一路推到当前基线，而这个反向迁移只回退 v2 引入的那些
     变化。真实场景里它面对的就是一个停在 v2 的库，故用例显式把版本钉回去。
     """
     c = sqlite3.connect(str(db_file))
@@ -611,7 +611,7 @@ def test_rollback_refuses_when_internal_cron_present(v1_db):
 def test_rollback_refuses_on_newer_schema(v1_db):
     """库已经在 v2 之上时，rollback_v2_to_v1 必须拒绝而不是把版本号盖成 1。
 
-    它只回退 v2 引入的那些变化，不认识 v3 的 token_usage.base_url 与日表四元组主键。
+    它只回退 v2 引入的那些变化，不认识 v2 之后各级加的表与列。
     盖了版本号却不动表形态，下次启动会从 v1 重跑一遍步进 —— 与其猜一个中间状态，
     不如直接拒绝。
     """

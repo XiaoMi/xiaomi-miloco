@@ -269,12 +269,16 @@ def compute_anchor(now_iso: str, anchor: dict[str, Any]) -> dict[str, Any]:
 @click.command("time-compute")
 @click.option(
     "--now",
-    required=True,
-    help="当前时间 ISO8601（含或不含时区；不含按 Asia/Shanghai）",
+    default=None,
+    help="当前时间 ISO8601（不填取本机当前时间；不含时区按部署时区解读）",
 )
 @click.option("--anchor", required=True, help="anchor JSON")
 def time_compute_cmd(now, anchor):
     """时间锚点纯算。本地执行，不调 backend。
+
+    ``--now`` 不填就读本机时钟 —— 调用方(agent)手里的"现在"来自注入的时间块,
+    是发起那一刻的快照, 抄进来会算出过去的时刻。传值的用法留给测试与"按指定
+    时刻算"。
 
     成功：stdout 裸 ISO（带时区偏移）+ exit 0。
     失败：stderr ``error: <code>[ <detail>]`` + exit 1。
@@ -284,6 +288,8 @@ def time_compute_cmd(now, anchor):
     except json.JSONDecodeError as e:
         print(f"error: invalid_anchor {e.msg}", file=sys.stderr)
         sys.exit(1)
+    if now is None:
+        now = _format_iso(datetime.now(deploy_timezone()))
     result = compute_anchor(now, anchor_obj)
     if not result.get("ok"):
         detail = result.get("detail")

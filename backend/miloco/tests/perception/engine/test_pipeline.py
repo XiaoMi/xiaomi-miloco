@@ -1868,3 +1868,176 @@ def test_display_falls_back_to_asia_shanghai_when_undetectable(
     ).strftime("%H:%M:%S")
     assert _fmt_clock(now_ms) == expected
     assert _fmt_time_window(now_ms, now_ms) == f"[{expected}-{expected}]"
+
+
+@pytest.mark.asyncio
+async def test_hold_trace_key_zero_when_gate_drops_frameless_window():
+    """零帧窗口被 gate 拦下时，trace 侧的 hold 标志必须为 0。
+
+    processor._publish_trace 用 (video_pass or audio_pass or hold_pass) 反推
+    gate_skipped，再据此决定建不建 identity / omni 的 trace。零帧 + 滞回期这一格里
+    packet 为 None、identity 与 omni 根本没跑；若 trace 仍写原始 hold_pass，这一轮会
+    凭空多一次 omni 调用记录（稀释 omni 错误率分母）、skip_rate 偏低、p95_rtf_omni 被
+    0 拉低、traces_device 留下一行读起来像"跑得飞快"的 identity_ms=0 / omni_ms=0。
+
+    状态机侧（HOLD_START / HOLD_EXPIRED / HOLD_RECOVERED）用的仍是原始 hold_pass，
+    由 test_empty_window_guard.py::test_zero_frames_quiet_audio_in_hold_does_not_open
+    钉住 —— 两个字段消费者不同，必须分开。
+    """
+    rng = np.random.default_rng(7)
+    quiet = (rng.standard_normal(16000) * 5).astype(np.int16)  # 非空但不过能量闸
+
+    # 第一窗有画面变化 → 让 gate 记下 last_visual_pass_ts，进入滞回期
+    gate_prev_frames: dict = {}
+    gate_last_visual_pass_ts: dict = {}
+    moving = [_solid(0, 0, 0)] * 2 + [_solid(255, 255, 255)] * 4
+    # 第二窗也留在 patch 作用域内：当前代码下 gate 会拦住、omni 不该被调，但这条用例存在
+    # 的意义正是防 gate 那道闸被改回去。不 patch 的话，闸失效时失败形态是网络错误 / 超时，
+    # 而不是下面那句写清楚的断言——CI 里读不出原因。
+    with patch(
+        "miloco.perception.engine.omni.omni.call_omni",
+        new_callable=AsyncMock,
+        return_value=MOCK_OMNI_RESPONSE,
+    ) as mock_omni:
+        await run_batch_pipeline(
+            BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", moving, quiet)]),
+            {}, PerceptionConfig(),
+            gate_prev_frames=gate_prev_frames,
+            gate_last_visual_pass_ts=gate_last_visual_pass_ts,
+        )
+        assert gate_last_visual_pass_ts.get("cam-1") is not None, "前置：滞回期未建立"
+        mock_omni.reset_mock()
+
+        # 第二窗零帧 + 安静音频 + 仍在滞回期
+        frameless = _make_snapshot("living", "cam-1", [], quiet)
+        result = await run_batch_pipeline(
+            BatchedSnapshot(snapshots=[frameless]),
+            {}, PerceptionConfig(),
+            gate_prev_frames=gate_prev_frames,
+            gate_last_visual_pass_ts=gate_last_visual_pass_ts,
+        )
+
+    timing = result.rooms["living"].timing
+    assert timing["gate_hold_cam-1_pass"] == 0, (
+        "gate 没建包，trace 侧 hold 标志必须为 0，否则 processor 会误判 identity/omni 跑过"
+    )
+    assert result.rooms["living"].skipped is True
+    # gate 拦下这一窗 → omni 压根不该被调（闸被改回去时这条先红，失败原因一目了然）
+    mock_omni.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_hold_trace_key_zero_when_audio_route_opens_frameless_window():
+    """零帧 + 音频过闸 + 滞回期：建了包但走的是 audio 路由 → trace 侧 hold 标志为 0。
+
+    与 test_hold_trace_key_zero_when_gate_drops_frameless_window 成对，覆盖另一格：
+    那条是「gate 没建包」，这条是「建了包但不是滞回拉起的」。
+
+    这一列的消费者有两个，都要求 0：
+    - processor._publish_trace 反推 gate_skipped（这格 audio_pass=1，本来就不会误判）
+    - web 的 ChannelPass 拿它反推 route，且 holdPass 判断排在 audioPass 之前 —— 写 1 会
+      把 audio 路由的窗口标成 "video (hold)"，tooltip 还说「仍走 video 路由」，正好在
+      本 PR 最需要读准的那一格上误导验证者。
+    """
+    rng = np.random.default_rng(11)
+    loud = (rng.standard_normal(16000) * 20000).astype(np.int16)  # 过能量闸
+
+    gate_prev_frames: dict = {}
+    gate_last_visual_pass_ts: dict = {}
+    moving = [_solid(0, 0, 0)] * 2 + [_solid(255, 255, 255)] * 4
+    config = PerceptionConfig()
+    config.omni.api_key = "test-key"
+
+    with patch(
+        "miloco.perception.engine.omni.omni.call_omni",
+        new_callable=AsyncMock,
+        return_value=MOCK_OMNI_RESPONSE,
+    ) as mock_omni:
+        # 第一窗有画面变化 → 进入滞回期
+        await run_batch_pipeline(
+            BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", moving, loud)]),
+            {}, config,
+            gate_prev_frames=gate_prev_frames,
+            gate_last_visual_pass_ts=gate_last_visual_pass_ts,
+        )
+        assert gate_last_visual_pass_ts.get("cam-1") is not None, "前置：滞回期未建立"
+        mock_omni.reset_mock()
+
+        # 第二窗零帧 + 响亮音频 + 仍在滞回期 → audio 路由建包
+        result = await run_batch_pipeline(
+            BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", [], loud)]),
+            {}, config,
+            gate_prev_frames=gate_prev_frames,
+            gate_last_visual_pass_ts=gate_last_visual_pass_ts,
+        )
+
+    timing = result.rooms["living"].timing
+    # 必须先钉住「包真建出来了」：下面两条断言在「gate 压根没建包」时也都成立
+    # （gate_audio_pass 写在 _run_device 的早返回之前；没包时 hold 列恒 0），
+    # 不钉前提的话，gate 哪天收紧成「无帧一律不建包」这条用例会继续全绿、
+    # 而 docstring 声明要覆盖的那一格已经不存在 —— 变成为错误的理由通过。
+    assert result.rooms["living"].skipped is False, "前提：这一格必须真建出 packet"
+    mock_omni.assert_called_once()
+    assert timing["gate_audio_cam-1_pass"] == 1, "前置：这一格应由音频拉起"
+    assert timing["gate_hold_cam-1_pass"] == 0, (
+        "包是音频建的、实际 route=audio，trace 侧 hold 标志必须为 0，"
+        "否则 dashboard 会把这一窗标成 video (hold)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gate_passed_equals_packet_built():
+    """`traces_v.gate_passed = video OR audio OR hold` 必须恒等于「本窗建了包」。
+
+    这条等价关系喂 stats 的 AVG(gate_passed) 与前端「整体过滤率」曲线。破坏它不会让任何
+    单行 trace 看起来可疑，只是把整条曲线挪一点——所以用测试守，不靠人验算。
+
+    刻意走 run_batch_pipeline 读真实落库的三个 timing 键，而不是在测试里复刻
+    `video_pass or audio_pass or hold_opened_window`：后者只能测 gate 内部，改 pipeline
+    落库那一行照样绿。
+    """
+    rng = np.random.default_rng(23)
+    loud = (rng.standard_normal(16000) * 20000).astype(np.int16)
+    quiet = (rng.standard_normal(16000) * 5).astype(np.int16)
+    silent = np.zeros(16000, dtype=np.int16)
+    still = [_solid(100, 100, 100)] * 6
+    moving = [_solid(0, 0, 0)] * 2 + [_solid(255, 255, 255)] * 4
+
+    config = PerceptionConfig()
+    config.omni.api_key = "test-key"
+
+    cases = [
+        ("有帧+运动", moving, silent, False),
+        ("有帧+静止+hold", still, silent, True),
+        ("有帧+静止+无hold", still, silent, False),
+        ("零帧+音频过闸+hold", [], loud, True),
+        ("零帧+音频过闸+无hold", [], loud, False),
+        ("零帧+音频未过闸+hold", [], quiet, True),
+        ("零帧+无音频+hold", [], silent, True),
+    ]
+
+    with patch(
+        "miloco.perception.engine.omni.omni.call_omni",
+        new_callable=AsyncMock,
+        return_value=MOCK_OMNI_RESPONSE,
+    ):
+        for name, frames, audio, hold in cases:
+            prev = {"cam-1": _preprocess(frames[0])} if frames else {}
+            last_v = {"cam-1": time.monotonic()} if hold else {}
+            result = await run_batch_pipeline(
+                BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", frames, audio)]),
+                {}, config,
+                gate_prev_frames=prev,
+                gate_last_visual_pass_ts=last_v,
+            )
+            t = result.rooms["living"].timing
+            gate_passed = bool(
+                t["gate_video_cam-1_pass"]
+                or t["gate_audio_cam-1_pass"]
+                or t["gate_hold_cam-1_pass"]
+            )
+            built = not result.rooms["living"].skipped
+            assert gate_passed is built, (
+                f"[{name}] gate_passed={gate_passed} 但建包={built}"
+                " —— 整体过滤率曲线会静默偏移"
+            )

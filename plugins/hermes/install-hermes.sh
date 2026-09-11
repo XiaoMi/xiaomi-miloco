@@ -286,7 +286,7 @@ fi
 # tarball 里没有的 scripts/sync-skills.py / skills/，必须整段跳）；
 # step 5 (config set) / 6 (.env) / 7 (backend 重启) / 8 (enable plugin) 主体幂等，
 # 会重跑一次以保证 config/enable/backend 状态收敛（step 7 会多一次 stop+sleep 3s+start）。
-# 重点补齐的是 1.6/1.75/1.9 env 持久化 + 4.7 ONNX 模型 + 8.5 disable 残留清理 +
+# 重点补齐的是 1.6/1.75/1.9 env 持久化 + 4.7 感知模型 + 8.5 disable 残留清理 +
 # 9 版本记录 + 10 cron reconcile + 收尾 banner。
 if [ "$POST_INSTALL_ONLY" -eq 1 ]; then
   info "post-install 模式: 跳过 step 3/4 前端部署；step 5-8 幂等重跑；补 env / cron / 收尾"
@@ -667,72 +667,93 @@ mkdir -p "$HERMES_HOME/memory"
 
 PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 
-# --- 4.7 同步本地感知 ONNX 模型到 MILOCO_HOME/models/ ---
-# [PR合并后] 可简化：上游 --agent-finish 自动下载模型，不再需要从 fork 仓库 cp
-# 原因：fork 走"plugin in fork 仓库"路线，不能复用 upstream 下载逻辑
-# 对齐上游 install.sh --agent-finish 的"下载感知模型"步骤（见
-# upstream install-guide.md 第 131 行"下载感知模型"）。
-#
-# hermes fork 走的是"plugin in fork 仓库"路线，不能复用 upstream 下载逻辑，
-# 但 fork 仓库的 backend/miloco/src/miloco/perception/models/ 目录里其实打包了
-# 同一份模型 — 直接 cp 即可（避免再下 80MB+）。
-#
-# 跳过条件：MILOCO_HOME/models/det_4C.onnx 已存在（用户已装）。
-[ "$POST_INSTALL_ONLY" -eq 1 ] || step 4.7 "同步本地感知 ONNX 模型 → ${MILOCO_HOME}/models/"
+# --- 4.7 同步本地感知模型到 MILOCO_HOME/models/ ---
+# 对应上游 install.sh --agent-finish 里的"下载感知模型"步骤：fork 走"plugin in fork
+# 仓库"路线，复用不了上游那套下载，但 fork 仓库的
+# backend/miloco/src/miloco/perception/models/ 里带着模型，从那儿同步即可。
+[ "$POST_INSTALL_ONLY" -eq 1 ] || step 4.7 "同步本地感知模型 → ${MILOCO_HOME}/models/"
 
-# Release 装机场景 install.py step 7「准备感知模型」已经从 miloco-models-*.tar.gz
-# 解压 5 个 ONNX 到 $MILOCO_HOME/models/。本步只是 dev/fork 场景的兜底（从 git
-# checkout 或 miloco 包内 cp），已经有模型就跳过 fork/pkg 搜索，避免误报
-# 「找不到 ONNX 模型源目录」。
-if compgen -G "$MILOCO_HOME/models/*.onnx" >/dev/null 2>&1; then
-  onnx_count=$(ls "$MILOCO_HOME/models"/*.onnx 2>/dev/null | wc -l | tr -d ' ')
-  info "  $MILOCO_HOME/models/ 已有 $onnx_count 个 ONNX 模型（install.py step 7 已解压 release tarball），跳过 fork/pkg 兜底"
-  MODEL_SRC=""
-else
-  # 搜模型源目录：优先 fork 仓库（git checkout），其次 miloco Python 包内 models/
-  # 安装到 ~/.hermes/plugins/miloco/ 后 $HERE 不再指向 git checkout，
-  # 但 pip install -e 的 miloco 包内 models/ 仍可达，以此兜底。
-  MODEL_SRC="$HERE/../../backend/miloco/src/miloco/perception/models"
-  if [ ! -d "$MODEL_SRC" ]; then
-    MODEL_SRC=$("$PYTHON" -c "from pathlib import Path; import miloco; print(Path(miloco.__file__).parent / 'perception' / 'models')" 2>/dev/null || true)
-  fi
+# 先搜源目录再看已有模型：源在就以源为准，搜不到源而已有模型是 release 装机的正常
+# 形态（install.py 解压过），不该报「找不到源目录」。
+# 源优先 fork 仓库（git checkout），其次 miloco 包内：装到 ~/.hermes/plugins/miloco/ 后
+# $HERE 不再指向 git checkout，但 pip install -e 的包仍可达。
+MODEL_SRC="$HERE/../../backend/miloco/src/miloco/perception/models"
+if [ ! -d "$MODEL_SRC" ]; then
+  MODEL_SRC=$("$PYTHON" -c "from pathlib import Path; import miloco; print(Path(miloco.__file__).parent / 'perception' / 'models')" 2>/dev/null || true)
 fi
-if [ -n "$MODEL_SRC" ] && [ ! -d "$MODEL_SRC" ]; then
-  warn "找不到 ONNX 模型源目录（fork 仓库 & miloco 包内均无）"
-  warn "感知引擎可能跑不起来（perceive query 报 models_missing）"
-  warn "修法：重新从 git checkout 目录运行本脚本，或从 upstream release 下载到 $MILOCO_HOME/models/"
-elif [ -n "$MODEL_SRC" ]; then
-  mkdir -p "$MILOCO_HOME/models"
-  # 同步 .onnx + .json（bge tokenizer）；已存在的不覆盖（保留用户手动调整）
-  synced=0
-  skipped=0
-  for f in "$MODEL_SRC"/*.onnx "$MODEL_SRC"/*.json; do
-    [ -f "$f" ] || continue
-    bn="$(basename "$f")"
-    if [ -f "$MILOCO_HOME/models/$bn" ]; then
-      skipped=$((skipped + 1))
-    else
-      cp "$f" "$MILOCO_HOME/models/$bn"
-      synced=$((synced + 1))
-    fi
-  done
-  info "  同步 ONNX 模型：新增 $synced 个、跳过已存在 $skipped 个"
-  info "  模型目录：$MILOCO_HOME/models/"
 
-  # 在 config.json 写 models 字段（settings.models_dir 默认读这里）
-  if [ -f "$MILOCO_HOME/config.json" ]; then
-    "$PYTHON" - "$MILOCO_HOME" <<'PY' || true
-import json, sys
+# 上一次跑到一半被打断（Ctrl-C / 磁盘满）会留下 *.tmp.<pid>：名字带当次进程号，不会
+# 被下次的 mv 顶掉，每失败一次就在模型目录里积一份完整大小的垃圾。放在两条分支之前，
+# 源目录找不到时也清。
+[ -d "$MILOCO_HOME/models" ] && find "$MILOCO_HOME/models" -type f -name '*.tmp.[0-9]*' -delete 2>/dev/null || true
+
+if [ -n "$MODEL_SRC" ] && [ -d "$MODEL_SRC" ]; then
+  mkdir -p "$MILOCO_HOME/models"
+  # 递归同步源目录下的全部文件（含子目录与隐藏文件），既不挑后缀也不只扫顶层：上游
+  # 把整个 models 目录打进 tarball 再原样解压，挑后缀或只扫顶层会与那条路分裂，将来
+  # 源侧新增别的文件或子目录就会漏掉。
+  # cmp 对不存在的目标也返回非零，所以"目标缺失"和"内容不同"走同一条写分支。
+  # 先写临时文件再 mv：就地 cp 会先把目标截断再往里写，中途被打断会留下一个长度不对
+  # 的模型文件，之后 onnxruntime 加载它直接失败。
+  synced=0
+  same=0
+  while IFS= read -r f; do
+    rel="${f#"$MODEL_SRC"/}"
+    dest="$MILOCO_HOME/models/$rel"
+    if cmp -s "$f" "$dest"; then
+      same=$((same + 1))
+      continue
+    fi
+    mkdir -p "$(dirname "$dest")"
+    cp "$f" "$dest.tmp.$$"
+    mv -f "$dest.tmp.$$" "$dest"
+    synced=$((synced + 1))
+    info "    写入 ${rel}"
+  done < <(find -L "$MODEL_SRC" -type f)
+  info "  同步感知模型：写入 $synced 个、内容一致跳过 $same 个"
+  info "  模型目录：$MILOCO_HOME/models/"
+else
+  info "  没找到本地模型源目录，跳过同步（release 装机的模型由 install.py 解压）"
+fi
+
+# 收尾闸：判据是"引擎必需的模型逐个到位"，放在两条分支汇合后的必经处。"源路径在
+# 不在"和"目录里有没有任意 .onnx"答的都不是这个问题——源目录缺了 det_4C.onnx 时两
+# 者都放行，而装完感知引擎必然报 models_missing，继续装是交付空壳。
+# 清单的出处是 resource_validator.MODELS 的非 optional 项，两边一致由仓库体检测试守。
+# 安装期一律装到 $MILOCO_HOME/models（install.py 也写死这个目录），所以查的也是它；
+# 用户把 config.json::directories.models 指到别处时 4.7 管不到那个目录，不中止。
+MODELS_ELSEWHERE=$("$PYTHON" -c '
+import json, os, sys
 home = sys.argv[1]
-p = f"{home}/config.json"
 try:
-    cfg = json.load(open(p, encoding="utf-8"))
+    cfg = json.load(open(os.path.join(home, "config.json"), encoding="utf-8"))
 except Exception:
     cfg = {}
-cfg["models"] = f"{home}/models"
-json.dump(cfg, open(p, "w", encoding="utf-8"), indent=2, ensure_ascii=False)
-print(f"  config.json::models = {home}/models")
-PY
+configured = (cfg.get("directories") or {}).get("models") or ""
+d = configured if os.path.isabs(configured) else os.path.join(home, configured or "models")
+default = os.path.join(home, "models")
+print("" if os.path.realpath(d) == os.path.realpath(default) else d)
+' "$MILOCO_HOME" 2>/dev/null || true)
+
+REQUIRED_MODELS="det_4C.onnx human_body_reid_v2.onnx"
+missing_models=""
+for m in $REQUIRED_MODELS; do
+  [ -s "$MILOCO_HOME/models/$m" ] || missing_models="$missing_models $m"
+done
+# 生效目录不是默认目录时，4.7 装到的地方就不是引擎读的地方，不管默认目录里够不够都
+# 得先说一声。放进下面那道闸里面等于只在默认目录也缺模型时才提醒，而从 checkout 跑时
+# 上面的同步必然把默认目录填满，那条路走不到。
+if [ -n "$MODELS_ELSEWHERE" ]; then
+  warn "config.json::directories.models 指向 ${MODELS_ELSEWHERE}，4.7 只往 $MILOCO_HOME/models/ 装，请自行确认那边模型齐全"
+fi
+
+if [ -n "$missing_models" ]; then
+  if [ -n "$MODELS_ELSEWHERE" ]; then
+    warn "  另外 $MILOCO_HOME/models/ 还缺 ${missing_models# }（生效目录在别处，不中止）"
+  else
+    err "感知模型缺失：${missing_models# }（目标目录：$MILOCO_HOME/models/，源目录：${MODEL_SRC:-未找到}）"
+    echo "修法：从带模型的 git checkout 目录运行本脚本，或从 upstream release 下载模型到 $MILOCO_HOME/models/" >&2
+    exit 1
   fi
 fi
 mark_done 4.7

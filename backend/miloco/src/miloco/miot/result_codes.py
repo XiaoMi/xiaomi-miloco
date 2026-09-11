@@ -62,7 +62,15 @@ def code_message(code: int) -> str:
     return _MIOT_SPEC_CODES.get(code, _UNKNOWN_FAIL_MSG)
 
 
-def _is_failure(code: object) -> bool:
+def is_known_code(code: object) -> bool:
+    """这个失败码在码表里有释义吗。
+
+    用来给日志分级:认识的码是已知形态,不认识的才需要人看。
+    """
+    return code in _MIOT_SPEC_CODES
+
+
+def is_failure(code: object) -> bool:
     """负码即失败,其余(0 / 正码 / 非 int / None)一律成功。镜像 PR #394。"""
     return isinstance(code, int) and code < 0 and code not in _MIOT_OK_CODES
 
@@ -89,7 +97,7 @@ def summarize_results(
 
     for it in items:
         code = it.get("code")
-        if _is_failure(code):
+        if is_failure(code):
             return False, code, code_message(code)  # type: ignore[arg-type]
 
     return True, None, None

@@ -47,15 +47,27 @@ def rule_group():
 
 
 @rule_group.command("list")
-@click.option("--enabled-only", is_flag=True, help="仅显示已启用的规则")
+@click.option(
+    "--enabled-only", is_flag=True, help="仅显示生效中的规则（task 停用的不算）"
+)
+@click.option(
+    "--show-milestone", "show_milestone", is_flag=True,
+    help="连服务端维护的达标规则一起显示（默认不显示）",
+)
 @click.option("--pretty", is_flag=True)
-def rule_list(enabled_only, pretty):
-    """列出所有规则。"""
+def rule_list(enabled_only, show_milestone, pretty):
+    """列出所有规则。
+
+    达标规则默认不显示：它由服务端按 task 的达标动作 + duration record 自动维护，
+    不是手工建的。
+    """
     from miloco_cli.client import api_get
 
     params = {}
     if enabled_only:
         params["enabled_only"] = "true"
+    if show_milestone:
+        params["include_milestone"] = "true"
     data = api_get(API_PREFIX, params or None)
     print_result(data, pretty)
 
@@ -75,7 +87,7 @@ def rule_list(enabled_only, pretty):
     required=False,
     help=(
         "感知源 did，可重复，可不填。"
-        "不填 → 所有感知设备都跑该 rule（OR 聚合）；"
+        "不填 → 所有感知设备都跑该 rule；"
         "填 → 只在这些 did 上跑。"
         "用户未明确指定设备时优先不填。"
     ),
@@ -85,9 +97,19 @@ def rule_list(enabled_only, pretty):
     "--mode",
     "mode_value",
     type=click.Choice(["event", "state"]),
-    default="event",
-    show_default=True,
-    help="响应模式：event 单点触发；state 进入/退出配对",
+    default=None,
+    help="旧入口，只能表达 enter / session 两种方向；新代码用 --direction",
+)
+@click.option(
+    "--direction",
+    "direction_value",
+    type=click.Choice(["enter", "exit", "session"]),
+    default=None,
+    help=(
+        "边沿如何映射成 task 的进/出：enter 条件成立就把 task 推进去；"
+        "exit 条件成立就把 task 推出来；session 进入/退出配对。"
+        "不传等价于 enter"
+    ),
 )
 @click.option(
     "--lifecycle",
@@ -112,7 +134,8 @@ def rule_list(enabled_only, pretty):
     "actions_raw",
     multiple=True,
     help=(
-        "event 模式设备直控动作 JSON（可重复）。\n"
+        "enter / exit 方向的设备直控动作 JSON（可重复）。"
+        "落 on_enter 还是 on_exit 由 --direction 决定，不用 --on-exit-action。\n"
         "设备控制（幂等）："
         "{\"did\":\"<id>\",\"iid\":\"prop.<siid>.<piid>\",\"value\":<v>,\"idempotent\":true}\n"
         "通知/播报（必带冷却）："
@@ -127,38 +150,41 @@ def rule_list(enabled_only, pretty):
     "--action-desc",
     "action_descs",
     multiple=True,
-    help="event 模式 Agent 回调描述（可重复）",
+    help=(
+        "enter / exit 方向的 Agent 回调描述（可重复）。"
+        "落哪个方向由 --direction 决定"
+    ),
 )
 @click.option(
     "--on-enter-action",
     "on_enter_actions_raw",
     multiple=True,
-    help="state on_enter 设备直控动作 JSON（可重复，格式同 --action）",
+    help="session 方向的 on_enter 设备直控动作 JSON（可重复，格式同 --action）",
 )
 @click.option(
     "--on-enter-desc",
     "on_enter_desc",
     default=None,
-    help="state on_enter Agent 回调提示文本",
+    help="session 方向的 on_enter Agent 回调提示文本",
 )
 @click.option(
     "--on-exit-action",
     "on_exit_actions_raw",
     multiple=True,
-    help="state on_exit 设备直控动作 JSON（可重复，格式同 --action）",
+    help="session 方向的 on_exit 设备直控动作 JSON（可重复，格式同 --action）",
 )
 @click.option(
     "--on-exit-desc",
     "on_exit_desc",
     default=None,
-    help="state on_exit Agent 回调提示文本",
+    help="session 方向的 on_exit Agent 回调提示文本",
 )
 @click.option(
     "--on-target-desc",
     "on_target_desc",
     default=None,
     help=(
-        "state on_target Agent 回调提示文本（duration record 累计达标瞬间触发）。"
+        "session 方向的达标回调提示文本（duration record 累计达标瞬间触发）。"
         "仅在 task 配 duration record + target_minutes 时有效。"
     ),
 )
@@ -167,7 +193,7 @@ def rule_list(enabled_only, pretty):
     "exit_debounce_seconds",
     type=int,
     default=None,
-    help="state mode EXIT 防抖（秒），默认 60",
+    help="session 方向的 EXIT 防抖（秒），默认 60",
 )
 @click.option(
     "--duration-seconds",
@@ -175,8 +201,9 @@ def rule_list(enabled_only, pretty):
     type=int,
     default=None,
     help=(
-        "累计窗口（秒）。不填=立即 fire（现状）。EVENT：达标 fire 后清窗口周期 fire；"
-        "STATE：达标 fire on_enter 一次，STILL_IN 不重复，EXITED 走 exit_debounce"
+        "条件需持续该时长才算成立（秒）。不填=立即 fire。"
+        "enter / exit：达标 fire 后清窗口周期 fire；"
+        "session：达标 fire on_enter 一次，STILL_IN 不重复，EXITED 走 exit_debounce"
     ),
 )
 @click.option(
@@ -196,6 +223,7 @@ def rule_create(
     perceive_devices,
     query_text,
     mode_value,
+    direction_value,
     lifecycle_value,
     terminate_when,
     actions_raw,
@@ -212,7 +240,9 @@ def rule_create(
 ):
     """创建规则。执行方式由填了哪个动作 flag 决定（--action → 设备直控，--action-desc → 走 Agent）。
 
-    mode/action 组合 example 与 condition 写法见 miloco-create-task SKILL。
+    动作也可以不填在这里 —— 多条同方向 rule 共用一份动作时装在 task 上
+    （task set-actions）。direction/action 组合 example 与 condition 写法见
+    miloco-create-task SKILL。
     """
     from miloco_cli.client import api_post
 
@@ -220,8 +250,11 @@ def rule_create(
     if lifecycle_value == "temporary" and not terminate_when:
         _exit_error("lifecycle=temporary requires --terminate-when")
 
-    # ---- 2. mode x action 矩阵 ----
-    if mode_value == "event":
+    # ---- 2. direction x action 矩阵 ----
+    direction = _resolve_direction(direction_value, mode_value)
+    if direction != "session":
+        # 单方向的 rule 只有一个边沿, 动作填在 --action / --action-desc 上;
+        # 落 on_enter 还是 on_exit 由 direction 决定, 不用另一套 flag。
         if (
             on_enter_actions_raw
             or on_enter_desc
@@ -230,19 +263,17 @@ def rule_create(
             or on_target_desc
         ):
             _exit_error(
-                "event mode must not set --on-enter-* / --on-exit-* / --on-target-desc"
-            )
-        if not actions_raw and not action_descs:
-            _exit_error(
-                "event mode requires --action or --action-desc"
+                f"direction={direction} must not set "
+                "--on-enter-* / --on-exit-* / --on-target-desc"
             )
         if actions_raw and action_descs:
             _exit_error(
-                "event mode: --action and --action-desc are mutually exclusive"
+                f"direction={direction}: --action and --action-desc are "
+                "mutually exclusive"
             )
-    else:  # state mode
+    else:
         if actions_raw or action_descs:
-            _exit_error("state mode must not set --action / --action-desc")
+            _exit_error("direction=session must not set --action / --action-desc")
 
         enter_static = bool(on_enter_actions_raw)
         enter_dynamic = bool(on_enter_desc)
@@ -251,15 +282,16 @@ def rule_create(
 
         if enter_static and enter_dynamic:
             _exit_error(
-                "state on_enter cannot have both --on-enter-action and --on-enter-desc"
+                "session on_enter cannot have both --on-enter-action "
+                "and --on-enter-desc"
             )
         if exit_static and exit_dynamic:
             _exit_error(
-                "state on_exit cannot have both --on-exit-action and --on-exit-desc"
+                "session on_exit cannot have both --on-exit-action and --on-exit-desc"
             )
         if not (enter_static or enter_dynamic or exit_static or exit_dynamic):
             _exit_error(
-                "state mode requires at least one of "
+                "direction=session requires at least one of "
                 "--on-enter-action / --on-enter-desc / --on-exit-action / --on-exit-desc"
             )
 
@@ -288,7 +320,10 @@ def rule_create(
     payload = {
         "name": name,
         "task_id": task_id,
-        "mode": mode_value,
+        # mode 与 direction 并存: 表里 mode 是 NOT NULL, 而它表达不了 exit ——
+        # 存一个自洽的占位值, 真实语义由 direction 承担。
+        "mode": _DIRECTION_TO_MODE[direction],
+        "direction": direction,
         "lifecycle": lifecycle_value,
         "condition": {
             "perceive_device_ids": list(perceive_devices),
@@ -314,11 +349,6 @@ def rule_create(
     print_result(data, pretty)
 
 
-# ---------------------------------------------------------------------------
-# update (partial)
-# ---------------------------------------------------------------------------
-
-
 @rule_group.command("update")
 @click.argument("rule_id")
 @click.option("--name", default=None, help="新规则名称")
@@ -335,7 +365,14 @@ def rule_create(
     "mode_value",
     type=click.Choice(["event", "state"]),
     default=None,
-    help="变更响应模式",
+    help="旧入口，只能表达 enter / session；新代码用 --direction",
+)
+@click.option(
+    "--direction",
+    "direction_value",
+    type=click.Choice(["enter", "exit", "session"]),
+    default=None,
+    help="变更方向：enter / exit / session",
 )
 @click.option(
     "--lifecycle",
@@ -349,26 +386,26 @@ def rule_create(
     "--action",
     "actions_raw",
     multiple=True,
-    help="替换 event 模式设备直控 actions（可重复，全量替换；RuleAction JSON）",
+    help="替换 enter / exit 方向的设备直控 actions（可重复，全量替换；RuleAction JSON）",
 )
 @click.option(
     "--action-desc",
     "action_descs",
     multiple=True,
-    help="替换 event 模式 Agent 回调描述（可重复，全量替换）",
+    help="替换 enter / exit 方向的 Agent 回调描述（可重复，全量替换）",
 )
 @click.option(
     "--on-enter-action",
     "on_enter_actions_raw",
     multiple=True,
-    help="替换 state on_enter 设备直控 actions（可重复，全量替换）",
+    help="替换 session 方向的 on_enter 设备直控 actions（可重复，全量替换）",
 )
 @click.option("--on-enter-desc", "on_enter_desc", default=None)
 @click.option(
     "--on-exit-action",
     "on_exit_actions_raw",
     multiple=True,
-    help="替换 state on_exit 设备直控 actions（可重复，全量替换）",
+    help="替换 session 方向的 on_exit 设备直控 actions（可重复，全量替换）",
 )
 @click.option("--on-exit-desc", "on_exit_desc", default=None)
 @click.option("--on-target-desc", "on_target_desc", default=None)
@@ -383,7 +420,7 @@ def rule_create(
     "duration_seconds",
     type=int,
     default=None,
-    help="累计窗口（秒）。EVENT / STATE 都生效（语义见 rule create help）",
+    help="条件需持续该时长才算成立（秒）。三个方向都生效（语义见 rule create help）",
 )
 @click.option(
     "--duration-ratio",
@@ -411,7 +448,7 @@ def rule_create(
     ),
     help=(
         "把指定字段重置为空（list → []，str/int → null）；可重复。"
-        "用于 mode 切换等需要显式清空场景，例如 event→state 时 --clear actions"
+        "用于方向切换等需要显式清空场景，例如 enter→session 时 --clear actions"
     ),
 )
 @click.option("--pretty", is_flag=True)
@@ -422,6 +459,7 @@ def rule_update(
     query_text,
     perceive_devices,
     mode_value,
+    direction_value,
     lifecycle_value,
     terminate_when,
     actions_raw,
@@ -445,7 +483,7 @@ def rule_update(
     from miloco_cli.client import api_patch
 
     if actions_raw and action_descs:
-        _exit_error("event mode: --action and --action-desc are mutually exclusive")
+        _exit_error("--action and --action-desc are mutually exclusive")
 
     if duration_seconds is not None and (duration_seconds < 1 or duration_seconds > 86400):
         _exit_error(
@@ -460,8 +498,12 @@ def rule_update(
         payload["name"] = name
     if task_id is not None:
         payload["task_id"] = task_id
-    if mode_value is not None:
-        payload["mode"] = mode_value
+    if mode_value is not None or direction_value is not None:
+        # 两个字段要一起改: mode 列 NOT NULL 且表达不了 exit, 只改一个会留下
+        # 「mode=state 而 direction=exit」这种自相矛盾的行。
+        direction = _resolve_direction(direction_value, mode_value)
+        payload["direction"] = direction
+        payload["mode"] = _DIRECTION_TO_MODE[direction]
     if lifecycle_value is not None:
         payload["lifecycle"] = lifecycle_value
     if terminate_when is not None:
@@ -718,6 +760,31 @@ def rule_logs_cleanup(keep_days, pretty):
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+_DIRECTION_TO_MODE = {
+    "enter": "event",
+    "exit": "event",
+    "session": "state",
+}
+_MODE_TO_DIRECTION = {"event": "enter", "state": "session"}
+
+
+def _resolve_direction(direction_value: str | None, mode_value: str | None) -> str:
+    """把 --direction / --mode 收敛成一个方向。
+
+    --mode 只能表达 enter 与 session，exit 表达不了，所以 --direction 是正路。
+    两个都传时必须自洽 —— 静默让一个赢，用户会以为另一个也生效了。
+    """
+    if direction_value is None:
+        return _MODE_TO_DIRECTION[mode_value or "event"]
+    expected = _DIRECTION_TO_MODE[direction_value]
+    if mode_value is not None and mode_value != expected:
+        _exit_error(
+            f"--direction {direction_value} 对应 --mode {expected}，"
+            f"不能同时传 --mode {mode_value}"
+        )
+    return direction_value
 
 
 def _parse_actions(raw_actions: tuple[str, ...], flag_name: str = "--action") -> list[dict]:

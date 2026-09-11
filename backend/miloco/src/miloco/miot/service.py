@@ -10,6 +10,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 
 from miot.types import (
     MIoTActionParam,
@@ -58,6 +59,7 @@ from miloco.miot.filter import (
     synthetic_camera_did,
     voice_allowed_camera_dids,
 )
+from miloco.miot.iid import try_parse_iid
 from miloco.miot.lru import LRUStore
 from miloco.miot.message_dedup import MessageDeduper
 from miloco.miot.result_codes import summarize_results
@@ -73,34 +75,31 @@ from miloco.utils.logger import cam_tag, log_safe
 
 logger = logging.getLogger(__name__)
 
+# 容器里这一笔的来源标记。切换清空与对齐、推送分开记，dump 里一眼能看出是谁动的
+SCOPE_SWITCH_SOURCE = "scope_switch"
+
 # 持有后台 task 引用，避免 CPython GC 回收 fire-and-forget task。
 _background_tasks: set[asyncio.Task] = set()
 
 
 def _parse_prop_iid(iid: str) -> tuple[int, int]:
     """Parse 'prop.{siid}.{piid}' → (siid, piid)."""
-    parts = iid.split(".")
-    if len(parts) != 3 or parts[0] != "prop":
+    parsed = try_parse_iid(iid, "prop")
+    if parsed is None:
         raise ValidationException(
             f"Invalid property iid format: '{iid}', expected prop.{{siid}}.{{piid}}"
         )
-    try:
-        return int(parts[1]), int(parts[2])
-    except ValueError as e:
-        raise ValidationException(f"Invalid iid numbers in '{iid}'") from e
+    return parsed
 
 
 def _parse_action_iid(iid: str) -> tuple[int, int]:
     """Parse 'action.{siid}.{aiid}' → (siid, aiid)."""
-    parts = iid.split(".")
-    if len(parts) != 3 or parts[0] != "action":
+    parsed = try_parse_iid(iid, "action")
+    if parsed is None:
         raise ValidationException(
             f"Invalid action iid format: '{iid}', expected action.{{siid}}.{{aiid}}"
         )
-    try:
-        return int(parts[1]), int(parts[2])
-    except ValueError as e:
-        raise ValidationException(f"Invalid iid numbers in '{iid}'") from e
+    return parsed
 
 
 def _truncate_value_len(value_json: str | None) -> int:
@@ -255,8 +254,12 @@ async def _write_action_ledger(
         logger.info(
             "action_ledger device=%s(did=%s room=%s) type=%s iid=%s success=%s "
             "reason=%s value_len=%d",
-            log_safe(device_name or "?"), log_safe(did), log_safe(room or "?"),
-            log_safe(action_type), log_safe(iid), log_safe(success),
+            log_safe(device_name or "?"),
+            log_safe(did),
+            log_safe(room or "?"),
+            log_safe(action_type),
+            log_safe(iid),
+            log_safe(success),
             log_safe(result_msg or error or "ok"),
             _truncate_value_len(value_json),
         )
@@ -338,27 +341,25 @@ async def _trigger_scene(
         if not is_home_allowed(
             miot_proxy._kv_repo, getattr(scenes[scene_id], "home_id", None)
         ):
-            raise ValidationException(
-                f"Scene '{scene_id}' is not in an allowed home"
-            )
+            raise ValidationException(f"Scene '{scene_id}' is not in an allowed home")
         # 场景无 did:用 scene_id 占 did/iid。scene_name 落 value_json 便于回看。
         # home_id 显式传场景所属家——did 是 scene_id,device cache 解析必 miss,
         # 不传的话场景台账恒 NULL、经查询侧 NULL 放行会串入他家合流页。
         scene_name = getattr(scenes[scene_id], "scene_name", None)
-        scene_value_json = json.dumps(
-            {"scene_name": scene_name}, ensure_ascii=False
-        )
+        scene_value_json = json.dumps({"scene_name": scene_name}, ensure_ascii=False)
         ok = await miot_proxy.execute_miot_scene(scene_id)
         await _write_action_ledger(
             miot_proxy,
             action_type="scene_trigger",
-            did=scene_id, iid=scene_id,
+            did=scene_id,
+            iid=scene_id,
             value_json=scene_value_json,
             result_code=None,
             result_msg=None if ok else "场景触发失败",
             success=bool(ok),
             error=None,
-            source=source, source_id=source_id,
+            source=source,
+            source_id=source_id,
             home_id=getattr(scenes[scene_id], "home_id", None),
         )
         return ok
@@ -368,11 +369,15 @@ async def _trigger_scene(
         await _write_action_ledger(
             miot_proxy,
             action_type="scene_trigger",
-            did=scene_id, iid=scene_id,
+            did=scene_id,
+            iid=scene_id,
             value_json=scene_value_json,
-            result_code=None, result_msg=None,
-            success=False, error=str(e),
-            source=source, source_id=source_id,
+            result_code=None,
+            result_msg=None,
+            success=False,
+            error=str(e),
+            source=source,
+            source_id=source_id,
             home_id=getattr(scenes.get(scene_id), "home_id", None),
         )
         raise
@@ -381,12 +386,16 @@ async def _trigger_scene(
         await _write_action_ledger(
             miot_proxy,
             action_type="scene_trigger",
-            did=scene_id, iid=scene_id,
+            did=scene_id,
+            iid=scene_id,
             # 执行前已归一(校验没过就是 None——那种失败本来无参可记)
             value_json=scene_value_json,
-            result_code=None, result_msg=None,
-            success=False, error=str(e),
-            source=source, source_id=source_id,
+            result_code=None,
+            result_msg=None,
+            success=False,
+            error=str(e),
+            source=source,
+            source_id=source_id,
             # scenes 取列表阶段就炸时为空 dict → .get 兜底 None
             home_id=getattr(scenes.get(scene_id), "home_id", None),
         )
@@ -411,6 +420,10 @@ class MiotService:
         self._notify_deduper = MessageDeduper(
             window_sec=get_settings().notify.dedup_window_sec
         )
+        # 切换编排的串行锁。都在一个 event loop 上只保证没有数据竞争，不保证不交错 ——
+        # 编排里每个 await 都是让出点，两次切换并发进来时，旧的那次完全可能在新的那次
+        # 写完之后才执行它那一步清空，把新作用域的树抹掉
+        self._scope_switch_lock = asyncio.Lock()
 
     async def lru_snapshot(self) -> dict:
         return self._lru.load()
@@ -440,9 +453,7 @@ class MiotService:
         if info is None:
             raise ResourceNotFoundException(f"Device '{did}' not found")
         if not is_home_allowed(self._kv_repo, getattr(info, "home_id", None)):
-            raise ValidationException(
-                f"Device '{did}' is not in an allowed home"
-            )
+            raise ValidationException(f"Device '{did}' is not in an allowed home")
 
     def _safe_lru_touch(self, did: str, iids: list[str]) -> None:
         """Best-effort LRU 写入；任何异常只 warning，不让控制返回受影响。
@@ -457,6 +468,108 @@ class MiotService:
                 self._lru.touch(did, iid)
         except Exception as e:
             logger.warning("LRU touch failed for did=%s iids=%s: %s", log_safe(did), log_safe(iids), log_safe(e))
+
+    async def _cancel_running_alignment(self) -> None:
+        """取消上一轮状态对齐，并等它真的停下来。
+
+        只 cancel 不等的话，它可能在容器清空之后才写完最后一笔。作用域代号那道闸能
+        兜住这种情况，但两道一起才不依赖单点。
+        """
+        from miloco.manager import get_manager
+
+        task = get_manager().state_align_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # 这个 CancelledError 是上一行 cancel() 自己引发的，不是外面在取消我们
+            pass
+        except Exception as e:
+            logger.warning("上一轮状态对齐是带着异常结束的: %s", e)
+
+    async def _reset_state_scope(
+        self,
+        rebuild: Callable[[], Awaitable[None]] | None = None,
+        *,
+        realign: bool = True,
+    ) -> None:
+        """切换账号或家庭时重建状态容器。切换入口统一走这里。
+
+        `rebuild` 是各入口自己的中段：建立启用集、刷新设备 / 相机 / 场景。它跑在锁内
+        且必须排在对齐之前 —— 对齐读的是设备缓存，缓存还没换就对齐，等于把旧家庭的
+        设备写进新作用域。
+
+        `realign=False` 给解绑用：解绑之后没有账号，起新对齐只会拿不到设备、白打一轮
+        日志。属性订阅那道门因为「这一代没对齐过」天然关着，不需要额外挡。
+
+        锁只包这个方法，不包整个入口方法：asyncio.Lock 不可重入，而入口方法之间存在
+        调用关系。锁一拿住，本轮代号在编排跑完之前不会变，所以编排内部不再逐步校验。
+        """
+        from miloco.manager import get_manager
+
+        manager = get_manager()
+        async with self._scope_switch_lock:
+            manager.begin_scope_switch()
+            await self._cancel_running_alignment()
+            manager.state_store.clear(source=SCOPE_SWITCH_SOURCE)
+            if rebuild is not None:
+                await rebuild()
+            if realign:
+                manager.start_state_alignment()
+
+    async def _refresh_all_caches(self) -> None:
+        """把设备 / 相机 / 场景缓存换成新作用域的。单个失败不拖垮另外两个。"""
+        results = await asyncio.gather(
+            self._miot_proxy.refresh_devices(),
+            self._miot_proxy.refresh_cameras(),
+            self._miot_proxy.refresh_scenes(),
+            return_exceptions=True,
+        )
+        errors = [r for r in results if isinstance(r, Exception)]
+        if errors:
+            logger.warning("作用域切换时刷新缓存部分失败: %s", errors)
+        try:
+            await self._sync_camera_adapter()
+        except Exception as e:
+            logger.warning("作用域切换时同步相机 adapter 失败: %s", e)
+
+    def _schedule_scope_reset(
+        self, rebuild: Callable[[], Awaitable[None]] | None = None
+    ) -> None:
+        """把编排丢到后台。给 HTTP 入口用 —— 刷新和对齐都要打云端，等不起。
+
+        串行仍由编排自己的锁保证，丢后台不会让两次切换交错。
+        """
+
+        async def _run() -> None:
+            try:
+                await self._reset_state_scope(rebuild)
+            except Exception as e:
+                logger.warning("作用域切换编排失败: %s", e, exc_info=True)
+
+        task = asyncio.create_task(_run())
+        # 防御性持有引用，避免 task 在 await 挂起期间被 GC 回收。
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+    def _schedule_cache_refresh(self) -> None:
+        """只在后台重拉三份缓存，不碰作用域。
+
+        与 `_schedule_scope_reset` 的区别是这里不推进代号、不清容器、不重跑对齐 ——
+        给「作用域没变但该刷一遍」的入口用。
+        """
+
+        async def _run() -> None:
+            try:
+                await self._refresh_all_caches()
+            except Exception as e:
+                logger.warning("后台刷新缓存失败: %s", e, exc_info=True)
+
+        task = asyncio.create_task(_run())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
     def _clear_account_scope_state(self) -> None:
         """Clear service-layer scope residue (called on account switch)."""
@@ -528,6 +641,7 @@ class MiotService:
             覆写家庭白名单），并据此告知住户配置是保留了还是重置了。
         """
         prev_token: object = self._TOKEN_UNREAD
+        same_account = False
         try:
             # state 是请求体里的自由字符串、没有字符集约束，而这一行打在
             # check_state_async 校验它**之前**——不剥换行的话，调用方塞一个含换行
@@ -545,42 +659,53 @@ class MiotService:
             # 而身份未知」是可能的，下面那道比对会整个跑不到。先记下换票前库里
             # 那份令牌，异常出口据此判断换票是否已经生效。
             prev_token = self._kv_repo.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY)
-            oauth_info = await self._miot_proxy.get_miot_auth_info(
-                code=code, state=state
-            )
 
-            # 只认交换本身带回来的身份。刻意**不**退回读 KV：KV 里此刻可能还是
-            # 旧 uid（refresh_miot_info 对各项是吞异常的，落库未必成功），拿它去
-            # 比对会把「新身份未知」判成「同账号」，正好是最不该出错的方向。
-            new_uid = getattr(getattr(oauth_info, "user_info", None), "uid", None)
-            new_uid = str(new_uid) if new_uid else None
-
-            # fail-closed：只有两边都拿到且相等才敢跳过清理。读不到 uid 一律照旧
-            # 全清——跨账号残留的拾音白名单若在新账号下命中，会让住户从未授权的
-            # 摄像头麦克风直接生效，这是唯一「误命中 = 隐私泄露」的键。
-            same_account = bool(prev_uid) and bool(new_uid) and prev_uid == new_uid
-            if same_account:
-                logger.info(
-                    "Re-authorized the same Mi account; keeping home / camera scope"
+            async def _rebuild() -> None:
+                nonlocal same_account
+                # 清配置排在换票**之后**：换票之前拿不到新账号身份，无从比对。
+                # 重建运行时状态容器（设备 / 相机 / 场景缓存）与清住户的配置是两件
+                # 事——前者无论换没换账号都要做，后者只该在真换了账号时做。
+                oauth_info = await self._miot_proxy.get_miot_auth_info(
+                    code=code, state=state
                 )
-            else:
-                logger.info(
-                    "Account changed (prev=%s new=%s); clearing home / camera scope",
-                    "set" if prev_uid else "unknown",
-                    "set" if new_uid else "unknown",
-                )
-                self._clear_account_scope_state()
 
-            # 登录后 list_homes 兜底会自动选第一个家庭（如果启用集为空）。
-            await self.list_homes()
-            # list_homes 已确保 HOME_WHITE_LIST_KEY 非空（空集时自动选首个家庭）；
-            # get_miot_auth_info 内部的初次 refresh_cameras 在白名单还是空集时运行，
-            # is_home_allowed 对空集返回 False → 所有摄像头被 continue 跳过 →
-            # _camera_img_managers 为空。这里补一次确保 managers 正确创建。
-            await self._miot_proxy.refresh_cameras()
-            # _sync_camera_adapter 的结果会被下面 restart 里的 sync_all_devices 覆盖,
-            # 保留是为了在 perception engine 未运行时也能让感知订阅状态收敛。
-            await self._sync_camera_adapter()
+                # 只认交换本身带回来的身份。刻意**不**退回读 KV：KV 里此刻可能还是
+                # 旧 uid（刷新对各项是吞异常的，落库未必成功），拿它去比对会把
+                # 「新身份未知」判成「同账号」，正好是最不该出错的方向。
+                new_uid = getattr(getattr(oauth_info, "user_info", None), "uid", None)
+                new_uid = str(new_uid) if new_uid else None
+
+                # fail-closed：只有两边都拿到且相等才敢跳过清理。读不到 uid 一律照旧
+                # 全清——跨账号残留的拾音白名单若在新账号下命中，会让住户从未授权的
+                # 摄像头麦克风直接生效，这是唯一「误命中 = 隐私泄露」的键。
+                same_account = bool(prev_uid) and bool(new_uid) and prev_uid == new_uid
+                if same_account:
+                    logger.info(
+                        "Re-authorized the same Mi account; keeping home / camera scope"
+                    )
+                else:
+                    logger.info(
+                        "Account changed (prev=%s new=%s); clearing home / camera scope",
+                        "set" if prev_uid else "unknown",
+                        "set" if new_uid else "unknown",
+                    )
+                    self._clear_account_scope_state()
+                    # 跟着同一个条件：会话重置的理由就是「换账号一定换掉了作用域」，
+                    # 同账号重绑并没有换，重置等于把住户的上下文白白丢掉。
+                    self._schedule_agent_session_reset()
+
+                # 建立启用集必须排在刷新和对齐之前：换账号那一支刚把启用集删了，而
+                # is_home_allowed 对空启用集一律返回假 —— 这时候刷新，所有摄像头
+                # 被跳过、managers 建不出来；这时候对齐，空作用域会按「零可读属性
+                # 算成功」被标成已对齐，属性订阅的门就开在一个空作用域上。
+                # 走 _ensure_home_selected 而不是 list_homes：后者会再触发一轮编排，
+                # 而我们此刻正拿着编排锁，asyncio.Lock 不可重入。
+                await self._ensure_home_selected()
+                # 换账号那一支里，换票内部那次刷新跑在旧启用集下（新账号的相机会被
+                # 跳过），这里按新启用集重来一遍；同账号那一支它是幂等的。
+                await self._refresh_all_caches()
+
+            await self._reset_state_scope(_rebuild)
 
             # Restart perception engine so camera adapters can re-register
             # frame callbacks now that camera_img_managers exist.
@@ -802,14 +927,19 @@ class MiotService:
         Unbind MIoT: fully clean up MIoT state and reinitialize to a clean state.
         """
         try:
-            self._clear_account_scope_state()
-            await self._miot_proxy.deinit()
-            # deinit 已清空 _camera_info_dict 和 token；init 重建 client 但无
-            # 有效 token，refresh_cameras 大概率静默失败（返回 None）。
-            # 仍调用一次：若 token 残留则清掉旧摄像机 managers；失败无副作用。
-            await self._miot_proxy.init()
-            await self._miot_proxy.refresh_cameras()
-            await self._sync_camera_adapter()
+
+            async def _rebuild() -> None:
+                self._clear_account_scope_state()
+                await self._miot_proxy.deinit()
+                # deinit 已清空 _camera_info_dict 和 token；init 重建 client 但无
+                # 有效 token，refresh_cameras 大概率静默失败（返回 None）。
+                # 仍调用一次：若 token 残留则清掉旧摄像机 managers；失败无副作用。
+                await self._miot_proxy.init()
+                await self._miot_proxy.refresh_cameras()
+                await self._sync_camera_adapter()
+
+            # 解绑之后没有账号，不起新对齐：只会拿不到设备、白打一轮日志
+            await self._reset_state_scope(_rebuild, realign=False)
         except Exception as e:
             logger.error("Failed to unbind MIoT: %s", e)
             raise MiotServiceException(f"Failed to unbind MIoT: {str(e)}") from e
@@ -1006,9 +1136,7 @@ class MiotService:
         """
         key = notify.strip()
         if self._notify_deduper.is_duplicate(key):
-            logger.info(
-                "send_notify skipped: identical message within dedup window"
-            )
+            logger.info("send_notify skipped: identical message within dedup window")
             return
         try:
             notify_id = await self._miot_proxy.get_miot_app_notify_id(notify)
@@ -1054,9 +1182,7 @@ class MiotService:
         """Get detected audio codec for a camera channel."""
         return self._miot_proxy.get_audio_codec(camera_id, channel)
 
-    async def start_video_stream(
-        self, camera_id: str, channel: int, callback
-    ) -> int:
+    async def start_video_stream(self, camera_id: str, channel: int, callback) -> int:
         """Subscribe to *decoded* video frames for live transcode.
 
         Returns the SDK ``reg_id`` (needed by :meth:`stop_video_stream`).
@@ -1067,7 +1193,8 @@ class MiotService:
         try:
             logger.info(
                 "Starting decoded video stream: camera_id=%s, channel=%s",
-                log_safe(camera_id), log_safe(channel),
+                log_safe(camera_id),
+                log_safe(channel),
             )
             if callback is None:
                 logger.info(
@@ -1082,14 +1209,13 @@ class MiotService:
             logger.error("Failed to start video stream: %s", e)
             raise MiotServiceException(f"Failed to start video stream: {str(e)}") from e
 
-    async def stop_video_stream(
-        self, camera_id: str, channel: int, reg_id: int
-    ):
+    async def stop_video_stream(self, camera_id: str, channel: int, reg_id: int):
         """Unsubscribe from the decoded video stream (paired with start)."""
         try:
             logger.info(
                 "Stopping decoded video stream: camera_id=%s, reg_id=%d",
-                log_safe(camera_id), reg_id,
+                log_safe(camera_id),
+                log_safe(reg_id),
             )
             await self._miot_proxy.stop_camera_decode_video_stream(
                 camera_id, channel, reg_id
@@ -1113,11 +1239,13 @@ class MiotService:
             allow = allowed_home_ids(self._kv_repo)
             if allow:
                 allowed_dids = set(
-                    filter_by_home(self._kv_repo, await self._miot_proxy.get_devices()).keys()
+                    filter_by_home(
+                        self._kv_repo, await self._miot_proxy.get_devices()
+                    ).keys()
                 )
                 allowed_scene_ids = set(
-                    filter_by_home(self._kv_repo,
-                        await self._miot_proxy.get_all_scenes() or {}
+                    filter_by_home(
+                        self._kv_repo, await self._miot_proxy.get_all_scenes() or {}
                     ).keys()
                 )
                 data["devices"] = [
@@ -1130,7 +1258,9 @@ class MiotService:
                 ]
                 data["areas"] = [
                     {"name": a}
-                    for a in sorted({d.get("room") for d in data["devices"] if d.get("room")})
+                    for a in sorted(
+                        {d.get("room") for d in data["devices"] if d.get("room")}
+                    )
                 ]
             else:
                 # 未选择家庭：清空 devices/scenes/areas
@@ -1231,10 +1361,13 @@ class MiotService:
                 await _write_action_ledger(
                     self._miot_proxy,
                     action_type="set_property",
-                    did=did, iid=request.iid,
+                    did=did,
+                    iid=request.iid,
                     value_json=attempted_value_json,
-                    result_code=code, result_msg=msg,
-                    success=success, error=None,
+                    result_code=code,
+                    result_msg=msg,
+                    success=success,
+                    error=None,
                 )
                 return {"results": results}
 
@@ -1261,8 +1394,10 @@ class MiotService:
                     iid=_request_iid(request),
                     did=did,
                     value_json=attempted_value_json,
-                    result_code=code, result_msg=msg,
-                    success=success, error=None,
+                    result_code=code,
+                    result_msg=msg,
+                    success=success,
+                    error=None,
                 )
                 return {"results": results}
 
@@ -1280,10 +1415,13 @@ class MiotService:
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type="call_action",
-                did=did, iid=request.iid,
+                did=did,
+                iid=request.iid,
                 value_json=attempted_value_json,
-                result_code=code, result_msg=msg,
-                success=success, error=None,
+                result_code=code,
+                result_msg=msg,
+                success=success,
+                error=None,
             )
             return {"result": result}
 
@@ -1310,10 +1448,13 @@ class MiotService:
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type=getattr(request, "type", None) or "call_action",
-                did=did, iid=_request_iid(request),
+                did=did,
+                iid=_request_iid(request),
                 value_json=attempted_value_json,
-                result_code=None, result_msg=None,
-                success=False, error=str(e),
+                result_code=None,
+                result_msg=None,
+                success=False,
+                error=str(e),
             )
             raise MiotServiceException(f"Failed to control device: {str(e)}") from e
 
@@ -1323,10 +1464,10 @@ class MiotService:
             devices = await self._miot_proxy.get_devices()
             if did not in devices:
                 raise ResourceNotFoundException(f"Device '{did}' not found")
-            if not is_home_allowed(self._kv_repo, getattr(devices[did], "home_id", None)):
-                raise ValidationException(
-                    f"Device '{did}' is not in an allowed home"
-                )
+            if not is_home_allowed(
+                self._kv_repo, getattr(devices[did], "home_id", None)
+            ):
+                raise ValidationException(f"Device '{did}' is not in an allowed home")
 
             # 用户主动指定 iids = 「这次确实关心这些 prop」→ 写 LRU；
             # 不传 iids 走全量可读冷查询，不算"用过"，不写。
@@ -1365,6 +1506,22 @@ class MiotService:
     async def list_homes(self) -> list[dict]:
         """列出账号下全部家庭（绕过过滤），每项含 in_use 标记。
 
+        启用集是被这一趟改过的话，顺带重置会话 —— 自动选家和用户显式切家一样换掉了
+        当前家庭，旧家庭的上下文不清会串进新家庭。
+        """
+        homes, changed = await self._ensure_home_selected()
+        if changed:
+            self._schedule_agent_session_reset()
+            self._schedule_scope_reset(self._refresh_all_caches)
+        return homes
+
+    async def _ensure_home_selected(self) -> tuple[list[dict], bool]:
+        """拉家庭全集，并保证启用集里至少有一个还看得见的家庭。
+
+        返回 `(家庭列表, 启用集有没有被这一趟改过)`。**副作用只有写 KV** —— 要不要
+        因此重置会话、清容器，是调用方按自己的场景决定的，不在这里做：`switch_home`
+        紧接着就要把启用集改成用户点的那个家，在这里先编排一轮等于白清一次。
+
         优先调米家 SDK ``get_homes_async()`` 拿用户真全集（含没设备 / 设备全离线
         的家），失败兜底到从 cached devices/cameras 反推。Union devices 与 cameras
         两个 dict 的 home_id —— 「家里只装了一台摄像头、无其他设备」这种单看
@@ -1374,6 +1531,7 @@ class MiotService:
         """
         allow = allowed_home_ids(self._kv_repo)
         seen: dict[str, dict] = {}
+        changed = False
 
         # 主路径：米家 user-level API 拿全集
         try:
@@ -1429,13 +1587,11 @@ class MiotService:
             logger.info("启用集与可见家庭无交集，自动启用首个家庭 %s（兜底）", first)
             for h in seen.values():
                 h["in_use"] = h["home_id"] in allow
-            # 兜底自动切换同样换掉了启用家庭 → 重置会话，消除旧家庭上下文泄漏
-            # （与显式 switch_home 同一 bug class）。
-            self._schedule_agent_session_reset()
+            changed = True
 
         # 按 home_id 字典序排序——米家 SDK 返回顺序受设备活跃度等影响不稳定，
         # 不排 HomeSwitcher 列表会在两次 reload 之间跳。
-        return sorted(seen.values(), key=lambda h: h["home_id"])
+        return sorted(seen.values(), key=lambda h: h["home_id"]), changed
 
     def _schedule_agent_session_reset(self) -> None:
         """切换家庭后后台 best-effort 重置 openclaw 里的 miloco session，清掉旧家庭
@@ -1444,6 +1600,7 @@ class MiotService:
         显式 `switch_home` 与 `list_homes` 兜底自动切换共用此入口。fire-and-forget：
         openclaw 不可达 / 删除失败只 WARN、不上抛，绝不阻塞或打断切换本身。
         """
+
         async def _bg():
             from miloco.dispatch.dispatcher import MILOCO_SESSION_ROUTES
             from miloco.utils.agent_client import reset_agent_sessions
@@ -1465,49 +1622,34 @@ class MiotService:
         返回切换后的全量家庭列表。刷新设备/摄像头/场景放到后台异步完成，
         避免让 HTTP 响应等待云端 API 调用。
         """
-        homes = await self.list_homes()
+        # 启用集在校验之前先读：_ensure_home_selected 可能顺手自动选了首个家庭，
+        # 读晚了就把那次自动选当成"切换前的状态"，用户点的那次反而看着没变化
+        prev_allow = allowed_home_ids(self._kv_repo)
+        # 走 _ensure_home_selected 而不是 list_homes：后者会为自动选家先重置一次会话，
+        # 而这里紧接着就要切到用户点的那个家，白重置一次
+        homes, _ = await self._ensure_home_selected()
         known = {h["home_id"] for h in homes}
         if home_id not in known:
             raise ValidationException(
                 f"Unknown home_id {home_id!r}; valid: {sorted(known)}"
             )
-        # 切换前后的启用集：只有真的变了才 reset——切到"已是当前唯一启用"的家庭
-        # （重复点选 / 重复提交同一 home_id）不该白删仍然有效的热上下文。
-        prev_allow = allowed_home_ids(self._kv_repo)
         # 先把目标加进在用集合,再把其余移出。
         target_list, _ = set_homes_in_use(self._kv_repo, [home_id], True)
         others = [h for h in target_list if h != home_id]
         if others:
             target_list, _ = set_homes_in_use(self._kv_repo, others, False)
 
-        # 后台异步刷新：设备/摄像头/场景列表需随家庭切换更新，但不必
-        # 让 HTTP 响应等它们完成。设备列表/摄像头列表请求时兜底触发刷新。
-        async def _background_refresh():
-            results = await asyncio.gather(
-                self._miot_proxy.refresh_devices(),
-                self._miot_proxy.refresh_cameras(),
-                self._miot_proxy.refresh_scenes(),
-                return_exceptions=True,
-            )
-            errors = [r for r in results if isinstance(r, Exception)]
-            if errors:
-                logger.warning("switch_home background refresh partial failure: %s",
-                               errors)
-            try:
-                await self._sync_camera_adapter()
-            except Exception as e:
-                logger.warning("switch_home _sync_camera_adapter failed: %s", e)
-
-        task = asyncio.create_task(_background_refresh())
-        # 防御性持有引用，避免 task 在 await 挂起期间被 GC 回收。
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
-
         # KV 已写入，本地更新 in_use 标记后立即返回，不等待 refresh 完成。
+        # 两件事都放后台：刷新和对齐都要打云端，让 HTTP 响应等它们会卡住几秒
         allow = allowed_home_ids(self._kv_repo)
-        # 启用集真的变化了才重置会话（避免切到当前家庭白丢热上下文）。
         if allow != prev_allow:
+            self._schedule_scope_reset(self._refresh_all_caches)
             self._schedule_agent_session_reset()
+        else:
+            # 前端家庭列表里当前那个家也是可点的，点它语义上什么都没换：作用域重置会为
+            # 这一下清空整棵容器、把属性推送关在对齐闸外好几秒、还把补拉计次归零，而会话
+            # 那边会白丢热上下文。刷新不在此列 —— 它是幂等的，前端也拿这一下当强制刷新
+            self._schedule_cache_refresh()
         for h in homes:
             h["in_use"] = h["home_id"] in allow
         return homes
@@ -1698,9 +1840,7 @@ class MiotService:
                 f"Unknown camera did(s) {unknown}; valid: {sorted(cameras.keys())}"
             )
         if bad_channel:
-            raise ValidationException(
-                f"非法通道号（格式错误或越界）: {bad_channel}"
-            )
+            raise ValidationException(f"非法通道号（格式错误或越界）: {bad_channel}")
 
         def _in_scope(pdid: str) -> bool:
             return is_home_allowed(
@@ -1815,9 +1955,7 @@ class MiotService:
             return getattr(cameras.get(pdid), "channel_count", None) or 1
 
         disabled = [
-            d
-            for d in all_dids
-            if len(denied_channels_of(denied, d, _cc(d))) >= _cc(d)
+            d for d in all_dids if len(denied_channels_of(denied, d, _cc(d))) >= _cc(d)
         ]
         if disabled:
             raise ValidationException(
@@ -1879,7 +2017,9 @@ class MiotService:
         cameras = await self._miot_proxy.get_cameras() or {}
 
         too_long = [
-            i["did"] for i in items if len((i.get("prompt") or "").strip()) > MAX_CAMERA_PROMPT_LEN
+            i["did"]
+            for i in items
+            if len((i.get("prompt") or "").strip()) > MAX_CAMERA_PROMPT_LEN
         ]
         if too_long:
             raise ValidationException(
@@ -1934,7 +2074,10 @@ class MiotService:
         cameras = await self._miot_proxy.get_cameras() or {}
         # 先整批解析 + 校验（任一项非法即抛，不写任何 KV），再统一写。
         resolved = [
-            (self._resolve_prompt_target_dids(i["did"], cameras), bool(i["crop_in_use"]))
+            (
+                self._resolve_prompt_target_dids(i["did"], cameras),
+                bool(i["crop_in_use"]),
+            )
             for i in items
         ]
         touched_physical = {physical_camera_did(i["did"]) for i in items}

@@ -87,6 +87,7 @@
   "plugin.version_too_old": "openclaw version too old (%1), requires >= %2. Upgrade: npm install -g openclaw@latest",
   "plugin.openclaw_not_found": "openclaw command not found. Install: npm install -g openclaw@latest",
   "plugin.version_check_failed": "Could not detect openclaw version, skipping version check",
+  "plugin.capability_probe_timeout": "Timed out probing openclaw plugin install flags; installing the legacy way. On openclaw >= 2026.8 this may be blocked by the capability consent gate — if so, run manually: openclaw plugins install --force --accept-capabilities <tgz>",
   "plugin.skipped": "Plugin installation skipped",
   "plugin.plugin_ok": "Plugin installed",
   "plugin.plugin_fail": "Plugin installation failed",

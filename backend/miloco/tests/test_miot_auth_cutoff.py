@@ -327,6 +327,7 @@ MUST_NOT_BE_GATED = {
     "_create_camera_img_manager": "建相机图片管理器",
     "_sync_meta_subscriptions": "同步设备元信息订阅",
     "_sync_device_state_subscriptions": "同步设备状态订阅",
+    "_sync_props_subscriptions": "同步设备属性订阅",
     "_sync_scene_subscriptions": "同步场景订阅",
     "_on_user_bind_event": "转发绑定与解绑推送，并据此补订退订",
     "init": "初始化与回调注册",
