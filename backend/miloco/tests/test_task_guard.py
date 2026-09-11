@@ -198,8 +198,7 @@ def test_guard_does_not_affect_tasks_without_one():
 
 
 def test_blocked_log_tells_unready_from_not_satisfied(caplog):
-    """被拦下时日志要分得出设备离线和条件真的不满足 —— 两种修法不同, 而这次进入
-    没有补发路径, 日志是事后唯一的线索。"""
+    """被拦下时日志要分得出设备离线和条件真的不满足 —— 两种修法不同。"""
     h = Harness({"g_off": False, "g_unknown": None})
     h.sm.register_task(
         "t1",

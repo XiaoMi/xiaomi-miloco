@@ -345,7 +345,7 @@ class TaskStateMachine:
         unmet = self._unmet_guards(topology)
         if unmet:
             # 被拦下的这次进入没有补发路径: 条件层锁存, 触发规则的 false→true 不会
-            # 再来第二次。所以这条日志是事后查「规则怎么不响了」的唯一线索。
+            # 再来第二次。
             logger.info(
                 "task %s 的进入被前提拦下 (rule=%s): %s",
                 signal.task_id,

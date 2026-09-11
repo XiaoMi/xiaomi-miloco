@@ -560,12 +560,16 @@ def test_unregister_clears_everything():
 
 
 def test_slot_for_edge_full_table():
-    """四个方向 × 两种边沿的全表。这是 ③→④ 的唯一契约, 写死不靠推导。"""
+    """③→④ 的全表。方向取自枚举, 不在这里抄第二份清单。
+
+    加了方向却没在 ``slot_for_edge`` 里给它分支时这条会红 —— 尾部兜底返的是进入
+    槽, 不红的话新方向会静默变成触发器。
+    """
     from miloco.task.state_machine import slot_for_edge
 
     table = {
-        (d, k.value): slot_for_edge(d, k)
-        for d in ("enter", "exit", "session", "milestone")
+        (d.value, k.value): slot_for_edge(d.value, k)
+        for d in RuleDirection
         for k in (SignalKind.ENTERED, SignalKind.EXITED)
     }
     assert table == {
@@ -577,6 +581,8 @@ def test_slot_for_edge_full_table():
         ("session", "exited"): ActionSlot.ON_EXIT,
         ("milestone", "entered"): ActionSlot.ON_TARGET,
         ("milestone", "exited"): None,
+        ("guard", "entered"): None,
+        ("guard", "exited"): None,
     }
 
 
