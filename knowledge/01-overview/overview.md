@@ -14,7 +14,7 @@ Miloco 是小米面向未来的全屋智能 AI 开源方案。运行在家庭本
 - **自动化规则** — 用自然语言描述"当 X 时做 Y"，VLM 负责语义判断
 - **家庭记忆** — 从感知与对话中沉淀长期知识，注入每次 Agent 对话的 system prompt
 - **任务管理** — 创建持久意图（任务装配 rule / cron / record），带行为统计与周期归档
-- **AI Agent 集成** — OpenClaw 插件 + `miloco-*` Skill 套件，双向与后端通信
+- **AI Agent 集成** — Agent 运行时插件（OpenClaw / Hermes 二选一，由 `agent.platform` 选择，留空走 OpenClaw webhook 老通路）+ `miloco-*` Skill 套件，双向与后端通信
 - **实时摄像头观看** — 浏览器无插件直播，与感知流水线共享解码
 - **设备欢迎** — 新设备绑定后主动通知用户，建立"Miloco 已接管该设备"的信任感
 - **事件反馈** — 用户指认感知事件出错，把该事件的 omni 复现数据脱敏打包到本地，供坏例回收与模型迭代
@@ -36,10 +36,14 @@ miloco/
 │   │   ├── perception/            # 感知域（含 engine/ 子包）
 │   │   ├── rule/                  # 规则引擎域
 │   │   ├── person/                # 身份域
+│   │   ├── pet/                   # 宠物花名册域（实验性，与 person 并列但不接身份状态机）
 │   │   ├── task/                  # 任务域（生命周期主体）
 │   │   ├── task_record/           # 任务记录域（行为统计 + 周期归档）
+│   │   ├── schedule/              # 定时域（internal / external cron）
 │   │   ├── home_profile/          # 家庭记忆域
 │   │   ├── dispatch/              # Agent 事件调度
+│   │   ├── agent_platform/        # Agent 运行时适配层（按配置动态加载 adapter）
+│   │   ├── state/                 # 运行时状态容器（分层 KV，进程内）
 │   │   ├── observability/         # 性能追踪与指标
 │   │   ├── admin/                 # 管理接口（含 token 用量查询）
 │   │   ├── node_monitor/          # 节点生命周期监控
@@ -49,10 +53,10 @@ miloco/
 ├── cli/src/miloco_cli/            # Click CLI（miloco-cli 命令）
 ├── plugins/
 │   ├── openclaw/src/              # TypeScript OpenClaw 插件
-│   └── skills/                    # Skill 套件（miloco-* 前缀）
+│   ├── hermes/                    # Python Hermes 插件与 adapter（与 OpenClaw 并列的 agent 运行时）
+│   └── skills/                    # Skill 套件（miloco-* 前缀，两套运行时共用源）
 ├── web/                           # 家庭面板前端（React + Vite + Tailwind）
-├── knowledge/                     # 本知识库
-└── xaf/                           # XAF（git submodule）
+└── knowledge/                     # 本知识库
 ```
 
 ---
@@ -63,10 +67,10 @@ miloco/
 
 | 层           | 职责                               | 典型类（文件路径）                                                                                                                                                                                                                                                                                     |
 | ------------ | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Router**   | 接收 HTTP 请求、参数校验、鉴权前置 | `miot/router.py`、`perception/router.py`、`rule/router.py`、`person/router.py`、`home_profile/router.py`、`task/router.py`、`task_record/router.py`、`admin/router.py`、`observability/router.py`、`node_monitor/router.py`                                                                            |
+| **Router**   | 接收 HTTP 请求、参数校验、鉴权前置 | `miot/router.py`、`perception/router.py`、`rule/router.py`、`person/router.py`、`pet/router.py`、`home_profile/router.py`、`task/router.py`、`task_record/router.py`、`schedule/router.py`、`admin/router.py`、`observability/router.py`、`node_monitor/router.py`                                     |
 | **Service**  | 业务编排，跨域协调                 | `MiotService`（`miot/service.py`）、`PerceptionService`（`perception/service.py`）、`RuleService`（`rule/service.py`）、`PersonService`（`person/service.py`）、`HomeProfileService`（`home_profile/service.py`）、`TaskService`（`task/service.py`）、`TaskRecordService`（`task_record/service.py`） |
-| **Runner**   | 异步后台循环，驱动持续任务         | `PerceptionRunner`（`perception/runner.py`）、`RuleRunner`（`rule/runner.py`）、`TerminateEvaluator`（`rule/terminate_evaluator.py`）                                                                                                                                                                  |
-| **Repo**     | 数据持久化，隔离 SQLite 细节       | `KVRepo` / `RuleRepo` / `PersonRepo` / `PerceptionLogRepo` / `TaskRepo` / `TokenUsageRepo`（`database/*.py`）、任务记录各 Repo（`task_record/repo.py`）                                                                                                                                                |
+| **Runner**   | 异步后台循环，驱动持续任务         | `PerceptionRunner`（`perception/runner.py`）、`RuleRunner`（`rule/runner.py`）、`TerminateEvaluator`（`rule/terminate_evaluator.py`）、`ScheduleRunner`（`schedule/runner.py`，internal cron）                                                                                                         |
+| **Repo**     | 数据持久化，隔离 SQLite 细节       | `KVRepo` / `RuleRepo` / `PersonRepo` / `PerceptionLogRepo` / `TaskRepo` / `TokenUsageRepo`（`database/*.py`）、任务记录各 Repo（`task_record/repo.py`）、定时 Repo（`schedule/repo.py`）                                                                                                               |
 | **外部代理** | 封装第三方 API                     | `MiotProxy`（`miot/client.py`）、`PerceptionEngineProxy`（`perception/client.py`）                                                                                                                                                                                                                     |
 
 `Manager`（`manager.py`）是进程内依赖注入中心，各 Router 通过统一入口取到单例实例。
@@ -136,6 +140,8 @@ CLI / Agent Skill
   → Service → 设备/感知/规则/任务
 ```
 
+> Agent 运行时是可替换的：除小米内部的 OpenClaw 外还支持开源的 Hermes，由 `agent.platform` 选择。出站（Skill → API）两者完全一致；入站回调统一收在 `AgentPlatformAdapter` 契约后，adapter 实现随插件分发、由 `agent_platform/loader.py` 动态加载，backend 不 import 插件符号。详见 [Hermes Agent 集成](../03-features/hermes-integration.md)。
+
 ### 家庭记忆注入
 
 ```
@@ -153,7 +159,7 @@ CLI / Agent Skill
 | 组件     | 技术                                                                                                                  |
 | -------- | --------------------------------------------------------------------------------------------------------------------- |
 | Web 框架 | FastAPI + Uvicorn（单进程，不支持 multi-worker）                                                                      |
-| 持久化   | SQLite（`miloco.db` 业务数据，18 张表，schema 见 `database/connector.py`；`observability.db` 性能追踪）               |
+| 持久化   | SQLite（`miloco.db` 业务数据，19 张表，schema 见 `database/connector.py`；`observability.db` 性能追踪）               |
 | 配置     | pydantic-settings，优先级：环境变量 > `$MILOCO_HOME/config.json` > `settings.yaml` > 代码默认值                       |
 | MiOT     | OAuth2 + 小米云 API + LAN OT 协议 + 摄像头 C 库                                                                       |
 | 感知     | OpenCV + ONNX Runtime（人体检测 + ReID）+ VLM（可配置）                                                               |
@@ -183,15 +189,18 @@ CLI / Agent Skill
 
 家庭面板是 React SPA，构建产物由 `spa_handler`（`main.py`）伺服，无需独立前端服务器。访问 `http://<host>:1810/` 即可使用，开发期 `pnpm dev` 启动 Vite dev server 自动代理 `/api` 到 backend。
 
-### 五个主标签页
+### 六个主标签页
 
-| 标签                 | 内容                                                                                                                                        | 独有操作                      |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- |
-| **概览（now）**      | 当前在家成员、摄像头状态卡（含直播入口）、感知暂停/恢复；MiOT/感知引擎状态条                                                                | 实时摄像头直播、感知引擎启停  |
-| **设备（devices）**  | 按房间展示设备列表、属性查询、开关/属性控制、场景触发                                                                                       | 直接点击控制设备（无需 CLI）  |
-| **家庭（family）**   | 成员档案、正式家庭记忆、待审候选知识                                                                                                        | 人脸注册、成员管理            |
-| **日志（activity）** | 今日有价值事件流（规则命中、语音指令、建议），可回放视频片段                                                                                | —                             |
-| **模型（usage）**    | LLM Token 用量统计（今日/近7天/近30天），含调用类型与模态构成饼图；omni 模型配置管理（增改/切换生效/停用/删除档案，切换生效前做连通性校验） | omni 模型档案管理与连通性测试 |
+| 标签                 | 内容                                                                                                                                                                                                                       | 独有操作                                  |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| **概览（now）**      | 当前在家成员、摄像头状态卡（含直播入口）、感知暂停/恢复；MiOT/感知引擎状态条                                                                                                                                               | 实时摄像头直播、感知引擎启停              |
+| **设备（devices）**  | 按房间展示设备列表、属性查询、开关/属性控制、场景触发                                                                                                                                                                      | 直接点击控制设备（无需 CLI）              |
+| **家庭（family）**   | 成员档案、正式家庭记忆、待审候选知识；宠物成员（实验性，开关在本页，关闭时只留开关行、宠物 chip 与建档入口隐藏）                                                                                                           | 人脸注册、成员管理、宠物建档              |
+| **任务（tasks）**    | 持续任务列表（描述 + 进度摘要 + 启停），行内打开详情抽屉看驱动规则与进度、以及任务此刻的运行态；建任务仍走 Agent 对话（页内给引导话术）                                                                                    | 启停 / 删除任务、改任务描述与规则触发条件 |
+| **日志（activity）** | 今日有价值事件流（规则命中、语音指令、建议），可回放视频片段                                                                                                                                                               | —                                         |
+| **模型（usage）**    | LLM Token 用量统计（今日/近7天/近30天），含调用类型与模态构成环形图，可按范围或按单个「模型名 + Base URL」清空；omni 模型配置管理（增改/切换生效/停用/删除档案，切换生效前做连通性校验，每套档案在列表里显示上次验证结果） | omni 模型档案管理与连通性测试             |
+
+**自动刷新周期可设**：「模型」页的用量卡与性能卡、以及 `#perf` 独立性能视图共用**同一个**刷新周期（住户可改，存本机、不落后端）。共用是刻意的——同页两张卡看的是同一段时间里同一次感知循环的两面，各自一个周期只会让两边数字对不上更难解释。取值有硬上下限，写入与读取两侧都夹取（存量值也因此能被收紧后的上限救回来）；边界取值的依据见 `web/src/hooks/useRefreshInterval.ts`。
 
 **家庭切换器**：顶部 TopBar 中显示当前启用的家庭名，多家庭账号可在此切换——切换后后端单事务写 scope 并触发后台刷新，前端整页 reload。底部左侧显示米家账号登录状态，可在此绑定/解绑米家账号。
 
@@ -211,6 +220,10 @@ Miloco 的感知流水线每次调 VLM（Omni）都会消耗 token。为了让�
 
 **数据存储**：`miloco.db` 中 token 用量相关表采用两级设计——原始明细表保留近期每次调用，每日汇总表聚合历史趋势，保证细粒度分布和长期历史趋势均可查；schema 见 `database/connector.py`。
 
+**用量记录的身份**：一条用量归属于「模型名 + Base URL」这对组合，而不是模型名单独。同名模型挂在不同 endpoint 上是两套不同的账（价格与配额都可能不同），聚合、展示、清空都按这对组合分。
+
+**清空**：用量可整体清空，也可只清某个时间范围、或只清某一个「模型名 + Base URL」；实时明细表与日聚合表一起删、不可恢复。日聚合表只有天粒度，所以按时间范围清会连带删掉起点当天更早的记录；这一天以界面已经显示给用户的那天为准（服务端时区与浏览器时区可能差一天，契约上由调用方带上该日期）。
+
 **在哪查看**：web 面板"模型"标签页查看（今日时序分布 + 多日汇总），API 端点见 `admin/router.py`。
 
 ---
@@ -221,11 +234,13 @@ Miloco 的感知流水线每次调 VLM（Omni）都会消耗 token。为了让�
 
 **事件调度**（`dispatch/dispatcher.py`，`AgentDispatcher`）：所有后端 → Agent 投递的统一收口。保证同一 session_key 单飞、同类批量合并、队列超长时按优先级淘汰。五类事件分三条 session 路由（交互、绑定、onboarding 共用主会话，规则、建议各一条），按合并类型各自单飞、互不混入同一 turn；详见 [Agent 集成](../03-features/openclaw-integration.md)。
 
+**运行时状态容器**（`state/`，`StateStore`）：进程内的分层 KV 树，回答"现在是什么"——多个异构来源（当前只有 iot，规划中还有 omni / tracker）按路径写入，消费方按路径 pattern 订阅变化或取一致快照。它只装**状态**，事件走 `dispatch/dispatcher.py`，两者职责不重叠。设计要点：写入恒为替换语义（想局部更新就写更深的路径）、任意线程可写而回调统一投到主 event loop、路径段与 pattern 共用一套语法所以段内不许出现通配符。容器由 `Manager` 持单例并在所有写入方之前 `start()`。当前唯一的写入域是设备控制，其路径分层与写入闸见 [device-control · 设备状态容器](../03-features/device-control.md#设备状态容器)。
+
 **可观测性**（`observability/`）：`MetricsClient`（`observability/metrics_client.py`）通过异步队列将感知 cycle trace 写入 `observability.db`；`AgentMetaPoller`（`observability/agent_meta_poller.py`）从 OpenClaw 轮询 agent run 元数据，写入 `agent_runs` 表。`perf.enabled=false` 时整套不初始化。性能数据通过 web 面板 URL hash `#perf` 进入的独立调试视图查看，或通过可观测性相关端点查询。
 
 **后台清理**（`main.py`）：周期性清理感知日志、规则日志、`meaningful_events`、事件截图与 omni trace（TTL + 磁盘 LRU，跟事件目录同生共死）、observability 各表。
 
-**管理接口**（`admin/router.py`）：系统状态聚合、token 用量查询、debug 开关、日志打包、后端版本查询（`/api/admin/version`，含 git 信息；wheel 部署无 git checkout 时从包版本号反推）、omni 模型配置管理（增改 / 切换生效 / 停用 / 删除档案，并提供连通性校验端点，供前端在切换生效前校验、不通过则不启用）。
+**管理接口**（`admin/router.py`）：系统状态聚合、token 用量查询、debug 开关、日志打包、后端版本查询（`/api/admin/version`，含 git 信息；wheel 部署无 git checkout 时从包版本号反推）、实验性功能开关的读写（写 `config.json` 并热生效；`MILOCO_FEATURES__*` 环境变量优先级更高，设了 env 则写入不生效）、omni 模型配置管理（增改 / 切换生效 / 停用 / 删除档案，并提供连通性校验端点，供前端在切换生效前校验、不通过则不启用）。连通性校验的结果按档案持久化在 KV 表里（成功与失败都记），界面直接读它显示每套档案的验证状态，不再靠前端本地缓存；记录带一份配置指纹，模型 / Base URL / api_key 任一改过就视为无记录，避免展示一条已过期配置的结论。
 
 ---
 

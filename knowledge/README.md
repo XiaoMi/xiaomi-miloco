@@ -59,7 +59,7 @@
 
 几类卡在 L2/L3 之间的中间态，统一这样判：
 
-- **结构性计数**（如 18 张表、四层流水线）：属框图级，留；但只写「有几张 / 几层」，不展开「第 N 张表叫什么、含哪些字段」。
+- **结构性计数**（如 19 张表、四层流水线）：属框图级，留；但只写「有几张 / 几层」，不展开「第 N 张表叫什么、含哪些字段」。
 - **当前技术栈**：组件名留，具体版本号删（版本交给依赖声明与 git）。
 - **状态锚点常量**：契约语义可带必要的锚点（如 `503=引擎未就绪`、枚举取值名），但不展开该状态的完整字段 schema 或全部错误码表。
 - **自研封装层**（Proxy / Adapter / Client）：封装类的设计意图与对外契约写 features；被封装的外部 SDK 本身的能力边界 / 版本兼容 / 已知限制写 external-deps，两篇互相指路。
@@ -152,6 +152,7 @@ knowledge/
   - [任务管理](03-features/task-management.md)
   - [家庭记忆](03-features/home-profile.md)
   - [Agent 集成](03-features/openclaw-integration.md)
+  - [Hermes Agent 集成](03-features/hermes-integration.md)
   - [实时摄像头观看](03-features/live-camera-view.md)
   - [设备欢迎](03-features/device-welcome.md)
   - [事件反馈打包](03-features/event-feedback.md)
@@ -161,6 +162,7 @@ knowledge/
   - [MiOT SDK](05-external-deps/sdk-miot.md)
   - [ONNX Runtime](05-external-deps/sdk-onnxruntime.md)
   - [OpenClaw SDK](05-external-deps/sdk-openclaw.md)
+  - [Hermes Agent](05-external-deps/sdk-hermes.md)
 - **06-dev-guide**
   - [开发指南](06-dev-guide/dev-guide.md)
   - [故障排查](06-dev-guide/troubleshooting.md)

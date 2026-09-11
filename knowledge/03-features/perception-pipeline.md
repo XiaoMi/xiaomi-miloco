@@ -161,6 +161,8 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 
 **主动查询路径（on-demand）**：主动查询入口从实时流缓冲 peek 数据后跳过 Gate 直接走 Identity + Omni，不影响实时流水线。每次查询自动写入 `on_demand_log` 表（query/answer/sources/latency），并复用 `OmniEventArtifacts` + `save_event_artifacts` 把 clip 和 omni_trace 落到 `snapshots/{log_id}/`；omni 未响应时只落 trace、跳过 clip。clip 始终为 mp4（`build_query_prompt` 不走 audio-only 路径）。前端 Activity 页通过子 Tab 浏览查询日志、播放 clip、提交反馈（反馈打包见 [事件反馈](event-feedback.md)）。
 
+**Smart Crop（自适应分辨率）**：送 Omni 之前把画面定向裁到"活动区域"，让模型在同样的 token 预算下看到更高等效分辨率的局部。裁切区域取"本窗所有主体检测框（人 + 宠物）与帧差分运动块的并集"再作非对称扩展，并受最小 / 最大面积约束。不变量是**裁出的区域必须包住窗口内检测到的一切主体和所有变化区域，包不住就不裁**——面积超上限直接回退全景，全景本就什么都看得见。区域计算是纯函数（`engine/omni/crop_enhance.py`，无 I/O、不调 VLM），编码与参考帧由 `prompt_builder.py` 负责。启停是三道闸的与：全局开关、用户开关，加上**逐机位**的偏好（默认开）；某台摄像头不在活跃投喂集里时根本没在裁，所以生效态由后端合并后给出，不留给前端各自推。逐机位偏好按**合成 did**（多通道相机逐路）存在 KV、随摄像头列表接口下发，引擎每个感知窗实时读取，改动下一窗即生效、不需重启（见 [设备控制 · Scope 机制](device-control.md#scope-机制)）。它默认开启且读取失败按"继续裁"处理：本项只影响视频构图、不涉隐私，反向失败关闭会让一次 KV 抖动静默关掉全家 Smart Crop，是更难发现的失效态。
+
 **Suggestion 去重**：`PerceptionEngine` 对建议做去重抑制，同类建议短期内只报一次，避免 Agent 被重复触发。去重用句向量语义相似度（`EventEmbedder`，`engine/omni/dedup_embedder.py`，bge-small-zh）而非精确文本匹配——措辞略有差异的同类建议也能识别为重复；embedder 初始化失败时降级为精确文本匹配。
 
 **Prompt 人名护栏**：VLM 只能给本轮 Identity 真正识别出的成员安姓名；对未识别（`unknown`）的人、或名册中本轮画面未真正出现的陌生人，一律不从 gallery / 家庭档案取成员名安到画面人物上，防止"注入了家庭档案就凭空点名"的幻觉。约束集中在各字段的 `FieldSpec`（`field_registry.py`）。
@@ -170,6 +172,10 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 **有价值事件沉淀**：每次推理后，规则命中/语音指令/建议至少一项为真时，写入 `meaningful_events` 表并异步落盘事件级 artifacts。per-device 视频片段（字节从编码现场旁路到事件写入侧，无需重新编码）与本次 omni 调用 trace 一并收敛到 `OmniEventArtifacts` 容器（`perception/snapshot_context.py`），由 `snapshot_writer.py` 一次性落到事件目录，trace 供事后复盘 LLM 决策。
 
 **引擎降级与自愈**：Omni API Key 未配置或 ONNX 模型缺失时，引擎进入 `PREREQ_MISSING` 状态，感知推理跳过，设备控制等功能不受影响，`/health` 返回 200。前置条件补齐后无需重启——`PerceptionRunner` 每个 tick 自愈一次，下个推理周期自动拉起引擎（廉价的"等外部条件"态才放行；引擎初始化真失败不在此重试，需手动重启感知）。从 web 删除或停用当前生效的模型配置时，引擎回到"未配模型"态并软停，仅关引擎实例、保留采集与自愈循环，重新配好后自动恢复；软停与在飞推理经 `PerceptionEngineProxy` 的引擎锁互斥，避免推理途中被 teardown 拔掉引擎而崩溃。
+
+**Omni 全局熔断**：VLM provider 挂了或配置错了的时候，感知每窗仍会照常发一次带视频的大请求——既烧钱又刷屏。所以所有 omni 出口共用一个进程级熔断器（`engine/omni/circuit_breaker.py`）：连续失败或窗口错误率超标就断开，期间的 omni 调用直接短路，不打网络。断开分两类，依据是错误被归为「可恢复」还是「配置类」（`engine/omni/error_classifier.py` 做映射，错误码集合与前端展示文案一一对应）——可恢复类（连不上 / 超时 / 限流等）按指数退避自动探测重连，配置类（Key 无效 / 模型不存在等）不自动探测，等用户改配置，因为再探一万次结论也一样。探测请求由 `PerceptionRunner` 的 tick 驱动、走独立的轻量通道（`engine/omni/probe.py`），探测期间感知侧的 omni 调用仍被短路，避免"正在探测却又真发了一份视频"。
+
+熔断状态对外是一份健康快照（三档 ok / warn / error + 错误码 + 下次探测倒计时），经 `admin/router.py` 的 SSE 流在状态变化时推给面板，用户也可以手动触发一次探测跳过剩余退避（带冷却，防连点打爆 provider）。倒计时与重试冷却都额外以"还剩几秒"的形式下发、前端按它走而不按快照里的绝对时刻，因为服务端与浏览器的时钟在家用部署里常对不齐。
 
 **用户「休息」暂停的持久化**：用户在 web 上「让它休息 / 唤醒」的意图会落盘到 KV（`perception/engine_state.py`，缺省视为开启，老部署 / 新装行为不变）。系统自动拉起的两条路径——开机 init 与重新授权后 restart——在 start 前先查该意图，被暂停则跳过、不自动拉起。为什么要持久化：早先暂停仅为内存态，后台一旦重启（崩溃自愈 / 手动重启 / 重新授权）就无条件把引擎拉起、继续调云端 VLM 烧 token，用户额度被静默耗光；落盘 + 开机门控根治这一静默复位。持久化只挂在「唤醒 / 让它休息」两个用户 endpoint 上，机制层的引擎启停底层方法、软停、优雅关停、切家一律不碰，显式唤醒仍必然 start。落盘失败时 endpoint fail-loud（返回 `500`、不执行启停），让用户如实感知可重试，而非静默返回成功却在重启后复位。
 
