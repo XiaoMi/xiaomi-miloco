@@ -342,6 +342,13 @@ class TaskStateMachine:
     def _handle_enter(
         self, signal: TaskSignal, topology: TaskTopology
     ) -> TransitionOutcome:
+        if topology.is_session_type and (
+            self.runtime_state(signal.task_id) is TaskRuntimeState.ON
+        ):
+            # 幂等: 多条路径同时进只执行一次边界动作。排在前提回查之前 —— 这次没有
+            # 进入可拦, 记成被前提拦下会让判定摘要和日志描述一次没发生的进入。
+            return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
+
         unmet = self._unmet_guards(topology)
         if unmet:
             # 被拦下的这次进入没有补发路径: 条件层锁存, 触发规则的 false→true 不会
@@ -358,10 +365,6 @@ class TaskStateMachine:
             # 事件型: runtime_state 恒 off, 每次进信号都执行 on_enter, 不卡死。
             self._maybe_dispatch(signal.task_id, ActionSlot.ON_ENTER, signal.payload)
             return self._done(TransitionOutcome.EVENT_FIRED, signal)
-
-        if self.runtime_state(signal.task_id) is TaskRuntimeState.ON:
-            # 幂等: 多条路径同时进只执行一次边界动作。
-            return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
         if self._exit_condition_already_true(signal, topology):
             # §5.1: 进入时退出条件已为真 → 拒绝进入。让错误表现从"开了永远不关"

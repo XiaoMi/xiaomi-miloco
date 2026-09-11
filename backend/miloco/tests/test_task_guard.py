@@ -128,6 +128,17 @@ def test_session_type_blocked_when_guard_false():
     assert h.sm.handle(_entered("s")) is TransitionOutcome.BLOCKED_BY_GUARD
 
 
+def test_live_session_repeat_enter_is_not_reported_as_blocked():
+    """已经在 on 的 task 这次没有进入可拦, 判定摘要不能说它被前提挡住。"""
+    h = Harness({"g": True})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("s")) is TransitionOutcome.ENTERED
+
+    h.satisfied["g"] = False
+
+    assert h.sm.handle(_entered("s")) is TransitionOutcome.ALREADY_IN_STATE
+
+
 def test_blocked_session_stays_off():
     h = Harness({"g": False})
     h.sm.register_task("t1", {"s": RuleDirection.SESSION, "g": RuleDirection.GUARD})
