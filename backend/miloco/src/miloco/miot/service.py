@@ -760,6 +760,11 @@ class MiotService:
                     "clearing home / camera scope fail-closed"
                 )
                 self._clear_account_scope_state()
+                # 与上面换账号那一支同一个理由：这个出口的语义就是「按换了账号
+                # 处理」。作用域清了而会话不清，等于留着上一个账号的房间名与设备名
+                # 去答新账号的话——住户问「客厅的灯开着吗」，会话拿旧家的设备名应答，
+                # 而白名单里已经一台都不剩。
+                self._schedule_agent_session_reset()
             logger.error("Failed to process Xiaomi MiOT authorization code: %s", e)
             raise MiotServiceException(
                 f"Failed to process Xiaomi MiOT authorization code: {str(e)}"

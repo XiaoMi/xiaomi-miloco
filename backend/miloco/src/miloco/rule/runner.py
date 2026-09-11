@@ -1708,7 +1708,10 @@ class RuleRunner:
         # ——复用同一个 _write_action_ledger helper(source=rule),避免两套组装逻辑漂移。
         import json as _json
 
-        from miloco.miot.service import _write_action_ledger
+        from miloco.miot.service import (
+                _refusal_ledger_reason,
+                _write_action_ledger,
+            )
 
         # 台账元组先归一好,成功/异常路径共用——SDK/网络抛异常时台账也要能看到
         # 规则当时试图设置什么值 / 什么参数(失败审计完整性)。
@@ -1765,7 +1768,17 @@ class RuleRunner:
                 action_type=_ltype,
                 did=action.did, iid=action.iid, value_json=_lvalue,
                 result_code=None, result_msg=None,
-                success=False, error=str(e), source="rule", source_id=rule_id,
+                success=False,
+                # 被拒与一般失败分开取值：留痕的原因列是事后聚类的键，不该跟着
+                # 面向住户的提示文案漂——那份文案带着命令行提示、随时会改，而服务层
+                # 那两条路写进这一列的是另一套短语，同一列两套写法会让按它筛选的人
+                # 漏掉其中一整条路。
+                error=(
+                    _refusal_ledger_reason(self._miot_proxy)
+                    if isinstance(e, MiotAuthUnavailableError)
+                    else str(e)
+                ),
+                source="rule", source_id=rule_id,
             )
             # 授权失效不逐条告警：失效是长期状态，而规则命中一次就下发一次——这条
             # 是量最大的下发路径，逐条打 ERROR 会把「什么时候失效」那一行淹掉。
