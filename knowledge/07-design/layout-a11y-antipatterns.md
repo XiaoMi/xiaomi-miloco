@@ -101,6 +101,9 @@ input:focus-visible {
 | **新建** `theme-extra.css`                                                  | 直接改 `theme.css` 文末的「业务扩展」段                                   |
 | Sidebar 用 `bg-bg-primary`(灰)                                              | 用 `bg-bg-secondary`(白)—— 违反"白 - 灰 - 白"三段式                       |
 | `outline: none` 不补 focus 替代                                             | 如果不要默认 outline,加 `class="no-focus-ring"` 或自己上 ring             |
+| 给色板 token 加斜杠透明度(`bg-brand-primary/10`、`text-error/60`)           | 用既有浅底 token(`brand-soft` 等)或实色;要「同色变暗一点」用亮度滤镜      |
+
+> **斜杠透明度对色板 token 无效**:色板 token 是裸 CSS 变量、没有 alpha 通道占位,任何带斜杠的写法**编译不出任何规则**——写了等于没写,看着像生效只是底色恰好接近。改这类问题要核构建产物里有没有编出规则,不能只看代码里写了什么。
 
 ---
 
