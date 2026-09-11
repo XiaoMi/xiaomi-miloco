@@ -21,6 +21,7 @@ from miot.storage import MIoTStorage
 _LOGGER = logging.getLogger(__name__)
 
 
+@pytest.mark.unit
 def test_urn_type_name():
     """type_name lives at URN segment[3]."""
     assert (
@@ -41,6 +42,7 @@ def test_urn_type_name():
     assert _urn_type_name("urn:miot-spec-v2:property") is None
 
 
+@pytest.mark.unit
 def test_lite_action_param_roundtrip():
     """MIoTSpecDeviceLite carries structured action input parameters."""
     lite = MIoTSpecDeviceLite(
@@ -66,6 +68,8 @@ async def test_spec(
     test_cache_path: str,
 ):
     """Test miot spec."""
+    # 不打 unit：要向云端 spec 接口取 urn 定义。同理下面的 test_spec_type 还会
+    # 往当前工作目录写 types_default.yaml。故本文件按用例打标而非模块级。
     miot_storage = MIoTStorage(root_path=test_cache_path)
 
     spec_parser = MIoTSpecParser(storage=miot_storage, lang="zh-Hans")

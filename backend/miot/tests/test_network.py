@@ -16,6 +16,9 @@ from miot.network import InterfaceStatus, MIoTNetwork, NetworkInfo
 
 _LOGGER = logging.getLogger(__name__)
 
+# 无真实网络/凭据/设备依赖 —— CI 的 `miot 单元测试` 步骤按 `-m unit` 选择。
+pytestmark = pytest.mark.unit
+
 # psutil 命名元组的最小替身，字段名与 snicaddr / snicstats 对齐。
 _Addr = namedtuple("Addr", "family address netmask broadcast ptp")
 _Stats = namedtuple("Stats", "isup duplex speed mtu flags")

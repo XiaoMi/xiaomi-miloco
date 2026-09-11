@@ -10,6 +10,9 @@ miot SDK 单元测试 — 不依赖真实设备或网络，可在 CI 中直接�
 
 import pytest
 
+# 无真实网络/凭据/设备依赖 —— CI 的 `miot 单元测试` 步骤按 `-m unit` 选择。
+pytestmark = pytest.mark.unit
+
 # ─── error ───────────────────────────────────────────────────────────────────
 from miot.error import MIoTError, MIoTErrorCode
 

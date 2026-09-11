@@ -25,6 +25,19 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _safe_log(value) -> str:
+    """去 CR/LF 防 log injection (CodeQL py/log-injection)。
+
+    凡是来自请求/原生的值都要过一遍,不分类型——``channel`` 声明成 int 也照样被
+    报,污点还会传播;CodeQL 在 PR 上只对改动行报警。与 miot/router.py /
+    schedule/router.py / perception/events_service.py 的同名函数同款,本文件
+    不能反向 import router(router imports ws),故按既有惯例放本文件一份。
+    """
+    if value is None:
+        return "None"
+    return str(value).replace("\r", "").replace("\n", " ")
+
+
 class NalClipRecorder:
     """One-shot in-memory BGR → mp4 recorder (class name kept for API stability).
 
@@ -330,6 +343,83 @@ class MIoTVideoStreamManager:
             "Start video stream (transcode), %s.%d reg_id=%d",
             camera_id, channel, reg_id,
         )
+
+    async def resubscribe_camera(self, camera_id: str) -> None:
+        """native 会话重建后，把该相机仍有订阅方的通道重新注册到新实例上。
+
+        ``MiotProxy.reconnect_camera`` 救静默相机时会 destroy 旧 native 实例
+        （``mi_camera_free``），旧实例上的解码回调随之全部消失、新实例回调表是空的，
+        本层持有的 ``_camera_reg_id`` 变成指向已释放实例的死 id。**四个**向原生实例注册
+        流的消费方里只有感知适配器有兜底（同一轮 sync 的 connect_device 会补注册），
+        另三个没有：
+
+        - watch 直播：要等 15s 失流看门狗踢前端重连才恢复，住户看到 15~45s 冻结，
+          而这恰好发生在相机出问题、住户正盯着它的时刻；
+        - ``record_clip``：录像器只会等到 ``recorder.wait`` 超时，API 返回 504，
+          且这条路径没有客户端看门狗兜底；
+        - ``/ws/audio_stream`` 的原始音频：由 :class:`MIoTAudioStreamManager` 单独维护
+          一张连接表，不在本方法遍历的 ``_camera_reg_id`` 里 —— 见那边的
+          ``resubscribe_camera``。
+
+        所以由重建方（``camera_adapter._reconnect_stalled``）显式调用本方法补注册。
+
+        旧 reg_id 直接丢弃、**不调** ``stop_video_stream``：reg_id 只在实例内有效，
+        旧实例已释放，拿旧 id 去新实例上注销要么报错、要么误删别人的订阅——后者是
+        实打实会发生的：``_next_reg_id`` 每个新实例都从 1 重新发号
+        （``camera.py`` ``_MIoTCamera.__init__``），直播与感知注册进同一个
+        ``decode_video_frame.{channel}`` 字典，而 unregister 只按号码 pop、不校验归属。
+
+        同理，补注册失败的两条分支必须把 reg_id 显式写成 ``-1``：本层此刻在新实例上
+        一个注册都没有，没有任何东西需要注销。留着旧号码，等订阅方离开时
+        ``_teardown_if_idle`` 只判 ``reg_id >= 0`` 就把死号送去注销，pop 掉的会是
+        感知在新实例上拿到的同号回调——住户关掉直播页后这台相机的感知彻底零帧，
+        且要等静默检测的 5min 重建冷却过去才自愈。
+        键本身保留不 pop：``resubscribe_camera`` 靠遍历 ``_camera_reg_id`` 的键决定补
+        哪些通道，pop 掉会连带丢掉「下次重建还要补这一路」的线索；而只要订阅方还在，
+        ``_ensure_sdk_subscription`` 的两个调用点都以 ``not _has_subscribers`` 为闸门，
+        不会因为这个 ``-1`` 被重复触发。
+
+        编码器与 ``_camera_seen_keyframe`` 刻意不动：``H264LiveEncoder`` 是本层自己的
+        libx264，与 native 实例无关，重建前后编码流是连续的——清掉 keyframe 标记只会
+        让已在播的前端白等一个 GOP。
+        """
+        for camera_tag in list(self._camera_reg_id):
+            did, _, channel_str = camera_tag.rpartition(".")
+            if did != camera_id:
+                continue
+            try:
+                channel = int(channel_str)
+            except ValueError:  # pragma: no cover - camera_tag 恒为 did.channel
+                continue
+            async with self._lock_for(camera_tag):
+                # 取锁期间订阅方可能已全部离开（_teardown_if_idle 清了 reg_id），
+                # 那就不该在新实例上白开一路流、白占相机的并发流名额。
+                if camera_tag not in self._camera_reg_id or not self._has_subscribers(
+                    camera_tag
+                ):
+                    continue
+                try:
+                    reg_id = await manager.miot_service.start_video_stream(
+                        camera_id=did,
+                        channel=channel,
+                        callback=self.__video_stream_callback,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.error("Resubscribe after rebuild failed, %s: %s",
+                                 camera_tag, e)
+                    self._camera_reg_id[camera_tag] = -1
+                    continue
+                if reg_id < 0:
+                    logger.error(
+                        "Resubscribe after rebuild rejected by SDK, %s", camera_tag
+                    )
+                    self._camera_reg_id[camera_tag] = -1
+                    continue
+                self._camera_reg_id[camera_tag] = reg_id
+                logger.warning(
+                    "Resubscribed video stream after native rebuild, %s reg_id=%d",
+                    camera_tag, reg_id,
+                )
 
     async def _teardown_if_idle(
         self, camera_id: str, channel: int, camera_tag: str
@@ -663,12 +753,38 @@ class MIoTAudioStreamManager:
     _camera_connect_map: dict[str, dict[str, OrderedDict[str, WebSocket]]]
     _camera_connect_id: int
     _camera_init_done: set
+    _camera_locks: dict[str, asyncio.Lock]
 
     def __init__(self):
         self._camera_connect_map = {}
         self._camera_connect_id = 0
         self._camera_init_done = set()
+        self._camera_locks = {}
         logger.info("Init MIoT Audio WS Manager")
+
+    def _lock_for(self, camera_tag: str) -> asyncio.Lock:
+        """Get-or-create the asyncio.Lock for this camera_tag.
+
+        ``dict.setdefault`` is atomic under the asyncio single-thread model
+        so no separate guard is needed for the lookup itself.
+        与视频侧同款：把「连接表检查 + start/stop」按相机串行化，否则
+        resubscribe_camera 查完表非空后，close_connection 可在其 start 的
+        await 期间清表停流，留下无订阅者的幽灵拉流（拾音关的相机没有帧、
+        回调自愈不触发，会一直占相机的并发流名额）。
+        """
+        return self._camera_locks.setdefault(camera_tag, asyncio.Lock())
+
+    def _all_websockets(self, camera_tag: str) -> list[WebSocket]:
+        """快照当前订阅方，避免遍历实时字典时被 close_connection 并发改表。
+
+        与视频侧同款：帧回调不申请 per-camera 锁（否则每帧都要等起停流的
+        await），改用快照免疫并发改表。快照后已断开的 ws 发送失败由调用方的
+        try 吞掉，清理由 close_connection 负责。
+        """
+        out: list[WebSocket] = []
+        for conn in self._camera_connect_map.get(camera_tag, {}).values():
+            out.extend(conn.values())
+        return out
 
     async def new_connection(
         self,
@@ -680,58 +796,121 @@ class MIoTAudioStreamManager:
     ) -> str:
         """New audio stream connection."""
         camera_tag = f"{camera_id}.{channel}"
-        if (
-            camera_tag not in self._camera_connect_map
-            or not self._camera_connect_map[camera_tag]
-        ):
-            self._camera_connect_map[camera_tag] = {}
-            await manager.miot_service.start_audio_stream(
-                camera_id=camera_id,
-                channel=channel,
-                callback=self.__audio_stream_callback,
-            )
-            logger.info("Start audio stream, %s.%d", camera_id, channel)
-        user_tag = f"{user_name}.{token_hash}"
-        self._camera_connect_map[camera_tag].setdefault(user_tag, OrderedDict())
-        connection_id = str(self._camera_connect_id)
-        self._camera_connect_id += 1
-        self._camera_connect_map[camera_tag][user_tag][connection_id] = websocket
-        if (
-            len(self._camera_connect_map[camera_tag][user_tag])
-            > self._CAMERA_CONNECT_COUNT_MAX
-        ):
-            logger.warning(
-                "Too many audio connections, %s.%d, %s, remove first",
-                camera_id,
-                channel,
-                user_tag,
-            )
-            _, ws = self._camera_connect_map[camera_tag][user_tag].popitem(last=False)
-            try:
-                if ws.client_state == WebSocketState.CONNECTED:
-                    await ws.close()
-            except Exception as err:
-                logger.error("WebSocket close error: %s", err)
-        # Send init only if codec is already known (first frame already arrived)
-        if camera_tag in self._camera_init_done:
-            codec = manager.miot_service.get_audio_codec(camera_id, channel)
-            await websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "init",
-                        "codec": codec,
-                        "sampleRate": self._SAMPLERATE_MAP.get(codec, 48000),
-                        "numberOfChannels": 1,
-                    }
+        async with self._lock_for(camera_tag):
+            if (
+                camera_tag not in self._camera_connect_map
+                or not self._camera_connect_map[camera_tag]
+            ):
+                self._camera_connect_map[camera_tag] = {}
+                await manager.miot_service.start_audio_stream(
+                    camera_id=camera_id,
+                    channel=channel,
+                    callback=self.__audio_stream_callback,
                 )
+                logger.info(
+                    "Start audio stream, %s.%s",
+                    _safe_log(camera_id),
+                    _safe_log(channel),
+                )
+            user_tag = f"{user_name}.{token_hash}"
+            self._camera_connect_map[camera_tag].setdefault(user_tag, OrderedDict())
+            connection_id = str(self._camera_connect_id)
+            self._camera_connect_id += 1
+            self._camera_connect_map[camera_tag][user_tag][connection_id] = websocket
+            if (
+                len(self._camera_connect_map[camera_tag][user_tag])
+                > self._CAMERA_CONNECT_COUNT_MAX
+            ):
+                logger.warning(
+                    "Too many audio connections, %s.%s, %s, remove first",
+                    _safe_log(camera_id),
+                    _safe_log(channel),
+                    _safe_log(user_tag),
+                )
+                _, ws = self._camera_connect_map[camera_tag][user_tag].popitem(
+                    last=False
+                )
+                try:
+                    if ws.client_state == WebSocketState.CONNECTED:
+                        await ws.close()
+                except Exception as err:
+                    logger.error("WebSocket close error: %s", err)
+            # Send init only if codec is already known (first frame already arrived)
+            if camera_tag in self._camera_init_done:
+                codec = manager.miot_service.get_audio_codec(camera_id, channel)
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "init",
+                            "codec": codec,
+                            "sampleRate": self._SAMPLERATE_MAP.get(codec, 48000),
+                            "numberOfChannels": 1,
+                        }
+                    )
+                )
+            logger.info(
+                "New audio stream connection, %s, %s, %s",
+                _safe_log(camera_tag),
+                _safe_log(user_tag),
+                _safe_log(connection_id),
             )
-        logger.info(
-            "New audio stream connection, %s, %s, %s",
-            camera_tag,
-            user_tag,
-            connection_id,
-        )
-        return connection_id
+            return connection_id
+
+    async def resubscribe_camera(self, camera_id: str) -> None:
+        """native 会话重建后，把该相机仍有 WS 订阅方的通道重新注册到新实例上。
+
+        与视频侧同因（旧实例 ``mi_camera_free`` 后回调全部消失），但音频侧更隐蔽：
+        「要不要向原生注册」的判据是**连接表空不空**（见 ``new_connection``），重建期间
+        客户端还挂着 ⇒ 表非空 ⇒ 连后来新接进来的订阅方也不会重新触发注册。于是这条
+        通道上的音频**永久静音**，直到该通道最后一个连接断开（``close_connection`` 才
+        ``stop_audio_stream`` 并摘掉 tag）才会重新开一路。视频有 15s 失流看门狗、感知有
+        同轮 sync，音频两个都没有：首帧看门狗只挂在视频路由上，音频路由没有看门狗，
+        服务端也不会察觉。
+
+        音频侧没有 reg_id（``register_raw_audio_async`` 用 ``raw_audio.{channel}``
+        单槽、``multi_reg=False``），所以重新注册就是覆盖，既不会泄漏也没有视频侧那种
+        「拿死 id 误删别人回调」的风险；旧注册随旧实例一起释放，不调 ``stop_audio_stream``。
+
+        必须清 ``_camera_init_done``：codec 是 ``CameraVisionHandler`` 上按通道缓存的
+        （``_detecting_wrapper`` 在首帧探测），重建后 handler 是全新的、缓存为 None。
+        不清的话中途接入的客户端会拿到 ``codec: null`` 的 init。代价是已连客户端会在
+        重建后的首帧再收到一条 init —— 原生会话确实换了、codec 也重新探测过，重发是
+        合理的。
+
+        本仓当前没有前端连 ``/ws/audio_stream``（只有 watch.html 连视频），所以住户此刻
+        观察不到这条故障；但它是带鉴权、正常注册在 FastAPI 上的对外路由。
+        """
+        for camera_tag in list(self._camera_connect_map):
+            did, _, channel_str = camera_tag.rpartition(".")
+            if did != camera_id:
+                continue
+            try:
+                channel = int(channel_str)
+            except ValueError:  # pragma: no cover - camera_tag 恒为 did.channel
+                continue
+            async with self._lock_for(camera_tag):
+                # 锁内复核连接表（快照后 close_connection 可能已清空它）：表为空
+                # 要么是 new_connection 正卡在注册那个 await 上（它自己会注册到
+                # 新实例），要么这一路已经没人听，都不该白开一路流。
+                if not self._camera_connect_map.get(camera_tag):
+                    continue
+                try:
+                    await manager.miot_service.start_audio_stream(
+                        camera_id=did,
+                        channel=channel,
+                        callback=self.__audio_stream_callback,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.error(
+                        "Audio resubscribe after rebuild failed, %s: %s",
+                        camera_tag,
+                        e,
+                    )
+                    continue
+                self._camera_init_done.discard(camera_tag)
+                logger.warning(
+                    "Resubscribed audio stream after native rebuild, %s", camera_tag
+                )
 
     async def close_connection(
         self, user_name: str, token_hash: str, camera_id: str, channel: int, cid: str
@@ -739,28 +918,36 @@ class MIoTAudioStreamManager:
         """Close audio stream connection."""
         camera_tag = f"{camera_id}.{channel}"
         user_tag = f"{user_name}.{token_hash}"
-        if (
-            camera_tag not in self._camera_connect_map
-            or user_tag not in self._camera_connect_map[camera_tag]
-            or cid not in self._camera_connect_map[camera_tag][user_tag]
-        ):
-            return
-        logger.info(
-            "Close audio stream connection, %s, %s, %s", camera_tag, user_tag, cid
-        )
-        try:
-            ws = self._camera_connect_map[camera_tag][user_tag].pop(cid)
-            if ws.client_state == WebSocketState.CONNECTED:
-                await ws.close()
-        except Exception as err:
-            logger.error("WebSocket close error: %s", err)
-        if len(self._camera_connect_map[camera_tag][user_tag]) == 0:
-            self._camera_connect_map[camera_tag].pop(user_tag, None)
-        if len(self._camera_connect_map[camera_tag]) == 0:
-            await manager.miot_service.stop_audio_stream(camera_id, channel)
-            self._camera_connect_map.pop(camera_tag)
-            self._camera_init_done.discard(camera_tag)
-            logger.info("No connection, stop audio stream, %s.%d", camera_id, channel)
+        async with self._lock_for(camera_tag):
+            if (
+                camera_tag not in self._camera_connect_map
+                or user_tag not in self._camera_connect_map[camera_tag]
+                or cid not in self._camera_connect_map[camera_tag][user_tag]
+            ):
+                return
+            logger.info(
+                "Close audio stream connection, %s, %s, %s",
+                _safe_log(camera_tag),
+                _safe_log(user_tag),
+                _safe_log(cid),
+            )
+            try:
+                ws = self._camera_connect_map[camera_tag][user_tag].pop(cid)
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.close()
+            except Exception as err:
+                logger.error("WebSocket close error: %s", err)
+            if len(self._camera_connect_map[camera_tag][user_tag]) == 0:
+                self._camera_connect_map[camera_tag].pop(user_tag, None)
+            if len(self._camera_connect_map[camera_tag]) == 0:
+                await manager.miot_service.stop_audio_stream(camera_id, channel)
+                self._camera_connect_map.pop(camera_tag)
+                self._camera_init_done.discard(camera_tag)
+                logger.info(
+                    "No connection, stop audio stream, %s.%s",
+                    _safe_log(camera_id),
+                    _safe_log(channel),
+                )
 
     async def __audio_stream_callback(
         self, did: str, data: bytes, ts: int, seq: int, channel: int
@@ -769,9 +956,20 @@ class MIoTAudioStreamManager:
 
         camera_tag = f"{did}.{channel}"
         if camera_tag not in self._camera_connect_map:
-            logger.error("No connection, %s.%d", did, channel)
-            await manager.miot_service.stop_audio_stream(did, channel)
-            return
+            # 这条自愈 stop 与 new/close 是同一个「查表 → await stop」形态，也要
+            # 原子化：check 与 stop 之间若 new_connection 刚开好流并放入订阅方，
+            # 这里的 stop 会把新流杀掉 ⇒ 订阅方永久静音（帧不再来、回调不再触发）。
+            # 回调整体不拿锁是刻意的——帧路径每帧都要等起停流的 await；但这支只在
+            # 「没人听」时走、频次极低，拿锁无死锁风险：new/close 持锁只等自己的
+            # start/stop await，从不等回调。
+            async with self._lock_for(camera_tag):
+                if camera_tag not in self._camera_connect_map:
+                    logger.error(
+                        "No connection, %s.%s", _safe_log(did), _safe_log(channel)
+                    )
+                    await manager.miot_service.stop_audio_stream(did, channel)
+                    return
+            # 锁内复核发现表又非空（new_connection 刚开好流）→ 落到下面正常发送
         # On first frame: codec is now known, send init to all connected websockets
         if camera_tag not in self._camera_init_done:
             codec = manager.miot_service.get_audio_codec(did, channel)
@@ -790,18 +988,19 @@ class MIoTAudioStreamManager:
                     camera_tag,
                     codec,
                 )
-                for conn in self._camera_connect_map[camera_tag].values():
-                    for ws in conn.values():
-                        try:
-                            await ws.send_text(init_msg)
-                        except Exception as err:
-                            logger.error("Audio init send error: %s", err)
-        for conn in self._camera_connect_map[camera_tag].values():
-            for ws in conn.values():
-                try:
-                    await ws.send_bytes(data)
-                except Exception as err:
-                    logger.error("Audio WebSocket send error: %s", err)
+                # 置位保持在发送前：检查与置位之间无 await，不会被并发帧回调重入
+                # ⇒ 不会重复发 init；而下面的发送走快照、不会抛改表类异常，置位
+                # 提前也不会再造成「幸存订阅方拿不到 init」。
+                for ws in self._all_websockets(camera_tag):
+                    try:
+                        await ws.send_text(init_msg)
+                    except Exception as err:
+                        logger.error("Audio init send error: %s", err)
+        for ws in self._all_websockets(camera_tag):
+            try:
+                await ws.send_bytes(data)
+            except Exception as err:
+                logger.error("Audio WebSocket send error: %s", err)
 
 
 miot_audio_stream_manager = MIoTAudioStreamManager()
