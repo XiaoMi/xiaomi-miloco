@@ -20,6 +20,7 @@ import type {
   MemorySeries,
   MemorySnapshot,
   MonitorMeta,
+  PerceptionLogResult,
   PerceptionCamera,
   PerfBucket,
   PerfDropPoint,
@@ -343,6 +344,15 @@ export async function listActivity(
 ): Promise<ActivityEvent[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListActivity(opts);
+}
+
+/** 原始视觉感知历史；与 Agent 增量 cursor 无关。 */
+export async function listPerceptionLogs(
+  homeId?: HomeId,
+  opts?: { since?: number; before?: number },
+): Promise<PerceptionLogResult> {
+  if (!isPrimary(homeId)) return { logs: [], hasMore: false };
+  return impl.realListPerceptionLogs(opts);
 }
 
 /** 事件 clip mp4 URL,含 ?token=... query 鉴权(<video> 无法设 Authorization). */

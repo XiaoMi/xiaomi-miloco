@@ -79,6 +79,16 @@ class TestPerceptionRepoQuery:
         logs, count = repo.query(limit=2)
         assert count == 2
 
+    def test_limit_returns_latest_rows_in_ascending_order(self, repo):
+        base = int(time.time() * 1000)
+        for i in range(5):
+            repo.append(_make_entry(base + i * 1000, {"cam1": f"scene {i}"}))
+
+        logs, count = repo.query(limit=2)
+
+        assert count == 2
+        assert [log["d"]["cam1"] for log in logs] == ["scene 3", "scene 4"]
+
     def test_after_ms_filter(self, repo):
         base = int(time.time() * 1000)
         for i in range(5):

@@ -15,6 +15,7 @@ import i18n from "@/i18n";
 import { ApiError } from "@/api/client";
 import {
   realListActivity,
+  realListPerceptionLogs,
   realListDevices,
   realGetUsageStats,
   realGetOmniConfig,
@@ -197,6 +198,76 @@ describe("realListActivity — /api/events 契约", () => {
     expect(calls[0]).toContain("before=1780999999999");
     expect(calls[0]).toContain("limit=100");
     expect(calls[0]).toContain("offset=50");
+  });
+});
+
+describe("realListPerceptionLogs — /api/perception/logs 契约", () => {
+  it("映射视觉描述、过滤空记录，并按时间倒序返回", async () => {
+    mockFetchByUrl({
+      "/api/perception/logs": {
+        code: 0,
+        message: "ok",
+        data: {
+          logs: [
+            { id: "p1", t: "2026-09-10T08:01:02+08:00", d: { living_room: "猫咪在沙发上休息" } },
+            { id: "p-empty", t: "2026-09-10T08:02:02+08:00", d: {} },
+            { id: "p2", t: "2026-09-10T08:03:02+08:00", d: { balcony: "猫咪走过阳台" } },
+          ],
+          count: 3,
+          total_inferences: 3,
+        },
+      },
+    });
+
+    const result = await realListPerceptionLogs();
+    expect(result.logs.map((log) => log.id)).toEqual(["p2", "p1"]);
+    expect(result.logs[0]).toMatchObject({
+      descriptions: { balcony: "猫咪走过阳台" },
+      timestamp: Date.parse("2026-09-10T08:03:02+08:00"),
+    });
+    expect(result.hasMore).toBe(false);
+    expect(result.clampedSince).toBeDefined();
+  });
+
+  it("使用 after/before ISO 参数读取选定时间窗，不使用消费游标", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      calls.push(typeof input === "string" ? input : input.toString());
+      return new Response(
+        JSON.stringify({ code: 0, message: "ok", data: { logs: [], count: 0, total_inferences: 0 } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await realListPerceptionLogs({ since: 1780000000000, before: 1780003600000 });
+    const url = new URL(calls[0], "http://localhost");
+    expect(url.pathname).toBe("/api/perception/logs");
+    expect(url.searchParams.get("after")).toBe(new Date(1779999999999).toISOString());
+    expect(url.searchParams.get("before")).toBe(new Date(1780003600000).toISOString());
+    expect(url.searchParams.get("limit")).toBe("1000");
+    expect(url.searchParams.has("cursor")).toBe(false);
+    expect(result.clampedSince).toBeUndefined();
+  });
+
+  it("未设置时间筛选时回落到最近 7 天，并保留单次查询上限", async () => {
+    const now = Date.parse("2026-09-11T10:00:00Z");
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      calls.push(typeof input === "string" ? input : input.toString());
+      return new Response(
+        JSON.stringify({ code: 0, message: "ok", data: { logs: [], count: 1000, total_inferences: 1000 } }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+
+    const result = await realListPerceptionLogs();
+    const url = new URL(calls[0], "http://localhost");
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    expect(url.searchParams.get("after")).toBe(new Date(now - sevenDaysMs - 1).toISOString());
+    expect(url.searchParams.get("limit")).toBe("1000");
+    expect(result.hasMore).toBe(true);
+    expect(result.clampedSince).toBe(now - sevenDaysMs);
   });
 });
 

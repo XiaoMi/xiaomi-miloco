@@ -91,7 +91,12 @@ def perceive_query(sources, query_text, pretty):
     help="[仅供调试] 相对时长，返回最近一段时间的日志，不读写 cursor 文件。"
          "支持 h/m/s/d 单位及组合，如 1h、30m、90s、7d、2h30m。",
 )
-@click.option("--limit", default=None, type=int, help="[仅供调试] 最大返回条数，默认无限制。")
+@click.option(
+    "--limit",
+    default=None,
+    type=int,
+    help="[仅供调试] 返回筛选窗口中最新的 N 条；默认无限制。",
+)
 @click.option("--jsonl", is_flag=True, help="JSONL 输出格式：每行输出一条 JSONL（时间: 日志JSON）。")
 @click.option("--pretty", is_flag=True)
 def perceive_logs(since, limit, jsonl, pretty):
