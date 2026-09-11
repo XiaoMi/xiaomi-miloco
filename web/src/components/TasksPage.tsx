@@ -89,6 +89,7 @@ const DIRECTION_LABEL_KEY: Record<TaskRuleDirection, string> = {
   enter: "tasks.directionEnter",
   exit: "tasks.directionExit",
   session: "tasks.directionSession",
+  guard: "tasks.directionGuard",
 };
 
 // task 的动作槽 → 展示用的行。三个槽里 *_desc（交给 Agent）和 *_actions（设备直控）

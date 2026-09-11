@@ -628,3 +628,16 @@ def test_reconfigure_exits_an_enter_exit_task_whose_exit_condition_is_true():
 
     assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
     assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+def test_both_direction_enums_carry_the_same_members():
+    """task 层与 rule 层各有一份同名不同类的 ``RuleDirection``。
+
+    只给一边加成员时 ``slot_for_edge`` 收到的字符串匹配不上任何分支, 落进尾部兜底
+    当成进入信号 —— 新方向静默变成触发器。
+    """
+    from miloco.rule.schema import RuleDirection as RuleSideDirection
+
+    assert {d.value for d in RuleDirection} == {
+        d.value for d in RuleSideDirection
+    }

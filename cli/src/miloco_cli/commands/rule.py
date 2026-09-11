@@ -266,11 +266,12 @@ def rule_iot_diagnostics(pretty):
 @click.option(
     "--direction",
     "direction_value",
-    type=click.Choice(["enter", "exit", "session"]),
+    type=click.Choice(["enter", "exit", "session", "guard"]),
     default=None,
     help=(
         "边沿如何映射成 task 的进/出：enter 条件成立就把 task 推进去；"
-        "exit 条件成立就把 task 推出来；session 进入/退出配对。"
+        "exit 条件成立就把 task 推出来；session 进入/退出配对；"
+        "guard 只当前提，同 task 的规则要进入时它必须成立，自己不触发也不配动作。"
         "不传等价于 enter"
     ),
 )
@@ -554,9 +555,9 @@ def rule_create(
 @click.option(
     "--direction",
     "direction_value",
-    type=click.Choice(["enter", "exit", "session"]),
+    type=click.Choice(["enter", "exit", "session", "guard"]),
     default=None,
-    help="变更方向：enter / exit / session",
+    help="变更方向：enter / exit / session / guard（guard 只当前提，不触发也不配动作）",
 )
 @click.option(
     "--lifecycle",
@@ -956,6 +957,7 @@ _DIRECTION_TO_MODE = {
     "enter": "event",
     "exit": "event",
     "session": "state",
+    "guard": "event",
 }
 _MODE_TO_DIRECTION = {"event": "enter", "state": "session"}
 
