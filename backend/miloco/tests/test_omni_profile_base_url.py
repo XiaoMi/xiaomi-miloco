@@ -25,8 +25,19 @@ def client(tmp_path, monkeypatch):
     from miloco.config import reset_settings
 
     reset_settings()
+
+    # 验证记录读写要用到 manager.kv_repo;端到端测试只挂 router、不过 lifespan,
+    # manager 单例的 _kv_repo 平时由 Manager.initialize() 灌注,这里补齐一份绑定到
+    # 本用例 MILOCO_HOME 的 KVRepo,避免走到验证记录相关端点时 AttributeError。
+    import miloco.database.connector as _connector_module
+    from miloco.admin.router import manager as _manager
     from miloco.admin.router import router
+    from miloco.database.kv_repo import KVRepo as _KVRepo
     from miloco.middleware import verify_token
+
+    monkeypatch.setattr(_connector_module, "db_connector", None)
+    _connector_module.init_database()
+    monkeypatch.setattr(_manager, "_kv_repo", _KVRepo(), raising=False)
 
     app = FastAPI()
     app.include_router(router, prefix="/api")

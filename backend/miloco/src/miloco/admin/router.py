@@ -7,6 +7,8 @@ System status check interface
 """
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -25,6 +27,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from miloco.admin import log_pack as _log_pack_mod
 from miloco.config import get_settings
+from miloco.database.kv_repo import OmniConfigKeys, SystemConfigKeys
 from miloco.database.token_usage_repo import get_token_usage_repo
 from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
@@ -34,6 +37,7 @@ from miloco.rule.schema import RuleDirection
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
 from miloco.utils.paths import miloco_home
+from miloco.utils.time_utils import now_ms
 
 logger = logging.getLogger(name=__name__)
 
@@ -997,6 +1001,125 @@ def _active_display_label() -> str:
     return m.label or f"{m.model} @ {m.base_url}"
 
 
+def _omni_fingerprint(model: str, base_url: str, api_key: str) -> str:
+    """model + base_url + api_key 拼接后,以 per-install 随机盐(设备 UUID)做 HMAC-SHA256,
+    取前 16 位十六进制,用于判断验证记录是否仍对应当前配置(三者任一变过,指纹即变,
+    旧结论作废)。api_key 只入指纹、不落库明文。
+
+    盐取自 SystemConfigKeys.DEVICE_UUID_KEY(每台部署各自随机生成、不外泄),故摘要
+    无法被离线暴力校验 api_key 猜测——不同安装同一份 model/base_url/api_key 会算出
+    不同摘要。代价:老摘要(裸 sha256、无盐)在升级后一律对不上,已有验证记录全部
+    失效、界面回落到「○ 未验证」,需用户重测一遍;不为此加迁移逻辑。
+
+    model / base_url 先按落盘口径归一化(strip、base_url 再 rstrip("/")),否则同一份配置
+    因尾斜杠等表述差异被判成"变了",记录白记。字段间以 \\x00 分隔,避免 model 与 base_url
+    边界处的拼接歧义造成指纹碰撞。"""
+    model = model.strip()
+    base_url = base_url.strip().rstrip("/")
+    salt = manager.kv_repo.get(SystemConfigKeys.DEVICE_UUID_KEY) or ""
+    return hmac.new(
+        salt.encode(), f"{model}\x00{base_url}\x00{api_key}".encode(), hashlib.sha256
+    ).hexdigest()[:16]
+
+
+def _log_safe(s: str) -> str:
+    """日志里回显用户可控字符串前先压掉换行/回车,防伪造日志行(CodeQL py/log-injection)。"""
+    return s.replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _load_omni_verified() -> dict:
+    """读 OmniConfigKeys.LAST_VERIFIED_KEY,{label: {at_ms, ok, code, message,
+    latency_ms, fingerprint}}。解析失败按空 dict 处理。"""
+    raw = manager.kv_repo.get(OmniConfigKeys.LAST_VERIFIED_KEY) or "{}"
+    try:
+        value = json.loads(raw)
+        if isinstance(value, dict):
+            return value
+    except json.JSONDecodeError:
+        # 脏数据(外部写入 / 手改库)按「无记录」处理:全部标记退回 ○ 未验证,
+        # 比让 GET /omni-config 500 掉整张卡片好。但必须留日志 —— 否则现场
+        # 只剩「测过的档案集体变回未测试」,无从定位是库里那块 JSON 坏了。
+        logger.warning(
+            "omni 验证记录不是合法 JSON(长度 %d),按空记录处理", len(raw)
+        )
+    return {}
+
+
+def _omni_last_verified(
+    label: str, model: str, base_url: str, api_key: str, records: dict | None = None
+) -> dict | None:
+    """取 label 对应的验证记录;指纹与当前配置不一致(model/base_url/api_key 已改)则
+    视为无记录,返回 None——避免展示一条已过期配置的验证结论。
+
+    fingerprint 是 api_key 派生值、只在服务端做作废判断,不随响应下发:客户端拿到它
+    等于拿到一个可离线校验 api_key 猜测的 oracle,与 _mask_api_key 的打码意图相抵。
+    """
+    rec = (_load_omni_verified() if records is None else records).get(label)
+    if not isinstance(rec, dict) or rec.get("fingerprint") != _omni_fingerprint(
+        model, base_url, api_key
+    ):
+        return None
+    return {k: v for k, v in rec.items() if k != "fingerprint"}
+
+
+def _record_omni_verified(
+    label: str, model: str, base_url: str, api_key: str, result: dict
+) -> None:
+    """把一次 probe 结果记到该 label 名下(成功/失败都记)。"""
+    records = _load_omni_verified()
+    records[label] = {
+        "at_ms": now_ms(),
+        "ok": bool(result.get("ok")),
+        "code": result.get("code"),
+        "message": result.get("message", ""),
+        "latency_ms": result.get("latency_ms"),
+        "fingerprint": _omni_fingerprint(model, base_url, api_key),
+    }
+    if not manager.kv_repo.set(
+        OmniConfigKeys.LAST_VERIFIED_KEY, json.dumps(records, ensure_ascii=False)
+    ):
+        # 写失败时端点仍返回探活结果(结论有效),但界面标记不会变化;
+        # 不留日志的话现场只剩"点了测试没反应",无从定位。
+        logger.warning(
+            "omni 验证记录写入 kv 失败,「%s」的状态标记不会更新(ok=%s)",
+            _log_safe(label),
+            bool(result.get("ok")),
+        )
+
+
+def _delete_omni_verified(label: str) -> None:
+    """删档案时联动清掉该 label 的验证记录;deactivate(只停用、档案还在)不调此函数。"""
+    records = _load_omni_verified()
+    if records.pop(label, None) is not None:
+        if not manager.kv_repo.set(
+            OmniConfigKeys.LAST_VERIFIED_KEY, json.dumps(records, ensure_ascii=False)
+        ):
+            # 写失败时删除操作本身已生效(档案已删),但验证记录未能同步清掉,
+            # 留一条日志便于定位为何该 label 的旧验证记录仍残留。
+            logger.warning(
+                "omni 验证记录删除失败,「%s」的验证记录未能清除", _log_safe(label)
+            )
+
+
+def _rename_omni_verified(old_label: str, new_label: str) -> None:
+    """改名档案时把旧 label 的验证记录迁到新 label 下,而非留在旧键上永久滞留。
+    配置未变时指纹依旧匹配,迁移后记录对新 label 直接生效。"""
+    records = _load_omni_verified()
+    rec = records.pop(old_label, None)
+    if rec is not None:
+        records[new_label] = rec
+        if not manager.kv_repo.set(
+            OmniConfigKeys.LAST_VERIFIED_KEY, json.dumps(records, ensure_ascii=False)
+        ):
+            # 写失败时改名操作本身已生效,但验证记录未能迁移到新 label 下,
+            # 留一条日志便于定位为何新 label「%s」看不到旧验证结论。
+            logger.warning(
+                "omni 验证记录迁移失败,「%s」→「%s」的验证记录未能同步",
+                _log_safe(old_label),
+                _log_safe(new_label),
+            )
+
+
 def _full_omni_payload() -> dict:
     """{active, profiles}：均 api_key 打码;profiles 标记哪套 active(按档案名 label 匹配)。
 
@@ -1006,7 +1129,7 @@ def _full_omni_payload() -> dict:
     的困惑。故在 active 未出现在档案列表时,把它作为一条合成档案补到列表头部(标 active)。
 
     active 字段附带 health 子对象(见 spec §6.1),来自 omni 熔断器 snapshot;前端顶部横条
-    与「模型」页 active 行的连接状态列均读此字段。
+    与「模型」页 active 行的状态标记均读此字段。
     """
     from dataclasses import asdict
 
@@ -1014,6 +1137,7 @@ def _full_omni_payload() -> dict:
 
     m = get_settings().model
     active = m.omni
+    records = _load_omni_verified()
     profiles = [
         {
             "label": p.label,
@@ -1022,6 +1146,9 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(p.api_key),
             "has_key": bool(p.api_key),
             "active": p.label == active.label,
+            "last_verified": _omni_last_verified(
+                p.label, p.model, p.base_url, p.api_key, records
+            ),
         }
         for p in m.omni_profiles
     ]
@@ -1035,6 +1162,13 @@ def _full_omni_payload() -> dict:
                 "api_key_masked": _mask_api_key(active.api_key),
                 "has_key": True,
                 "active": True,
+                "last_verified": _omni_last_verified(
+                    _active_display_label(),
+                    active.model,
+                    active.base_url,
+                    active.api_key,
+                    records,
+                ),
             },
         )
     health = asdict(get_omni_circuit_breaker().snapshot())
@@ -1046,6 +1180,13 @@ def _full_omni_payload() -> dict:
             "api_key_masked": _mask_api_key(active.api_key),
             "has_key": bool(active.api_key),
             "health": health,
+            "last_verified": _omni_last_verified(
+                _active_display_label(),
+                active.model,
+                active.base_url,
+                active.api_key,
+                records,
+            ),
         },
         "profiles": profiles,
     }
@@ -1137,6 +1278,17 @@ async def put_omni_config(
             )
         result = await _probe.probe_omni(model, base_url, key)
         if not result.get("ok"):
+            # 探的三元组与该档案「已落盘」的那份完全一致时(典型:打开编辑框什么都没改
+            # 就点保存),这条失败结论说的就是已落盘配置本身 —— 必须记下来,否则界面
+            # 停在旧的绿 ●,与刚探出的 unauthorized 自相矛盾。改了任一字段则维持原
+            # 语义:新配置没落盘,不拿它的结论去盖旧记录。
+            if (
+                target is not None
+                and target["model"] == model
+                and target["base_url"].rstrip("/") == base_url
+                and target["api_key"] == key
+            ):
+                _record_omni_verified(orig or label, model, base_url, key, result)
             raise HTTPException(status_code=400, detail=result)
     if target:
         profiles[profiles.index(target)] = entry
@@ -1145,8 +1297,13 @@ async def put_omni_config(
     update: dict = {"omni_profiles": profiles}
     if will_activate:
         update["omni"] = entry
+    # 落盘成功后才写验证记录 / 迁移记录 —— preflight 失败时上面已提前 raise,不会走到这里,
+    # 档案配置也就没被换成那份没落盘的新配置,kv 里原本有效的记录自然不受影响。
     update_shared_config(model=update)
+    if orig and orig != label:
+        _rename_omni_verified(orig, label)
     if will_activate:
+        _record_omni_verified(label, model, base_url, key, result)
         # preflight 通过 = 新配置已验可用,主动把熔断状态清掉。之前 OPEN_CONFIG (bad_key
         # 之类) 时 before_call 短路一切,omni_client 里的 _maybe_reset_breaker_on_config_change
         # 只在真正调 omni 时才触发,永远等不到,用户改完 key 仍要手动点 retry 才恢复。
@@ -1176,6 +1333,7 @@ async def activate_omni_config(
                     detail={"code": "no_key", "message": "未配置 API Key"},
                 )
             result = await _probe.probe_omni(p.model, p.base_url, p.api_key)
+            _record_omni_verified(p.label, p.model, p.base_url, p.api_key, result)
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result)
             update_shared_config(
@@ -1240,6 +1398,7 @@ async def delete_omni_config(
         # 删当前生效模型 → 当前生效配置重置为出厂未配态(MiMo 默认 + 空 key)。
         update["omni"] = OmniModelSettings().model_dump()
     update_shared_config(model=update)
+    _delete_omni_verified(label)
     if was_active:
         await _soft_stop_best_effort("删除")
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
@@ -1286,6 +1445,8 @@ async def test_omni_config(
     极简 chat 真正验证该模型可用；非 OpenAI 兼容族（Gemini 等原生协议）没有等价 GET /models
     预检语义，直接走 adapter 化的 chat 探测。消耗极少量 token，不计入 miloco 用量统计。
     返回 {ok, code, status, latency_ms, message}。"""
+    from miloco.perception.engine.omni.omni_client import resolve_omni_api_key
+
     omni = get_settings().model.omni
     model = (body.model or omni.model).strip()
     base_url = (body.base_url or omni.base_url).strip()
@@ -1303,27 +1464,68 @@ async def test_omni_config(
             data={"ok": False, "code": "no_key", "message": "未配置 API Key"},
         )
     result = await _probe.probe_omni(model, base_url, api_key)
+
+    # 本次实际探测的三元组(model/base_url/api_key)与当前生效配置 / 某套已存档案精确匹配,
+    # 才把结果记到那个真实 label 名下;匹配不到(测的是未保存的新配置,或改了字段后没存的
+    # 档案草稿)就不写——避免探测结果被错记到不相干档案上、抹掉它原本的验证状态。
+    #
+    # body.label 非空时优先用它落键(用户点的就是这一行):三元组只用来确认该 label
+    # 已落盘的配置确实等于本次测的配置,不等就不写——否则多个档案共用完全相同的
+    # model+base_url+api_key 时,原逻辑的"遍历 profiles 找首个三元组匹配"永远只命中
+    # 列表里排第一的那个,把结果错记到别的档案名下。body.label 为空时保持原逻辑:
+    # 匹配不到就不写,且不回退 active。
+    live = get_settings().model.omni
+    live_key = resolve_omni_api_key(live.api_key)
+    tested_is_active = (
+        model == live.model
+        and base_url.rstrip("/") == live.base_url.rstrip("/")
+        and api_key == live_key
+    )
+    body_label = (body.label or "").strip()
+    if body_label:
+        matched_label = None
+        if tested_is_active and body_label == _active_display_label():
+            matched_label = body_label
+        else:
+            profile = next(
+                (p for p in get_settings().model.omni_profiles if p.label == body_label),
+                None,
+            )
+            if (
+                profile is not None
+                and profile.model == model
+                and profile.base_url.rstrip("/") == base_url.rstrip("/")
+                and profile.api_key == api_key
+            ):
+                matched_label = body_label
+    elif tested_is_active:
+        matched_label = _active_display_label()
+    else:
+        matched_label = next(
+            (
+                p.label
+                for p in get_settings().model.omni_profiles
+                if p.model == model
+                and p.base_url.rstrip("/") == base_url.rstrip("/")
+                and p.api_key == api_key
+            ),
+            None,
+        )
+    if matched_label is not None:
+        _record_omni_verified(matched_label, model, base_url, api_key, result)
+
     # 测通 + 三元组精确匹配当前 active + 熔断非 ok → 主动清熔断,与 put/activate/retry
     # 恢复路径对齐。护栏:测别的档案 / 未保存的新配置时不动状态。
     # OPEN_CONFIG 下 tick 不会自动探测(只探 OPEN_RECOVERABLE),不清则用户测通了红条仍不消失,
     # 只能靠横条上的「立即重试」或改配置重存才能恢复——「测通即恢复」是最直觉的路径。
-    if result.get("ok"):
+    if result.get("ok") and tested_is_active:
         from miloco.perception.engine.omni.circuit_breaker import (
             get_omni_circuit_breaker,
         )
-        from miloco.perception.engine.omni.omni_client import resolve_omni_api_key
 
-        live = get_settings().model.omni
-        live_key = resolve_omni_api_key(live.api_key)
-        tested_is_active = (
-            model == live.model
-            and base_url.rstrip("/") == live.base_url.rstrip("/")
-            and api_key == live_key
-        )
-        if tested_is_active:
-            cb = get_omni_circuit_breaker()
-            if cb.snapshot().state != "ok":
-                await cb.reset_on_config_change()
+        cb = get_omni_circuit_breaker()
+        if cb.snapshot().state != "ok":
+            await cb.reset_on_config_change()
     return NormalResponse(code=0, message="ok", data=result)
 
 

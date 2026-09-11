@@ -8,6 +8,9 @@
 环境隔离:删 MILOCO_MODEL__OMNI__* 环境变量,否则 env 优先级高会盖过 config.json。
 """
 
+import json
+import time
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -83,6 +86,19 @@ def client(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     reset_settings()
+
+    # 验证记录读写要用到 manager.kv_repo;端到端测试只挂 router、不过 lifespan,
+    # manager 单例的 _kv_repo 平时由 Manager.initialize() 灌注,这里补齐一份绑定到
+    # 本用例 MILOCO_HOME 的 KVRepo。用 monkeypatch 而非裸赋值:退出时自动还原成
+    # 进入前的值(而不是一律拍成 None,把 None 泄漏给后续用例)。
+    import miloco.database.connector as _connector_module
+    from miloco.admin.router import manager as _manager
+    from miloco.database.kv_repo import KVRepo as _KVRepo
+
+    monkeypatch.setattr(_connector_module, "db_connector", None)
+    _connector_module.init_database()
+    monkeypatch.setattr(_manager, "_kv_repo", _KVRepo(), raising=False)
+
     app = FastAPI()
     app.include_router(router, prefix="/api")
     yield TestClient(app)
@@ -1015,6 +1031,9 @@ def test_test_connection_ok_normalizes_base_url_trailing_slash(client):
         },
     )
     assert get_omni_circuit_breaker().snapshot().state == "ok"
+    # 指纹归一化后应与落盘时(rstrip '/')一致,读回验证记录不应因尾斜杠而失配
+    profile = next(p for p in _get(client)["profiles"] if p["label"] == "甲")
+    assert profile["last_verified"] is not None
 
 
 def test_test_connection_ok_not_matching_active_leaves_breaker(client):
@@ -1100,3 +1119,387 @@ def test_test_connection_failure_does_not_touch_breaker(client, monkeypatch, rea
 
     # 熔断仍是 error
     assert get_omni_circuit_breaker().snapshot().state == "error"
+
+
+# ─── 复现测试: 验证记录持久化的 5 个问题 ──────────────────────────────────
+
+
+def test_put_preflight_failure_does_not_clobber_existing_verified_record(
+    client, monkeypatch
+):
+    """编辑当前生效档案「甲」preflight 失败 → 400,配置整体不落盘(仍是旧值),
+    kv 里「甲」原本有效的验证记录也不该被换成那份没落盘的新配置的指纹。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    before = next(p for p in _get(client)["profiles"] if p["label"] == "甲")
+    assert before["last_verified"] is not None
+    assert before["last_verified"]["ok"] is True
+
+    async def _fail(*a, **k):
+        return {"ok": False, "code": "bad_key", "message": "unauthorized"}
+
+    monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _fail)
+
+    resp = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m2",
+            "base_url": "https://x/v1",
+            "api_key": "sk-new",
+            "original_label": "甲",
+        },
+    )
+    assert resp.status_code == 400
+
+    out = _get(client)
+    # 配置整体没落盘:active 还是旧的 m1
+    assert out["active"]["model"] == "m1"
+    after = next(p for p in out["profiles"] if p["label"] == "甲")
+    # 「甲」的验证记录不该被那份没落盘的新配置(m2)覆盖
+    assert after["last_verified"] is not None
+    assert after["last_verified"]["ok"] is True
+
+
+def test_put_preflight_failure_on_unchanged_active_profile_updates_record(
+    client, monkeypatch
+):
+    """编辑当前生效档案「甲」但一字未改就点保存,preflight 失败 → 400;此时探的
+    三元组与「甲」已落盘的那份完全一致,这条失败结论说的就是已落盘配置本身,必须
+    写进记录,不能让界面停在旧的绿 ●。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    before = next(p for p in _get(client)["profiles"] if p["label"] == "甲")
+    assert before["last_verified"]["ok"] is True
+    fp_before = before["last_verified"]["fingerprint"]
+
+    async def _fail(*a, **k):
+        return {"ok": False, "code": "bad_key", "message": "unauthorized"}
+
+    monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _fail)
+
+    resp = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "",  # 留空 = 沿用原 key,即一字未改
+            "original_label": "甲",
+        },
+    )
+    assert resp.status_code == 400
+
+    after = next(p for p in _get(client)["profiles"] if p["label"] == "甲")
+    assert after["last_verified"]["ok"] is False
+    assert after["last_verified"]["code"] == "bad_key"
+    assert after["last_verified"]["fingerprint"] == fp_before
+
+
+def test_test_connection_unsaved_new_config_does_not_touch_active_record(client):
+    """测未保存的新配置(与任何已落盘档案三元组都不匹配)不该写记录 —— 尤其不该
+    落到当前生效档案「甲」名下,清空它原本的绿态。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    before = next(p for p in _get(client)["profiles"] if p["label"] == "甲")
+    assert before["last_verified"] is not None
+
+    # 测一份完全没保存过的新配置:不传 label,三元组也跟「甲」不同
+    client.post(
+        "/api/admin/omni-config/test",
+        json={
+            "model": "m-never-saved",
+            "base_url": "https://never-saved/v1",
+            "api_key": "sk-never-saved",
+        },
+    )
+
+    after = next(p for p in _get(client)["profiles"] if p["label"] == "甲")
+    assert after["last_verified"] is not None
+    assert after["last_verified"] == before["last_verified"]
+
+
+def test_rename_migrates_verified_record(client):
+    """改名(不触发 probe 的场景)应把旧 label 的验证记录迁到新 label,而不是留在旧键
+    上永久滞留、新键读不到。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "乙",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-yi123456",
+            "activate": False,
+        },
+    )
+    # 显式按 label「乙」测试,写下「乙」名下的验证记录(非激活流程)
+    client.post(
+        "/api/admin/omni-config/test",
+        json={
+            "label": "乙",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-yi123456",
+        },
+    )
+    before = next(p for p in _get(client)["profiles"] if p["label"] == "乙")
+    assert before["last_verified"] is not None
+
+    # 改名「乙」→「乙2」,不激活(不触发 probe),配置一字节未变
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "乙2",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "original_label": "乙",
+            "activate": False,
+        },
+    )
+    out = _get(client)
+    assert not any(p["label"] == "乙" for p in out["profiles"])
+    renamed = next(p for p in out["profiles"] if p["label"] == "乙2")
+    assert renamed["last_verified"] is not None
+
+
+def test_get_omni_config_survives_non_dict_verified_record(client):
+    """kv 里某个 label 的验证记录不是 dict(脏数据/外部写入)时,GET 不该 500,
+    应按「无记录」处理。"""
+    from miloco.admin.router import manager
+    from miloco.database.kv_repo import OmniConfigKeys
+
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    manager.kv_repo.set(
+        OmniConfigKeys.LAST_VERIFIED_KEY, json.dumps({"甲": "corrupted-not-a-dict"})
+    )
+
+    resp = client.get("/api/admin/omni-config")
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    after = next(p for p in data["profiles"] if p["label"] == "甲")
+    assert after["last_verified"] is None
+
+
+def test_test_endpoint_writes_body_label_not_first_triple_match(client):
+    """review 回归:三个档案共用完全相同的 model+base_url+api_key,test 端点带
+    body.label 精确指向"非列表里第一个"的那套 —— 结果必须记到它自己名下,
+    不能被三元组匹配抢到列表里排第一的「甲」头上。"""
+    same = {
+        "model": "m1",
+        "base_url": "https://x/v1",
+        "api_key": "sk-same-key1",
+    }
+    client.put(
+        "/api/admin/omni-config",
+        json={"label": "甲", "activate": False, **same},
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={"label": "乙", "activate": False, **same},
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={"label": "丙", "activate": False, **same},
+    )
+
+    # 先测「甲」,让它落一条真实的验证记录(带真实 at_ms)
+    r = client.post("/api/admin/omni-config/test", json={"label": "甲", **same})
+    assert r.json()["data"]["ok"] is True
+    jia_before = next(p for p in _get(client)["profiles"] if p["label"] == "甲")
+    rec_before = jia_before["last_verified"]
+    assert rec_before is not None
+
+    # 探活是打桩的,两次 client.post 之间没有真实网络往返,不显式错开时间的话
+    # 两次写入可能落在同一毫秒 —— 一旦「丙」的记录被错记到「甲」名下,只比 at_ms
+    # 会因为 ok/code/message/fingerprint 全部字节级相同而假绿,抓不到回归。
+    time.sleep(0.005)
+
+    # 再测「丙」(列表里排第三,三元组与「甲」完全相同) —— 结果应记到「丙」自己名下
+    r = client.post("/api/admin/omni-config/test", json={"label": "丙", **same})
+    assert r.json()["data"]["ok"] is True
+
+    out = _get(client)["profiles"]
+    bing = next(p for p in out if p["label"] == "丙")
+    jia_after = next(p for p in out if p["label"] == "甲")
+    assert bing["last_verified"] is not None
+    # 关键断言:「甲」的验证记录整条(ok/code/message/fingerprint/at_ms)原样未变,
+    # 没有被这次测「丙」覆盖
+    assert jia_after["last_verified"] == rec_before
+    # 且「丙」确实是新写的一条,不是复用「甲」的旧记录
+    assert bing["last_verified"]["at_ms"] > rec_before["at_ms"]
+
+
+def test_test_endpoint_blank_label_still_no_write_when_unmatched(client):
+    """回归防护:body.label 为空且三元组匹配不到任何档案 / active 时,仍然"匹配不到就
+    不写",且不回退到 active —— 守住上一轮修好的行为,防止这次改动把它带回来。"""
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-active",
+        },
+    )
+    before = next(p for p in _get(client)["profiles"] if p["label"] == "甲")
+    assert before["last_verified"] is not None
+    at_ms_before = before["last_verified"]["at_ms"]
+
+    # 不传 label,三元组也跟「甲」不同、更不是 active —— 不该落到「甲」名下
+    client.post(
+        "/api/admin/omni-config/test",
+        json={
+            "model": "m-never-saved",
+            "base_url": "https://never-saved/v1",
+            "api_key": "sk-never-saved",
+        },
+    )
+
+    after = next(p for p in _get(client)["profiles"] if p["label"] == "甲")
+    assert after["last_verified"]["at_ms"] == at_ms_before
+
+
+# ─── 删档案自动清 kv 里的验证记录(直读 kv,不只看接口返回) ──────────────────
+
+
+def test_delete_removes_verified_record_from_kv(client):
+    """删档案「甲」:接口层面 profiles 里没了不够,kv 里 LAST_VERIFIED_KEY 存的
+    原始记录也必须一并清掉,否则残留的旧验证记录会在同名档案重建后借尸还魂。"""
+    from miloco.admin.router import manager
+    from miloco.database.kv_repo import OmniConfigKeys
+
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": "sk-k111111111",
+        },
+    )  # 默认 activate=true → preflight 通过 → 落一条「甲」的验证记录
+    before = json.loads(manager.kv_repo.get(OmniConfigKeys.LAST_VERIFIED_KEY) or "{}")
+    assert "甲" in before
+
+    client.post("/api/admin/omni-config/delete", json={"label": "甲"})
+
+    after = json.loads(manager.kv_repo.get(OmniConfigKeys.LAST_VERIFIED_KEY) or "{}")
+    assert "甲" not in after
+
+
+def test_delete_synthesized_active_empty_label_also_clears_kv(client):
+    """删「空 label 的当前生效合成行」:除了 profiles 清空,kv 里按展示 label
+    (model @ base_url)存的验证记录也必须一并删掉,不留孤儿键。"""
+    from miloco.admin.router import manager
+    from miloco.config.settings import get_settings
+    from miloco.database.kv_repo import OmniConfigKeys
+
+    s = get_settings()
+    s.model.omni.label = ""
+    s.model.omni.model = "ad-hoc-model"
+    s.model.omni.base_url = "https://adhoc/v1"
+    s.model.omni.api_key = "sk-adhoc999999"
+    data = _get(client)
+    synth_label = data["profiles"][0]["label"]
+    assert synth_label == "ad-hoc-model @ https://adhoc/v1"
+
+    # 显式测一次这套合成配置,让它按展示 label 落一条验证记录
+    client.post(
+        "/api/admin/omni-config/test",
+        json={
+            "label": synth_label,
+            "model": "ad-hoc-model",
+            "base_url": "https://adhoc/v1",
+            "api_key": "sk-adhoc999999",
+        },
+    )
+    before = json.loads(manager.kv_repo.get(OmniConfigKeys.LAST_VERIFIED_KEY) or "{}")
+    assert synth_label in before
+
+    client.post("/api/admin/omni-config/delete", json={"label": synth_label})
+
+    after = json.loads(manager.kv_repo.get(OmniConfigKeys.LAST_VERIFIED_KEY) or "{}")
+    assert synth_label not in after
+
+
+def test_kv_verified_record_never_contains_api_key_plaintext(client, monkeypatch):
+    """kv 里 LAST_VERIFIED_KEY 的原始字符串不含 api_key 明文,只存 sha256 指纹(16 位十六进制)。
+    覆盖两条写入路径:PUT 激活(preflight 成功)与 activate_omni_config(哪怕 probe 失败也写)。"""
+    import re
+
+    from miloco.admin.router import manager
+    from miloco.database.kv_repo import OmniConfigKeys
+
+    secret_key = "sk-topsecretkeyabcd1234"
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "甲",
+            "model": "m1",
+            "base_url": "https://x/v1",
+            "api_key": secret_key,
+        },
+    )
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "乙",
+            "model": "m2",
+            "base_url": "https://y/v1",
+            "api_key": "sk-anothersecretkey5678",
+            "activate": False,
+        },
+    )
+
+    # activate 路径:probe 失败也要写记录(router.py 里 _record_omni_verified 在
+    # result.get("ok") 为假时依旧被调用,先于 400 抛出)
+    async def _fail(*a, **k):
+        return {"ok": False, "code": "bad_key", "message": "unauthorized"}
+
+    monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _fail)
+    client.post("/api/admin/omni-config/activate", json={"label": "乙"})
+
+    raw = manager.kv_repo.get(OmniConfigKeys.LAST_VERIFIED_KEY) or "{}"
+    assert secret_key not in raw
+    assert "sk-anothersecretkey5678" not in raw
+
+    records = json.loads(raw)
+    for rec in records.values():
+        assert re.fullmatch(r"[0-9a-f]{16}", rec["fingerprint"])
