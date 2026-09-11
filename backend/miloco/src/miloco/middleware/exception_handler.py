@@ -11,6 +11,7 @@ Provides exception handling mechanisms:
 
 import logging
 import secrets
+import sys
 from collections.abc import Callable
 from typing import get_args, get_origin
 
@@ -251,6 +252,16 @@ def _safe_symbol(value: object, *, fallback: str) -> str:
     return value
 
 
+def _safe_module_name(module_name: object, namespace: object = None) -> str:
+    if module_name == "__main__":
+        spec = namespace.get("__spec__") if isinstance(namespace, dict) else None
+        if spec is None:
+            main_module = sys.modules.get("__main__")
+            spec = getattr(main_module, "__spec__", None)
+        module_name = getattr(spec, "name", module_name)
+    return _safe_symbol(module_name, fallback="")
+
+
 def _safe_route_template(request: Request) -> str:
     route = request.scope.get("route")
     path = getattr(route, "path", None)
@@ -272,7 +283,9 @@ def _safe_traceback_locations(exc: BaseException) -> tuple[str, ...]:
         traceback = error.__traceback__
         while traceback is not None:
             frame = traceback.tb_frame
-            module_name = _safe_symbol(frame.f_globals.get("__name__"), fallback="")
+            module_name = _safe_module_name(
+                frame.f_globals.get("__name__"), frame.f_globals
+            )
             if module_name == "miloco" or module_name.startswith("miloco."):
                 function_name = _safe_symbol(
                     frame.f_code.co_name,
@@ -319,7 +332,9 @@ def _exception_chain(exc: BaseException) -> tuple[BaseException, ...]:
 def skip_traceback_location(function: Callable[..., object]) -> None:
     """Exclude one registered Miloco framework frame from error locations."""
 
-    module_name = _safe_symbol(getattr(function, "__module__", None), fallback="")
+    module_name = _safe_module_name(
+        getattr(function, "__module__", None), getattr(function, "__globals__", None)
+    )
     function_name = _safe_symbol(getattr(function, "__name__", None), fallback="")
     if (
         not (module_name == "miloco" or module_name.startswith("miloco."))

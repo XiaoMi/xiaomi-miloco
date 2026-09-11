@@ -5,6 +5,7 @@ import json
 import logging
 import re
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import cast
 
 from fastapi import FastAPI, Request, status
@@ -376,3 +377,29 @@ def test_traceback_locations_skip_registered_class_method() -> None:
 
     assert any(":business_operation:" in location for location in locations)
     assert not any(":dispatch:" in location for location in locations)
+
+
+def test_traceback_skip_resolves_python_module_main_name() -> None:
+    namespace: dict[str, object] = {
+        "__name__": "__main__",
+        "__spec__": SimpleNamespace(name="miloco.main"),
+    }
+    exec(
+        "def business_operation():\n"
+        "    raise RuntimeError('private')\n"
+        "def global_exception_middleware():\n"
+        "    business_operation()\n",
+        namespace,
+    )
+    middleware = cast(Callable[[], None], namespace["global_exception_middleware"])
+    skip_traceback_location(middleware)
+
+    try:
+        middleware()
+    except RuntimeError as exc:
+        locations = _safe_traceback_locations(exc)
+
+    assert any(":business_operation:" in location for location in locations)
+    assert not any(
+        ":global_exception_middleware:" in location for location in locations
+    )
