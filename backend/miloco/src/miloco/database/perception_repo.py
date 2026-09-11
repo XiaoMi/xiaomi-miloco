@@ -99,13 +99,15 @@ class PerceptionLogRepo:
         """Query perception logs with time filters.
 
         Args:
-            after_ms: Cursor — only return entries with timestamp > after_ms.
+            after_ms: Exclusive lower bound. Use with limit=None for forward cursor reads.
             before_ms: Upper bound — only return entries with timestamp < before_ms.
             since_ms: Absolute ms timestamp — only return entries with timestamp >= since_ms.
-            limit: Max entries to return. None means no limit.
+            limit: Return the latest N entries in the filtered window. None means no limit.
 
         Returns:
             (logs, count) where logs are dicts with "t" (ISO 8601) and "d" keys.
+            ``logs`` is always ordered oldest-first, with or without ``limit``,
+            so ``logs[-1]`` is the newest returned row.
         """
         from miloco.utils.time_utils import ms_to_iso_local
 
@@ -125,18 +127,24 @@ class PerceptionLogRepo:
                 params.append(before_ms)
 
             where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+            # limit 语义是“窗口内最新 N 条”：先按 DESC 从最新端取 N 条。
+            # 不带 limit 时仍走 ASC，保持原有增量游标查询的顺序。
+            order = "DESC" if limit is not None else "ASC"
             limit_clause = "LIMIT ?" if limit is not None else ""
             sql = f"""
                 SELECT id, timestamp, descriptions
                 FROM perception_log
                 {where}
-                ORDER BY timestamp ASC
+                ORDER BY timestamp {order}
                 {limit_clause}
             """
             if limit is not None:
                 params.append(limit)
 
             results = self.db_connector.execute_query(sql, tuple(params))
+            # 补偿上面的 DESC；对外返回顺序始终为升序。
+            if limit is not None:
+                results = list(reversed(results))
 
             logs = []
             for row in results:
