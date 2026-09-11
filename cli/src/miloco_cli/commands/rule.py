@@ -623,7 +623,7 @@ def rule_create(
     "duration_seconds",
     type=int,
     default=None,
-    help="条件需持续该时长才算成立（秒）。三个方向都生效（语义见 rule create help）",
+    help="条件需持续该时长才算成立（秒）。guard 不支持（其余方向的语义见 rule create help）",
 )
 @click.option(
     "--duration-ratio",
