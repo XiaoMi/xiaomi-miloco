@@ -72,7 +72,7 @@ _GATE_TOTAL_RE = re.compile(r"^gate_[^_]+_ms$")
 
 
 async def _run_omni_probe() -> None:
-    """OPEN_RECOVERABLE + backoff 到期时的自动探测协程。
+    """OPEN_*(RECOVERABLE backoff 到期 / CONFIG 慢周期到期)时的自动探测协程。
 
     走 mark_half_open → probe_omni(bypass before_call) → record_probe_result 三步。
     record_probe_result 会清 in-flight 位;探测本身异常也走一次失败记录,保证 in-flight
@@ -126,7 +126,7 @@ async def _run_omni_probe() -> None:
     except asyncio.CancelledError:
         # CancelledError 是 BaseException 子类,进不了 except Exception。
         # mark_half_open 后被 cancel (runner.stop / loop 关闭 / task.cancel 等) 若不复位,
-        # state 会卡在 HALF_OPEN:tick 只 arm OPEN_RECOVERABLE、before_call 短路一切、
+        # state 会卡在 HALF_OPEN:tick 只 arm OPEN_*(HALF_OPEN 不在其列)、before_call 短路一切、
         # retry_now 对 HALF_OPEN no-op → 永久卡死,只能重启进程。走一次
         # record_probe_result(fail, RECOVERABLE) 回落到 OPEN_RECOVERABLE 让 tick 接管;
         # 之后 re-raise 让 cancel 语义正确传播(task 状态标记为 cancelled)。
@@ -230,9 +230,10 @@ class PipelineProcessor:
     def drive_omni_probe(self) -> None:
         """tick 入口驱动 omni 熔断器自动探测。
 
-        三条件齐(state==OPEN_RECOVERABLE + backoff 到期 + 无 in-flight)时 fire-and-forget
-        spawn 一次 probe task;否则 sync 判断后立即返回。CLOSED 稳态开销 = 一次 sync 读,
-        可忽略。
+        三条件齐(state∈{OPEN_RECOVERABLE, OPEN_CONFIG} + 探测周期到期 + 无 in-flight)时
+        fire-and-forget spawn 一次 probe task;否则 sync 判断后立即返回。OPEN_CONFIG 走
+        固定慢周期(config_probe_interval_sec),是误判分类的逃生通道。CLOSED 稳态开销 =
+        一次 sync 读,可忽略。
 
         单飞位由熔断器内部维护(try_arm_probe 原子占位、record_probe_result 释放),
         并发 tick / 多相机 batch 场景下同一时刻只会有一个 probe in-flight。

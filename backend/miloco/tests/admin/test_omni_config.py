@@ -958,7 +958,8 @@ def _force_breaker_open_config():
 
 def test_test_connection_ok_matching_active_clears_breaker(client):
     """测通 + 三元组与当前 active 完全一致 → 熔断从 OPEN_CONFIG 回 CLOSED。
-    这是「测通即恢复」的最直觉路径,OPEN_CONFIG 下 tick 不自动探测,不清则用户困在红条上。"""
+    这是「测通即恢复」的最直觉路径,OPEN_CONFIG 下 tick 只有慢周期(默认 300s)自动探测,
+    不清则用户测通后最坏还要困在红条上一整个周期。"""
     from miloco.perception.engine.omni.circuit_breaker import (
         get_omni_circuit_breaker,
     )

@@ -156,6 +156,133 @@ async def test_open_config_refreshes_code_on_subsequent_config_error(cb):
     assert cb.snapshot().code == "not_found"
 
 
+# ─── OPEN_CONFIG 逃生通道(慢速自动探测)───────────────────────────────────────
+#
+# 以下用例守护本 PR 的核心新增:OPEN_CONFIG 不再是永久黑洞。缺了它们,谁把
+# probe_due / try_arm_probe 里的 OPEN_CONFIG 分支删掉都不会有测试变红——
+# 上方 test_try_arm_probe_false_when_open_config 仍会因"周期未到"而 pass。
+# cb fixture 未传 config_probe_interval_sec,走默认 300s。
+
+
+async def test_open_config_probe_due_after_interval(cb, frozen_time):
+    """OPEN_CONFIG 慢速自动探测:config_probe_interval_sec 到期后 probe_due 返 True。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert cb.probe_due() is False  # 刚进 OPEN_CONFIG,300s 未到
+    frozen_time.tick(301)
+    assert cb.probe_due() is True
+
+
+async def test_open_config_try_arm_probe_after_interval(cb, frozen_time):
+    """逃生通道生效:周期到期后 tick 能 arm 到探测,不再永久卡死。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    assert cb.try_arm_probe() is False
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+
+
+async def test_open_config_snapshot_shows_next_probe(cb):
+    """OPEN_CONFIG snapshot 携带 next_probe 字段,供前端消费倒计时(前端接线见 #544)。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    snap = cb.snapshot()
+    assert snap.state == "error"
+    assert snap.next_probe_at_ms is not None
+    assert snap.next_probe_in_seconds is not None
+    assert 299 <= snap.next_probe_in_seconds <= 300
+
+
+async def test_open_config_probe_fail_config_rearms_interval(cb, frozen_time):
+    """黑洞不残留:OPEN_CONFIG 到期 → 探测仍是 CONFIG 错 → 留在 OPEN_CONFIG 且重排
+    下一个慢周期;第二轮到期照样能 arm。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+    await cb.record_probe_result(False, _cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert cb.probe_in_flight() is False
+    assert cb.probe_due() is False
+    frozen_time.tick(299)
+    assert cb.probe_due() is False
+    frozen_time.tick(2)
+    assert cb.try_arm_probe() is True
+
+
+async def test_open_config_probe_success_closes(cb, frozen_time):
+    """误判分类的自愈路径:OPEN_CONFIG 到期探测成功 → CLOSED,before_call 放行。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    await cb.record_probe_result(True, None)
+    assert cb.state_for_test() == CircuitState.CLOSED
+    assert cb.snapshot().state == "ok"
+    await cb.before_call()  # 不抛
+
+
+async def test_open_config_probe_fail_recoverable_downgrades_to_backoff(cb, frozen_time):
+    """OPEN_CONFIG 到期探测遇到 RECOVERABLE 错(如网络不通):降级 OPEN_RECOVERABLE,
+    从 backoff_start 起走指数退避,不再等 300s。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    await cb.record_probe_result(False, _rec("unreachable"))
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+    snap = cb.snapshot()
+    assert snap.code == "unreachable"
+    assert snap.next_probe_in_seconds == 1.0  # backoff_start
+
+
+async def test_concurrent_config_failure_during_probe_keeps_config_interval(cb, frozen_time):
+    """探测在飞期间并发 record_failure(CONFIG) 把 state 推到 OPEN_CONFIG,随后探测以
+    RECOVERABLE 失败收尾:_grow_backoff_locked 不得跑在 OPEN_CONFIG 守卫之前,否则会把
+    刚排好的慢周期覆盖成 ~backoff_start 秒(OPEN_CONFIG 参与 probe_due 后这就是活数据)。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+    frozen_time.tick(2)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    for _ in range(3):  # 探测 await 窗口里的并发 CONFIG 失败(真 key 错)
+        await cb.record_failure(_cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    await cb.record_probe_result(False, _rec("timeout"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    snap = cb.snapshot()
+    assert snap.code == "bad_key"
+    assert 299 <= snap.next_probe_in_seconds <= 300
+
+
+async def test_half_open_from_open_config_keeps_error_ui(cb, frozen_time):
+    """OPEN_CONFIG 的慢周期探测期间横条不闪:HALF_OPEN 沿用来源态的 UI 级别(error),
+    前端“到模型页修改”入口不会每 300s 卸载又挂回。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+    assert cb.snapshot().state == "error"
+
+
+async def test_half_open_from_open_recoverable_stays_warn(cb, frozen_time):
+    """对照:从 OPEN_RECOVERABLE 进入的 HALF_OPEN 仍是 warn,行为不变。"""
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    frozen_time.tick(2)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    assert cb.snapshot().state == "warn"
+
+
 # ─── 指数退避 ───────────────────────────────────────────────────────────────
 
 
@@ -360,6 +487,8 @@ async def test_try_arm_probe_false_when_closed(cb):
 
 
 async def test_try_arm_probe_false_when_open_config(cb):
+    """刚进 OPEN_CONFIG 时 arm 不到——原因是慢速探测周期未到,**不是**
+    OPEN_CONFIG 本身阻塞 arm(周期到期后能 arm,见下方逃生通道用例)。"""
     for _ in range(3):
         await cb.record_failure(_cfg("bad_key"))
     assert cb.try_arm_probe() is False
@@ -604,3 +733,139 @@ async def test_probe_result_recoverable_fail_still_reopens_from_half_open(
     await cb.record_probe_result(False, _rec("unreachable"))
     assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
     assert cb.snapshot().code == "unreachable"
+
+
+# ─── 过期探测结果:探测在飞期间配置被重置,结果作废 (review 🟡2) ─────────────
+
+
+async def _open_config_probe_in_flight(cb, frozen_time) -> None:
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+
+
+async def test_stale_config_probe_after_reset_is_discarded(cb, frozen_time):
+    """OPEN_CONFIG(bad_key) 到期后台 arm 并读到旧 key;探测在飞的几秒内用户保存了
+    正确 key(reset_on_config_change → CLOSED)。旧探测带着 bad_key 回来不得把刚修好
+    的配置打回 OPEN_CONFIG 再锁 300s。"""
+    await _open_config_probe_in_flight(cb, frozen_time)
+    seen: list = []
+    cb.register_listener(lambda snap: seen.append(snap.state))
+
+    await cb.reset_on_config_change()
+    assert cb.state_for_test() == CircuitState.CLOSED
+
+    await cb.record_probe_result(False, _cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.CLOSED
+    snap = cb.snapshot()
+    assert snap.state == "ok"
+    assert snap.code is None
+    assert snap.next_probe_in_seconds is None
+    # 记账仍要发生:单飞位释放、last_probe_* 落点
+    assert cb.probe_in_flight() is False
+    assert snap.last_probe_result == "fail"
+    # 过期结果不触发状态广播:reset 之后 listener 只看到那一次 "ok"
+    assert seen == ["ok"]
+    await cb.before_call()  # 放行
+
+
+async def test_stale_ok_probe_after_reset_and_reopen_is_discarded(cb, frozen_time):
+    """反向:reset 后新配置的真流量又攒够失败重开(不同错误码),旧探测的“成功”迟到
+    不得把真开着的熔断合上;旧探测的“失败”也不得覆盖新错误码。"""
+    await _open_config_probe_in_flight(cb, frozen_time)
+    await cb.reset_on_config_change()
+    for _ in range(3):
+        await cb.record_failure(_cfg("not_found"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert cb.snapshot().code == "not_found"
+
+    await cb.record_probe_result(True, None)
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert cb.snapshot().code == "not_found"
+    assert cb.probe_in_flight() is False
+
+    # 单飞位已释放,新一轮探测照常可 arm(不会因过期结果卡死)
+    frozen_time.tick(301)
+    assert cb.try_arm_probe() is True
+    await cb.mark_half_open()
+    await cb.record_probe_result(False, _cfg("not_found"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+
+
+async def test_stale_retry_probe_after_reset_is_discarded(cb, frozen_time):
+    """「立即重试」发起的探测同样受代数保护:retry_now 置 in-flight 并盖代数,期间
+    走「测试连接 / 保存档案」把熔断清掉后,retry 的旧结果作废。"""
+    for _ in range(3):
+        await cb.record_failure(_cfg("bad_key"))
+    await cb.retry_now()
+    assert cb.state_for_test() == CircuitState.HALF_OPEN
+    assert cb.probe_in_flight() is True
+
+    await cb.reset_on_config_change()
+    await cb.record_probe_result(False, _cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.CLOSED
+    assert cb.snapshot().state == "ok"
+    assert cb.probe_in_flight() is False
+
+
+async def test_probe_result_without_reset_still_applies(cb, frozen_time):
+    """对照:探测在飞期间没有 CLOSED 发生,结果照常生效(代数一致)。"""
+    await _open_config_probe_in_flight(cb, frozen_time)
+    await cb.record_probe_result(True, None)
+    assert cb.state_for_test() == CircuitState.CLOSED
+
+    await _open_config_probe_in_flight(cb, frozen_time)
+    await cb.record_probe_result(False, _cfg("bad_key"))
+    assert cb.state_for_test() == CircuitState.OPEN_CONFIG
+    assert 299 <= cb.snapshot().next_probe_in_seconds <= 300
+
+
+@pytest.mark.parametrize("manual", [False, True])
+async def test_config_probe_reentry_preserves_episode_start(cb, frozen_time, monkeypatch, manual):
+    """同一轮配置故障连续探测失败,起点保留且每次续排完整慢周期。"""
+    monkeypatch.setattr(time, "time", lambda: frozen_time.now + 1000)
+    for _ in range(3):
+        await cb.record_failure(_cfg())
+    since = cb.snapshot().since_ms
+    for _ in range(2):
+        frozen_time.tick(301)
+        if manual:
+            await cb.retry_now()
+        else:
+            assert cb.try_arm_probe()
+            await cb.mark_half_open()
+        frozen_time.tick(2)
+        await cb.record_probe_result(False, _cfg())
+        assert cb.snapshot().since_ms == since
+        assert cb.snapshot().next_probe_in_seconds == 300
+
+
+async def test_new_config_episode_ignores_stale_half_open_origin(cb, frozen_time, monkeypatch):
+    """跨 CLOSED 的新故障重新计时,不读取上一轮 HALF_OPEN 的残值。"""
+    monkeypatch.setattr(time, "time", lambda: frozen_time.now + 1000)
+    for _ in range(3):
+        await cb.record_failure(_cfg())
+    old_since = cb.snapshot().since_ms
+    await cb.retry_now()
+    await cb.record_probe_result(True, None)
+    frozen_time.tick(100)
+    for _ in range(3):
+        await cb.record_failure(_cfg())
+    assert cb.snapshot().since_ms == old_since + 100_000
+
+
+async def test_recoverable_probe_to_config_starts_new_config_episode(cb, frozen_time, monkeypatch):
+    """从可恢复故障探出配置错误,配置故障起点从本次确认时计。"""
+    monkeypatch.setattr(time, "time", lambda: frozen_time.now + 1000)
+    for _ in range(3):
+        await cb.record_failure(_rec())
+    old_since = cb.snapshot().since_ms
+    frozen_time.tick(10)
+    assert cb.try_arm_probe()
+    await cb.mark_half_open()
+    await cb.record_probe_result(False, _cfg())
+    assert cb.snapshot().since_ms == old_since + 10_000
