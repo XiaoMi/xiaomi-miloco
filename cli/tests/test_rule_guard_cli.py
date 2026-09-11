@@ -68,3 +68,43 @@ def test_guard_stores_a_placeholder_mode(runner):
     _result, post = _create_guard(runner)
 
     assert post.call_args[0][1]["mode"] == "event"
+
+
+def _create_guard_with(runner, *extra):
+    with (
+        patch("miloco_cli.client.api_get", return_value=_SPEC),
+        patch("miloco_cli.client.api_post", return_value=_OK) as post,
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "rule", "create",
+                "--name", "空调开着",
+                "--task-id", "ac_on_guard",
+                "--direction", "guard",
+                "--iot-did", "d1",
+                "--iot-iid", "2.1",
+                "--iot-op", "eq",
+                "--iot-value", "true",
+                *extra,
+            ],
+        )
+    return result, post
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("--action", '{"did":"d2","siid":2,"aiid":1}'),
+        ("--action-desc", "播报"),
+        ("--on-enter-desc", "播报"),
+        ("--duration-seconds", "60"),
+    ],
+)
+def test_guard_rejects_actions_and_duration_locally(runner, extra):
+    """**断 post 没被调用** —— 服务端那份校验同样会拒, 只断退出码分不开
+    「CLI 本地拦住」和「发了请求被服务端拒」。"""
+    result, post = _create_guard_with(runner, *extra)
+
+    assert result.exit_code != 0
+    assert not post.called

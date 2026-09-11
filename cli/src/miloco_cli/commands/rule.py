@@ -431,7 +431,25 @@ def rule_create(
 
     # ---- 2. direction x action 矩阵 ----
     direction = _resolve_direction(direction_value, mode_value)
-    if direction != "session":
+    if direction == "guard":
+        # 口径同服务端 _validate_guard。拦在这里只为省掉那次往返 —— 少了这一支,
+        # guard 会落进下面那支, 而它是按 enter / exit 写的、放行 --action。
+        if (
+            actions_raw
+            or action_descs
+            or on_enter_actions_raw
+            or on_enter_desc
+            or on_exit_actions_raw
+            or on_exit_desc
+            or on_target_desc
+        ):
+            _exit_error(
+                "direction=guard must not set any action; "
+                "put them on the enter rule of the same task"
+            )
+        if duration_seconds is not None:
+            _exit_error("direction=guard must not set --duration-seconds")
+    elif direction != "session":
         # 单方向的 rule 只有一个边沿, 动作填在 --action / --action-desc 上;
         # 落 on_enter 还是 on_exit 由 direction 决定, 不用另一套 flag。
         if (
