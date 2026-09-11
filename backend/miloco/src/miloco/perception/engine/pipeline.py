@@ -555,13 +555,14 @@ async def run_batch_pipeline(
         room_timing[f"gate_video_{did}_pass"] = int(gate_timing.video_pass)
         room_timing[f"gate_audio_{did}_pass"] = int(gate_timing.audio_pass)
         room_timing[f"gate_hold_{did}_pass"] = int(gate_timing.hold_opened_window)
-        # gate 真实评估的打分 → traces_device.gate_video_score / gate_audio_energy
-        # 经 _merge_results 保留顶层"_"前缀,在 processor._publish_trace 复用。
+        # "_" 前缀留给 traces_device 有专属列的打分:_merge_results 不加 "{room}/" 前缀,
+        # 由 processor._publish_trace 逐 key 显式读。带前缀又没人读的 key 会被
+        # timing_detail 的前缀过滤丢掉,写进去等于扔掉。
         # on-demand bypass / 系统异常 fallback 路径不走这里,score 字段保持 NULL。
         room_timing[f"_gate_video_score_{did}"] = gate_timing.video_score
         room_timing[f"_gate_audio_energy_{did}"] = gate_timing.audio_energy
-        room_timing[f"_gate_speech_prob_{did}"] = gate_timing.speech_prob
-        # intra/cross 拆分 → 经 _merge_results 加 "{room}/" 前缀进 timing_detail JSON。
+        # 其余打分经 _merge_results 加 "{room}/" 前缀进 timing_detail JSON。
+        room_timing[f"gate_speech_prob_{did}"] = gate_timing.speech_prob
         room_timing[f"gate_video_intra_score_{did}"] = gate_timing.video_intra_score
         room_timing[f"gate_video_cross_score_{did}"] = gate_timing.video_cross_score
 

@@ -2041,3 +2041,31 @@ async def test_gate_passed_equals_packet_built():
                 f"[{name}] gate_passed={gate_passed} 但建包={built}"
                 " —— 整体过滤率曲线会静默偏移"
             )
+
+
+@pytest.mark.asyncio
+async def test_gate_speech_prob_reaches_timing_detail():
+    """speech_prob 不带 "_" 前缀,经 _merge_results 加 "{room}/" 前缀进 timing_detail。
+
+    带 "_" 前缀的 key 要在 processor._publish_trace 有对应读取行才有出口,
+    speech_prob 没有专属列也没有那一行,带前缀就会被静默丢弃。
+    """
+    config = PerceptionConfig()
+    config.omni.api_key = "test-key"
+    gray = _solid(100, 100, 100)
+    silent = np.zeros(16000, dtype=np.int16)
+
+    with patch(
+        "miloco.perception.engine.omni.omni.call_omni",
+        new_callable=AsyncMock,
+        return_value=MOCK_OMNI_RESPONSE,
+    ):
+        result = await run_batch_pipeline(
+            BatchedSnapshot(snapshots=[_make_snapshot("living", "cam-1", [gray] * 6, silent)]),
+            {}, config,
+        )
+
+    merged = PerceptionEngine()._merge_results(result)
+
+    assert merged.timing is not None
+    assert "living/gate_speech_prob_cam-1" in merged.timing

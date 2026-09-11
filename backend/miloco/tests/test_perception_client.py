@@ -846,3 +846,31 @@ async def test_window_duration_survives_engine_dropping_snapshots(proxy):
 
     assert result is not None
     assert result.timing["_window_duration_ms"] == 4000.0
+
+
+async def test_realtime_log_excludes_timing(proxy, caplog):
+    """realtime_perceive 日志那份 JSON 不带 timing:per-device key 按相机数展开,
+    正式消费方是 observability traces,日志里只是副本。"""
+    import logging
+
+    from miloco.perception.types import CaptionEntry
+
+    async def engine_realtime(*args, **kwargs):
+        return RealtimePerceptionResult(
+            skipped=False,
+            caption=[CaptionEntry(description="厨房区域空无一人", room_name="厨房")],
+            timing={"厨房/gate_video_1184458598_ms": 7.46},
+        )
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+
+    with caplog.at_level(logging.INFO, logger="miloco.perception.client"):
+        await proxy._realtime_perceive_impl(
+            _stub_snapshot(), [], 0, 0.0, asyncio.get_running_loop(), [],
+        )
+
+    logged = [r.getMessage() for r in caplog.records if "realtime_perceive:" in r.getMessage()]
+    assert len(logged) == 1
+    assert "gate_video_1184458598_ms" not in logged[0]
+    assert '"timing"' not in logged[0]
+    assert "厨房区域空无一人" in logged[0]

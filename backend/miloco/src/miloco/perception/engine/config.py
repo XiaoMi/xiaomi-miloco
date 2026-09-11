@@ -94,7 +94,7 @@ class GateConfig:
     speech_vad_enabled: bool = True
     # threshold=0.4 + min_chunks=3：在 82 幻觉 + 149 真实语音 clip 上实测 FP 4% / FN 5%
     # 的拐点(对话 peak 概率中位 0.998、键鼠噪声 0.10,分得很开)。残留 FP 由下游
-    # needs_response 佐证兜底。speech_prob 已落 trace,后续可据线上分布再调。
+    # needs_response 佐证兜底。speech_prob 进 traces.timing_detail,可据线上分布再调。
     speech_vad_threshold: float = 0.4  # 单帧人声概率阈(silero)
     speech_vad_min_speech_chunks: int = 3  # 需 >= 此数的 512 样本帧过阈才判有人声(抗单次咔哒尖峰)
     # visual 滞回时长(秒)。visual 最近通过过、距今 <= 此值时,本窗 visual
