@@ -9,6 +9,8 @@
     "typeCallAction": "Call action",
     "typeSceneTrigger": "Trigger scene",
     "typeUnknown": "Unknown action",
-    "limitHint": "Showing the latest 500 actions only"
+    "limitHint": "Showing the latest 500 actions only",
+    "authDegraded": "Auth expired · refused",
+    "authDegradedHint": "Mi Home authorization had already been rejected by the cloud when this command was dispatched, so it was never sent. Re-authorize before dispatching again."
   }
 }

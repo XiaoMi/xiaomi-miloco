@@ -33,6 +33,7 @@ from miloco.perception.engine.omni import probe as _probe
 from miloco.rule.schema import RuleDirection
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
+from miloco.utils.logger import log_safe
 from miloco.utils.paths import miloco_home
 
 logger = logging.getLogger(name=__name__)
@@ -51,7 +52,7 @@ async def get_system_status(current_user: str = Depends(verify_token)):
     - Perception model: whether a vision_understanding model is activated
     - Rule engine: whether running and how many rules are loaded
     """
-    logger.info("Get system status API called - User: %s", current_user)
+    logger.info("Get system status API called - User: %s", log_safe(current_user))
 
     # MiOT login status
     try:
@@ -243,12 +244,13 @@ def _write_dismissed(version: str) -> None:
     try:
         _dismiss_file().write_text(version.strip(), encoding="utf-8")
     except Exception as e:
-        logger.warning("failed to persist dismissed version %s: %s", _scrub_log(version), e)
-
-
-def _scrub_log(value: object) -> str:
-    """中和插入日志的外部值里的 CR/LF，防日志伪造/注入（CodeQL py/log-injection）。"""
-    return str(value).replace("\r", " ").replace("\n", " ")
+        # 版本串来自请求体，异常消息可能把它原样嵌回来，两个都要中和——只包前一个
+        # 等于从旁路把换行重新带回日志。
+        logger.warning(
+            "failed to persist dismissed version %s: %s",
+            log_safe(version),
+            log_safe(e),
+        )
 
 
 def _deploy_kind() -> str:
@@ -280,15 +282,15 @@ def _latest_is_newer(current: str, latest: str) -> bool:
         return Version(_norm_ver(latest)) > Version(_norm_ver(current))
     except Exception as e:
         # latest 源自 GitHub tag_name（外部可控），current 源自本地包版本——统一经
-        # _scrub_log 中和 CR/LF，与 upgrade_run/_write_dismissed 一致地闭合日志注入这一类。
-        # 异常 e 也必须 _scrub_log：packaging 的 InvalidVersion 会把原始（未净化的）版本串
+        # log_safe 中和 CR/LF，与 upgrade_run/_write_dismissed 一致地闭合日志注入这一类。
+        # 异常 e 也必须 log_safe：packaging 的 InvalidVersion 会把原始（未净化的）版本串
         # 原样嵌进消息（"Invalid version: '<latest>'"），直接打 e 等于把 latest 的 CR/LF
         # 从旁路重新带回日志、抵消上面对 latest 的净化——故一并中和。
         logger.info(
             "upgrade check: version compare failed (%s vs %s): %s",
-            _scrub_log(current),
-            _scrub_log(latest),
-            _scrub_log(e),
+            log_safe(current),
+            log_safe(latest),
+            log_safe(e),
         )
         return False
 
@@ -308,9 +310,9 @@ async def _fetch_latest_release() -> dict | None:
             return None
         return {"tag": tag, "html_url": j.get("html_url")}
     except Exception as e:  # 网络不可达 / 超时 / 解析失败 → 静默降级，不打扰用户
-        # e 亦经 _scrub_log：JSONDecodeError 等可能把响应体片段（外部数据）嵌进消息，
+        # e 亦经 log_safe：JSONDecodeError 等可能把响应体片段（外部数据）嵌进消息，
         # 与 _latest_is_newer 一致地闭合日志注入旁路。
-        logger.info("upgrade check: fetch latest release failed: %s", _scrub_log(e))
+        logger.info("upgrade check: fetch latest release failed: %s", log_safe(e))
         return None
 
 
@@ -517,7 +519,7 @@ async def upgrade_run(current_user: str = Depends(verify_token)):
         # 无进程 → 不会 racing）。
         if not launched:
             _upgrade_state["started_at"] = 0.0
-        logger.error("failed to launch upgrade process: %s", _scrub_log(e))
+        logger.error("failed to launch upgrade process: %s", log_safe(e))
         raise HTTPException(
             status_code=500, detail="failed to launch upgrade process"
         ) from e

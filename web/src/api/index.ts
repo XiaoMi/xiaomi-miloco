@@ -19,6 +19,7 @@ import type {
   ProcSeries,
   MemorySeries,
   MemorySnapshot,
+  MiotAuthorizeResult,
   MonitorMeta,
   PerceptionCamera,
   PerfBucket,
@@ -70,7 +71,7 @@ export async function bindMiot(): Promise<{ oauthUrl: string }> {
 export async function authorizeMiot(
   code: string,
   state: string,
-): Promise<void> {
+): Promise<MiotAuthorizeResult> {
   return impl.realAuthorizeMiot(code, state);
 }
 

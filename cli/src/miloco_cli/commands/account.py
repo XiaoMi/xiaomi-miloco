@@ -48,6 +48,14 @@ def _submit_authorize(code: str, state: str, pretty: bool) -> None:
     data = api_post("/api/miot/authorize", {"code": code, "state": state})
     print_result(data, pretty)
 
+    # 绑回同一个账号时后端保留了家庭与摄像头配置；这里必须跟着跳过选家流程，
+    # 否则下面的 api_put 会把刚保住的家庭白名单又覆盖掉。老后端不返回这个字段
+    # （data 为 None），取不到就按原行为走。
+    payload = data.get("data") if isinstance(data, dict) else None
+    if isinstance(payload, dict) and payload.get("scope_preserved"):
+        click.echo("\n已保留原有家庭与摄像头设置")
+        return
+
     # 登录成功后列出家庭
     try:
         homes = api_get("/api/miot/scope/homes")

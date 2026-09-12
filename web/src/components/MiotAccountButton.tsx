@@ -21,6 +21,7 @@ import { IconX } from "@/lib/icons";
 import type { HomeStatus } from "@/lib/types";
 import { forwardRef, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { miotTone } from "@/lib/miotTone";
 import { toast } from "./Toast";
 
 interface Props {
@@ -89,6 +90,20 @@ export const MiotAccountButton = forwardRef<HTMLButtonElement, Props>(
       else onBind();
     };
 
+    // 授权失效比「未绑」更需要住户注意，走 error 档。判据与状态条共用一份，
+    // 避免两处各写一遍再分头退化——其中一处曾把它门控在 bound 上。
+    const authDegraded = miotTone(miot) === "degraded";
+    const dotToneClass = authDegraded
+      ? "bg-error"
+      : miot.bound
+        ? "bg-success"
+        : "bg-warning";
+    const dotRingVar = authDegraded
+      ? "--color-error-bg"
+      : miot.bound
+        ? "--color-success-bg"
+        : "--color-warning-bg";
+
     return (
       <div ref={wrapRef} className="relative shrink-0">
         <button
@@ -131,20 +146,18 @@ export const MiotAccountButton = forwardRef<HTMLButtonElement, Props>(
               {miot.bound ? (miot.accountName?.[0] ?? "米") : "?"}
             </span>
           )}
-          {/* 右下角状态点（§3 5px + 3px 光环）*/}
+          {/* 右下角状态点（§3 5px + 3px 光环）—— 3 态。
+              授权失效时 bound 仍是 true，只看 bound 的话这里会显示绿点，
+              等于在说一切正常；这是住户在侧栏能察觉异常的唯一信号。 */}
           <span
             aria-hidden
-            className={`absolute rounded-full ${
-              miot.bound ? "bg-success" : "bg-warning"
-            }`}
+            className={`absolute rounded-full ${dotToneClass}`}
             style={{
               width: 5,
               height: 5,
               right: 0,
               bottom: 0,
-              boxShadow: miot.bound
-                ? "0 0 0 3px var(--color-bg-secondary), 0 0 0 4px var(--color-success-bg)"
-                : "0 0 0 3px var(--color-bg-secondary), 0 0 0 4px var(--color-warning-bg)",
+              boxShadow: `0 0 0 3px var(--color-bg-secondary), 0 0 0 4px var(${dotRingVar})`,
             }}
           />
         </button>
@@ -167,15 +180,42 @@ export const MiotAccountButton = forwardRef<HTMLButtonElement, Props>(
                 </div>
               )}
             </div>
+            {/* 授权失效时把状态挂在「重新绑定」这一项上——住户点开菜单本来就是
+                为了找解决办法，状态与解法同处一行，不用自己把两件事连起来。
+                账号行的 uid 保持原样：uid 是账号身份的常驻展示位，不该被会来回
+                变的临时状态占用。 */}
             <button
               type="button"
               onClick={() => {
                 setMenuOpen(false);
                 onBind();
               }}
-              className="block w-full text-left text-body px-3 py-2 text-text-primary hover:bg-bg-tertiary transition-colors"
+              className={`block w-full text-left text-body px-3 py-2 text-text-primary hover:bg-bg-tertiary transition-colors ${
+                authDegraded ? "flex items-start gap-2" : ""
+              }`}
             >
-              {t("account.rebind")}
+              {authDegraded ? (
+                <>
+                  <span
+                    aria-hidden
+                    className="shrink-0 rounded-full bg-error"
+                    style={{
+                      width: 6,
+                      height: 6,
+                      marginTop: 7,
+                      boxShadow: "0 0 0 2px var(--color-error-bg)",
+                    }}
+                  />
+                  <span className="min-w-0">
+                    <span className="block">{t("account.rebind")}</span>
+                    <span className="block text-caption text-text-tertiary">
+                      {t("account.authDegradedReason")}
+                    </span>
+                  </span>
+                </>
+              ) : (
+                t("account.rebind")
+              )}
             </button>
             <button
               type="button"
@@ -206,7 +246,10 @@ export const MiotAccountButton = forwardRef<HTMLButtonElement, Props>(
                 try {
                   sessionStorage.setItem(
                     "miloco_pending_toast",
-                    JSON.stringify({ text: t("account.toastUnbound"), tone: "ok" }),
+                    JSON.stringify({
+                      text: t("account.toastUnbound"),
+                      tone: "ok",
+                    }),
                   );
                 } catch {
                   /* sessionStorage 不可用降级 */
@@ -297,7 +340,9 @@ function ConfirmUnbindDialog({
         </div>
         <p className="text-body text-text-secondary">
           {t("account.confirmUnbindBodyPrefix")}
-          {accountName ? t("account.confirmUnbindBodyName", { name: accountName }) : ""}
+          {accountName
+            ? t("account.confirmUnbindBodyName", { name: accountName })
+            : ""}
           {t("account.confirmUnbindBodySuffix")}
         </p>
         <div className="mt-6 flex justify-end gap-2">

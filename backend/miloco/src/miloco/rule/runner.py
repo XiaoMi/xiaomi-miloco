@@ -41,6 +41,7 @@ from miot.types import MIoTActionParam, MIoTGetPropertyParam, MIoTSetPropertyPar
 
 from miloco.database.rule_repo import RuleLogRepo
 from miloco.dispatch import dispatch_event
+from miloco.middleware.exceptions import MiotAuthUnavailableError
 from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
@@ -67,6 +68,7 @@ from miloco.task.state_machine import (
     TransitionOutcome,
     slot_for_edge,
 )
+from miloco.utils.logger import log_safe
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
@@ -611,7 +613,7 @@ class RuleRunner:
             h.add_input(1)
             rule = self._rules.get(rule_id)
             if rule is None:
-                logger.warning("update_state: rule %s not found", rule_id)
+                logger.warning("update_state: rule %s not found", log_safe(rule_id))
                 return TriggerOutcome.NOT_FIRED
             if not self._is_effectively_enabled(rule):
                 return TriggerOutcome.NOT_FIRED
@@ -660,14 +662,16 @@ class RuleRunner:
                         src.pending_exit = True
                         logger.debug(
                             "rule %s source %s exit pending (1st false)",
-                            rule_id, source_did,
+                            log_safe(rule_id), log_safe(source_did),
                         )
                         return out(TriggerOutcome.NOT_FIRED)
                     src.pending_exit = False
                 elif src.pending_exit:
                     src.pending_exit = False
                     logger.info(
-                        "rule %s source %s flicker absorbed", rule_id, source_did
+                        "rule %s source %s flicker absorbed",
+                        log_safe(rule_id),
+                        log_safe(source_did),
                     )
                     return out(TriggerOutcome.STILL_IN)
             elif not skip_flicker and self._state[rule_id].exit_debounce_task is not None:
@@ -681,21 +685,21 @@ class RuleRunner:
                         logger.debug(
                             "rule %s source %s enter pending during exit_debounce "
                             "(1st true)",
-                            rule_id, source_did,
+                            log_safe(rule_id), log_safe(source_did),
                         )
                         return out(TriggerOutcome.NOT_FIRED)
                     src.pending_enter = False
                     logger.info(
                         "rule %s source %s enter confirmed (2 consecutive true) "
                         "during exit_debounce",
-                        rule_id, source_did,
+                        log_safe(rule_id), log_safe(source_did),
                     )
                 elif src.pending_enter:
                     src.pending_enter = False
                     logger.info(
                         "rule %s source %s single-frame true absorbed during "
                         "exit_debounce",
-                        rule_id, source_did,
+                        log_safe(rule_id), log_safe(source_did),
                     )
                     return out(TriggerOutcome.NOT_FIRED)
 
@@ -766,10 +770,12 @@ class RuleRunner:
         """
         rule = self._rules.get(rule_id)
         if rule is None:
-            logger.warning("trigger_rule: rule %s not found", rule_id)
+            logger.warning("trigger_rule: rule %s not found", log_safe(rule_id))
             return None
         if not self._is_effectively_enabled(rule):
-            logger.info("trigger_rule: rule %s is disabled, skipping", rule_id)
+            logger.info(
+                "trigger_rule: rule %s is disabled, skipping", log_safe(rule_id)
+            )
             return None
 
         # Bridge: update state machine so future events diff correctly
@@ -1561,7 +1567,7 @@ class RuleRunner:
             return False
         logger.info(
             "Rule %s action %s %s in cooldown, skipping",
-            rule_id, action.did, action.iid,
+            log_safe(rule_id), log_safe(action.did), log_safe(action.iid),
         )
         return True
 
@@ -1589,7 +1595,10 @@ class RuleRunner:
             logger.error(
                 "Rule %s scene action %s has no dedup guard "
                 "(idempotent=%s, cooldown_minutes=%s), refusing to dispatch",
-                rule_id, action.did, action.idempotent, action.cooldown_minutes,
+                log_safe(rule_id),
+                log_safe(action.did),
+                log_safe(action.idempotent),
+                log_safe(action.cooldown_minutes),
             )
             return RuleActionExecuteResult(
                 action=action,
@@ -1614,9 +1623,14 @@ class RuleRunner:
         except Exception as e:
             # 场景不存在 / 不在允许的家庭 / SDK 抛错都归到这里；失败详情进
             # rule_log.execute_result，不吞。
-            logger.error(
-                "Failed to trigger scene %s (rule %s): %s", action.did, rule_id, e
-            )
+            # 授权失效不逐条告警：与紧邻的直控路径同一口径——失效是长期状态，
+            # 规则命中一次就下发一次，逐条打 ERROR 会把「什么时候失效」那一行
+            # 淹掉。被拒的这一次仍然可查：服务层已经落了一行写明原因的台账。
+            if not isinstance(e, MiotAuthUnavailableError):
+                logger.error(
+                    "Failed to trigger scene %s (rule %s): %s",
+                    log_safe(action.did), log_safe(rule_id), log_safe(e),
+                )
             return RuleActionExecuteResult(
                 action=action, result=False, error=f"exception: {e}"
             )
@@ -1655,7 +1669,7 @@ class RuleRunner:
         # 「不是 prop. 就当 action.」的兜底，拿 scene_id 当 did 发出去。
         parsed = parse_device_iid(action.iid)
         if parsed is None:
-            logger.error("Invalid iid format '%s'", action.iid)
+            logger.error("Invalid iid format '%s'", log_safe(action.iid))
             return RuleActionExecuteResult(
                 action=action, result=False, error=f"invalid_iid: {action.iid}"
             )
@@ -1671,7 +1685,9 @@ class RuleRunner:
                     if results[0].get("value") == action.value:
                         logger.info(
                             "Rule %s action %s %s already at target, skipping",
-                            rule_id, action.did, action.iid,
+                            log_safe(rule_id),
+                            log_safe(action.did),
+                            log_safe(action.iid),
                         )
                         return RuleActionExecuteResult(
                             action=action, result=True, skipped=True
@@ -1679,7 +1695,7 @@ class RuleRunner:
             except Exception as e:
                 logger.warning(
                     "Idempotent check failed: %s %s: %s",
-                    action.did, action.iid, e,
+                    log_safe(action.did), log_safe(action.iid), log_safe(e),
                 )
 
         # Cooldown check: non-idempotent actions inside cooldown window are skipped.
@@ -1692,7 +1708,10 @@ class RuleRunner:
         # ——复用同一个 _write_action_ledger helper(source=rule),避免两套组装逻辑漂移。
         import json as _json
 
-        from miloco.miot.service import _write_action_ledger
+        from miloco.miot.service import (
+                _refusal_ledger_reason,
+                _write_action_ledger,
+            )
 
         # 台账元组先归一好,成功/异常路径共用——SDK/网络抛异常时台账也要能看到
         # 规则当时试图设置什么值 / 什么参数(失败审计完整性)。
@@ -1743,17 +1762,33 @@ class RuleRunner:
             )
 
         except Exception as e:
+            # 台账无论哪种失败都要落——写在分支之外，免得日后改字段只改一处。
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type=_ltype,
                 did=action.did, iid=action.iid, value_json=_lvalue,
                 result_code=None, result_msg=None,
-                success=False, error=str(e), source="rule", source_id=rule_id,
+                success=False,
+                # 被拒与一般失败分开取值：留痕的原因列是事后聚类的键，不该跟着
+                # 面向住户的提示文案漂——那份文案带着命令行提示、随时会改，而服务层
+                # 那两条路写进这一列的是另一套短语，同一列两套写法会让按它筛选的人
+                # 漏掉其中一整条路。
+                error=(
+                    _refusal_ledger_reason(self._miot_proxy)
+                    if isinstance(e, MiotAuthUnavailableError)
+                    else str(e)
+                ),
+                source="rule", source_id=rule_id,
             )
-            logger.error(
-                "Failed to execute action %s %s: %s",
-                action.did, action.iid, e,
-            )
+            # 授权失效不逐条告警：失效是长期状态，而规则命中一次就下发一次——这条
+            # 是量最大的下发路径，逐条打 ERROR 会把「什么时候失效」那一行淹掉。
+            # 拒绝本身在代理层的闸门处已经记过一条，这里再记就是重复；台账里的
+            # error 带着「被拒」字样，事后仍分得清「设备真的没响应」与「根本没发」。
+            if not isinstance(e, MiotAuthUnavailableError):
+                logger.error(
+                    "Failed to execute action %s %s: %s",
+                    log_safe(action.did), log_safe(action.iid), log_safe(e),
+                )
             return RuleActionExecuteResult(
                 action=action, result=False, error=f"exception: {e}"
             )
@@ -1869,7 +1904,7 @@ class RuleRunner:
                 if attempt > 0:
                     logger.info(
                         "Agent callback succeeded for rule %s after %d retries",
-                        callback.rule_id,
+                        log_safe(callback.rule_id),
                         attempt,
                     )
                 return True
@@ -1913,7 +1948,7 @@ class RuleRunner:
                 f.write(entry)
         except Exception as e:
             logger.error("Failed to record dynamic failure (rule %s): %s",
-                         callback.rule_id, e)
+                         log_safe(callback.rule_id), log_safe(e))
 
     def _compose_prompt_text(
         self, rule: Rule, slot_text: str, extra_metadata: dict | None = None

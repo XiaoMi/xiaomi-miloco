@@ -64,6 +64,8 @@ interface Props {
   scopeCameras: ScopeCamera[];
   /** miot 上是否有 camera 类设备——区分两种空态 */
   miotHasCamera: boolean;
+  /** 米家授权是否已失效——失效时空态要说清真实原因，别引导住户去开开关。 */
+  miotAuthDegraded?: boolean;
   /** 最多投喂给 miloco 的摄像头数(后端 MAX_ENABLED_CAMERAS，经 /api/miot/status 下发)。
    *  上区展示数受 connected 自然约束，此值只用于下区「启用」按钮的满额置灰判断。 */
   maxStreamCams: number;
@@ -103,6 +105,7 @@ export function HeroNow({
   petsEnabled = false,
   scopeCameras,
   miotHasCamera,
+  miotAuthDegraded,
   maxStreamCams,
   onPersonClick,
   onJumpUsage,
@@ -216,6 +219,7 @@ export function HeroNow({
         benchCams={benchCams}
         maxStreamCams={maxStreamCams}
         miotHasCamera={miotHasCamera}
+        miotAuthDegraded={miotAuthDegraded}
         onToggleCameras={onToggleCameras}
         onToggleCameraVoice={onToggleCameraVoice}
         onSetCameraPrompt={onSetCameraPrompt}
@@ -235,6 +239,8 @@ interface CameraSectionProps {
   /** 最多投喂数(后端 MAX_ENABLED_CAMERAS)，用于满额置灰下区「启用」 */
   maxStreamCams: number;
   miotHasCamera: boolean;
+  /** 米家授权是否已失效——失效时空态要说清真实原因，别引导住户去开开关。 */
+  miotAuthDegraded?: boolean;
   onToggleCameras: (dids: string[], inUse: boolean) => void | Promise<void>;
   onToggleCameraVoice: (did: string, voiceInUse: boolean) => void | Promise<void>;
   onSetCameraPrompt: (did: string, text: string) => void | Promise<void>;
@@ -248,6 +254,7 @@ function CameraSection({
   benchCams,
   maxStreamCams,
   miotHasCamera,
+  miotAuthDegraded,
   onToggleCameras,
   onToggleCameraVoice,
   onSetCameraPrompt,
@@ -481,7 +488,11 @@ function CameraSection({
             </div>
           ) : (
             <div className="text-body rounded-lg bg-bg-primary border border-dashed border-border-strong text-text-secondary py-6 px-5 text-center">
-              {t("hero.noStreaming")}
+              {/* 授权失效时别说「打开开关开启感知」——开关不是原因，开了也没用。
+                  失效后拉相机列表就会被拒，感知没有相机可跑。 */}
+              {miotAuthDegraded
+                ? t("hero.noStreamingAuthDegraded")
+                : t("hero.noStreaming")}
             </div>
           )}
           {/* 下区:未投喂给 miloco 的相机(未启用 / 超出上限)。不拉流、不展示小窗，

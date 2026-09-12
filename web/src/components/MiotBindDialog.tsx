@@ -26,7 +26,8 @@ import type { ScopeHome } from "@/lib/types";
 interface Props {
   open: boolean;
   onClose: () => void;
-  onDone: () => void;
+  /** 绑定完成。``scopePreserved`` 为真表示同账号重绑、原有配置已保留。 */
+  onDone: (scopePreserved?: boolean) => void;
 }
 
 type Step = "open" | "paste" | "select-home";
@@ -169,11 +170,22 @@ export function MiotBindDialog({ open, onClose, onDone }: Props) {
     }
     setSubmitting(true);
     // 第一阶段：OAuth 绑定（不可逆，消费 code）
+    let auth;
     try {
-      await authorizeMiot(parsed.code, parsed.state);
+      auth = await authorizeMiot(parsed.code, parsed.state);
     } catch (e) {
       setError(e instanceof Error ? e.message : t("account.bindFail"));
       setSubmitting(false);
+      return;
+    }
+    // 绑回同一个账号时后端保留了家庭与摄像头配置，这里必须跟着跳过选家——
+    // switchScopeHome 是「唯一启用」语义（加入目标、停用其余），跑一遍就把刚
+    // 保住的白名单冲掉了。多家庭账号尤其明显：选家步骤默认勾列表第一个，
+    // 住户为修授权而重绑，回来却发现换了一批设备。
+    if (auth.scopePreserved) {
+      setSubmitting(false);
+      onDone(true);
+      onClose();
       return;
     }
     // 第二阶段：获取并启用家庭（绑定已成功，失败不应阻断用户）

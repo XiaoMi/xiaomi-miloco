@@ -315,9 +315,9 @@ async def test_audio_frame_callback_snapshots_connections(monkeypatch):
 
 
 async def test_audio_log_records_render_without_format_error(monkeypatch, caplog):
-    """音频日志格式串必须全用 %s 配 _safe_log。
+    """音频日志格式串必须全用 %s 配 log_safe。
 
-    logging 在**发射时**才做 msg % args：若残留 %d，_safe_log 返回的 str 会在
+    logging 在**发射时**才做 msg % args：若残留 %d，log_safe 返回的 str 会在
     这一步抛 TypeError，被 Handler.handleError 吞掉——日志丢失 + stderr 刷
     traceback。caplog 拿得到格式化前的 record（CI 全绿也发现不了），但
     getMessage() 做的就是同一件事，渲染不炸即证明发射路径健康。

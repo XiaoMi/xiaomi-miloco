@@ -28,6 +28,10 @@ export interface BackendActionRow {
   trace_id: string | null;
   /** v4:设备所属家庭;老行 / 解析失败为 null(后端按 home 过滤时对 null 放行) */
   home_id?: string | null;
+  /** v5:下发当时的米家授权状态。"degraded" = 授权已被云端拒绝，下发被拒、请求
+   *  未发出。老行为 null——表示写入时还没有这个维度，**不能**据此推断当时授权
+   *  正常。 */
+  auth_state?: "ok" | "degraded" | null;
 }
 
 const VALUE_MAX = 60;
@@ -123,6 +127,18 @@ export function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
             </div>
           )}
         </div>
+
+        {/* 降级期间下发的动作单独标一下：成功徽标在这种情况下并不代表设备真的
+            照做了——只看成功/失败会把「授权已失效时发出去的指令」和正常执行的
+            混为一谈。 */}
+        {row.auth_state === "degraded" && (
+          <span
+            className="text-caption px-2 py-0.5 rounded-full whitespace-nowrap text-warning bg-warning-bg"
+            title={t("actions.authDegradedHint")}
+          >
+            {t("actions.authDegraded")}
+          </span>
+        )}
 
         <span
           className={`text-caption px-2 py-0.5 rounded-full whitespace-nowrap sm:order-last sm:justify-self-end ${

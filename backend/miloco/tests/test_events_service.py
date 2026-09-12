@@ -540,7 +540,7 @@ class TestReadCropMeta:
     async def test_log_lines_carry_no_injected_newline(self, svc, dao, caplog):
         """device_id 带 CR/LF 时,日志不得被撑成多行(CodeQL py/log-injection).
 
-        断言的是「这条日志路径清洗过」,不是 _safe_log 的 replace 本身 —— 后者是同义
+        断言的是「这条日志路径清洗过」,不是 log_safe 的 replace 本身 —— 后者是同义
         反复。构造上借道既有的坏-crop 分支:crop 半截 → ValidationError → 正是那条
         带 event_id / device_id 的 warning。
         """
