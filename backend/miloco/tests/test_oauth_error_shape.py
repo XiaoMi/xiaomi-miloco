@@ -951,6 +951,9 @@ def test_only_one_newline_scrubber_exists():
     清洗函数」——名字是写的人随手起的，而判据一旦依赖它，下一次换名字就绕过去了。
     也刻意不含 ``re.sub`` 那一族：按正则压平换行的那几处还兼做截断（模型输出进审计
     日志），职责不同，并进来会改行为。
+
+    扫描范围只覆盖 **miloco 包内的模块级函数**；CLI、miot SDK、类方法、内联赋值和
+    调用点内联不在本护栏视野内。这里明确范围，不把它表述成「全仓都守住了」。
     """
     import ast
     import pathlib
@@ -987,6 +990,8 @@ def test_only_one_newline_scrubber_exists():
 
     assert found == ["miloco.utils.logger:log_safe"], (
         "剥换行的实现不止一份——多出来的那份不会被护栏按名字认出来，用它包过的日志调用"
-        f"会整条退出「一半脱一半不脱」的检查，请改成 import log_safe：{found}"
+        f"会整条退出「一半脱一半不脱」的检查，请改成 import log_safe：{found}\n"
+        "例外：若命中的是操作换行结构的格式化器而非日志清洗，不要改成 log_safe；"
+        "应保留原行为，或为该格式显式增加豁免并说明理由。"
     )
 
