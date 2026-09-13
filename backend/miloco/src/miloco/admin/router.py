@@ -998,7 +998,10 @@ def _active_display_label() -> str:
 
 
 def _full_omni_payload() -> dict:
-    """{active, profiles}：均 api_key 打码;profiles 标记哪套 active(按档案名 label 匹配)。
+    """{active, profiles, fallbacks, pool}：均 api_key 打码;profiles 只标哪套 active。
+
+    备选归属不再逐条打在 profile 上,改由同级 fallbacks 数组按优先级顺序承载
+    (前端用 label 反查即可),避免同一份信息在两处各存一份、改一处漏一处。
 
     当前生效配置(active)并不一定已存档进 omni_profiles —— 默认状态(omni_profiles 为空、
     omni 是默认 MiMo)或历史遗留场景下,active 不在档案列表里。此时若直接返回 profiles,
@@ -1007,6 +1010,10 @@ def _full_omni_payload() -> dict:
 
     active 字段附带 health 子对象(见 spec §6.1),来自 omni 熔断器 snapshot;前端顶部横条
     与「模型」页 active 行的连接状态列均读此字段。
+
+    fallbacks: 按优先级排序的备选 provider label 列表（引用 omni_profiles 的 label）。
+    pool: ProviderPool 运行时快照（当前 active provider、failed 集合、
+    上次切换时间戳、恢复循环是否在跑等；字段全集见 PoolSnapshot）。
     """
     from dataclasses import asdict
 
@@ -1038,6 +1045,34 @@ def _full_omni_payload() -> dict:
             },
         )
     health = asdict(get_omni_circuit_breaker().snapshot())
+
+    # 备选 provider label 列表（按优先级排序）
+    fallbacks = list(m.omni_fallbacks)
+
+    # ProviderPool 运行时快照
+    pool_snapshot: dict | None = None
+    try:
+        from miloco.perception.engine.omni.provider_pool import get_pool
+
+        pool = get_pool()
+        if pool is not None:
+            snap = pool.snapshot()
+            pool_snapshot = {
+                "active_label": snap.active_label,
+                "active_model": snap.active_model,
+                "active_base_url": snap.active_base_url,
+                "active_is_primary": snap.active_is_primary,
+                "active_index": snap.active_index,
+                "fallback_count": snap.fallback_count,
+                "failed_keys": snap.failed_keys,
+                "last_switch_at_ms": snap.last_switch_at_ms,
+                "recovery_loop_running": snap.recovery_loop_running,
+                "exhausted": snap.exhausted,
+            }
+    except Exception:
+        logger.warning("[omni-config] 获取 ProviderPool 快照失败，pool_snapshot 置为 None", exc_info=True)
+        pool_snapshot = None
+
     return {
         "active": {
             "label": active.label,
@@ -1048,6 +1083,8 @@ def _full_omni_payload() -> dict:
             "health": health,
         },
         "profiles": profiles,
+        "fallbacks": fallbacks,
+        "pool": pool_snapshot,
     }
 
 
@@ -1143,8 +1180,22 @@ async def put_omni_config(
     else:
         profiles.append(entry)
     update: dict = {"omni_profiles": profiles}
+    # 改名时同步改 omni_fallbacks 里的引用，否则该备选静默失效
+    # （label 查不到 → _resolve_providers_unlocked 跳过），前端面板上直接消失。
+    fallbacks = list(get_settings().model.omni_fallbacks)
+    new_fallbacks: list[str] | None = None
+    if orig and orig != label and orig in fallbacks:
+        new_fallbacks = [label if x == orig else x for x in fallbacks]
     if will_activate:
         update["omni"] = entry
+        # 与 activate_omni_config / put_omni_fallbacks 的过滤口径对齐：
+        # 主档案不该同时是自己的备选，否则 failover 会把首个备选当成
+        # "已 failed" 跳过，单备选场景直接误判为全部耗尽。
+        base = fallbacks if new_fallbacks is None else new_fallbacks
+        if label in base:
+            new_fallbacks = [x for x in base if x != label]
+    if new_fallbacks is not None:
+        update["omni_fallbacks"] = new_fallbacks
     update_shared_config(model=update)
     if will_activate:
         # preflight 通过 = 新配置已验可用,主动把熔断状态清掉。之前 OPEN_CONFIG (bad_key
@@ -1178,16 +1229,21 @@ async def activate_omni_config(
             result = await _probe.probe_omni(p.model, p.base_url, p.api_key)
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result)
-            update_shared_config(
-                model={
-                    "omni": {
-                        "label": p.label,
-                        "model": p.model,
-                        "base_url": p.base_url,
-                        "api_key": p.api_key,
-                    }
+            update: dict = {
+                "omni": {
+                    "label": p.label,
+                    "model": p.model,
+                    "base_url": p.base_url,
+                    "api_key": p.api_key,
                 }
-            )
+            }
+            # 与 put_omni_fallbacks 的过滤口径对齐：主档案不该同时是自己的备选，
+            # 否则快照的 active_is_primary / active_index 自相矛盾，
+            # 前端备选面板会把当前生效档案当成一行备选画出来。
+            fallbacks = get_settings().model.omni_fallbacks
+            if p.label in fallbacks:
+                update["omni_fallbacks"] = [x for x in fallbacks if x != p.label]
+            update_shared_config(model=update)
             # 同 upsert 路径:preflight 通过后主动清熔断状态,避免 OPEN_CONFIG 卡死。
             from miloco.perception.engine.omni.circuit_breaker import (
                 get_omni_circuit_breaker,
@@ -1236,6 +1292,12 @@ async def delete_omni_config(
     was_active = _label_is_active(label)
     profiles = [p for p in _profiles_as_dicts() if p["label"] != label]
     update: dict = {"omni_profiles": profiles}
+    # 档案没了，omni_fallbacks 里的引用也要一起清：留着会让 ProviderPool 每次
+    # get_active() 打一条 warning，且 GET /omni-config 的 fallbacks 与
+    # pool.fallback_count 长期对不上。
+    fallbacks = get_settings().model.omni_fallbacks
+    if label in fallbacks:
+        update["omni_fallbacks"] = [x for x in fallbacks if x != label]
     if was_active:
         # 删当前生效模型 → 当前生效配置重置为出厂未配态(MiMo 默认 + 空 key)。
         update["omni"] = OmniModelSettings().model_dump()
@@ -1530,6 +1592,49 @@ async def retry_omni_probe(current_user: str = Depends(verify_token)):
                 result.get("retry_after_seconds"),
             ),
         )
+    return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+
+class OmniFallbacksBody(BaseModel):
+    """fallback label 列表（按优先级排序，靠前优先）。"""
+
+    labels: list[str] = Field(
+        default_factory=list,
+        description="omni_fallbacks 的 label 列表，必须都是 omni_profiles 中已有的 label",
+    )
+
+
+@router.put(
+    "/omni-config/fallbacks",
+    summary="保存 fallback provider 顺序（label 列表，靠前优先）",
+    response_model=NormalResponse,
+)
+def put_omni_fallbacks(
+    body: OmniFallbacksBody, current_user: str = Depends(verify_token)
+):
+    """更新 omni_fallbacks 列表。
+
+    - ``labels``: 按优先级排序的 profile label 列表，前端拖拽排序后提交。
+    - 不在 omni_profiles 中的 label 自动过滤并 warning。
+    - 写 config.json 后，ProviderPool 下个 get_active() 调用即生效（无需重启）。
+    """
+    m = get_settings().model
+    valid_labels: set[str] = {p.label for p in m.omni_profiles}
+    seen: set[str] = set()
+    filtered: list[str] = []
+    for label in body.labels:
+        # 过滤三类：不存在的 label、主 provider 自己、重复项。主 provider 不该出现在
+        # 备选列表里；重复项会让前端面板渲染多行且拖拽/取消勾选行为错位。
+        if label not in valid_labels or _label_is_active(label) or label in seen:
+            continue
+        seen.add(label)
+        filtered.append(label)
+    skipped = len(body.labels) - len(filtered)
+    if skipped:
+        logger.warning(
+            "omni_fallbacks 中 %d 个 label 已过滤（不存在/主 provider/重复）", skipped
+        )
+    update_shared_config(model={"omni_fallbacks": filtered})
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
 

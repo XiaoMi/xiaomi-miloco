@@ -145,6 +145,12 @@ class PerceptionRunner:
         # 自愈通道永久卡死。registry 是独立 module,不进 runner↔processor 循环链。
         await omni_probe_registry.cancel_inflight()
 
+        # provider pool 是进程级单例，不绑定单个 runner 代的生命周期；
+        # pool.stop() 仅在整个进程 shutdown（main.py lifespan 收尾）时调用一次，
+        # 与 init_perception_module 中的 pool.start() 对称。
+        # 若在此处 stop，且 runner 因 apply_config_restart 被 stop→start 后，
+        # 恢复循环永不重建 → failover / failback 彻底失效。
+
         self._inference_worker.shutdown(wait=False)
 
         # 关闭 perception engine（含 IdentityEngine dispatcher worker 等）

@@ -509,10 +509,30 @@ export interface OmniActiveConfig extends OmniModelConfig {
   health: OmniHealth;
 }
 
-/** GET /omni-config 返回：当前生效 active + 已存档案 profiles。 */
+/** ProviderPool 运行时快照（对齐后端 PoolSnapshot）。池未初始化时为 null。 */
+export interface OmniPoolSnapshot {
+  active_label: string;
+  active_model: string;
+  active_base_url: string;
+  active_is_primary: boolean;
+  /** 0 = primary，≥1 = fallback 下标。 */
+  active_index: number;
+  fallback_count: number;
+  failed_keys: string[];
+  last_switch_at_ms: number | null;
+  recovery_loop_running: boolean;
+  /** 是否处于「所有 provider 都不可用」的暂停态。 */
+  exhausted: boolean;
+}
+
+/** GET /omni-config 返回：当前生效 active + 已存档案 profiles + fallback label 列表 + pool 快照。 */
 export interface OmniConfigState {
   active: OmniActiveConfig;
   profiles: OmniProfile[];
+  /** 按优先级排序的 fallback provider label 列表（引用 profiles 的 label）。旧后端可能不返回，故标可选。 */
+  fallbacks?: string[];
+  /** ProviderPool 运行时快照；池未初始化时为 null。 */
+  pool?: OmniPoolSnapshot | null;
 }
 
 /** 定位一套档案(档案名 = 唯一 id)。 */
