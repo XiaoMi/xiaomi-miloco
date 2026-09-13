@@ -437,12 +437,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         await cleanup_task
     except asyncio.CancelledError:
+        # 主动 cancel() 后 await 必然抛 CancelledError,这是"取消已生效"的正常收尾
+        # 信号而非故障;这里只需等它停稳,不记日志也不重抛,否则会打断后续关停清理。
         pass
 
     rollover_task.cancel()
     try:
         await rollover_task
     except asyncio.CancelledError:
+        # 同 cleanup_task:吞掉取消信号只为确认 rollover 已退出,非故障。
         pass
 
     # 关闭顺序遵循"生产者先于消费者":
