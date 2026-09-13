@@ -564,6 +564,80 @@ async def test_try_failover_skips_when_cb_ok(loop, monkeypatch):
     assert active.model == "primary-model"
 
 
+async def test_failover_skips_when_tick_probe_in_flight(loop, monkeypatch):
+    """tick 探测在飞行中（且非 OPEN_CONFIG）→ _try_failover 本轮不切。
+
+    切换尾部的 reset_on_config_change 不清 _probe_in_flight，旧 provider 的
+    探测结论落回来会把刚复位成 CLOSED 的熔断器重新推开，新 provider 被无辜短路
+    （配置类错误还会把 tick 通道钉死）。与 _probe_failed_providers 同口径：
+    OPEN_CONFIG（state == "error"）下 tick 不 arm 新探测，不让权，仍由池收尾。
+    """
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    primary = _omni(label="primary", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model", api_key="sk-a")
+    _mock_settings(primary, ["a"], [primary, fb_a], monkeypatch)
+    pool = _build_pool(loop)
+
+    cb = get_omni_circuit_breaker()
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("rate_limited", "m", ErrorCategory.RECOVERABLE)
+        )
+    assert cb.snapshot().state == "warn"
+
+    # tick 通道已 arm 自己的探测 → 池本轮整体让权。
+    # 直写私有位仅为构造「arm 后未落账」的残留态（跑 try_arm_probe 要先把 probe_due
+    # 推到未来，反而要再写一个私有时钟）；置位后立刻用公共读口复核，实现若改成派生
+    # 字段这里会先炸，不会静默失真。
+    cb._probe_in_flight = True
+    assert cb.probe_in_flight() is True
+    assert await pool._try_failover() is False
+    assert pool._active_label is None  # 没切走
+    assert pool._failed_keys == set()  # 也没提前把主标成 failed
+
+    # 探测落账（record_probe_result 的路径之一）→ 下一轮照常切
+    cb.clear_probe_in_flight()
+    assert await pool._try_failover() is True
+    assert pool._active_label == "a"
+
+
+async def test_failover_not_yield_when_open_config(loop, monkeypatch):
+    """OPEN_CONFIG（state == "error"）且 tick 探测在飞行中 → 池不让权，照常收尾。
+
+    与 _probe_failed_providers 同口径：配置类错误下 tick 不 arm 新探测，
+    _probe_in_flight 残留不应阻塞池的 failover 决策。
+    """
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    primary = _omni(label="primary", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model", api_key="sk-a")
+    _mock_settings(primary, ["a"], [primary, fb_a], monkeypatch)
+    pool = _build_pool(loop)
+
+    cb = get_omni_circuit_breaker()
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("invalid_api_key", "m", ErrorCategory.CONFIG)
+        )
+    assert cb.snapshot().state == "error"
+
+    cb._probe_in_flight = True
+    assert cb.probe_in_flight() is True
+    assert await pool._try_failover() is True  # 不让权，仍切换
+    assert pool._active_label == "a"
+    # 切换尾部只复位状态机、不清 in-flight 位：残留位正是让权守卫要防的那一个，
+    # 这里显式钉住「OPEN_CONFIG 下不会因此把新 provider 短路」。
+    assert cb.snapshot().state == "ok"
+    assert cb.probe_in_flight() is True
+
+
 async def test_switch_back_to_primary_when_already_primary(loop, monkeypatch):
     """已在 primary 时调用 _switch_back_to_primary 为 no-op。"""
     primary = _omni(label="p", model="primary-model")

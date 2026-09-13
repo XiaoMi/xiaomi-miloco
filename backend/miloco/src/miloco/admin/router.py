@@ -985,7 +985,10 @@ def _active_display_label() -> str:
 
 
 def _full_omni_payload() -> dict:
-    """{active, profiles, fallbacks, pool}：均 api_key 打码;profiles 标记哪套 active 及是否在 fallback 中。
+    """{active, profiles, fallbacks, pool}：均 api_key 打码;profiles 只标哪套 active。
+
+    备选归属不再逐条打在 profile 上,改由同级 fallbacks 数组按优先级顺序承载
+    (前端用 label 反查即可),避免同一份信息在两处各存一份、改一处漏一处。
 
     当前生效配置(active)并不一定已存档进 omni_profiles —— 默认状态(omni_profiles 为空、
     omni 是默认 MiMo)或历史遗留场景下,active 不在档案列表里。此时若直接返回 profiles,

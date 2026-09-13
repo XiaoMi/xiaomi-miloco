@@ -496,9 +496,11 @@ export function UsageOmniConfig() {
       if (from < 0 || to < 0) return prev;
       const next = [...prev];
       const [item] = next.splice(from, 1);
-      // 指示线画在目标行上方（border-t-2），语义是"插到目标行之前"。
-      // 向下拖时 splice 删除会让目标行下标前移 1，直接用 to 会落到目标行之后。
-      next.splice(from < to ? to - 1 : to, 0, item);
+      // 落点 = 目标行原本的位置：向下拖落到目标行之后，向上拖落到目标行之前。
+      // 「插到目标行之前」无法表达末位（["a","b","c"] 拖 a 到 c 只会得到
+      // ["b","a","c"]），两条备选时更会原地不动。splice 删除后目标行下标已自动
+      // 前移，直接 splice(to) 即占据目标行原位，末位也能一次拖到。
+      next.splice(to, 0, item);
       return next;
     });
     setFallbackDirty(true);
@@ -562,6 +564,15 @@ export function UsageOmniConfig() {
   function onDragEnd() {
     setDragLabel(null);
     setDragOverLabel(null);
+  }
+
+  // 落点方向:拖拽行在目标行之上 → 落点在目标行之后(指示线画在目标行下方)。
+  // dragLabel 为 null 只可能出现在非拖拽期(onDragStart 必先于 onDragOver),
+  // 此时不该有指示线,显式返回 false;不借 indexOf("") 这种恒为 -1 的默认值,
+  // 否则会静默得出「落点在下」的反向结论。
+  function dropsAfter(targetLabel: string): boolean {
+    if (dragLabel == null) return false;
+    return fallbackLabels.indexOf(dragLabel) < fallbackLabels.indexOf(targetLabel);
   }
 
   // 尚未加入 fallback 的可选 profile（排除 active 行，排除已在 fallback 中的）
@@ -817,7 +828,9 @@ export function UsageOmniConfig() {
                     </div>
                   </div>
 
-                  {/* 当前 fallback 排序列表 */}
+                  {/* 当前 fallback 排序列表。底边框按方向分支出现在各分支内:
+                      last:border-b-0 编译后特异性(0-2-0)高于 border-b-2(0-1-0),
+                      同侧并存会把末行的 2px 落点指示线压成 0。 */}
                   {fallbackProfiles.length > 0 ? (
                     <div className="rounded-lg bg-bg-primary border border-border overflow-hidden">
                       {fallbackProfiles.map((p, idx) => (
@@ -829,10 +842,12 @@ export function UsageOmniConfig() {
                           onDragLeave={onDragLeave}
                           onDrop={onDrop(p.label)}
                           onDragEnd={onDragEnd}
-                          className={`flex items-center gap-3 px-3 py-2.5 border-b border-border last:border-b-0 transition-colors ${
+                          className={`flex items-center gap-3 px-3 py-2.5 transition-colors ${
                             dragOverLabel === p.label
-                              ? "border-t-2 border-t-brand-primary"
-                              : ""
+                              ? dropsAfter(p.label)
+                                ? "border-b-2 border-b-brand-primary"
+                                : "border-t-2 border-t-brand-primary border-b border-border last:border-b-0"
+                              : "border-b border-border last:border-b-0"
                           } ${dragLabel === p.label ? "opacity-50" : ""}`}
                         >
                           {/* 拖拽手柄 */}
