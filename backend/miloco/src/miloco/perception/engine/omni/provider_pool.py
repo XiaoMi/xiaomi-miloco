@@ -53,6 +53,14 @@ def _provider_key(omni: OmniModelSettings) -> str:
     折叠成一个 —— 第二把 key 永远选不中，failover 直接判耗尽。
     只取 sha256 前 8 位，避免明文 key 进日志 / 进 snapshot().failed_keys。
     """
+    # 身份指纹,不是口令存储:值不落盘、不参与任何凭证校验,32 位截断既还原不出
+    # api_key,也换不来任何凭证能力。CodeQL py/weak-sensitive-data-hashing 按
+    # 「敏感数据进了非慢哈希」的口径报这条,且该库把 hmac.new 同样建模成哈希操作
+    # (algorithm=digestmod、input=msg),换成 keyed HMAC 一样会被报 —— 也就是说
+    # 除了「不做任何密钥派生」之外,只有抑制这一条路。而它建议的慢哈希用在这里是
+    # 错的:本函数在每个推理周期(get_active → 解析备选列表)和每轮探测里都会被调,
+    # 慢哈希会把感知链路拖慢两个数量级,此处也没有任何需要被拖慢的校验方。
+    # codeql[py/weak-sensitive-data-hashing]
     fp = hashlib.sha256((omni.api_key or "").encode()).hexdigest()[:8]
     return f"{omni.model}@{omni.base_url}#{fp}"
 

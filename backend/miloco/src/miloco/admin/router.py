@@ -1618,7 +1618,6 @@ def put_omni_fallbacks(
         filtered.append(label)
     skipped = len(body.labels) - len(filtered)
     if skipped:
-        logger = logging.getLogger(__name__)
         logger.warning(
             "omni_fallbacks 中 %d 个 label 已过滤（不存在/主 provider/重复）", skipped
         )
