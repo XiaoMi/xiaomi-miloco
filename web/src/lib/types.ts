@@ -837,11 +837,17 @@ export interface TaskRecordSummary {
 // 不会出现在这里。
 export type TaskRuleDirection = "enter" | "exit" | "session";
 
+// 触发源。omni 是摄像头视觉判定，iot 是设备属性变化，record 是累计量达标。
+export type TaskRuleSourceType = "omni" | "iot" | "record";
+
 export interface TaskRuleBrief {
   ruleId: string;
   // 规则的自然语言条件（"孩子在书桌前学习" 之类）
   query: string;
   direction: TaskRuleDirection;
+  // 触发源。omni 的条件是住户写的自然语言、可改；其余源的条件是服务端按谓词渲染
+  // 出来的一句描述，后端会拒绝对它的 PATCH，所以界面上必须是只读的。
+  sourceType: TaskRuleSourceType;
   // 命中后执行的动作人话摘要。多条规则的 task 动作不在这里，在 Task.actions 上
   actionsDesc: string[];
 }

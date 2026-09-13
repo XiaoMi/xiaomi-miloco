@@ -31,6 +31,7 @@ import logging
 import time
 import uuid
 from collections import deque
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Mapping
 
@@ -44,8 +45,11 @@ from miloco.dispatch import dispatch_event
 from miloco.miot.client import MiotProxy
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
+from miloco.rule.iot_source import IotRef, IotSource, iot_ref_of
 from miloco.rule.record_source import RECORD_SOURCE_DID, RecordSource, record_ref_of
 from miloco.rule.schema import (
+    IOT_SOURCE_TYPE,
+    RECORD_SOURCE_TYPE,
     SCENE_IID,
     Rule,
     RuleAction,
@@ -222,9 +226,36 @@ def _is_milestone(rule: Rule) -> bool:
     return _slot_for(rule, RuleEvent.ENTERED) is ActionSlot.ON_TARGET
 
 
+def or3(values: Iterable[bool | None]) -> bool | None:
+    """三值 OR：任一为真则真；否则有未知就是未知；全假才是假；空集合是未知。
+
+    第二行是这个函数存在的理由：``any([None, False])`` 得出 False，而正确答案是
+    未知 —— 那个未知的 source 可能是真，按假算会产生一次凭空的退出边沿。
+
+    输入全是确定值时结果与 ``any()`` 逐位相同。
+    """
+    seen_unknown = False
+    empty = True
+    for value in values:
+        empty = False
+        if value is True:
+            return True
+        if value is None:
+            seen_unknown = True
+    if empty or seen_unknown:
+        return None
+    return False
+
+
 @dataclass
 class PerSourceState:
-    last_bool: bool = False
+    # None = 未就绪（「不知道」）。与 False（「知道它是假」）是两件事：假驱动退出
+    # 边沿，不知道不该驱动任何东西。只有 mark_source_unknown 会写 None。
+    #
+    # 新建的 source 是 False 而不是 None：它随即就被喂上真实值，而「一条 rule 有没有
+    # 被观测过」由 is_condition_satisfied 的空 sources 分支回答。默认给 None 会让
+    # update_state 里几条早返路径留下一个未知 source，把整条 rule 的判定冻住。
+    last_bool: bool | None = False
     pending_exit: bool = False
     pending_enter: bool = False
 
@@ -293,6 +324,8 @@ class RuleRunner:
             self._feed_record,
             self._record_refs_of_task,
         )
+        # iot 源。要等容器和拉属性的入口接上来才建, 见 attach_iot_source。
+        self._iot_source: IotSource | None = None
 
         logger.info("RuleRunner init, rules: %d", len(self._rules))
 
@@ -338,6 +371,85 @@ class RuleRunner:
             context="record", skip_flicker=True, extra_metadata=metadata,
         )
 
+    # ---- iot 源接线 ----
+
+    def attach_iot_source(self, store, pull_props=None) -> IotSource:
+        """建 iot 源并启动。由 ``init_rule_service`` 在容器就绪之后调。
+
+        源层拿不到 rule 表, 所以条件项由 runner 这一侧枚举 —— 与 record 源同样的
+        分工。不按 enabled 过滤: 停用判断在 ``update_state`` 入口, 那是唯一一处。
+        """
+        source = IotSource(
+            store=store,
+            feed=self._feed_iot,
+            mark_unknown=self.mark_source_unknown,
+            iot_refs=self._iot_refs,
+            ref_of_rule=self._iot_ref_of_rule,
+            pull_props=pull_props,
+        )
+        self._iot_source = source
+        source.start()
+        return source
+
+    @property
+    def iot_source(self) -> IotSource | None:
+        return self._iot_source
+
+    def _iot_refs(self):
+        for rule in self._rules.values():
+            ref = iot_ref_of(rule)
+            if ref is not None:
+                yield ref
+
+    def _iot_ref_of_rule(self, rule_id: str) -> IotRef | None:
+        """一条 rule 现在盯着哪条属性。**现读，不留快照。**
+
+        求值时按 rule_id 扫一遍全部条件项的话，批量唤醒（启动补种、重连补拉、切家庭）
+        会变成 O(n²)；而按批取一次快照又会让批内被删掉的 rule 仍被求值 —— 它拿不到
+        动作（``update_state`` 有 rule 不存在的守卫），但会往诊断里写回一条已经被
+        ``rebuild_index`` 剪掉的条目。字典现读两头都占。
+        """
+        rule = self._rules.get(rule_id)
+        return iot_ref_of(rule) if rule is not None else None
+
+    def iot_refs_of_task(self, task_id: str) -> list[str]:
+        """该 task 名下带 iot 条件项的 rule_id。task 重新启用时按它 seed。"""
+        return [
+            rule.id
+            for rule in self._rules.values()
+            if rule.task_id == task_id and iot_ref_of(rule) is not None
+        ]
+
+    def seed_iot_rule(self, rule_id: str) -> None:
+        """一条 rule 的配置变了 —— 索引让**未来的**变更找得到它, 但它对**已经在树
+        上的值**一无所知。凡是「rule 的有效性发生变化」的地方都要跟一次 seed。"""
+        if self._iot_source is not None:
+            self._iot_source.seed_rule(rule_id)
+
+    def seed_iot_rules_of_task(self, task_id: str) -> None:
+        if self._iot_source is not None:
+            self._iot_source.seed_rules(self.iot_refs_of_task(task_id))
+
+    async def _feed_iot(self, rule_id: str, value: bool) -> None:
+        """把 iot 源算出的 bool 交给条件层。
+
+        ``skip_flicker``: iot 的值不会抖, 而它每次翻转只喂一次 —— 留观察窗会把这一次
+        吸收掉, 条件永久停在旧值。与 record 源同一个理由。
+        """
+        await self.update_state(
+            rule_id,
+            self._iot_source_did(rule_id),
+            value,
+            context="iot",
+            skip_flicker=True,
+        )
+
+    def _iot_source_did(self, rule_id: str) -> str:
+        ref = self._iot_ref_of_rule(rule_id)
+        # 真实 did: 一条 rule 一个条件项时 OR 退化成单元素 (无害), 而将来打开多设备
+        # OR 时键的语义不用改 —— 改过一次之后存量运行态与新代码的键对不上。
+        return ref.did if ref is not None else "iot"
+
     # ---- task 状态机接管 (expand-contract 阶段 A) ----
 
     def attach_state_machine(self, state_machine: TaskStateMachine) -> None:
@@ -363,13 +475,53 @@ class RuleRunner:
     def is_condition_satisfied(self, rule_id: str) -> bool | None:
         """该 rule 的条件现在是不是真。``None`` = 未就绪。
 
-        判"未就绪"用的是"有没有任何 source 被观测过", 而不是 last_rule_state 的
-        初值 False —— 后者分不出"观测到假"和"还没观测"。
+        一条 source 都没有 = 这条 rule 还没开始工作；有 source 但其中有未知（设备
+        离线、叶子没了、求值失败）= 这条 rule 现在瞎着。两者都答"不知道"。
+
+        **现算，不读 ``last_rule_state``。** 后者只在聚合结果确定时更新，它记的是
+        「最后一个确定的聚合结果」、供 diff 产边沿用；设备离线之后读它拿到的是离线前
+        那个确定值，未知就表达不出来了。两者用途不同，不共用一个值。
         """
         state = self._state.get(rule_id)
         if state is None or not state.sources:
             return None
-        return state.last_rule_state
+        return or3(src.last_bool for src in state.sources.values())
+
+    def mark_source_unknown(self, rule_id: str, source_did: str) -> None:
+        """把一个 source 置成未就绪。源层在设备离线 / 叶子被删 / 求值失败时调。
+
+        **一并撤掉这条 rule 已排队的 exit 抗抖。** 序列「条件为真 → 变假、排入 exit
+        debounce → 设备离线、置未知」之后，那个 timer 仍会到点执行 on_exit —— 未知
+        驱动了动作，正是三态要禁止的事。
+
+        不喂假：假会驱动退出边沿。
+        """
+        src = self._ensure_source(rule_id, source_did)
+        src.last_bool = None
+        src.pending_exit = False
+        state = self._state[rule_id]
+        pending = state.exit_debounce_task
+        if pending is not None:
+            if not pending.done():
+                pending.cancel()
+            self._rewind_abandoned_exit(state)
+        self._clear_pending_source_enter(rule_id)
+
+    def _rewind_abandoned_exit(self, state: RuleRuntimeState) -> None:
+        """放弃一次「退出边沿已经发出、动作还没落地」的抗抖: 清掉抗抖记录, 并把聚合
+        基线拨回那次边沿之前。
+
+        不拨回去这个中间态就固化了 —— 设备带同一个假值回来时聚合与基线相等、命中
+        `old == new` 的早返, 这次退出永远补不上; 带真值回来时假→真被当成一次新的
+        进入, 进入动作重复发。
+
+        拨回的目标恒为真: 抗抖只可能由一次真→假的边沿排出来。
+
+        cancel 归调用方 —— 到点那一侧走进来时那个 task 就是自己, 不能 cancel 自己。
+        """
+        state.exit_debounce_task = None
+        state.exit_debounce_at = None
+        state.last_rule_state = True
 
     # ---- Legacy field views (test / rule_tester compatibility) ----
     #
@@ -458,19 +610,27 @@ class RuleRunner:
     def add_rule(self, rule: Rule) -> None:
         """Insert or replace a rule.
 
-        When replacing an existing rule whose ``direction`` or
-        ``condition.perceive_device_ids`` changed, drop the per-rule runtime
-        state (last_source/rule_state, pending_exit, action_cooldown). Keeping
-        stale state across a shape change can resurrect old EXIT debounces
-        or skew the next OR-aggregation.
+        When replacing an existing rule whose ``direction`` or condition
+        changed, drop the per-rule runtime state (last_source/rule_state,
+        pending_exit, action_cooldown). Keeping stale state across a shape
+        change can resurrect old EXIT debounces or skew the next
+        OR-aggregation.
+
+        条件比的是两列: 旧的 ``perceive_device_ids`` 和 ``condition_dnf``。少了后者
+        的话, 改一条 iot 规则的 did 之后新 did 的值与旧 did 的残留会在 OR 里并存。
+
+        丢状态的同时要把「进入动作已经派发过」这件事带过去, 见
+        ``_carry_entered_baseline``。
         """
         existing = self._rules.get(rule.id)
         if existing is not None:
             # 判 direction 而不是 mode: enter 与 exit 的 mode 都是 event, 只看
             # mode 的话这两者互换时状态不会清, 旧的防抖和聚合结果会留下来。
             direction_changed = existing.resolved_direction != rule.resolved_direction
-            sources_changed = set(existing.condition.perceive_device_ids) != set(
-                rule.condition.perceive_device_ids
+            sources_changed = (
+                set(existing.condition.perceive_device_ids)
+                != set(rule.condition.perceive_device_ids)
+                or existing.condition_dnf != rule.condition_dnf
             )
             duration_config_changed = (
                 existing.duration_seconds != rule.duration_seconds
@@ -487,12 +647,61 @@ class RuleRunner:
                 or duration_config_changed
                 or enabled_changed
             ):
+                # direction / enabled 变了不带: 那两种情形动作已经换了家或被停掉,
+                # 不该由旧基线再产一次边沿。
+                carry = (
+                    not direction_changed
+                    and not enabled_changed
+                    and self._has_dispatched_enter(existing)
+                )
                 self._reset_runtime_state(rule.id)
+                if carry:
+                    self._carry_entered_baseline(rule)
         self._rules[rule.id] = rule
+
+    def _has_dispatched_enter(self, rule: Rule) -> bool:
+        """这条 rule 此刻撑着它的 task 吗 —— 口径是「进入动作已经派发出去」。
+
+        排队中的退出抗抖算撑着: 退出边沿虽然发过了, on_exit 还没落地, 状态机那侧
+        仍在 on。
+
+        带 duration 的 session 看 ``state_duration_fired``: 它才是「on_enter 派发
+        过」的标记, ``last_rule_state`` 为真只说明条件成立、时长还没攒够。
+        """
+        state = self._state.get(rule.id)
+        if state is None:
+            return False
+        if (
+            state.exit_debounce_task is not None
+            and not state.exit_debounce_task.done()
+        ):
+            return True
+        if rule.duration_seconds:
+            return state.state_duration_fired
+        return state.last_rule_state
+
+    def _carry_entered_baseline(self, rule: Rule) -> None:
+        """换条件形状时把「已经进入」带到新状态上, 与 ``_rewind_abandoned_exit``
+        是同一条命题: 撤掉一个中间态要连聚合基线一起拨回。
+
+        换条件是一次配置变更、不是一次观测, 状态机那侧因此留在 on。基线跟着整份
+        状态清成假的话, 换完之后第一次观测到假与基线相等、命中 ``update_state``
+        里 ``old == new`` 的早返, 退出边沿再也产不出来 —— 会话型 task 卡在 on,
+        进入时下的设备指令永远收不回来。
+
+        带 duration 时还要一并置 ``state_duration_fired``: 退出边沿被
+        「没配对的 ENTERED」那道闸挡着, 不置位一样退不出去。
+        """
+        state = self._ensure_state(rule.id)
+        state.last_rule_state = True
+        if rule.duration_seconds:
+            state.state_duration_fired = True
 
     def remove_rule(self, rule_id: str) -> None:
         self._rules.pop(rule_id, None)
         self._reset_runtime_state(rule_id)
+        if self._iot_source is not None:
+            self._iot_source.rebuild_index()
 
     def _ensure_state(self, rule_id: str) -> RuleRuntimeState:
         state = self._state.get(rule_id)
@@ -702,7 +911,12 @@ class RuleRunner:
             src.last_bool = current_bool
 
             rule_state = self._state[rule_id]
-            new_rule_state = any(s.last_bool for s in rule_state.sources.values())
+            aggregated = or3(s.last_bool for s in rule_state.sources.values())
+            if aggregated is None:
+                # 别的 source 处于未知：这一轮不参与判定。不 diff、不更新
+                # last_rule_state —— 按假算会产生一次凭空的退出边沿。
+                return out(TriggerOutcome.NOT_FIRED)
+            new_rule_state = aggregated
             old_rule_state = rule_state.last_rule_state
             rule_state.last_rule_state = new_rule_state
 
@@ -755,11 +969,11 @@ class RuleRunner:
         - No EXIT synthesis. The follow-up EXITED event must come from real
           perception; for state-mode rules this means on_exit / debounce will
           not fire just because you triggered.
-        - The ``source_did`` written here (``condition.perceive_device_ids[0]``
-          or ``"manual"``) does not match the ``"perception"`` key the
-          production perception client uses. After a manual trigger,
-          OR-aggregation sees both keys, which can keep a state-mode rule
-          stuck at ENTERED until the runner is rebuilt (process restart).
+        - The ``source_did`` is picked per source so it lands on the same
+          OR key production uses. It still falls back to ``"manual"`` for an
+          omni rule with an empty device list; that key is never fed again, so
+          OR-aggregation keeps a state-mode rule stuck at ENTERED until the
+          runner is rebuilt (process restart).
 
         Returns the execution result, or None when the rule is missing,
         disabled, or has an empty ENTER slot.
@@ -773,11 +987,7 @@ class RuleRunner:
             return None
 
         # Bridge: update state machine so future events diff correctly
-        source_did = (
-            rule.condition.perceive_device_ids[0]
-            if rule.condition.perceive_device_ids
-            else "manual"
-        )
+        source_did = self._manual_source_did(rule)
         src = self._ensure_source(rule_id, source_did)
         src.last_bool = True
         state = self._state[rule_id]
@@ -794,6 +1004,24 @@ class RuleRunner:
         return await self._fire(
             rule, RuleEvent.ENTERED, sources, context, str(uuid.uuid4())
         )
+
+    def _manual_source_did(self, rule: Rule) -> str:
+        """手动触发往 OR 里塞的那个键。**必须与该源真实使用的键一致。**
+
+        对不上的话 OR 里会多出一个再也不会被喂的永真键, rule 永久卡在 on。收口前
+        非 omni 的源躲开这件事全靠 ``perceive_device_ids`` 恰好是空的 —— 那会退化成
+        ``"manual"``, 正是这个失败模式。
+        """
+        source_type = rule.resolved_source_type
+        if source_type == RECORD_SOURCE_TYPE:
+            return RECORD_SOURCE_DID
+        if source_type == IOT_SOURCE_TYPE:
+            ref = iot_ref_of(rule)
+            if ref is not None:
+                return ref.did
+        if rule.condition.perceive_device_ids:
+            return rule.condition.perceive_device_ids[0]
+        return "manual"
 
     # ---- EVENT duration sliding-window evaluator ----
 
@@ -1086,6 +1314,15 @@ class RuleRunner:
         try:
             await asyncio.sleep(delay)
         except asyncio.CancelledError:
+            return
+        # 复查当前聚合态。取消与到点是竞态：mark_source_unknown 撤 timer 时这个协程
+        # 可能已经醒过来、越过了 cancel 点，只靠取消挡不住这一次。
+        if self.is_condition_satisfied(rule.id) is None:
+            logger.info(
+                "EXIT_DEBOUNCE_ABANDONED: rule=%s name=%s 条件已转未就绪",
+                rule.id, rule.name,
+            )
+            self._rewind_abandoned_exit(self._ensure_state(rule.id))
             return
         # Cleanup before firing so a re-entry during fire doesn't see stale handle
         rs = self._ensure_state(rule.id)

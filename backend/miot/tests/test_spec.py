@@ -14,6 +14,7 @@ from miot.spec import (
     MIoTSpecLiteActionParam,
     MIoTSpecParser,
     MIoTSpecTypeClass,
+    MIoTSpecTypeLevel,
     _urn_type_name,
 )
 from miot.storage import MIoTStorage
@@ -95,3 +96,66 @@ async def test_spec_type(test_cache_path: str):
     with open("./types_default.yaml", "w", encoding="utf-8") as f:
         yaml.dump(spec_type.data.model_dump(by_alias=True), f, allow_unicode=True)
     # _LOGGER.info('device_types: %s', spec_type.data.model_dump_json(by_alias=True))
+
+
+@pytest.mark.asyncio
+async def test_parse_lite_carries_notify(monkeypatch):
+    """access 里的 notify 要跟着进 lite 模型。
+
+    只 read 不 notify 的属性拿不到推送，消费方靠这一位区分「会自己更新」和「开机
+    写过一次就冻住」，构造处漏传时这一位恒假、两类属性长得一模一样。
+    """
+    from miot.spec import (
+        MIoTSpecDevice,
+        MIoTSpecProperty,
+        MIoTSpecService,
+    )
+
+    def _prop(iid: int, name: str, access: list[str]) -> MIoTSpecProperty:
+        return MIoTSpecProperty(
+            iid=iid,
+            name=name,
+            type=f"urn:miot-spec-v2:property:{name}:0000000{iid}:vendor:1",
+            description=name,
+            description_trans=name,
+            format="uint8",
+            access=access,
+        )
+
+    device = MIoTSpecDevice(
+        urn="urn:miot-spec-v2:device:lock:0000A00E:vendor:1",
+        name="lock",
+        description="lock",
+        description_trans="门锁",
+        services=[
+            MIoTSpecService(
+                iid=5,
+                name="door",
+                type="urn:miot-spec-v2:service:door:00007830:vendor:1",
+                description="door",
+                description_trans="门",
+                properties=[
+                    _prop(1, "door-status", ["notify"]),
+                    _prop(2, "battery", ["read"]),
+                ],
+            )
+        ],
+    )
+
+    parser = MIoTSpecParser.__new__(MIoTSpecParser)
+
+    async def _fake_parse(urn: str, skip_cache: bool = False):
+        return device
+
+    monkeypatch.setattr(parser, "parse_async", _fake_parse, raising=False)
+
+    # 与 miloco 侧同一组参数：三级都放宽到 UNKNOWN，否则模板未命中的属性被整批滤掉
+    lite = await parser.parse_lite_async(
+        urn=device.urn,
+        spec_service_level=MIoTSpecTypeLevel.UNKNOWN,
+        spec_property_level=MIoTSpecTypeLevel.UNKNOWN,
+        spec_action_level=MIoTSpecTypeLevel.UNKNOWN,
+    )
+
+    assert lite["prop.0.5.1"].notify is True
+    assert lite["prop.0.5.2"].notify is False

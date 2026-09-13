@@ -520,6 +520,10 @@ class MIoTSpecDeviceLite(BaseModel):
     format: str = Field(description="SPEC format")
     writeable: bool = Field(description="Writeable")
     readable: bool = Field(description="Readable")
+    notify: bool = Field(
+        default=False,
+        description="Notify: the device pushes this property when it changes",
+    )
     unit: Optional[str] = Field(default=None, description="SPEC unit")
     value_range: Optional[MIoTSpecValueRange] = Field(
         default=None, description="SPEC value range"
@@ -1324,6 +1328,7 @@ class MIoTSpecParser:
                     format=spec_property.format,
                     writeable=spec_property.writable,
                     readable=spec_property.readable,
+                    notify=spec_property.notify,
                     value_range=spec_property.value_range,
                     value_list=spec_property.value_list,
                     unit=spec_property.unit,

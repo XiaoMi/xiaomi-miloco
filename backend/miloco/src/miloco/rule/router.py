@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Query
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
 from miloco.middleware.exceptions import BusinessException
+from miloco.rule.iot_source import source_not_running
 from miloco.rule.schema import (
     Rule,
     RuleDirection,
@@ -21,6 +22,7 @@ from miloco.rule.schema import (
     RuleUpdate,
 )
 from miloco.schema.common_schema import NormalResponse
+from miloco.utils.common import safe_log
 from miloco.utils.time_utils import parse_iso_ms, since_to_ms
 
 logger = logging.getLogger(__name__)
@@ -113,6 +115,34 @@ async def get_all_rules(
 
 
 # ---- Logs (must be before /{rule_id} to avoid path conflict) ----
+
+
+def build_iot_diagnostics(iot_source) -> dict:
+    """iot 源的自述。源没接上来时给一份「没在跑」而不是抛。
+
+    那个分支生产 HTTP 路径打不到：``rule_service`` 在 lifespan 的 ``initialize()`` 里
+    就建好，而端口是启动段跑完才 listen。留着是为了这个函数能脱离 Manager 单测；两个
+    分支同形由 ``source_not_running`` 保证。
+    """
+    if iot_source is None:
+        return source_not_running("iot 源没有启动")
+    return iot_source.diagnostics()
+
+
+@router.get(
+    "/iot/diagnostics",
+    summary="IoT trigger source diagnostics",
+    response_model=NormalResponse,
+)
+async def get_iot_diagnostics(current_user: str = Depends(verify_token)):
+    """每条 iot 条件项现在是真是假还是未就绪、为什么，以及消费协程还活着吗。
+
+    **debug 级日志**：读诊断不该在诊断对象的日志里留痕。
+    """
+    logger.debug("IoT diagnostics API called, user=%s", safe_log(current_user))
+    service = get_manager().rule_service
+    data = build_iot_diagnostics(service.iot_source if service is not None else None)
+    return NormalResponse(code=0, message="ok", data=data)
 
 
 @router.get("/logs", summary="Get Rule Logs", response_model=NormalResponse)

@@ -434,8 +434,14 @@ def test_reconfigure_ignores_unseeded_rule_when_deciding():
     assert h.dispatched == []
 
 
-def test_reconfigure_exits_when_whole_exit_side_unseeded():
-    """整套 rule 被换掉 → 无从确认还撑着, 保守退出而不是静默卡在 on。"""
+def test_reconfigure_keeps_a_task_on_when_the_only_session_rule_is_unseeded():
+    """整套 rule 被换掉 —— 换配置不是一次观测, 不该由它决定退出。
+
+    on 态交给新 rule 的第一次观测重新裁决: 报假就退, 报真就本来该留着。强制退一次的
+    话, 新 rule 也成立的那些情形要白跑一次 on_exit。
+
+    出路径被整个改没了是另一回事, 由 ``exit_side_rule_ids`` 为空那条分支管。
+    """
     h = Harness(satisfied={"s": True, "new": None})
     h.sm.register_task("t1", {"s": RuleDirection.SESSION})
     h.sm.handle(_entered(rule_id="s"))
@@ -443,8 +449,8 @@ def test_reconfigure_exits_when_whole_exit_side_unseeded():
 
     h.sm.reconfigure("t1", {"new": RuleDirection.SESSION})
 
-    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
-    assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert h.dispatched == []
 
 
 def test_suspend_clears_state_without_running_on_exit():

@@ -72,8 +72,12 @@ STATE_REFRESH_SOURCE = "iot_refresh"
 _RECONCILE_CONCURRENCY = 16
 
 
-def _is_subscribable_did(did: str) -> bool:
-    """did 能否用于拼 MQTT topic:带 '/' 会打断 topic 路径与解码正则。"""
+def is_subscribable_did(did: str) -> bool:
+    """did 能否用于拼 MQTT topic:带 '/' 会打断 topic 路径与解码正则。
+
+    公开的是因为建 iot 规则时要用同一份判据 —— 挂在不可订阅的 did 上的规则会落库
+    成功但永远没有输入。写第二份的话两侧会漂移。
+    """
     return "/" not in did
 
 
@@ -345,6 +349,10 @@ class MiotProxy:
         # re-OAuth 重建 client 后不用重新注册
         self._state_listeners: list[Callable[[Any], Awaitable[None]]] = []
         self._props_listeners: list[Callable[[Any], Awaitable[None]]] = []
+        # MQTT 重连的多消费方。SDK 那一层是单槽 (register_mips_connect_callback),
+        # 已经被本类的 refresh_devices 占着 —— 别的消费方直接注册会把设备刷新覆盖掉。
+        # 形状照 add_device_state_listener。
+        self._mips_connect_listeners: list[Callable[[], None]] = []
 
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
@@ -520,7 +528,7 @@ class MiotProxy:
         # disconnect window may have caused us to miss events. Registered AFTER
         # init_async on purpose: the first connect during setup should not
         # pre-empt the initial full refresh done by refresh_miot_info below.
-        self._miot_client.register_mips_connect_callback(self.refresh_devices)
+        self._miot_client.register_mips_connect_callback(self._on_mips_connected)
         await self.refresh_miot_info()
 
         if self._token_refresh_task:
@@ -1492,6 +1500,22 @@ class MiotProxy:
         """加一个属性推送的消费方。多次调用按注册顺序全部收到。"""
         self._props_listeners.append(callback)
 
+    def add_mips_connect_listener(self, callback: Callable[[], None]) -> None:
+        """加一个 MQTT 重连的消费方。回调是同步的, 自己排后台任务。
+
+        一个消费方抛异常不影响其余, 也不影响 refresh_devices —— 它们互不知情。
+        """
+        self._mips_connect_listeners.append(callback)
+
+    async def _on_mips_connected(self) -> None:
+        """SDK 单槽回调的唯一占用方: 先刷设备表, 再通知各个 listener。"""
+        await self.refresh_devices()
+        for callback in self._mips_connect_listeners:
+            try:
+                callback()
+            except Exception as e:
+                logger.error("mips-connect listener failed: %s", e)
+
     async def _fan_out(
         self, listeners: list[Callable[[Any], Awaitable[None]]], msg: Any, label: str
     ) -> None:
@@ -1542,20 +1566,18 @@ class MiotProxy:
 
         Dids containing '/' (Huami/Zepp-bridged sub-devices) are skipped:
         the '/' breaks the topic path AND the decoder regex — see
-        _is_subscribable_did. (An older note here claimed 0x87 rejection; that
+        is_subscribable_did. (An older note here claimed 0x87 rejection; that
         is UNVERIFIED, same origin as the disproven blt.* observation.)
         """
         skipped = [
-            did for did in self._device_info_dict if not _is_subscribable_did(did)
+            did for did in self._device_info_dict if not is_subscribable_did(did)
         ]
         if skipped:
             logger.debug(
                 "device-meta: skipping %d did(s) with '/': %s", len(skipped), skipped
             )
         await _reconcile_subscriptions(
-            lambda: {
-                did for did in self._device_info_dict if _is_subscribable_did(did)
-            },
+            lambda: {did for did in self._device_info_dict if is_subscribable_did(did)},
             self._subscribed_meta_dids,
             self._miot_client.sub_device_meta_async,
             self._miot_client.unsub_device_meta_async,
@@ -1581,7 +1603,7 @@ class MiotProxy:
         artifact), so subscribe them.
         """
         skipped = [
-            did for did in self._device_info_dict if not _is_subscribable_did(did)
+            did for did in self._device_info_dict if not is_subscribable_did(did)
         ]
         if skipped:
             logger.debug(
@@ -1590,9 +1612,7 @@ class MiotProxy:
                 skipped,
             )
         await _reconcile_subscriptions(
-            lambda: {
-                did for did in self._device_info_dict if _is_subscribable_did(did)
-            },
+            lambda: {did for did in self._device_info_dict if is_subscribable_did(did)},
             self._subscribed_device_state_dids,
             self._miot_client.sub_device_state_async,
             self._miot_client.unsub_device_state_async,
@@ -1617,16 +1637,14 @@ class MiotProxy:
         the '/' breaks the topic path AND the decoder regex.
         """
         skipped = [
-            did for did in self._device_info_dict if not _is_subscribable_did(did)
+            did for did in self._device_info_dict if not is_subscribable_did(did)
         ]
         if skipped:
             logger.debug(
                 "device-props: skipping %d did(s) with '/': %s", len(skipped), skipped
             )
         await _reconcile_subscriptions(
-            lambda: {
-                did for did in self._device_info_dict if _is_subscribable_did(did)
-            },
+            lambda: {did for did in self._device_info_dict if is_subscribable_did(did)},
             self._subscribed_props_dids,
             self._miot_client.sub_device_props_async,
             self._miot_client.unsub_device_props_async,
@@ -2156,6 +2174,7 @@ class MiotProxy:
                     "format": s.format,
                     "writeable": s.writeable,
                     "readable": s.readable,
+                    "notify": s.notify,
                 }
                 if s.unit:
                     entry["unit"] = s.unit
@@ -2167,7 +2186,11 @@ class MiotProxy:
                     ]
                 if s.value_list:
                     entry["value_list"] = [
-                        {"name": v.name, "value": v.value} for v in s.value_list
+                        # name 是 spec 的英文名（agent 认它）, description 是多语言
+                        # 转换后的文本（住户看它）。两个都带: 少了后者, 服务端渲染
+                        # 条件描述时只能拿英文名去拼一句给住户看的话。
+                        {"name": v.name, "value": v.value, "description": v.description}
+                        for v in s.value_list
                     ]
                 if s.type_name:
                     entry["type_name"] = s.type_name

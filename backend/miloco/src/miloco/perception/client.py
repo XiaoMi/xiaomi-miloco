@@ -172,6 +172,24 @@ def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
 
+def omni_rules_only(rules: list) -> list:
+    """只有 omni rule 参与视觉判定。收 ``Rule`` 对象，不收 ``model_dump()`` 的 dict。
+
+    **调用点必须排在 dump 之前**: ``resolved_source_type`` 是普通 ``@property``,
+    不进 dump。dump 之后按键取拿到的是 ``None`` —— 判 ``== "omni"`` 会把所有规则都
+    滤掉, 而回退成 omni 又会让 iot rule 进摄像头 prompt, 两个方向都错。
+
+    **不下沉到 ``get_effectively_enabled_rules``**: 那里还有 GET /rules 和 admin 两
+    个调用方, 它们要的是"全部启用的规则", 不是"感知要判的规则"。
+
+    过滤掉的 rule 也不会被"未命中喂 False"推退: 那条路遍历的是
+    ``result.device_rule_map``, 非 omni rule 根本不进那张表。
+    """
+    from miloco.rule.schema import OMNI_SOURCE_TYPE
+
+    return [r for r in rules if r.resolved_source_type == OMNI_SOURCE_TYPE]
+
+
 def _is_enter_rule(rule: dict) -> bool:
     """下发闸的方向判据。
 
@@ -712,7 +730,7 @@ class PerceptionEngineProxy:
             from miloco.manager import get_manager
 
             rules = await get_manager().rule_service.get_effectively_enabled_rules()
-            rules = [rule.model_dump() for rule in rules]
+            rules = [rule.model_dump() for rule in omni_rules_only(rules)]
             rules, skipped_task_ids = _filter_completed_event_rules(rules)
 
             device_count = sum(1 for d in batch.devices.values() if d.has_data)
