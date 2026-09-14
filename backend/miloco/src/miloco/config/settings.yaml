@@ -113,6 +113,22 @@ perception:
       motion_global_drift_ratio: 0.5
       crop_min_area_ratio: 0.10
       crop_max_area_ratio: 0.49
+    person_crop_inject:
+      # 单帧人像注入:给每个待识别 track 附一张从本窗视频里裁出的"外观单帧"、绑定 track_id。
+      # 离线评测(主指标 = 多人同框逐窗召回,配对 McNemar)显示显著提升,在已开 Smart Crop 的
+      # 条件下仍然可观;代价是误识率有方向性上升,压回基线另有专项。
+      # 单闸(不像 crop_enhance 是双闸):本能力没有 UI 入口,详见
+      # perception/engine/config.py::PersonCropInjectConfig 的 docstring。
+      # 每窗热读(不在建引擎时快照),但 get_settings() 有进程级 lru_cache、本能力又没有 admin/UI
+      # 入口去清它,所以手改本文件或 config.json 不会当场生效。关闸走 CLI:
+      #   miloco-cli config set perception.engine.person_crop_inject.enabled false
+      # (写 config.json 并默认顺手重启后端)。关闸即退化为只给 bbox 数字坐标。
+      enabled: true
+      # 256 是评测扫出来的效率前沿:往下掉得快且显著,往上检测不到增益却要 12.5× token。
+      crop_height: 256
+      # 原生框高低于此值的帧不参与选帧(远处小框放大只得到一张糊图);末帧兜底同样过这道闸 ——
+      # 否则全窗都是小框时它恰好失效,只把选帧从"窗内最大"降级成"末帧",清晰度一点没变。
+      min_bbox_height_px: 40
     gate:
       # visual 滞回时长(秒)。visual 最近通过过、距今 <= 此值时,本窗 visual 不通过
       # 也强制生成 packet 并打 hold 标志,保住 video 路由不被纯音频短路。
