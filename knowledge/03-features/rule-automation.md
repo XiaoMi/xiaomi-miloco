@@ -49,6 +49,7 @@
 - 规则执行依赖感知流水线持续运行，感知引擎停止时规则不会触发
 - 不支持基于精确传感器数值的条件（如"温度高于 28 度"），需通过 VLM 语义推理
 - DYNAMIC 规则的 Agent isolated 会话的文字输出不进主对话流，不自动发声；需通过 `miloco-notify` Skill 路由才能让用户感知到
+- 一条规则真正生效的条件是**有效启用**：它自己 `enabled` **且**所属 task 未暂停。task 暂停不会去改规则那一列（见 [任务管理](task-management.md)），感知下发闸、管理接口的启用数按这个派生口径算；`rule list` 默认仍返回 `enabled` 原值，要按派生口径看需加 `--enabled-only`
 - 规则名不可重复，创建/更新遇重名冲突失败（`ConflictException`）
 - condition.query 不能以"检测到/识别到/感知到"等断言性词汇开头（会导致 VLM 将条件视为已发生事实而连续误触发）
 
@@ -108,6 +109,8 @@
 
 **累计达标通知**：给 task 配 `on_target_desc`（`task set-actions`），前提是它挂了 duration 型 record 且设了 target_minutes。达标规则**不由用户建**——task 的达标动作、活跃的时长记账、记账上的阈值三样齐备时服务端自动生成一条 `direction=milestone` 的规则，任一样消失就删掉。它不出现在 `rule list`（`--show-milestone` 可看）和 `task get` 里，用户主动建会被拒。做成派生物是因为装配是分步的，中间态必然有一半不成立，而派生量没有中间态。
 
+**「配得下去但永不执行」靠收敛点诊断，不靠写入闸**：写侧只保留能就地判定的那道闸——建 / 改一条 `enter` 规则时，它自己得有动作可落（判当前真实状态，不预演这次写入的后果；`exit` 不查，无动作的 exit 只推状态，是让 task 可重入的正常配置）。而"哑规则"（同方向兄弟争槽、清空动作槽、改方向或改挂 task 之后选不到动作）和"方向组合被改成非法"（删掉最后一条 enter 后 task 再也进不了 on）这类毛病，破坏入口不止一条、有的入口还不该设闸（拒绝 `rule delete` 会把"先删掉它"这条自救路堵死），所以改为在 `reconfigure_task` 这个所有写入路径的收敛点上诊断并告警（`RuleService.report_task_config_problems` / `report_muted_enter_rules`）。判据一律复用写入侧那几份与读侧的选槽链路，不另写一份——复刻永远滞后于被复刻者。
+
 **DYNAMIC 规则 isolated 会话**：触发时构造 `RuleTriggerCallback`（含 rule_id / event / prompt_text / room_name / source_device_ids），经 `AgentDispatcher` → OpenClaw Webhook 投递。Agent 在 `session="isolated"` 会话中运行，文字输出不进主对话流、不自动发声，"用户该收到"的内容必须经 `miloco-notify` Skill 落地。
 
 **STATIC 动作两重检查**：执行前做幂等检查（先查当前属性值，已达目标则跳过）和冷却检查（冷却窗口内跳过，适合 TTS 等不宜频繁触发的动作）。`idempotent=false` 的动作必须配 `cooldown_minutes`，service 层在 CRUD 时强制校验。
@@ -137,7 +140,7 @@
 
 **下游**：STATIC 规则直接调 `MiotProxy`（`miot/client.py`）；DYNAMIC 规则经 `AgentDispatcher` 投给 OpenClaw Agent，Agent 调 `miloco-devices` Skill 执行。详见 [设备控制](device-control.md)。
 
-**共享**：规则通过必填的 `task_id` 字段 FK CASCADE 挂到 task（应用层 + DB NOT NULL 双保险校验 task 存在）；event 规则的「当期达标静默」依赖关联任务的 record 状态。DYNAMIC 规则回调经 `dispatch_event("rule", ...)` 投递，`AgentDispatcher` 保证单飞和批量合并。详见 [任务管理](task-management.md)、[Agent 集成](openclaw-integration.md)。
+**共享**：规则通过必填的 `task_id` 字段 FK CASCADE 挂到 task（应用层 + DB NOT NULL 双保险校验 task 存在）；达标（`direction=milestone`）规则的「当期达标静默」依赖关联任务的 record 状态。DYNAMIC 规则回调经 `dispatch_event("rule", ...)` 投递，`AgentDispatcher` 保证单飞和批量合并。详见 [任务管理](task-management.md)、[Agent 集成](openclaw-integration.md)。
 
 ### 配置
 

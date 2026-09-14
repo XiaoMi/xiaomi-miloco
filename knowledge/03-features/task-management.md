@@ -13,6 +13,8 @@
 ### 能做什么
 
 - **持久意图主体**：一个任务（`task_id` + 描述）是长期存在的身份，可处于启用 / 暂停态，挂载规则、定时、记录三类能力，独立运转
+- **生命周期**：permanent（长期常驻）与 temporary（限时，可带一个到期时刻）两种；描述、生命周期、到期时刻建好之后都可改，只改传进来的那几个字段
+- **运行态可见**：任务详情显示这个任务此刻是开着还是关着——回答"我的规则怎么没反应"（停用时不显示，那时运行态恒关、没有信息量）。最后一次判定的结论摘要目前只在任务全貌接口里给出、界面未呈现，供诊断用。运行态与判定摘要都是内存派生量，不落库，重启后一律从关闭态起
 - **行为统计（任务记录）**：记录"做了多少 / 做了多久 / 做了几次"，按周期窗口（日 / 周 / 月 / 长期）自动归档滚动
 - **三种统计形态**：
   - **进度型（progress）**：有明确目标值与单位的累积，如"每天喝 8 杯水"，达标即完成
@@ -33,6 +35,9 @@
 
 - 任务记录只做统计与归档，不做自动化触发（那是规则）、不做定时提醒（那是 cron）
 - 任务被暂停后，记录累积类操作（进度累加 / 事件追加 / 计时段起止）被静默跳过（返回 noop 而非报错，不计数），恢复启用后才继续累积
+- 暂停不派发任务的退出动作（现实里条件可能还成立），但会由服务端自己收尾进行中的计时段——记账是自己的账本，不是对世界的副作用，段一直开着会把暂停之后的时间也算进累计
+- 计时段的结束时刻必须晚于开始时刻，倒挂的区间一律拒绝落账、这一段原样留着（起点可能落在未来——上报方时钟偏快或手工补过一条未来时刻的开始，等时钟追上来再收比写脏数据强）
+- 达标状态是"本期已落账累计 ≥ 目标"的派生量，落账与改目标都在同一笔事务里当场重算，不留给读取方现算
 - 一个任务同时只能有一条活跃记录；记录形态（kind）在创建时定死，不可中途切换
 - 事件型记录长期累积、不参与周期归档
 - 任务被删除后，关联的规则与所有记录一并清理，仅保留独立的终止审计快照
@@ -73,7 +78,7 @@
 
 **TaskService**（`task/service.py`）
 
-任务生命周期主体的业务层：创建 / 启停 / 更新 / 删除任务，装配规则与定时。rule / cron 归属通过各自的 `task_id` FK CASCADE 直连 task。启停时联动改写关联规则的 `enabled`，internal cron 直接联动 `runner.apply_enabled_state`，external cron 汇总成 `agent_pending` 交由 Agent 落地。`delete_task` 单事务编排终止——写审计快照 + 删任务（FK CASCADE 连带清 rule / cron / 全部 task_record_* 表）。另提供 summary 聚合视图：以 task 为主表左连接各任务的活跃记录摘要（没绑记录的 task 也返，不丢行），一次性出全部任务的完整状态（基础 + 规则摘要 + 关联 + 记录摘要），供前端任务面板拉取；记录侧摘要由 `TaskRecordService.list_active_summaries` 拼装。
+任务生命周期主体的业务层：创建 / 启停 / 更新 / 删除任务，装配规则与定时。rule / cron 归属通过各自的 `task_id` FK CASCADE 直连 task。启停**不改写关联规则的 `enabled`**——那一列是用户对单条规则的意图，覆写它会让"用户手动关掉的那一条"在任务重新启用时被错误打开；规则到底生不生效由派生量**有效启用**（`rule.enabled` AND 所属 task 未暂停）决定，感知侧每轮的下发闸与管理接口的规则计数都读这个口径（`RuleService.get_effectively_enabled_rules` / `apply_task_status`）。internal cron 直接联动 `runner.apply_enabled_state`，external cron 汇总成 `agent_pending` 交由 Agent 落地。`delete_task` 单事务编排终止——写审计快照 + 删任务（FK CASCADE 连带清 rule / cron / 全部 task_record_* 表）。另提供 summary 聚合视图：以 task 为主表左连接各任务的活跃记录摘要（没绑记录的 task 也返，不丢行），一次性出全部任务的完整状态（基础 + 规则摘要 + 关联 + 记录摘要），供前端任务面板拉取；记录侧摘要由 `TaskRecordService.list_active_summaries` 拼装。任务全貌视图（单任务详情与 summary 列表共用同一份组装）另附运行态与最后一次判定摘要，两者都从规则引擎持有的 `TaskStateMachine`（见 [规则自动化](rule-automation.md)）与 `DecisionTracker`（`task/tracking.py`）现取——纯内存派生量、不落库，读不到就当关闭态。
 
 **TaskRecordService**（`task_record/service.py`）
 
@@ -113,7 +118,7 @@
 
 ### 任务相关 API 路径
 
-主要入口：`POST /api/tasks`（创建）、`DELETE /api/tasks/{task_id}`（终止，级联清理）、`/api/tasks/{task_id}/record/...`（记录初始化 / 累积 / 查询 / 归档），完整端点见 `task/router.py` 和 `task_record/router.py`。
+主要入口：`POST /api/tasks`（创建）、`PATCH /api/tasks/{task_id}`（改描述 / 生命周期 / 到期时刻，只改传进来的字段）、`PATCH /api/tasks/{task_id}/actions`（写 task 的边界动作槽，只改请求体里出现的槽、传 null 清空；槽语义见 [规则自动化](rule-automation.md)）、`DELETE /api/tasks/{task_id}`（终止，级联清理）、`/api/tasks/{task_id}/record/...`（记录初始化 / 累积 / 查询 / 归档），完整端点见 `task/router.py` 和 `task_record/router.py`。定时能力自成一段前缀 `/api/crons`（创建 / 列表 / 详情 / 删除 / 启停，internal 与 external 两类同表），端点见 `schedule/router.py`。
 
 ### 与其他模块的关系
 

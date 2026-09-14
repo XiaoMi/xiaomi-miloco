@@ -14,7 +14,7 @@
 | [设计原则](design-principles.md)                        | 设计哲学与七条铁律,LLM 写新模块前必读                                             |
 | [设计 Token](design-tokens.md)                          | 颜色 / 字体 / 字号 / 间距 / 圆角 / 阴影 / 动效 / z-index 全量规范                 |
 | [组件原型](component-patterns.md)                       | Card / Button / Status Dot / Drawer / Dialog / Toast / Chip / Switch 复制即用模板 |
-| [布局 · 可访问性 · 反模式](layout-a11y-antipatterns.md) | 栅格、断点、a11y 必做项、命名约定、25 条反模式扣分项                              |
+| [布局 · 可访问性 · 反模式](layout-a11y-antipatterns.md) | 栅格、断点、a11y 必做项、命名约定、21 条反模式扣分项                              |
 | [小米品牌设计语言](xiaomi-brand-language.md)            | 小米全套品牌系统(色彩 / 字体 / 版式 / 数据可视化 / Voice)                         |
 
 ---

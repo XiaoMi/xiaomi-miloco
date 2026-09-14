@@ -17,6 +17,7 @@
 - **实时识别**：随感知流水线运行，track 稳定后自动识别并写回 person_id，caption 中出现成员名
 - **陌生人分配**：未能识别的 track 自动分配唯一编号，同一个人跨不同 track 用 ReID embedding 聚类合并
 - **成员合并 / 拆分**：把误分裂成多个的同一人合并为一个、或把误合并的样本拆分成新成员，DB 行与磁盘样本目录同步增删
+- **宠物成员（实验性）**：给猫狗等宠物建一份花名册（名字 / 物种 / 头像 / 多姿态参考图），上传照片或视频可由 VLM 先生成一份外观描述供用户确认；建档后感知描述里用宠物名而非"一只猫"。受 `features.pet_recognition` 总开关门控，默认关
 
 ### 典型场景
 
@@ -31,6 +32,9 @@
 - 陌生人池（tier_u）全内存，重启即清
 - 每个摄像头持有独立的 IdentityEngine 实例，身份库全局共享；不支持"两台摄像头实时合并同一 track"
 - 成员名重复时创建/更新抛 `ConflictException`
+- 宠物不走人的那套身份栈：没有 track 级状态机、识别不做 ReID 比对、不建 embedding 库（视频建档挑多姿态参考图时借人体 ReID 嵌入算差异度，仅此一处，模型不可用则回退感知哈希），只靠"参考图 + 外观描述"让 VLM 在当窗自己认，因此不保证跨窗一致、同色同种的两只可能互认
+- 宠物识别真正生效要两件事同时成立：总开关开着**且**花名册非空——只开开关不建档时 VLM 侧的宠物字段与命名纪律整套不注入
+- 总开关关闭只关"新增 / 写入注册数据"（建档、头像、参考图、外观描述），读取与存量管理（改名、删除）仍可用，已录数据不删
 
 ---
 
@@ -100,7 +104,17 @@ IdentityLibrary 写入样本文件
 
 per-camera 识别管线总编排，维护每个 track 的识别状态机（none / pending / confirmed / unknown / no_person 五态）。决定何时派发识别请求，回流结果后更新 person_id 映射，以及何时将高置信结果异步写入 tier_c。每窗口比对 tier_a 指纹快照，发现变化时将所有 track 推回 pending 强制重判。
 
+**PetLibrary**（`perception/engine/identity/pet_library.py`）
+
+宠物花名册的文件存取封装，落在身份库根目录下与人类样本并列的 `pets/` 子目录。它只存"身份壳"（名 / 物种 / 头像 / 少量多姿态参考图，上限见 `perception/engine/identity/pet_library.py`），宠物的外观描述沉淀进家庭记忆的成员画像、不在这里。HTTP 侧是 `pet/router.py`（含一个无副作用的"看素材出外观描述"端点，只调 VLM 不落库），素材筛选与描述生成在 `pet/observe.py`；参考图注入 omni prompt 由 `perception/engine/omni/pet_refs.py` 负责。
+
+**红线**：本域不接 `IdentityEngine` / ReID / 身份状态机 / `person` 表。`IdentityLibrary` 只遍历 `persons/`、从不遍历库根，所以 `pets/` 不会被它的扫描与补向量逻辑误触。
+
 ### 关键设计决策
+
+#### 宠物为什么不复用人的身份栈
+
+人的识别栈（DeepSORT track + ReID embedding + 五态状态机 + 三层样本）是为"跨窗保持同一个人"建的，代价是每台摄像头一套常驻状态。宠物的诉求只是"别把它叫成一只猫"，形变与姿态远比人剧烈、ReID 模型也不是为它训的，接进去只会污染人的状态机而换不来准确率。所以宠物走另一条极轻的路：花名册存参考图，prompt 里带上参考图和命名纪律，让 VLM 当窗自己认，识别结果不落任何状态。这也是它能作为实验性功能整体开关、关掉后主链路一行不改的原因。
 
 #### tier_a / tier_c / tier_u 三层样本设计意图
 
@@ -112,23 +126,26 @@ per-camera 识别管线总编排，维护每个 track 的识别状态机（none 
 
 ### 如果我要修改身份识别相关功能
 
-| 修改目标                            | 去看哪个文件                                                |
-| ----------------------------------- | ----------------------------------------------------------- |
-| 修改识别状态机逻辑（何时触发/确认） | `perception/engine/identity/engine.py`（IdentityEngine）    |
-| 修改陌生人池聚类逻辑                | `perception/engine/identity/tier_u.py`（TierUPool）         |
-| 修改样本库读写逻辑                  | `perception/engine/identity/library.py`（IdentityLibrary）  |
-| 修改注册流程（预览/commit 逻辑）    | `perception/engine/identity/registration_session.py`        |
-| 修改成员 CRUD API                   | `person/router.py`、`person/service.py`                     |
-| 修改成员合并 / 拆分逻辑             | `perception/engine/identity/library.py`、`person/router.py` |
+| 修改目标                            | 去看哪个文件                                                                   |
+| ----------------------------------- | ------------------------------------------------------------------------------ |
+| 修改识别状态机逻辑（何时触发/确认） | `perception/engine/identity/engine.py`（IdentityEngine）                       |
+| 修改陌生人池聚类逻辑                | `perception/engine/identity/tier_u.py`（TierUPool）                            |
+| 修改样本库读写逻辑                  | `perception/engine/identity/library.py`（IdentityLibrary）                     |
+| 修改注册流程（预览/commit 逻辑）    | `perception/engine/identity/registration_session.py`                           |
+| 修改成员 CRUD API                   | `person/router.py`、`person/service.py`                                        |
+| 修改成员合并 / 拆分逻辑             | `perception/engine/identity/library.py`、`person/router.py`                    |
+| 修改宠物花名册 / 宠物注册链路       | `pet/router.py`、`pet/observe.py`、`perception/engine/identity/pet_library.py` |
 
 ### 身份识别相关 API 路径
 
 成员管理：`/api/identity/persons` 前缀（CRUD）；上传注册：`/api/identity/register/preview`（预览）→ `/api/identity/register/commit`（确认写入）；陌生人池注册：`/api/identity/pool/fetch`（取候选）→ `/api/identity/register/from-cluster`（确认写入）。完整端点见 `person/router.py`。
 
+宠物花名册在同一个 `/api/identity` 前缀下另起一段：`/api/identity/pets`（CRUD + 头像 + 参考图 + 看素材出外观描述）。两个 router 共用 prefix、靠路径首段（`/persons*` 与 `/pets*`）互斥，端点见 `pet/router.py`。实验性开关的读写端点在 `admin/router.py`。
+
 ### 与其他模块的关系
 
 **上游**：身份识别嵌入在 Identity 层，每次感知周期由 Identity 编排器（`perception/engine/identity/identity.py`）调用，`{track_id → person_id}` 映射写回 `IdentityPacket` 后交给 Omni 层。
 
-**下游**：`person_id` 注入 Omni prompt，VLM 在 caption 中以成员名代替匿名编号。成员增改与注册落库后级联 `HomeProfileService.commit()` 重渲染家庭档案 md（保证新成员 / 改名及时进档案、改名条目自动纠偏），成员删除时改走 `HomeProfileService.remove_subject` 清理绑定该成员的条目。
+**下游**：`person_id` 注入 Omni prompt，VLM 在 caption 中以成员名代替匿名编号。成员增改与注册落库后级联 `HomeProfileService.commit()` 重渲染家庭档案 md（保证新成员 / 改名及时进档案、改名条目自动纠偏），成员删除时改走 `HomeProfileService.remove_subject` 清理绑定该成员的条目。宠物花名册的增改删同样联动重渲 / 清理：宠物识别门以花名册为判据、写完立即生效，而 prompt 里的宠物名单来自家庭档案 md，不重渲就会出现"门开了但名单缺失或还是旧名字"。
 
 **共享**：per-camera IdentityEngine 共享工厂构造的同一份 IdentityLibrary 实例；成员 CRUD / 注册流程另建自己的实例。因 IdentityLibrary 无状态、且两端都经 `resolve_library_root` 解析同一根目录，读写必然落在同一份样本库。
