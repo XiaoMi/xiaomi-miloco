@@ -323,6 +323,11 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
 
     task_repo = TaskRepo()
     tracker = DecisionTracker()
+
+    def forget_task_memory(task_id: str) -> None:
+        tracker.forget(task_id)
+        rule_runner.drop_owed_exit(task_id)
+
     state_machine = TaskStateMachine(
         is_condition_satisfied=rule_runner.is_condition_satisfied,
         # 只有状态机自己发起动作时才会走到这里 (重新配置时强制 on_exit、手动
@@ -334,7 +339,7 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
         track=lambda outcome, signal: tracker.record(
             signal.task_id, signal.rule_id, outcome.value, now_ms()
         ),
-        on_forget=tracker.forget,
+        on_forget=forget_task_memory,
     )
     rule_runner.attach_state_machine(state_machine)
     rule_runner.attach_tracker(tracker)
@@ -988,7 +993,8 @@ class RuleService:
         """task 被删 —— 清掉所有 per-task 的内存态。
 
         rule 维度走 ``remove_rule_from_runner``, 它清不到按 task_id 存的那些:
-        状态机拓扑、运行态、判定跟踪、动作快照、停用标记、达标源的轮次计数。
+        状态机拓扑、运行态、判定跟踪、动作快照、停用标记、欠下的那次退出、达标源的
+        轮次计数。
         record timer 不在这里撤 —— 它按 rule_id 存, 逐条清 rule 时已经撤掉了。
 
         ``task_id`` 是用户自己起的名字, 删掉再用同名重建是正常操作 —— 不清的话新
@@ -1296,12 +1302,41 @@ class RuleService:
                 sm.unregister_task(task_id)
             return
         sm.reconfigure(task_id, _live_topology(rules))
+        self._resume_owed_session(task_id)
         # 排 timer 只挂在「进入会话」那个边沿上, 而装配是分步的 —— 三样齐备的那
         # 一刻可能落在会话开始之后, 那时进入边沿早过去了, 这一天的达标就只能靠
         # 退出兜底或跨零点补发, 而这条通知的全部意义是到点提醒。已经在态内就补
         # 排一次: arm 自带撤旧, 等于按当前累计重排, 阈值改了也一并跟上。
         if sm.runtime_state(task_id) is TaskRuntimeState.ON:
             self._runner.record_source.arm(task_id)
+
+    def _resume_owed_session(self, task_id: str) -> None:
+        """停用清掉的在态, 启用时按欠账补回来 —— 只对 enter + exit 形态。
+
+        这类 task 的退出条件多是脉冲 (挥一下手), 停用后不会自动再成立: 运行态停在
+        ``off``, 住户再做退出动作会被状态机第一道闸判成"本来就没开着"、静默吃掉,
+        得先重新做一次进入动作才退得出去。而进入动作确实下过、退出动作没下过, 所以
+        ``off`` 是停用造成的失真, 补回 ``on`` 是修失真, 不是开例外通道。
+
+        判据是"欠着账被停用过"而不是"这次是不是 enable": 改一条 rule 也走
+        ``reconfigure_task``, 那时运行态没被清过, 不该动它。
+        """
+        runner = self._runner
+        sm = runner.state_machine
+        if sm is None or runner.is_task_paused(task_id):
+            return
+        if runner.owed_exit_paused_at(task_id) is None:
+            return
+        if not sm.resume_session(task_id):
+            return
+        runner.end_owed_exit_pause(task_id)
+        logger.info("OWED_EXIT_RESUMED: task=%s 启用后把在态补回来", task_id)
+        # 计时段要跟着回来: 恢复在态之后住户再做进入动作会判"已在态内"、不再 fire
+        # on_enter, 而段只能由那条路开 —— 不补这一下, 累计就永远不再走了。
+        try:
+            self._task_record_service.reopen_active_session(task_id)
+        except Exception:
+            logger.exception("task %s 恢复在态时重开计时段失败", task_id)
 
     def apply_task_status(self, task_id: str, active: bool) -> None:
         """task 启停 → 刷新派生的「有效启用」并走重新配置路径。

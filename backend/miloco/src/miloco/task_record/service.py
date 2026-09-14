@@ -927,6 +927,40 @@ class TaskRecordService:
                 conn.rollback()
                 raise
 
+    def reopen_active_session(self, task_id: str) -> str | None:
+        """重新开始观测这个 task —— 起一段新的计时，返回起点。
+
+        没有 duration record、段已经开着、今日已达标时返 None，不抛。
+
+        起点取当前时刻而不是停用时刻：停用期间没有观测，那段时间不该算进累计。
+        """
+        now = _now_iso()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN")
+            try:
+                if _detect_kind(cursor, task_id) is not RecordKind.DURATION:
+                    conn.rollback()
+                    return None
+                row = DurationRepo.get_active(cursor, task_id)
+                if row is None or row["active_session_start_at"] is not None:
+                    conn.rollback()
+                    return None
+                if row["status"] == RecordStatus.COMPLETED.value:
+                    # 达标之后 agent 那条路就不再调 session-end 了，这里开的段没人
+                    # 收尾；非 recurring 的行又不跨日切段，派生累计会按「到现在」
+                    # 一直涨。
+                    conn.rollback()
+                    return None
+                DurationRepo.set_active_session_start(
+                    cursor, task_id=task_id, start_at=now, now=now
+                )
+                conn.commit()
+                return now
+            except Exception:
+                conn.rollback()
+                raise
+
     # ── compute（独立 op，含历史日期 / 跨窗口） ───────────────────────────
 
     def compute_derived(

@@ -219,6 +219,15 @@ class TaskStateMachine:
     def runtime_state(self, task_id: str) -> TaskRuntimeState:
         return self._states.get(task_id, TaskRuntimeState.OFF)
 
+    def has_exit_path(self, task_id: str) -> bool:
+        """名下有没有能把 task 推回 ``off`` 的规则。
+
+        没有就是事件型: 运行态恒 ``off``, 每次进信号执行一次动作, 谈不上"在态",
+        也就没有"进入指令留在设备上等着退出指令来复位"这回事。
+        """
+        topology = self._topologies.get(task_id)
+        return topology is not None and topology.is_session_type
+
     # ── 拓扑维护 ──────────────────────────────────────────────────
 
     def register_task(self, task_id: str, directions: dict[str, RuleDirection]) -> None:
@@ -468,6 +477,26 @@ class TaskStateMachine:
             for stale in queue:
                 self._track(TransitionOutcome.SIGNAL_DROPPED, stale)
             queue.clear()
+
+    def resume_session(self, task_id: str) -> bool:
+        """把 ``suspend`` 清掉的在态补回来。恢复了返回 True。
+
+        **只对 enter + exit 形态**。session 形态的在态是持续条件的投影, 没有观测就
+        断言它成立等于说谎; enter + exit 没有持续条件可言, 在态与否由那一对进出动作
+        决定 —— 进入动作下过、退出动作没下过, 那它就还在态内, ``off`` 是停用造成的
+        失真。
+
+        调用方要自己确认这个 task 确实欠着一次退出, 本函数只判形态。
+        """
+        topology = self._topologies.get(task_id)
+        if topology is None:
+            return False
+        if topology.holding_rule_ids or not topology.is_session_type:
+            return False
+        if self.runtime_state(task_id) is TaskRuntimeState.ON:
+            return False
+        self._states[task_id] = TaskRuntimeState.ON
+        return True
 
     def _should_stay_on(self, topology: TaskTopology) -> bool:
         """配置变了、现实没变 —— 这个 task 还该留在 ``on`` 吗。
