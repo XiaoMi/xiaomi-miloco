@@ -41,6 +41,8 @@ from miloco.miot.ws import (
 )
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.common import escape_for_js_string
+from miloco.utils.logger import cam_tag as _cam_tag
+from miloco.utils.logger import log_safe
 
 logger = logging.getLogger(name=__name__)
 
@@ -68,26 +70,6 @@ def _truncate_ws_reason(reason: str) -> str:
     # 注意:即便没超长也要返回 round-trip 后的串,不能 return 原 reason——原串可能含
     # 孤立代理项,直接交给 websocket.close() 仍会在它内部 encode 时崩。统一走 encoded。
     return encoded[:120].decode("utf-8", errors="ignore")
-
-
-def _safe_log(value) -> str:
-    """去 CR/LF 防 log injection (CodeQL py/log-injection)。
-
-    **凡是来自请求的值都要过一遍,不分类型**:CodeQL 只看「值来自请求」,不信任
-    类型注解。实测踩过两次:
-      - ``channel`` / ``duration_ms`` 声明成 ``int`` 也照样被报(第一批 4 条 alert
-        全部指向 ``channel`` 而非 ``camera_id``);
-      - ``timeout_s`` 由 ``duration_ms`` 算出,污点会**传播**过来;
-      - ``current_user`` 来自 ``Depends(verify_token)``,一样算请求输入。
-    所以调用侧统一 ``%s`` + ``_safe_log()``,别看着是数字或已鉴权就跳过。数值想保
-    留格式就先格式化再消毒:``_safe_log(f"{timeout_s:.1f}")``。
-
-    注:本文件里未被本次改动碰到的历史日志点仍是裸值(CodeQL 在 PR 上只对改动行
-    报警),不在本次范围内;新增/修改日志时请一律走本函数。
-    """
-    if value is None:
-        return "None"
-    return str(value).replace("\r", "").replace("\n", " ")
 
 
 # 首帧看门狗:WS 注册成功(reg_id≥0)后,若摄像头在这么多秒内一帧都没出,判定为
@@ -163,7 +145,7 @@ async def _first_frame_watchdog(
         # 12s 无首帧:续等,期间出帧即解除(静默自愈 / 静默检测重连完成)。
         logger.info(
             "First-frame delayed, %s.%s — no frame in %.0fs, extending grace %.0fs",
-            _safe_log(camera_id), _safe_log(channel),
+            log_safe(camera_id), log_safe(channel),
             _FIRST_FRAME_TIMEOUT_S, _GRACE_EXTENSION_S,
         )
         await asyncio.sleep(_GRACE_EXTENSION_S)
@@ -174,15 +156,16 @@ async def _first_frame_watchdog(
         logger.warning(
             "First-frame watchdog short-circuited, %s.%s — NAT-blocked evidence "
             "already conclusive, skipping %.0fs grace",
-            _safe_log(camera_id), _safe_log(channel), _GRACE_EXTENSION_S,
+            log_safe(camera_id), log_safe(channel), _GRACE_EXTENSION_S,
         )
         waited_s = _FIRST_FRAME_TIMEOUT_S
     # 实际等待时长按走过的出口算：短路那条只过了 12s，写死 72s 会让运维按 6 倍的
     # 时长反推「是不是等得不够久」，还和上一行刚打的 "skipping 60s grace" 自相矛盾。
     logger.warning(
-        "First-frame watchdog fired, %s.%s — no frame in %.0fs, camera likely "
+        "First-frame watchdog fired, %s — no frame in %.0fs, camera likely "
         "unreachable (cross-LAN / offline / PPCS relay not established)",
-        _safe_log(camera_id), _safe_log(channel), waited_s,
+        # waited_s 是按有没有宽限期算出的**实际**等待时长，不是那个超时常量
+        _cam_tag(camera_id, channel), waited_s,
     )
     # NAT 阻断判据在选文案时**重新取一次**：走续等那条路时又过了 60s，会话可能
     # 刚跨过 _STREAM_NAT_TIMEOUT。与列表接口的 stream_error 共用 stream_nat_blocked
@@ -209,8 +192,8 @@ async def _first_frame_watchdog(
         # send 失败基本意味着连接已被对端关掉——再 close 也是白搭,还会再抛一条
         # error 把"连接没了"这件正常事刷成两条 ERROR。直接收尾,主流程 finally 的
         # close_connection 负责清理。降到 info,不混进真 error。
-        logger.info("watchdog send skipped (conn likely gone), %s.%s: %s",
-                    _safe_log(camera_id), _safe_log(channel), err)
+        logger.info("watchdog send skipped (conn likely gone), %s: %s",
+                    _cam_tag(camera_id, channel), log_safe(err))
         return
     try:
         # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)。
@@ -220,8 +203,7 @@ async def _first_frame_watchdog(
             code=1011, reason=_truncate_ws_reason(reason)
         )
     except Exception as err:
-        logger.info("watchdog close failed, %s.%s: %s",
-                    _safe_log(camera_id), _safe_log(channel), err)
+        logger.info("watchdog close failed, %s: %s", _cam_tag(camera_id, channel), log_safe(err))
 
 
 router = APIRouter(prefix="/miot", tags=["Xiaomi IoT"])
@@ -239,15 +221,21 @@ async def authorize_miot(
     current_user: str = Depends(verify_token),
 ):
     """Exchange the authorization code (pasted by user) for an access token."""
-    logger.info("MiOT authorize API called, user: %s", current_user)
-    await manager.miot_service.authorize_with_code(request.code, request.state)
-    return NormalResponse(code=0, message="MiOT authorized successfully", data=None)
+    logger.info("MiOT authorize API called, user: %s", log_safe(current_user))
+    # data 里带回 account_changed / scope_preserved：命令行与 web 都据此决定
+    # 要不要再跑一遍选家流程（它是「唯一启用」语义，会覆写家庭白名单，把后端
+    # 刚保住的配置又冲掉），并据此告知住户配置是保留了还是重置了。老客户端
+    # 忽略多出的字段即可。
+    result = await manager.miot_service.authorize_with_code(
+        request.code, request.state
+    )
+    return NormalResponse(code=0, message="MiOT authorized successfully", data=result)
 
 
 @router.get("/status", summary="Check MiOT bind status", response_model=NormalResponse)
 async def get_miot_bind_status(current_user: str = Depends(verify_token)):
     """Check MiOT bind status"""
-    logger.info("MiOT bind status API called, user: %s", current_user)
+    logger.info("MiOT bind status API called, user: %s", log_safe(current_user))
     result = await manager.miot_service.get_miot_bind_status()
     return NormalResponse(
         code=0, message="Bind status checked successfully", data=result
@@ -257,7 +245,7 @@ async def get_miot_bind_status(current_user: str = Depends(verify_token)):
 @router.post("/bind", summary="Bind MiOT account", response_model=NormalResponse)
 async def bind_miot(current_user: str = Depends(verify_token)):
     """Bind MiOT account: get OAuth URL for authorization"""
-    logger.info("MiOT bind API called, user: %s", current_user)
+    logger.info("MiOT bind API called, user: %s", log_safe(current_user))
     result = await manager.miot_service.bind_miot()
     return NormalResponse(
         code=0, message="OAuth URL generated successfully", data=result
@@ -267,7 +255,7 @@ async def bind_miot(current_user: str = Depends(verify_token)):
 @router.post("/unbind", summary="Unbind MiOT account", response_model=NormalResponse)
 async def unbind_miot(current_user: str = Depends(verify_token)):
     """Unbind MiOT account: clear all MiOT state"""
-    logger.info("MiOT unbind API called, user: %s", current_user)
+    logger.info("MiOT unbind API called, user: %s", log_safe(current_user))
     await manager.miot_service.unbind_miot()
     return NormalResponse(code=0, message="MiOT unbound successfully", data=None)
 
@@ -277,7 +265,7 @@ async def unbind_miot(current_user: str = Depends(verify_token)):
 )
 async def get_miot_login_status(current_user: str = Depends(verify_token)):
     """Check MiOT login status"""
-    logger.info("MiOT login status API called, user: %s", current_user)
+    logger.info("MiOT login status API called, user: %s", log_safe(current_user))
 
     result = await manager.miot_service.get_miot_login_status()
 
@@ -294,7 +282,7 @@ async def get_miot_login_status(current_user: str = Depends(verify_token)):
 )
 async def get_miot_user_info(current_user: str = Depends(verify_token)):
     """Get MiOT user information"""
-    logger.info("Get MiOT user info API called, user: %s", current_user)
+    logger.info("Get MiOT user info API called, user: %s", log_safe(current_user))
 
     user_info = await manager.miot_service.get_miot_user_info()
 
@@ -309,7 +297,7 @@ async def get_miot_user_info(current_user: str = Depends(verify_token)):
 )
 async def get_miot_camera_list(current_user: str = Depends(verify_token)):
     """Get MiOT camera list"""
-    logger.info("Get MiOT camera list API called, user: %s", current_user)
+    logger.info("Get MiOT camera list API called, user: %s", log_safe(current_user))
 
     camera_list = await manager.miot_service.get_miot_camera_list()
 
@@ -326,7 +314,7 @@ async def get_miot_camera_list(current_user: str = Depends(verify_token)):
 )
 async def get_miot_device_list(current_user: str = Depends(verify_token)):
     """Get MiOT device list"""
-    logger.info("get miot device list, user: %s", current_user)
+    logger.info("get miot device list, user: %s", log_safe(current_user))
     device_list = await manager.miot_service.get_miot_device_list()
     logger.info(
         "Successfully retrieved Xiaomi Home device list - Count: %s", len(device_list)
@@ -346,7 +334,11 @@ async def get_home_info(
     refresh: bool = Query(False, description="true = 先刷新云端设备/摄像头/场景"),
 ):
     """Get home info for CLI。refresh=true 触发 device refresh。"""
-    logger.info("Get home info API called, user=%s, refresh=%s", current_user, refresh)
+    logger.info(
+        "Get home info API called, user=%s, refresh=%s",
+        log_safe(current_user),
+        log_safe(refresh),
+    )
     data = await manager.miot_service.get_home_info(refresh=refresh)
     return NormalResponse(code=0, message="Home info retrieved successfully", data=data)
 
@@ -358,7 +350,7 @@ async def get_home_info(
 )
 async def get_device_spec(did: str, current_user: str = Depends(verify_token)):
     """Get spec for a single device (轻量，不拉全量 home_info)。"""
-    logger.info("Get device spec API called, user=%s, did=%s", current_user, did)
+    logger.info("Get device spec API called, user=%s, did=%s", log_safe(current_user), log_safe(did))
     data = await manager.miot_service.get_device_spec(did)
     return NormalResponse(code=0, message="ok", data=data)
 
@@ -376,9 +368,9 @@ async def control_device(
     """Control device: set_property / set_properties / call_action"""
     logger.info(
         "Control device API called, user: %s, did: %s, type: %s",
-        current_user,
-        did,
-        request.type,
+        log_safe(current_user),
+        log_safe(did),
+        log_safe(request.type),
     )
     data = await manager.miot_service.control_device(did, request)
     return NormalResponse(
@@ -412,9 +404,9 @@ async def get_device_status(
     """Get device property values. iid: comma-separated prop IIDs, e.g. prop.2.1,prop.2.2"""
     logger.info(
         "Get device status API called, user: %s, did: %s, iid: %s",
-        current_user,
-        did,
-        iid,
+        log_safe(current_user),
+        log_safe(did),
+        log_safe(iid),
     )
     iids = [i.strip() for i in iid.split(",")] if iid else None
     data = await manager.miot_service.get_device_status(did, iids)
@@ -446,7 +438,7 @@ async def trigger_scene(
 ):
     """Trigger a MIoT manual scene"""
     logger.info(
-        "Trigger scene API called, user: %s, scene_id: %s", current_user, scene_id
+        "Trigger scene API called, user: %s, scene_id: %s", log_safe(current_user), log_safe(scene_id)
     )
     success = await manager.miot_service.trigger_scene(scene_id)
     if not success:
@@ -461,7 +453,7 @@ async def trigger_scene(
 )
 async def refresh_miot_all_info(current_user: str = Depends(verify_token)):
     """Refresh MiOT all information"""
-    logger.info("Refresh MiOT all info API called, user: %s", current_user)
+    logger.info("Refresh MiOT all info API called, user: %s", log_safe(current_user))
     result = await manager.miot_service.refresh_miot_all_info()
     logger.info("MiOT information refresh completed: %s", result)
     return NormalResponse(
@@ -489,7 +481,7 @@ async def refresh_camera_online(current_user: str = Depends(verify_token)):
 )
 async def refresh_miot_cameras(current_user: str = Depends(verify_token)):
     """Refresh MiOT camera information"""
-    logger.info("Refresh MiOT cameras API called, user: %s", current_user)
+    logger.info("Refresh MiOT cameras API called, user: %s", log_safe(current_user))
 
     result = await manager.miot_service.refresh_miot_cameras()
 
@@ -506,7 +498,7 @@ async def refresh_miot_cameras(current_user: str = Depends(verify_token)):
 )
 async def refresh_miot_scenes(current_user: str = Depends(verify_token)):
     """Refresh MiOT scene information"""
-    logger.info("Refresh MiOT scenes API called, user: %s", current_user)
+    logger.info("Refresh MiOT scenes API called, user: %s", log_safe(current_user))
 
     result = await manager.miot_service.refresh_miot_scenes()
 
@@ -523,7 +515,7 @@ async def refresh_miot_scenes(current_user: str = Depends(verify_token)):
 )
 async def refresh_miot_user_info(current_user: str = Depends(verify_token)):
     """Refresh MiOT user information"""
-    logger.info("Refresh MiOT user info API called, user: %s", current_user)
+    logger.info("Refresh MiOT user info API called, user: %s", log_safe(current_user))
 
     result = await manager.miot_service.refresh_miot_user_info()
 
@@ -540,7 +532,7 @@ async def refresh_miot_user_info(current_user: str = Depends(verify_token)):
 )
 async def refresh_miot_devices(current_user: str = Depends(verify_token)):
     """Refresh MiOT device information"""
-    logger.info("Refresh MiOT devices API called, user: %s", current_user)
+    logger.info("Refresh MiOT devices API called, user: %s", log_safe(current_user))
 
     result = await manager.miot_service.refresh_miot_devices()
 
@@ -573,11 +565,14 @@ async def send_notify(
 ):
     """Send notification"""
     logger.info(
-        "Send notify API called, notify: %s, user: %s", request.notify, current_user
+        # notify 是调用方 POST 上来的自由文本，schema 只约束非空、不限字符集——
+        # 这是这一行里真正外部可控的那个值，比旁边那个更需要剥换行。
+        "Send notify API called, notify: %s, user: %s",
+        log_safe(request.notify),
+        log_safe(current_user),
     )
     await manager.miot_service.send_notify(request.notify)
     return NormalResponse(code=0, message="Notification sent successfully", data=None)
-
 
 
 # ─── scope: 家庭 / 相机接入范围 ──────────────────────────────────────────────
@@ -730,9 +725,8 @@ async def record_clip(
     return 504; register failures (camera not bound) return 503.
     """
     logger.info(
-        "record_clip API called, user: %s, camera: %s.%s, dur=%sms",
-        _safe_log(current_user), _safe_log(camera_id), _safe_log(channel),
-        _safe_log(duration_ms),
+        "record_clip API called, user: %s, camera: %s, dur=%sms",
+        log_safe(current_user), _cam_tag(camera_id, channel), log_safe(duration_ms),
     )
     recorder = NalClipRecorder(duration_ms=duration_ms)
     try:
@@ -751,11 +745,11 @@ async def record_clip(
             mp4_bytes = await recorder.wait(timeout=timeout_s)
         except asyncio.TimeoutError:
             logger.warning(
-                "record_clip timeout, %s.%s — no keyframe within %ss",
-                _safe_log(camera_id), _safe_log(channel),
-                # timeout_s 由 Query 参数 duration_ms 算出 → 污点传播过来,同样要消毒。
-                # 先格式化再消毒,保住原来的 1 位小数。
-                _safe_log(f"{timeout_s:.1f}"),
+                "record_clip timeout, %s — no keyframe within %ss",
+                _cam_tag(camera_id, channel),
+                # timeout_s 由查询参数 duration_ms 算出 → 污点传播过来，同样要
+                # 消毒。先格式化再消毒，保住原来的一位小数。
+                log_safe(f"{timeout_s:.1f}"),
             )
             raise HTTPException(
                 message=(
@@ -771,8 +765,8 @@ async def record_clip(
         )
 
     logger.info(
-        "record_clip OK, %s.%s, %d bytes",
-        _safe_log(camera_id), _safe_log(channel), len(mp4_bytes),
+        "record_clip OK, %s, %d bytes",
+        _cam_tag(camera_id, channel), len(mp4_bytes),
     )
     return Response(
         content=mp4_bytes,
@@ -831,8 +825,9 @@ async def video_stream_websocket(
 ):
     """Video stream WebSocket."""
     logger.info(
-        "WebSocket connection request, %s, %s.%s",
-        _safe_log(current_user), _safe_log(camera_id), _safe_log(channel),
+        "WebSocket connection request, %s, %s",
+        log_safe(current_user),
+        _cam_tag(camera_id, channel),
     )
     start_time: datetime = datetime.now()
     token_hash: str = str(hash(websocket.cookies.get("access_token")))
@@ -882,15 +877,13 @@ async def video_stream_websocket(
             except WebSocketDisconnect:
                 # 看门狗判定连不上后主动 close,或住户关页——recv 抛 disconnect 是
                 # 预期的正常收尾,不是异常。降到 info,别跟真 error 混淆刷 ERROR 噪音。
-                logger.info("Client closed, %s.%s",
-                            _safe_log(camera_id), _safe_log(channel))
+                logger.info("Client closed, %s", _cam_tag(camera_id, channel))
                 break
             except Exception as err:
                 logger.error("WebSocket error: %s", err)
                 break
     except WebSocketDisconnect:
-        logger.info("Client disconnected, %s.%s",
-                    _safe_log(camera_id), _safe_log(channel))
+        logger.info("Client disconnected, %s", _cam_tag(camera_id, channel))
     except Exception as err:
         logger.error("WebSocket error, %s", err)
         await websocket.close(
@@ -902,10 +895,9 @@ async def video_stream_websocket(
         if watchdog is not None:
             watchdog.cancel()
         logger.info(
-            "Websocket connect duration[%.2fs], %s.%s",
+            "Websocket connect duration[%.2fs], %s",
             (datetime.now() - start_time).total_seconds(),
-            _safe_log(camera_id),
-            _safe_log(channel),
+            _cam_tag(camera_id, channel),
         )
         if cid:
             await miot_video_stream_manager.close_connection(
@@ -926,10 +918,9 @@ async def audio_stream_websocket(
 ):
     """Audio stream WebSocket."""
     logger.info(
-        "Audio WebSocket connection request, %s, %s.%s",
-        _safe_log(current_user),
-        _safe_log(camera_id),
-        _safe_log(channel),
+        "Audio WebSocket connection request, %s, %s",
+        log_safe(current_user),
+        _cam_tag(camera_id, channel),
     )
     start_time: datetime = datetime.now()
     token_hash: str = str(hash(websocket.cookies.get("access_token")))
@@ -950,15 +941,13 @@ async def audio_stream_websocket(
             except WebSocketDisconnect:
                 # 住户关页是正常收尾,不是异常——跟 video 端点对齐,降到 info 避免
                 # 跟真 error 混淆刷 ERROR 噪音。
-                logger.info("Audio client closed, %s.%s",
-                            _safe_log(camera_id), _safe_log(channel))
+                logger.info("Audio client closed, %s", _cam_tag(camera_id, channel))
                 break
             except Exception as err:
                 logger.error("Audio WebSocket error: %s", err)
                 break
     except WebSocketDisconnect:
-        logger.info("Audio client disconnected, %s.%s",
-                    _safe_log(camera_id), _safe_log(channel))
+        logger.info("Audio client disconnected, %s", _cam_tag(camera_id, channel))
     except Exception as err:
         logger.error("Audio WebSocket error, %s", err)
         await websocket.close(
@@ -966,10 +955,9 @@ async def audio_stream_websocket(
         )
     finally:
         logger.info(
-            "Audio WebSocket connect duration[%.2fs], %s.%s",
+            "Audio WebSocket connect duration[%.2fs], %s",
             (datetime.now() - start_time).total_seconds(),
-            _safe_log(camera_id),
-            _safe_log(channel),
+            _cam_tag(camera_id, channel),
         )
         if cid:
             await miot_audio_stream_manager.close_connection(

@@ -218,8 +218,11 @@ def _fired_wait_seconds(caplog) -> float:
     """从判死那条 warning 里取出播报的等待时长。"""
     for rec in caplog.records:
         if "watchdog fired" in rec.getMessage():
-            # 格式串第 3 个参数是等待秒数（前两个是 camera_id / channel）。
-            return rec.args[2]
+            # 取**最后**一个实参而不是固定下标：等待秒数始终排在末尾，而它前面那
+            # 段相机标识的写法是会变的（合并时就从「相机、通道两个实参」变成了
+            # 合成一个）。按下标取，那次变更会让这条用例以 IndexError 变红，而它
+            # 想钉的「播报的是实际等待时长」其实一点没坏。
+            return rec.args[-1]
     raise AssertionError("没找到 watchdog fired 日志")
 
 

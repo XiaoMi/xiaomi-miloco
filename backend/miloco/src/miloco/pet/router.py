@@ -29,6 +29,7 @@ from miloco.perception.engine.identity.pet_library import (
     get_pet_library,
 )
 from miloco.schema.common_schema import NormalResponse
+from miloco.utils.logger import log_safe
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,12 @@ def _resync_home_profile(action: str, pet_id: str) -> None:
     try:
         get_manager().home_profile_service.commit()
     except Exception:  # noqa: BLE001
-        logger.warning("宠物%s后重渲家庭档案失败: pet_id=%s", action, pet_id, exc_info=True)
+        logger.warning(
+            "宠物%s后重渲家庭档案失败: pet_id=%s",
+            log_safe(action),
+            log_safe(pet_id),
+            exc_info=True,
+        )
 
 
 def _require_pet_enabled() -> None:
@@ -234,7 +240,11 @@ async def delete_pet(pet_id: str, current_user: str = Depends(verify_token)):
     try:
         cleanup = get_manager().home_profile_service.remove_subject(pet_id)
     except Exception:  # noqa: BLE001
-        logger.warning("宠物删除后清理家庭档案失败: pet_id=%s", pet_id, exc_info=True)
+        logger.warning(
+            "宠物删除后清理家庭档案失败: pet_id=%s",
+            log_safe(pet_id),
+            exc_info=True,
+        )
     return NormalResponse(
         code=0,
         message="Pet deleted" if removed else "Pet not found (no-op)",

@@ -17,13 +17,18 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from miloco.database.kv_repo import ScopeConfigKeys
+from miloco.database.kv_repo import (
+    AuthConfigKeys,
+    DeviceInfoKeys,
+    ScopeConfigKeys,
+)
 from miloco.middleware.exceptions import (
     MiotServiceException,
     ResourceNotFoundException,
     ValidationException,
 )
 from miloco.miot import filter as miot_filter
+from miloco.miot.client import refusal_reason_for
 from miloco.miot.service import MiotService
 from miot.types import MIoTCameraStatus
 
@@ -304,6 +309,12 @@ def test_set_in_use_no_op_skips_kv_write():
 def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: _FakeKV | None = None) -> MiotService:
     kv = kv or _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
     proxy = SimpleNamespace(
+        # 真实代理有这个判据，夹具也要有：缺了它，生产侧任何「先问一句能不能用」
+        # 的检查都会在这里撞 AttributeError，而那不是生产缺陷、是夹具没建模。
+        is_operational=True,
+        # 真实代理还有「有没有绑」这一档，以及据它分档的拒绝文案。夹具取生产那
+        # 份纯函数、不另写一份措辞——复刻件会与本体漂移，而漂移之后测试照样绿。
+        is_authenticated=True,
         _kv_repo=SimpleNamespace(
             db_connector=SimpleNamespace(
                 execute_update=lambda *a, **kw: 0,
@@ -317,6 +328,11 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
         ),
         get_devices=AsyncMock(return_value=devices or {}),
         get_cameras=AsyncMock(return_value=cameras or {}),
+        # 真实代理另有一对**不触发刷新**的取数口（降级态下写台账走它们，避免为一行
+        # 留痕去打一趟注定 401 的云端）。夹具让它们与上面那两个刷新口返回同一份，
+        # 缺了它们，被拒那条路会在这里撞 AttributeError。
+        cached_devices=devices or {},
+        get_cached_camera=lambda did: (cameras or {}).get(did),
         refresh_devices=AsyncMock(return_value=None),
         refresh_cameras=AsyncMock(return_value=None),
         refresh_scenes=AsyncMock(return_value=None),
@@ -326,6 +342,11 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
         # 默认无跨 NAT 诊断（list_cameras_with_state 逐相机调用）。需要断言
         # stream_error 的测试自行覆盖成 lambda did: True。
         stream_nat_blocked=lambda did: False,
+    )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
     )
     svc = MiotService(miot_proxy=proxy)
 
@@ -824,6 +845,11 @@ async def test_unbind_miot_clears_scope_config():
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
+    )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
     svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
@@ -865,6 +891,11 @@ async def test_unbind_miot_clears_scope_config_when_keys_absent():
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
+    )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
     svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
@@ -898,6 +929,11 @@ async def test_unbind_miot_scope_cleared_even_if_deinit_fails():
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
+    )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
     svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
@@ -916,17 +952,26 @@ async def test_unbind_miot_scope_cleared_even_if_deinit_fails():
 # ─── authorize_with_code: 换账号时 scope 清理 ────────────────────────────────
 
 
-@pytest.mark.asyncio
-async def test_authorize_with_code_clears_scope_before_token_exchange():
-    """直接绑新账号（不经 unbind）时也必须清理旧 scope 和 LRU，
-    否则新账号设备会被旧启用集过滤为空。"""
-    kv = _FakeKV({
-        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
-        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
-    })
+def _authorize_fixture(kv, *, new_uid: str | None):
+    """搭一个能跑 authorize_with_code 的最小 service + proxy。
+
+    ``new_uid`` 是本次授权返回的账号 uid；None 表示交换回来没带 user_info。
+    """
+    from miot.types import MIoTOauthInfo, MIoTUserInfo
+
     db_connector = MagicMock()
     db_connector.execute_update = MagicMock(return_value=0)
     db_connector.execute_query = MagicMock(return_value=[])
+    oauth = MIoTOauthInfo(
+        access_token="at",
+        refresh_token="rt",
+        expires_ts=9999999999,
+        user_info=(
+            MIoTUserInfo(uid=new_uid, nickname="n", icon="", union_id="u")
+            if new_uid is not None
+            else None
+        ),
+    )
     proxy = SimpleNamespace(
         _kv_repo=SimpleNamespace(
             db_connector=db_connector,
@@ -934,7 +979,7 @@ async def test_authorize_with_code_clears_scope_before_token_exchange():
             set=kv.set,
             delete=kv.delete,
         ),
-        get_miot_auth_info=AsyncMock(),
+        get_miot_auth_info=AsyncMock(return_value=oauth),
         deinit=AsyncMock(),
         init=AsyncMock(),
         refresh_cameras=AsyncMock(),
@@ -943,30 +988,186 @@ async def test_authorize_with_code_clears_scope_before_token_exchange():
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
+    )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]
     svc._connected_camera_dids = lambda: set()  # type: ignore[assignment]
     svc._restart_perception_engine = AsyncMock()  # type: ignore[assignment]
+    return svc, proxy, db_connector
 
-    await svc.authorize_with_code(code="test_code", state="test_state")
 
-    assert kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY) is None, (
-        "authorize_with_code 应清除旧 HOME_WHITE_LIST_KEY"
-    )
-    assert kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY) is None, (
-        "authorize_with_code 应清除旧 CAMERA_BLACK_LIST_KEY"
-    )
-    # LRU 必须清空
-    lru_calls = [
-        c for c in db_connector.execute_update.call_args_list
+def _scope_kv(uid: str | None):
+    initial = {
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"]),
+        ScopeConfigKeys.CAMERA_BLACK_LIST_KEY: json.dumps(["c1"]),
+    }
+    if uid is not None:
+        initial[DeviceInfoKeys.USER_INFO_KEY] = json.dumps({"uid": uid})
+    return _FakeKV(initial)
+
+
+def _lru_cleared(db_connector) -> bool:
+    return any(
+        "DELETE" in str(c).upper()
+        for c in db_connector.execute_update.call_args_list
         if "device_lru" in str(c)
-    ]
-    assert any("DELETE" in str(c).upper() for c in lru_calls), (
-        f"authorize_with_code must DELETE FROM device_lru, got: {lru_calls}"
     )
+
+
+@pytest.mark.asyncio
+async def test_same_account_rebind_keeps_scope_even_if_a_later_step_fails():
+    """同账号重绑时，收尾步骤抛异常不许把刚保住的配置清掉。
+
+    住户按界面提示点「重新绑定」走的正是同账号这条路。换票成功、身份比对相等之后
+    还要选家、刷三份缓存、起一轮状态对齐——其中选家那次写库与状态对齐都可能抛。
+    异常出口若只看「令牌变没变」，换票必然让它成立，于是这一档会被误伤：摄像头
+    停用集是「默认启用」语义，清掉等于把住户特意关掉的相机重新打开投喂，而他拿到
+    的只是一句「授权处理失败」。
+    """
+    kv = _scope_kv("same-uid")
+    kv.set(AuthConfigKeys.MIOT_TOKEN_INFO_KEY, json.dumps({"access_token": "old"}))
+    svc, proxy, _db = _authorize_fixture(kv, new_uid="same-uid")
+
+    async def _exchange(code, state):
+        # 换票成功：令牌必然换掉（异常出口那个判据因此恒真）
+        kv.set(AuthConfigKeys.MIOT_TOKEN_INFO_KEY, json.dumps({"access_token": "new"}))
+        return proxy.get_miot_auth_info.return_value
+
+    proxy.get_miot_auth_info = AsyncMock(side_effect=_exchange)
+    proxy.get_miot_auth_info.return_value = _authorize_fixture(kv, new_uid="same-uid")[
+        1
+    ].get_miot_auth_info.return_value
+    # 比对相等之后的收尾步骤抛错
+    svc._ensure_home_selected = AsyncMock(  # type: ignore[assignment]
+        side_effect=RuntimeError("database is locked")
+    )
+
+    with pytest.raises(MiotServiceException):
+        await svc.authorize_with_code(code="test_code", state="test_state")
+
+    assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H1"]
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)) == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_authorize_clears_scope_when_it_fails_after_the_token_landed():
+    """换票已落库、其后某一步失败时，范围也必须清——那道比对根本跑不到。
+
+    授权这条路上「取账号身份」刻意不兜异常（当场报错让住户重试一次，比留下
+    「绑上了但收不到推送」更诚实）。于是存在「新账号的令牌已经落库、而身份未知」
+    的中间态：此时上面那道 fail-closed 比对整个跳过，库里剩下「新账号的令牌 +
+    旧账号的家庭与摄像头范围」。跨账号残留的拾音白名单若在新账号下命中，会让住户
+    从未授权的摄像头麦克风直接生效——那是唯一「误命中等于隐私泄露」的键。
+    """
+    kv = _scope_kv("old-uid")
+    kv.set(AuthConfigKeys.MIOT_TOKEN_INFO_KEY, json.dumps({"access_token": "old"}))
+    svc, proxy, _db = _authorize_fixture(kv, new_uid="new-uid")
+
+    async def _exchange_then_fail(code, state):
+        # 模拟真实顺序：落库先发生（SDK 的 persist 回调），之后那一步才抛
+        kv.set(AuthConfigKeys.MIOT_TOKEN_INFO_KEY, json.dumps({"access_token": "new"}))
+        raise TimeoutError("fetching account identity timed out")
+
+    proxy.get_miot_auth_info = AsyncMock(side_effect=_exchange_then_fail)
+
+    with pytest.raises(MiotServiceException):
+        await svc.authorize_with_code(code="test_code", state="test_state")
+
+    assert kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY) is None
+    assert kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_authorize_with_code_clears_scope_when_account_changed():
+    """换账号（不经 unbind）必须清理旧 scope 和 LRU。
+
+    旧 home_id / did 在新账号下要么查不到（设备列表全空、感知全黑），要么更糟——
+    共享家庭下同一个 id 在两个账号里都合法但归属的人变了，残留的拾音白名单会让
+    新住户从未授权的摄像头麦克风直接生效。
+    """
+    kv = _scope_kv("old-uid")
+    svc, proxy, db_connector = _authorize_fixture(kv, new_uid="new-uid")
+
+    result = await svc.authorize_with_code(code="test_code", state="test_state")
+
+    assert kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY) is None
+    assert kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY) is None
+    assert _lru_cleared(db_connector), "换账号必须清 device_lru"
     proxy.get_miot_auth_info.assert_awaited_once()
+    assert result == {"account_changed": True, "scope_preserved": False}
     # 无可用家庭（devices/cameras 为空）→ 兜底逻辑无目标，启用集仍为空
     assert miot_filter.allowed_home_ids(kv) == set()
+
+
+@pytest.mark.asyncio
+async def test_authorize_with_code_keeps_scope_for_same_account():
+    """绑回同一个账号不清配置。
+
+    home_id / did 与 token 生命周期无关，同账号重新授权后依然有效；而清掉的代价
+    很实：摄像头停用集是「默认启用」语义，清空等于把住户特意关掉的相机重新打开。
+    """
+    kv = _scope_kv("same-uid")
+    svc, _proxy, db_connector = _authorize_fixture(kv, new_uid="same-uid")
+
+    result = await svc.authorize_with_code(code="test_code", state="test_state")
+
+    assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H1"]
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)) == ["c1"]
+    assert not _lru_cleared(db_connector), "同账号不该清 device_lru"
+    assert result == {"account_changed": False, "scope_preserved": True}
+
+
+@pytest.mark.asyncio
+async def test_authorize_with_code_clears_when_previous_uid_unknown():
+    """读不到旧 uid 时必须照旧全清——fail-closed。
+
+    绝不能因为拿不到 uid 就默认「同账号」，那会让跨账号的残留配置留下来。
+    """
+    kv = _scope_kv(None)  # 没有 USER_INFO_KEY
+    svc, _proxy, db_connector = _authorize_fixture(kv, new_uid="new-uid")
+
+    result = await svc.authorize_with_code(code="test_code", state="test_state")
+
+    assert kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY) is None
+    assert _lru_cleared(db_connector)
+    assert result == {"account_changed": True, "scope_preserved": False}
+
+
+@pytest.mark.asyncio
+async def test_authorize_with_code_clears_when_new_uid_unknown():
+    """交换回来没带 user_info 且 KV 也读不到新 uid 时，同样照旧全清。"""
+    kv = _scope_kv("old-uid")
+    svc, _proxy, db_connector = _authorize_fixture(kv, new_uid=None)
+
+    result = await svc.authorize_with_code(code="test_code", state="test_state")
+
+    # 交换没带 user_info = 新身份未知，必须当成换了账号
+    assert result["account_changed"] is True
+    assert kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY) is None
+    assert _lru_cleared(db_connector)
+
+
+@pytest.mark.asyncio
+async def test_authorize_with_code_keeps_scope_when_exchange_fails():
+    """令牌交换失败时不许动配置。
+
+    旧实现先删配置再交换，交换失败（state 无效 / 网络断）的用户既没绑上、
+    配置也没了。
+    """
+    kv = _scope_kv("old-uid")
+    svc, proxy, db_connector = _authorize_fixture(kv, new_uid="new-uid")
+    proxy.get_miot_auth_info = AsyncMock(side_effect=RuntimeError("state is invalid"))
+
+    with pytest.raises(MiotServiceException):
+        await svc.authorize_with_code(code="bad", state="bad")
+
+    assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H1"]
+    assert json.loads(kv.get(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)) == ["c1"]
+    assert not _lru_cleared(db_connector)
 
 
 # ─── MiotProxy: scope entry-filter (build gate + prune branch) ───────────────
@@ -1552,6 +1753,11 @@ async def test_authorize_with_code_auto_selects_first_home():
         refresh_scenes=AsyncMock(),
         get_devices=AsyncMock(return_value={"d1": _home("H1"), "d2": _home("H2")}),
         get_cameras=AsyncMock(return_value={}),
+    )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
     )
     svc = MiotService(miot_proxy=proxy)
     svc._sync_camera_adapter = AsyncMock()  # type: ignore[assignment]

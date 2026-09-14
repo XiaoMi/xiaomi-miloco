@@ -27,6 +27,7 @@ from miloco.perception.engine.identity.config_loader import resolve_library_root
 from miloco.perception.engine.identity.library import IdentityLibrary, _list_crop_files
 from miloco.person.schema import PersonCreate, PersonUpdate, _normalize_optional_str
 from miloco.schema.common_schema import NormalResponse
+from miloco.utils.logger import log_safe
 from miloco.utils.paths import miloco_home
 
 # 严格 UUID4 白名单：拒绝路径分隔符、`..` 等可构造路径穿越的字符
@@ -47,7 +48,7 @@ async def list_persons(current_user: str = Depends(verify_token)):
     """列家庭成员。除 DB 字段外,合并 identity_lib 下样本计数(tier_a / tier_c),
     供 web 端"已登记 / 待补样本"分桶展示。identity_lib 读不到时计数留 0,
     不阻塞主列表(注册前 person 目录尚未创建)。"""
-    logger.info("List persons - user: %s", current_user)
+    logger.info("List persons - user: %s", log_safe(current_user))
     persons = manager.person_service.list_persons()
     # PersonRef 索引化:避免 N×M scan
     refs: dict = {}
@@ -78,7 +79,7 @@ async def list_persons(current_user: str = Depends(verify_token)):
 
 @router.post("/persons", summary="Create Person", response_model=NormalResponse)
 async def create_person(body: PersonCreate, current_user: str = Depends(verify_token)):
-    logger.info("Create person - user: %s, name: %s", current_user, body.name)
+    logger.info("Create person - user: %s, name: %s", log_safe(current_user), log_safe(body.name))
     person_id = manager.person_service.create_person(body.name, body.role)
     # 新增成员后级联刷新家庭档案 md（与 update_person 同款），否则 profile.md 的家庭成员段不含新成员
     try:
@@ -96,7 +97,7 @@ async def create_person(body: PersonCreate, current_user: str = Depends(verify_t
 async def update_person(
     person_id: str, body: PersonUpdate, current_user: str = Depends(verify_token)
 ):
-    logger.info("Update person - user: %s, id: %s", current_user, person_id)
+    logger.info("Update person - user: %s, id: %s", log_safe(current_user), log_safe(person_id))
     # role 三态:本次 PATCH 未带 role → 不改(UNSET);带了(空串已归一成 None) → 写,None 即清空
     # 家庭角色。靠 model_fields_set 区分"未传"与"显式传空",否则可空字段无法经 update 清空。
     role_provided = "role" in body.model_fields_set
@@ -119,14 +120,14 @@ async def update_person(
             if meta_fields:
                 lib.set_meta(person_id, **meta_fields)
     except Exception as e:  # noqa: BLE001
-        logger.warning("同步 identity_lib meta 失败 person_id=%s: %s", person_id, e)
+        logger.warning("同步 identity_lib meta 失败 person_id=%s: %s", log_safe(person_id), log_safe(e))
     # 级联刷新家庭档案：person 改名/改 role 不走 home_profile 写入，需显式触发一次
     # commit 重渲染 md；已绑定 subject_id 的条目 subject_name 在 commit 内按成员当前 name 自动纠偏。
     try:
         manager.home_profile_service.commit()
     except Exception as e:  # noqa: BLE001
         logger.warning(
-            "级联刷新家庭档案失败 person_id=%s: %s", person_id, e
+            "级联刷新家庭档案失败 person_id=%s: %s", log_safe(person_id), log_safe(e)
         )
     return NormalResponse(code=0, message="Person updated", data=None)
 
@@ -135,7 +136,7 @@ async def update_person(
     "/persons/{person_id}", summary="Delete Person", response_model=NormalResponse
 )
 async def delete_person(person_id: str, current_user: str = Depends(verify_token)):
-    logger.info("Delete person - user: %s, id: %s", current_user, person_id)
+    logger.info("Delete person - user: %s, id: %s", log_safe(current_user), log_safe(person_id))
     # defense-in-depth：在路径穿越敏感操作（shutil.rmtree）前先做 UUID4 白名单校验，
     # 与 register_sample 保持一致；person_service.delete_person 会先查 DB，理论上
     # 已能拦截非法 ID，但同样的检查在入口加一层更稳。
@@ -150,13 +151,13 @@ async def delete_person(person_id: str, current_user: str = Depends(verify_token
         lib.delete_person(person_id)
         lib.clear_person_avatar(person_id)
     except Exception as e:  # noqa: BLE001
-        logger.warning("级联删除 identity_lib 失败 person_id=%s: %s", person_id, e)
+        logger.warning("级联删除 identity_lib 失败 person_id=%s: %s", log_safe(person_id), log_safe(e))
     # 级联清家庭档案：移除该成员绑定的候选+正式条目并重渲染 md，
     # 否则条目会回落陈旧 subject_name、漂移到家庭档案面板而非消失。
     try:
         manager.home_profile_service.remove_subject(person_id)
     except Exception as e:  # noqa: BLE001
-        logger.warning("级联清家庭档案失败 person_id=%s: %s", person_id, e)
+        logger.warning("级联清家庭档案失败 person_id=%s: %s", log_safe(person_id), log_safe(e))
     return NormalResponse(code=0, message="Person deleted", data=None)
 
 
@@ -259,7 +260,7 @@ async def register_sample(
     """
     logger.info(
         "Register sample - user: %s, person_id: %s, body=%s face=%s",
-        current_user, person_id, body_image.filename, face_image.filename if face_image else None,
+        log_safe(current_user), log_safe(person_id), log_safe(body_image.filename), log_safe(face_image.filename if face_image else None),
     )
 
     # person_id 校验：格式白名单（防 ../ 路径穿越）+ 必须已在 DB 中注册。
@@ -292,7 +293,7 @@ async def register_sample(
         try:
             reid_emb = reid_extractor.extract_feature(body_arr)
         except Exception:  # noqa: BLE001
-            logger.warning("ReID emb 抽取失败 person_id=%s (登记继续)", person_id, exc_info=True)
+            logger.warning("ReID emb 抽取失败 person_id=%s (登记继续)", log_safe(person_id), exc_info=True)
 
     # person 真名一并写进 meta.json——与 register_sample_batch 对齐。否则单图登记只落
     # body 图、不写 name,感知层 list_persons 读不到 name → omni gallery 渲染退化成 UUID
@@ -392,7 +393,7 @@ async def register_sample_batch(
     """
     logger.info(
         "Sample batch - user: %s, person_id: %s, n=%d",
-        current_user, person_id, len(body.items),
+        log_safe(current_user), log_safe(person_id), len(body.items),
     )
     if not _PERSON_ID_RE.match(person_id):
         raise HTTPException(status_code=400, detail="Invalid person_id format")
@@ -434,7 +435,7 @@ async def register_sample_batch(
                 except Exception:  # noqa: BLE001
                     logger.warning(
                         "ReID emb 抽取失败 person_id=%s index=%d (登记继续)",
-                        person_id, i, exc_info=True,
+                        log_safe(person_id), i, exc_info=True,
                     )
             ok = library.add_tier_a_sample(
                 person_id=person_id, body_crop=img, source="user_upload",
@@ -561,7 +562,7 @@ async def extract_samples(
     """
     logger.info(
         "Extract samples - user: %s, person_id: %s, file=%s ct=%s",
-        current_user, person_id, media.filename, media.content_type,
+        log_safe(current_user), log_safe(person_id), log_safe(media.filename), log_safe(media.content_type),
     )
     if not _PERSON_ID_RE.match(person_id):
         raise HTTPException(status_code=400, detail="Invalid person_id format")
@@ -2189,7 +2190,8 @@ async def register_from_cluster(
         for cam_id, track_id in target.members:
             pool.close_write_gate(cam_id, track_id)
     except Exception:  # noqa: BLE001
-        logger.warning("close_write_gate 失败 cluster=%s", body.cluster_id,
+        logger.warning(
+            "close_write_gate 失败 cluster=%s", log_safe(body.cluster_id),
                        exc_info=True)
 
     return NormalResponse(
