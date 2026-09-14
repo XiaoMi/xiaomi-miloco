@@ -16,6 +16,8 @@ die()  { echo "FATAL: $1"; exit 1; }
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES="${HERMES_HOME}/hermes"
 MILOCO_CLI="$HOME/.local/bin/miloco-cli"
+# MILOCO_HOME 沿用 HERMES_HOME chain（与 install.sh 1877 行一致）
+MILOCO_HOME="${MILOCO_HOME:-${HERMES_HOME}/miloco}"
 BACKEND="http://127.0.0.1:1810"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
@@ -36,7 +38,7 @@ HEALTH=$(python3 -c "import urllib.request; print(urllib.request.urlopen('$BACKE
 [ "$HEALTH" = '{"status":"ok"}' ] && ok "backend /health" || no "backend /health: $HEALTH"
 
 # 感知引擎状态
-TOKEN=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('$HOME/.hermes/miloco/config.json')))['server']['token'])" 2>/dev/null || echo "")
+TOKEN=$(python3 -c "import json,os; print(json.load(open('$MILOCO_HOME/config.json'))['server']['token'])" 2>/dev/null || echo "")
 ENGINE=$(python3 -c "
 import urllib.request,json
 r=urllib.request.urlopen(urllib.request.Request('$BACKEND/api/perception/engine/status',headers={'Authorization':'Bearer $TOKEN'}))
