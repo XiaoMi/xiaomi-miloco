@@ -107,11 +107,19 @@ async def on_demand_perceive(request: OnDemandPerceptionRequest):
     dependencies=[Depends(verify_token)],
 )
 async def query_logs(
-    limit: int | None = Query(None, ge=1, le=1000, description="Max entries; omit for unlimited"),
-    after: str | None = Query(None, description="ISO 8601 timestamp cursor"),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=1000,
+        description="Latest N entries in the filtered window; omit for unlimited",
+    ),
+    after: str | None = Query(
+        None,
+        description="ISO 8601 exclusive lower bound; omit limit for forward cursor reads",
+    ),
     before: str | None = Query(
         None,
-        description="ISO 8601 upper-bound; combined with ``after`` allows windowed pagination",
+        description="ISO 8601 exclusive upper bound",
     ),
     since: str | None = Query(None, description="Relative time, e.g. '1h', '30m', '2h30m'"),
 ):

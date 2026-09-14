@@ -16,6 +16,7 @@ import {
   eventCropMeta,
   eventRefUrl,
   listActivity,
+  listPerceptionLogs,
   listOnDemandLogs,
   onDemandClipUrl,
   revealDir,
@@ -28,7 +29,13 @@ import {
   splitHumanizedSections,
   type TriggerStatusKind,
 } from "@/lib/eventText";
-import type { ActivityEvent, EventCropMeta, HomeId, OnDemandLogEntry } from "@/lib/types";
+import type {
+  ActivityEvent,
+  EventCropMeta,
+  HomeId,
+  OnDemandLogEntry,
+  PerceptionLogEntry,
+} from "@/lib/types";
 
 /** Lightbox 内容类型:clip 走 <video>,Smart Crop 参考帧走 <img>. */
 type LightboxKind = "video" | "image";
@@ -41,7 +48,7 @@ import {
 import { TimeLabel } from "./TimeLabel";
 import { toast } from "./Toast";
 
-type ActivityTab = "events" | "queries";
+type ActivityTab = "events" | "perception" | "queries";
 
 interface Props {
   events: ActivityEvent[];
@@ -164,6 +171,12 @@ export function ActivityFeed({
 }: Props) {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<ActivityTab>("events");
+  const [perceptionCount, setPerceptionCount] = useState(0);
+  const [perceptionHasMore, setPerceptionHasMore] = useState(false);
+  const handlePerceptionCount = useCallback((n: number, hasMore: boolean) => {
+    setPerceptionCount(n);
+    setPerceptionHasMore(hasMore);
+  }, []);
   const [odCount, setOdCount] = useState((initialOdLogs ?? EMPTY_OD_LOGS).length);
   const [odHasMore, setOdHasMore] = useState((initialOdLogs ?? EMPTY_OD_LOGS).length === OD_PAGE_SIZE);
   const handleOdCount = useCallback((n: number, hasMore: boolean) => {
@@ -438,29 +451,38 @@ export function ActivityFeed({
           <span className="text-caption-mono text-text-tertiary font-normal">
             {activeTab === "events"
               ? t("activity.loadedCount", { n: feedRows.length, more: showLoadMore ? "+" : "" })
-              : t("activity.odLoaded", { n: odCount, more: odHasMore ? "+" : "" })}
+              : activeTab === "perception"
+                ? t("activity.perceptionLoaded", {
+                    n: perceptionCount,
+                    more: perceptionHasMore ? "+" : "",
+                  })
+                : t("activity.odLoaded", { n: odCount, more: odHasMore ? "+" : "" })}
           </span>
         </h2>
-        <div className={"inline-flex items-center gap-3 flex-wrap" + (activeTab === "events" ? "" : " invisible")}>
+        <div className={"inline-flex items-center gap-3 flex-wrap" + (activeTab !== "queries" ? "" : " invisible")}>
           {/* 事件 / 动作 checkbox — 都默认勾选,仅组件内 state 不持久化 */}
-          <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={showEvents}
-              onChange={(e) => setShowEvents(e.target.checked)}
-              className="accent-brand-primary w-[13px] h-[13px]"
-            />
-            {t("actions.filterEvents")}
-          </label>
-          <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={showActions}
-              onChange={(e) => setShowActions(e.target.checked)}
-              className="accent-brand-primary w-[13px] h-[13px]"
-            />
-            {t("actions.filterActions")}
-          </label>
+          {activeTab === "events" && (
+            <>
+              <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={showEvents}
+                  onChange={(e) => setShowEvents(e.target.checked)}
+                  className="accent-brand-primary w-[13px] h-[13px]"
+                />
+                {t("actions.filterEvents")}
+              </label>
+              <label className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={showActions}
+                  onChange={(e) => setShowActions(e.target.checked)}
+                  className="accent-brand-primary w-[13px] h-[13px]"
+                />
+                {t("actions.filterActions")}
+              </label>
+            </>
+          )}
           <TimeRangeFilter
             since={since}
             before={before}
@@ -479,6 +501,7 @@ export function ActivityFeed({
       {/* Sub-tabs */}
       <div className="flex gap-0 px-5 border-b border-border" role="tablist" aria-label={t("activity.title")}>
         <SubTab active={activeTab === "events"} onClick={() => setActiveTab("events")} label={t("activity.tabEvents")} id="tab-events" controls="panel-events" />
+        <SubTab active={activeTab === "perception"} onClick={() => setActiveTab("perception")} label={t("activity.tabPerception")} id="tab-perception" controls="panel-perception" />
         <SubTab active={activeTab === "queries"} onClick={() => setActiveTab("queries")} label={t("activity.tabOnDemand")} id="tab-queries" controls="panel-queries" />
       </div>
 
@@ -565,6 +588,18 @@ export function ActivityFeed({
 
       </div>{/* end events panel */}
 
+      {/* Raw perception panel: ordinary scene descriptions, not alerts. */}
+      <div id="panel-perception" role="tabpanel" aria-labelledby="tab-perception" hidden={activeTab !== "perception"}>
+        <PerceptionLogList
+          homeId={homeId}
+          active={activeTab === "perception"}
+          since={appliedSince}
+          before={appliedBefore}
+          deviceNames={deviceNames}
+          onCountChange={handlePerceptionCount}
+        />
+      </div>
+
       {/* On-demand queries panel */}
       <div id="panel-queries" role="tabpanel" aria-labelledby="tab-queries" hidden={activeTab !== "queries"}>
         <OnDemandLogList initial={initialOdLogs ?? EMPTY_OD_LOGS} initialLoading={onDemandLoading ?? false} initialError={onDemandError ?? null} onRetryInitial={onRetryOnDemand} homeId={homeId} deviceNames={deviceNames} onCountChange={handleOdCount} />
@@ -581,6 +616,145 @@ export function ActivityFeed({
         />
       )}
     </section>
+  );
+}
+
+function PerceptionLogList({ homeId, active, since, before, deviceNames, onCountChange }: {
+  homeId: HomeId;
+  active: boolean;
+  since?: number;
+  before?: number;
+  deviceNames: Record<string, string>;
+  onCountChange: (count: number, hasMore: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const [logs, setLogs] = useState<PerceptionLogEntry[]>([]);
+  const [clampedSince, setClampedSince] = useState<number | undefined>();
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
+  const fetchGenRef = useRef(0);
+
+  const reload = useCallback(() => {
+    const gen = ++fetchGenRef.current;
+    setLoading(true);
+    setError(null);
+    listPerceptionLogs(homeId, { since, before })
+      .then(({ logs: rows, hasMore, clampedSince: effectiveSince }) => {
+        if (gen !== fetchGenRef.current) return;
+        setLogs(rows);
+        setClampedSince(effectiveSince);
+        setHasMore(hasMore);
+        onCountChange(rows.length, hasMore);
+      })
+      .catch((err: unknown) => {
+        if (gen !== fetchGenRef.current) return;
+        setError(err instanceof Error ? err : new Error(String(err)));
+        setLogs([]);
+        setClampedSince(undefined);
+        setHasMore(false);
+        onCountChange(0, false);
+      })
+      .finally(() => {
+        if (gen === fetchGenRef.current) setLoading(false);
+      });
+  }, [homeId, since, before, onCountChange]);
+
+  useEffect(() => {
+    if (!active) return;
+    reload();
+    return () => {
+      fetchGenRef.current += 1;
+    };
+  }, [active, reload]);
+
+  if (loading && logs.length === 0) {
+    return <div className="text-body text-center py-10 text-text-secondary">{t("activity.loading")}</div>;
+  }
+
+  if (error && logs.length === 0) {
+    return (
+      <div className="text-body text-center py-10 text-text-secondary">
+        <div>{t("activity.perceptionLoadFailed", { msg: error.message })}</div>
+        <button
+          type="button"
+          onClick={reload}
+          disabled={loading}
+          className="mt-3 text-caption text-text-tertiary hover:text-text-primary transition-colors disabled:opacity-50"
+        >
+          {loading ? t("activity.loading") : t("activity.retry")}
+        </button>
+      </div>
+    );
+  }
+
+  if (logs.length === 0) {
+    return (
+      <div className="text-body text-center py-10 text-text-secondary">
+        <div>{t("activity.perceptionEmpty")}</div>
+        {clampedSince !== undefined && (
+          <div className="mt-1 text-caption text-text-tertiary">
+            {t("activity.perceptionClamped", {
+              from: new Date(clampedSince).toLocaleDateString(),
+            })}
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={reload}
+          disabled={loading}
+          className="mt-3 text-caption text-text-tertiary hover:text-text-primary transition-colors disabled:opacity-50"
+        >
+          {loading ? t("activity.loading") : t("common.refresh")}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="px-5 py-2 flex items-center justify-between gap-3">
+        <div className="min-w-0 text-caption text-text-tertiary">
+          <div>
+            {clampedSince !== undefined
+              ? t("activity.perceptionClamped", {
+                  from: new Date(clampedSince).toLocaleDateString(),
+                })
+              : t("activity.perceptionHint")}
+          </div>
+          {hasMore && (
+            <div className="mt-1">{t("activity.perceptionLimited", { n: logs.length })}</div>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={reload}
+          disabled={loading}
+          className="text-caption text-text-tertiary hover:text-text-primary transition-colors disabled:opacity-50"
+        >
+          {loading ? t("activity.loading") : t("common.refresh")}
+        </button>
+      </div>
+      <ul className="divide-y divide-border">
+        {logs.map((log) => (
+          <li key={log.id} className="px-5 py-2.5 hover:bg-bg-tertiary transition-colors list-none">
+            <div className="flex flex-col gap-1 sm:grid sm:grid-cols-[70px_1fr] sm:gap-x-3 sm:items-baseline">
+              <TimeLabel timestamp={log.timestamp} />
+              <div className="min-w-0">
+                {Object.entries(log.descriptions).map(([source, description]) => (
+                  <div key={source} className="mb-1 last:mb-0">
+                    <span className="text-caption-mono text-text-tertiary mr-2">
+                      {deviceNames[source] ?? source}
+                    </span>
+                    <span className="text-body text-text-primary break-words whitespace-pre-line">{description}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 

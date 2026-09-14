@@ -284,13 +284,14 @@ class PerceptionService:
         """Query perception logs.
 
         Args:
-            after: ISO 8601 timestamp cursor — return entries after this time.
+            after: ISO 8601 exclusive lower bound. Omit limit for forward cursor reads.
             before: ISO 8601 upper bound — return entries before this time.
             since: Relative time string like "1h", "30m", "2h30m".
-            limit: Max entries to return. None means no limit.
+            limit: Return the latest N entries in the filtered window. None means no limit.
 
         Returns:
-            Dict with logs, count, and total_inferences.
+            Dict with logs, count, and total_inferences. ``logs`` is always
+            ordered oldest-first, with or without ``limit``.
         """
         from miloco.utils.time_utils import parse_iso_ms, since_to_ms
 
