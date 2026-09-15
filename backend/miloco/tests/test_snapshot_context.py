@@ -12,6 +12,7 @@
 - asyncio task 隔离(子 task 复制父 ContextVar 当前值,但不影响父)
 - _strip_base64 剥多模态 base64
 - _pick_response_fields 抽 OpenAI raw 字段
+- _summarize_visual_input 的 mode 判定(video 优先, image_url 参考图不作数)
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from miloco.perception.snapshot_context import (
     OmniEventArtifacts,
     _pick_response_fields,
     _strip_base64,
+    _summarize_visual_input,
     event_artifacts_scope,
     push_clip_bytes,
     push_crop_meta,
@@ -194,6 +196,91 @@ def test_push_omni_trace_multi_device_keeps_per_call_attribution():
                 reset_device_context(t)
     calls = artifacts.trace["calls"]
     assert [c["device_id"] for c in calls] == ["cam_a", "cam_b", "cam_c"]
+
+
+class TestSummarizeVisualInput:
+    """trace 的 visual_input 摘要 —— 按需查询做视频/图片 A/B 对照就靠 mode 这一列。"""
+
+    def test_video_call_with_ref_images_is_not_labelled_image(self):
+        """视频调用带 gallery / Smart Crop 参考帧时仍须记成 video。
+
+        image_url 块不等于图片模式: 视频路的 gallery 参考图、全景参考帧、非 fused
+        的 tracker crops 都是 image_url 块。按 image_url 判会把视频调用标成图片组,
+        直接污染两种模态的对照结论。
+        """
+        messages = [
+            {"role": "system", "content": "sys"},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+                    {"type": "text", "text": "参考图"},
+                    {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,BB"}},
+                ],
+            },
+        ]
+        summary = _summarize_visual_input(messages)
+        assert summary["mode"] == "video"
+        # 口径是"全部 image_url 块", 含参考图, 比主画面帧数大
+        assert summary["image_block_count"] == 1
+
+    def test_image_mode_counts_every_image_block(self):
+        """图片模式: 主画面 N 帧 + 参考图都算进 image_block_count。"""
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "d:image/png;base64,AA"}},
+                    {"type": "image_url", "image_url": {"url": "d:image/png;base64,BB"}},
+                    {"type": "image_url", "image_url": {"url": "d:image/jpeg;base64,CC"}},
+                    {"type": "input_audio", "input_audio": {"data": "DD", "format": "m4a"}},
+                ],
+            }
+        ]
+        summary = _summarize_visual_input(messages)
+        assert summary == {
+            "mode": "image",
+            "image_block_count": 3,
+            "audio_attached": True,
+        }
+
+    def test_audio_only_call_is_labelled_audio(self):
+        """纯音频窗口(任一模式)没有视觉块 → audio。"""
+        messages = [
+            {"role": "user", "content": [
+                {"type": "input_audio", "input_audio": {"data": "DD", "format": "m4a"}},
+            ]}
+        ]
+        assert _summarize_visual_input(messages)["mode"] == "audio"
+
+    def test_no_media_returns_empty(self):
+        """没有媒体块的窗口不留摘要键。"""
+        messages = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+        assert _summarize_visual_input(messages) == {}
+
+    def test_trace_call_carries_video_mode(self):
+        """经 push_omni_trace 落进 call 记录的 mode 同上 —— 钉住真实消费面。"""
+        artifacts = OmniEventArtifacts()
+        token = set_device_context(
+            DeviceContext(device_trace_id="t", device_id="cam_a", room_name="客厅")
+        )
+        try:
+            with event_artifacts_scope(artifacts):
+                push_omni_trace(
+                    request_messages=[
+                        {"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": "d:image/png;base64,AA"}},
+                            {"type": "video_url", "video_url": {"url": "d:video/mp4;base64,BB"}},
+                        ]}
+                    ],
+                    response_raw={"choices": [{"message": {"content": "x"}}], "usage": {}},
+                    latency_ms=1.0,
+                    error=None,
+                    model="mimo-vl",
+                )
+        finally:
+            reset_device_context(token)
+        assert artifacts.trace["calls"][0]["visual_input"]["mode"] == "video"
 
 
 def test_push_ref_frame_per_device():

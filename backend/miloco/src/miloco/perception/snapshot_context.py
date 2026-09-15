@@ -314,8 +314,18 @@ def _strip_base64(messages: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _summarize_visual_input(messages: list[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize media modality without retaining inline payload bytes."""
-    frame_count = 0
+    """Summarize media modality without retaining inline payload bytes.
+
+    ``mode`` 以 video_url 优先判定。image_url 块不等于"图片模式": fused 的 gallery
+    参考图、Smart Crop 全景参考帧、非 fused 的 tracker crops 都是 image_url 块,
+    视频调用照样带着它们 —— 反过来按 image_url 判会把视频调用标成 image, 而 mode
+    正是按需查询用图片序列开关上线后区分两种模态、做对照复盘的那一列。
+
+    ``image_block_count`` 数的是 messages 里**全部** image_url 块, 口径含上面那些
+    参考图, 所以它比"主画面帧数"大, 不要拿它当图片模式专属计数用。messages 这一层
+    拿不到精确的主画面帧数, 故不叫 frame_count 以免误读。
+    """
+    image_block_count = 0
     audio_attached = False
     video_attached = False
     for message in messages:
@@ -326,16 +336,16 @@ def _summarize_visual_input(messages: list[dict[str, Any]]) -> dict[str, Any]:
                 continue
             block_type = block.get("type")
             if block_type == "image_url":
-                frame_count += 1
+                image_block_count += 1
             elif block_type == "video_url":
                 video_attached = True
             elif block_type == "input_audio":
                 audio_attached = True
-    if not frame_count and not video_attached and not audio_attached:
+    if not image_block_count and not video_attached and not audio_attached:
         return {}
     return {
-        "mode": "image" if frame_count else ("video" if video_attached else "audio"),
-        "frame_count": frame_count,
+        "mode": "video" if video_attached else ("image" if image_block_count else "audio"),
+        "image_block_count": image_block_count,
         "audio_attached": audio_attached,
     }
 

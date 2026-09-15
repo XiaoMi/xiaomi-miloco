@@ -200,9 +200,10 @@ def build_query_prompt(
     # 可能残留的 0(早期哨兵),否则 _encode_video_mp4 会算出 scale=0 崩掉按需查询。
     base: dict = {
         "system_prompt": _adapt_visual_prompt("\n\n".join(parts), visual_input_mode),
-        "user_content": _adapt_visual_prompt(
-            _build_query_user_content(identity_packets, query, last_caption, label_lookup),
-            visual_input_mode,
+        # 措辞改写由 _build_query_user_content 内部只对模板段做 —— 整串包一层会把
+        # 用户原话与上一窗 caption 一起改掉, 见该函数的 docstring
+        "user_content": _build_query_user_content(
+            identity_packets, query, last_caption, label_lookup, visual_input_mode
         ),
         "visual_input_mode": visual_input_mode,
         "crops": [],
@@ -310,18 +311,14 @@ def build_fused_payload(
             user_content.append({"type": "text", "text": f"当前时间: {context.current_time}"})
         if context.room_name:
             user_content.append({"type": "text", "text": f"位置: {context.room_name}"})
-        if audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN:
+        if audio_b64:
             user_content.append(adapter.build_audio_block(audio_b64, _audio_only_media_info(ep.sample_rate)))
-        elif audio_b64:
-            logger.warning(
-                "event=fused_audio_b64_too_short size=%d (< %d), 跳过 input_audio 块, "
-                "本窗口走 text-only",
-                len(audio_b64), _MIN_AUDIO_B64_LEN,
-            )
         else:
-            # 编不出音频(_encode_audio_only_mp4 对过短采样返回 None)。audio route 的
+            # 编不出音频: 采样不足一个 AAC 帧, 或编出来尺寸不达标 —— 两种都在
+            # _encode_audio_m4a 出口统一收口(见 _MIN_AUDIO_B64_LEN)。audio route 的
             # user_content 里没有参考图,一个媒体块都没有时模型手里只剩时间和房间名。
-            # 与 video route 同一个 event 名,一次 grep 覆盖两条路由。
+            # 与 video route 同一个 event 名,一次 grep 覆盖两条路由; 尺寸不达标那档
+            # 另有 event=audio_m4a_too_short 从编码层留痕(带 size)。
             logger.warning(
                 "event=fused_no_media_block route=audio reason=empty_audio room=%s, "
                 "本窗口未拼出 input_audio 块、走 text-only",
@@ -621,6 +618,11 @@ def _build_payload(
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
         base["audio_media_info"] = _audio_only_media_info(ep.sample_rate)
         base["media_info"] = base["audio_media_info"]
+        # 纯音频路由没有视觉输入, payload 恒按 video 语义走: _build_messages 对
+        # "image 模式 + 无帧且无音频" 抛 ValueError, 而音频编不出来(采样不足一个
+        # AAC 帧)在这条路由上是既有降级路径(退化成纯文本问模型)。模式开关是给
+        # 视觉表达做 A/B 的, 不该把一个与视觉无关的窗口从降级变成整轮失败。
+        base["visual_input_mode"] = "video"
     else:
         # 自适应分辨率(Smart Crop)只接 fused 生产路径。此路(非 fused/legacy)不裁切:
         # crops 通道把参考图渲染在 video 之后且无说明文字,模型会把局部裁切当整个房间描述
@@ -1714,6 +1716,16 @@ def _prepare_omni_visual_frames(
     if target_w <= 0 or target_h <= 0:
         raise ValueError(f"invalid omni target size: {target_w}x{target_h}")
     scale = short_edge / min(h0, w0)
+    # 缩小用 INTER_AREA(区域平均,抗锯齿最好);放大时 INTER_AREA 会退化成近似最近邻
+    # (它按源像素落到的目标格子做平均,放大时每格只摊到一个源像素),必须换重采样核。
+    # LANCZOS4 是离线对照里实测的那一个(与 CUBIC 统计上无法区分 p=0.63,取被测过的)。
+    #
+    # 注意 scale **没有钳到 1.0**,本函数被全景 / query / legacy / crop 四条路径共用,
+    # 所以「源短边 < 目标短边」时它们同样走放大分支 —— miloco 恒定拉相机子码流(LOW,
+    # 见「全链分辨率」表②),其像素数由机型决定;离线实测到 720p,此时用户选 768/1080
+    # 档就命中(scale=1.07 / 1.50),是常见配置而非边角。这条路径本来就在放大,只是此前
+    # 用的是退化成最近邻的 INTER_AREA;换核后画质更好但**编码字节会变**,落盘 clip.mp4
+    # 随之变化。即:双闸全关的用户走的也是被本行改过的路径,不是零回归。
     interp = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
     prepared: list[NDArray[np.uint8]] = []
     for index, frame in enumerate(frames):
@@ -1939,6 +1951,9 @@ def _encode_audio_m4a(
     在 read 字节之后,调 push_clip_bytes 把 m4a 字节旁路给 meaningful_events 复用
     (跟 _encode_video_mp4 对称,UI 端用同一个 <video> 控件播放;m4a 容器虽然只
     有音频,HTML5 <video> 也能 render audio-only track).
+
+    返回 None 有两种情况: 采样不足一个 AAC 帧(编不出来), 或编出来的 b64 短于
+    _MIN_AUDIO_B64_LEN(编码异常产出的损坏容器, 见该常量的说明)。两种都不落盘。
     """
     import os
     import tempfile
@@ -1977,11 +1992,23 @@ def _encode_audio_m4a(
 
         with open(tmp_path, "rb") as f:
             m4a_bytes = f.read()
+        b64 = base64.b64encode(m4a_bytes).decode()
+        # 尺寸闸收口在这里而不是各调用点: 图片模式的三个附加点(非 fused query /
+        # fused image / 非 fused image)与 audio route 共用本函数, 闸放在 push 之前
+        # 才能保证「落盘产物 = 实际请求」—— 不达标的音频既不进 payload 也不落盘,
+        # 不会留下模型没听过的回放数据。
+        if len(b64) < _MIN_AUDIO_B64_LEN:
+            logger.warning(
+                "event=audio_m4a_too_short size=%d (< %d), 丢弃该音频(不入 payload / 不落盘)",
+                len(b64),
+                _MIN_AUDIO_B64_LEN,
+            )
+            return None
         if artifact_target == "image":
             push_image_audio(m4a_bytes)
         else:
             push_clip_bytes(m4a_bytes, "m4a")
-        return base64.b64encode(m4a_bytes).decode()
+        return b64
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -2392,7 +2419,16 @@ def _build_query_user_content(
     query: str,
     last_caption: str | None,
     label_lookup: "dict[str, str] | None" = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> str:
+    """query 路径的 user 文本。
+
+    图片模式的措辞改写**只作用于本函数按模板生成的那几段**(检测结果/场景状态/
+    音频), "当前场景参考"与"用户问题"原样拼接: 前者是上一窗模型输出的引文、后者
+    是用户原话, 改写等于篡改引用 —— 用户问"视频里那个人是谁"会被改成"按时间排列
+    的画面图片里那个人是谁"再送模型。fused 实时路径对用户话语(pending_speech)也
+    是原样放进独立 user 消息、末尾的统一改写碰不到它, 两条路对齐。
+    """
     parts: list[str] = []
 
     for i, ep in enumerate(edge_packets):
@@ -2408,11 +2444,15 @@ def _build_query_user_content(
         parts.append(f"音频：{ep.audio_analysis.type.value}（能量: {ep.audio_analysis.energy_level:.3f}）")
         parts.append("")
 
+    tail_parts: list[str] = []
     if last_caption:
-        parts.append(f"当前场景参考：{last_caption}")
+        tail_parts.append(f"当前场景参考：{last_caption}")
+    tail_parts.append(f"\n用户问题：{query}")
 
-    parts.append(f"\n用户问题：{query}")
-    return "\n".join(parts)
+    # 原实现是 "\n".join(parts + tail_parts) —— 这里等值展开成"改写前半段、后半段
+    # 原样", video 模式下 _adapt_visual_prompt 是恒等变换, 输出逐字节不变。
+    head = _adapt_visual_prompt("\n".join(parts), visual_input_mode)
+    return "\n".join(([head] if parts else []) + tail_parts)
 
 
 # =============================================================================

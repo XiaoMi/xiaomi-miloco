@@ -892,11 +892,10 @@ def _shape_only_db(tmp_path, tables: dict[str, list[str]]):
 
 
 def test_a_v3_shaped_db_is_detected_as_v3_not_v2(tmp_path):
-    """v3 库 (只有 token_usage.base_url) 要认成 3 —— 认成 2 就会把 v2→v3 再跑一遍。
+    """v3 库 (token_usage 与 token_usage_daily 都带 base_url) 要认成 3。
 
-    每加一级迁移都要在 _SCHEMA_VERSION_MARKERS 里补一行, 漏了就退到上一级重跑。
-    这条钉的是 v3 那一行在不在, 不是整条链跑不跑得动: 从启动路径看两种判定的终态
-    一样 (v2→v3 幂等), 分不开对错, 所以直接断识别函数的返回值。
+    认成 2 就会把 v2→v3 再跑一遍。v3 那一级动过两张表, 两张都得是 marker ——
+    只列 token_usage 的话, 只改了一半的库会被认成 v3 而跳过日表重建。
     """
     from miloco.database.connector import _detect_schema_version
 
@@ -906,6 +905,7 @@ def test_a_v3_shaped_db_is_detected_as_v3_not_v2(tmp_path):
             "rule": ["id", "mode"],
             "task": ["task_id", "status"],
             "token_usage": ["model", "base_url"],
+            "token_usage_daily": ["date", "model", "base_url", "type"],
         },
     )
     assert _detect_schema_version(conn) == 3
@@ -949,8 +949,12 @@ def test_freshly_backfilled_table_is_not_version_evidence(tmp_path):
 
     兜底建一律按**当前** schema 建表, 于是它新建的表天然长着最高一级的 marker 列。
     老库 + 缺表兜底建因此会被"自证"成最新版: 迁移整段跳过、user_version 却写成最新,
-    中间几级的列一个没补 —— 之后哪个请求先读到没补的列就在那儿炸。所以落在忽略集里
-    的表命中某级 marker 时该级整个跳过, 宁可退回低一级把迁移重跑一遍(各迁移函数幂等)。
+    中间几级的列一个没补 —— 之后哪个请求先读到没补的列就在那儿炸。所以忽略集里的表
+    自己那一份 marker 不作数。
+
+    这里被滤掉的就是最高一级的全部证据, 于是退到下一级 —— 注意退级只发生在**该级
+    证据全部来自兜底新建的表**时; 该级只要还有一张老表能验, 就按那张老表判(见
+    test_backfilled_table_does_not_hide_the_levels_other_evidence)。
     """
     from miloco.database.connector import _detect_schema_version
 
@@ -973,5 +977,81 @@ def test_freshly_backfilled_table_is_not_version_evidence(tmp_path):
     assert _detect_schema_version(conn) == 5
     assert (
         _detect_schema_version(conn, ignore_tables=frozenset({"on_demand_log"})) == 2
+    )
+    conn.close()
+
+
+def test_backfilled_table_does_not_hide_the_levels_other_evidence(tmp_path):
+    """兜底新建的表只让**自己**那份 marker 失效, 不能把整级抹掉。
+
+    "task 缺表被兜底新建 + rule 是已迁到 v4 的老表": 整级跳过会判成 v3, 于是
+    v3→v4 重跑 —— 那一步对每条 rule 无条件按 mode 重算 direction, 存量 exit 型
+    rule(mode=event)被打回 enter, 用户配的"离开时提醒"静默消失。只滤掉被兜底建的
+    那张表的 marker, 这一级还能靠 rule.direction 认出来。
+    """
+    from miloco.database.connector import _detect_schema_version
+
+    conn = _shape_only_db(
+        tmp_path,
+        {
+            # rule 已是 v4 形态(带 direction), task 是刚兜底建出来的
+            "rule": ["id", "mode", "direction", "condition_dnf"],
+            "task": ["task_id", "status", "on_target_actions"],
+            "token_usage": ["model", "base_url"],
+            "token_usage_daily": ["model", "base_url", "type"],
+        },
+    )
+    assert _detect_schema_version(conn, ignore_tables=frozenset({"task"})) == 4, (
+        "忽略了 task 就把 v4 整级抹掉 → 判成 v3 → v3→v4 重跑改写 direction"
+    )
+    conn.close()
+
+
+def test_a_half_migrated_v3_db_falls_back_and_reruns(tmp_path):
+    """v2→v3 只迁了一半的库必须退回 v2 重跑 —— token_usage 一张当证据会漏判成 v3。
+
+    这是 token_usage_daily 必须进 v3 marker 的唯一分水岭: token_usage 已迁
+    (base_url 在)、日表没迁(仍是三列主键)。只列 token_usage 时该级全中 → 判 3 →
+    日表重建整段跳过, 而 user_version 随即写成 3; 之后 rollup 的
+    ON CONFLICT(date, model, base_url, type) 对不上三列主键, 要等运行期写日表才炸。
+    """
+    from miloco.database.connector import _detect_schema_version
+
+    conn = _shape_only_db(
+        tmp_path,
+        {
+            "rule": ["id", "mode"],
+            "task": ["task_id", "status"],
+            "token_usage": ["model", "base_url"],  # 已迁
+            "token_usage_daily": ["date", "model", "type"],  # 没迁, 三列主键
+        },
+    )
+    assert _detect_schema_version(conn) == 2, (
+        "日表没 base_url 就该退回 v2 重跑 v2→v3, 不能因为 token_usage 已迁就认成 v3"
+    )
+    conn.close()
+
+
+def test_a_level_whose_evidence_is_all_filtered_falls_through(tmp_path):
+    """某级证据被忽略集滤空后退到**下级**, 而不是就此认定该级通过。
+
+    "token_usage 缺表被兜底新建(进忽略集) + token_usage_daily 是没迁过的老表":
+    滤完 v3 这一级的证据是空的, 于是继续往下判。rule/task 都是 v2 形态、v4 那级也
+    不成立, 最终退回 2 把 v2→v3 重跑一遍, 日表照样重建。若这里不是 continue 而是
+    直接返回 3, 日表就带着三列主键被留下了。
+    """
+    from miloco.database.connector import _detect_schema_version
+
+    conn = _shape_only_db(
+        tmp_path,
+        {
+            "rule": ["id", "mode"],
+            "task": ["task_id", "status"],
+            "token_usage": ["model", "base_url"],  # 刚兜底建出来的
+            "token_usage_daily": ["date", "model", "type"],  # 还是 v2 的三列主键
+        },
+    )
+    assert _detect_schema_version(conn, ignore_tables=frozenset({"token_usage"})) == 2, (
+        "v3 证据滤空后要退到下级判, 不能就此认成 v3 把日表留下"
     )
     conn.close()

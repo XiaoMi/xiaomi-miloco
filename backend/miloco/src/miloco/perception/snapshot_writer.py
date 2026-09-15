@@ -208,7 +208,13 @@ def _save_image_frames(
             temp_dir = Path(tempfile.mkdtemp(prefix=".frames-", dir=device_dir))
             for index, frame in enumerate(frames):
                 (temp_dir / f"{index:03d}.jpg").write_bytes(frame)
-            temp_dir.replace(device_dir / IMAGE_FRAME_DIRNAME)
+            target = device_dir / IMAGE_FRAME_DIRNAME
+            # rename(2) 只在目标目录**为空**时才能覆盖它, 非空直接 ENOTEMPTY。所以
+            # 先删旧的再替换 —— 否则重写同一事件时这一句抛 OSError、被下面的 except
+            # 吃掉: 新帧整批丢弃, 盘上留着上一轮的旧帧, 而调用方只看到一条 error 日志。
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            temp_dir.replace(target)
             saved.append(device_id)
         except OSError as e:
             logger.error("Failed to write image frames for %s: %s", device_id, e)

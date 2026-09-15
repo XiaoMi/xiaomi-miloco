@@ -596,6 +596,117 @@ class TestNoMediaBlockWarning:
         assert "room=study-room" in msg
 
 
+class TestAudioSizeGate:
+    """音频尺寸闸收口在 ``_encode_audio_m4a`` 出口（见 ``_MIN_AUDIO_B64_LEN``）。
+
+    图片模式新增的三个音频附加点与 audio route 共用这一个编码函数, 闸只写在某个
+    调用点上会漏掉其余调用点 —— 漏掉的表现是把"非空但损坏的极短 m4a"发给 omni,
+    换回 400 Multimodal data is corrupted、整轮失败。
+    """
+
+    def test_too_short_audio_is_dropped_and_not_archived(self, monkeypatch, caplog):
+        """产物尺寸不达标 → 既不入 payload 也不落盘。"""
+        from miloco.observability.context import (
+            DeviceContext,
+            reset_device_context,
+            set_device_context,
+        )
+        from miloco.perception.engine.omni import prompt_builder as pb
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.snapshot_context import (
+            OmniEventArtifacts,
+            event_artifacts_scope,
+        )
+
+        # 把阈值拉到不可能达到, 模拟"PyAV 产出非空但损坏的极短 m4a"。
+        # 真实编码产物恒远大于 500（单个 AAC 帧实测 b64 已 1680+）, 正常路径不受影响。
+        monkeypatch.setattr(pb, "_MIN_AUDIO_B64_LEN", 10**9)
+
+        ep = _video_route_packet()
+        # _mock_edge_packet 的 audio_clip 只有 100 采样, 不足一个 AAC 帧会走"编不出来"
+        # 那条早退路径, 到不了尺寸闸 —— 这里给足采样, 让闸成为唯一拦截点。
+        ep.audio_clip = np.zeros(16000, dtype=np.int16)
+
+        artifacts = OmniEventArtifacts()
+        token = set_device_context(
+            DeviceContext(device_trace_id="t", device_id="cam_a", room_name="r")
+        )
+        try:
+            with event_artifacts_scope(artifacts), caplog.at_level("WARNING"):
+                fused = build_fused_payload(
+                    packets=[ep],
+                    context=OmniContext(room_name="厨房"),
+                    candidates=[],
+                    gallery_snapshot={},
+                    visual_input_mode="image",
+                )
+        finally:
+            reset_device_context(token)
+
+        types = [b["type"] for b in _multimodal_user_content(fused["messages"])]
+        assert "input_audio" not in types
+        # 落盘产物 = 实际请求: 没发出去的音频不留回放数据
+        assert artifacts.image_audio == {}
+        assert any(
+            "audio_m4a_too_short" in r.getMessage() for r in caplog.records
+        ), "尺寸闸拦下音频时要留痕（带 size）, 否则线上只能看到 omni 400"
+
+    def test_audio_route_too_short_falls_back_to_text_only(self, monkeypatch, caplog):
+        """audio route 同样被这一个闸收口 —— 尺寸不达标退化成 text-only, 不是报错。"""
+        from miloco.perception.engine.omni import prompt_builder as pb
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        monkeypatch.setattr(pb, "_MIN_AUDIO_B64_LEN", 10**9)
+
+        with caplog.at_level("WARNING"):
+            fused = build_fused_payload(
+                packets=[_audio_only_packet()],  # audio_clip 16000 采样, 过得了早退
+                context=OmniContext(room_name="厨房"),
+                candidates=[],
+                gallery_snapshot={},
+            )
+
+        blocks = _multimodal_user_content(fused["messages"])
+        assert not [b for b in blocks if b.get("type") == "input_audio"]
+        assert any("fused_no_media_block" in r.getMessage() for r in caplog.records)
+
+
+class TestAudioRouteVersusVisualMode:
+    """纯音频路由不随视觉模式开关变语义。
+
+    ``_build_messages`` 对"image 模式 + 无帧且无音频"抛 ValueError; 而音频编不出来
+    (采样不足一个 AAC 帧)在 audio route 上是**既有降级路径**——退化成纯文本问模型。
+    模式开关是给视觉表达做 A/B 的, 不该把一个与视觉无关的窗口从降级变成整轮失败。
+    """
+
+    def test_audio_route_keeps_video_semantics_in_image_mode(self):
+        from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.prompt_builder import build_prompt
+        from miloco.perception.engine.omni.provider import MiMoAdapter
+
+        ep = _audio_only_packet()
+        ep.audio_clip = np.zeros(512, dtype=np.int16)  # < 一个 AAC 帧 → 编不出音频
+
+        payload = build_prompt(ep, OmniContext(), visual_input_mode="image")
+        assert payload["visual_input_mode"] == "video"
+        # 不抛 ValueError: 退化成纯文本, 与 video 模式下的同一窗口行为一致
+        messages = _build_messages(payload, MiMoAdapter())
+        assert [b["type"] for b in messages[1]["content"]] == ["text"]
+
+    def test_audio_route_still_sends_audio_in_image_mode(self):
+        """音频编码正常时 audio route 照常发 input_audio —— 覆盖 mode 不该误伤它。"""
+        from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.prompt_builder import build_prompt
+        from miloco.perception.engine.omni.provider import MiMoAdapter
+
+        ep = _audio_only_packet()  # audio_clip 16000 采样, 编得出
+        payload = build_prompt(ep, OmniContext(), visual_input_mode="image")
+        messages = _build_messages(payload, MiMoAdapter())
+        types = [b["type"] for b in messages[1]["content"]]
+        assert "input_audio" in types
+        assert "image_url" not in types
+
+
 class TestBuildMessagesContentBlocks:
     """omni_client._build_messages 块组装（audio vs video route）。"""
 
@@ -710,6 +821,48 @@ class TestImagePromptAdaptation:
         from miloco.perception.engine.omni.prompt_builder import _adapt_visual_prompt
 
         assert _adapt_visual_prompt(self._BBOX_BOLD, "video") == self._BBOX_BOLD
+
+    # query 路径逐字节钉住: 拼接方式从 "\n".join(parts + tail)" 展开成"改写前半段 +
+    # 原样后半段", 段落间空行的数量属于这条 prompt 的一部分, 不能漂。
+    _QUERY_BODY = (
+        "检测结果：\nwangshihao\n场景状态：static\n音频：silence（能量: 0.000）"
+        "\n\n当前场景参考：视频中一名男子起身\n\n用户问题：视频里那个人是谁"
+    )
+
+    def test_query_video_mode_body_is_byte_identical(self):
+        """video 模式 query 文本逐字节不变。"""
+        from miloco.perception.engine.omni.prompt_builder import build_query_prompt
+
+        payload = build_query_prompt(
+            [_mock_edge_packet()], "视频里那个人是谁", "视频中一名男子起身",
+        )
+        assert payload["user_content"] == self._QUERY_BODY
+
+    def test_query_image_mode_keeps_user_words_and_caption_verbatim(self):
+        """图片模式只改模板段, 用户原话与上一窗 caption 原样进 prompt。
+
+        改写整串会把用户问的"视频里那个人是谁"改成"按时间排列的画面图片里那个人
+        是谁"再送模型 —— 用户原文被静默改动, 而 fused 实时路径对用户话语
+        (pending_speech)是原样放进独立 user 消息的, 两条路要对齐。
+        """
+        from miloco.perception.engine.omni.prompt_builder import build_query_prompt
+
+        payload = build_query_prompt(
+            [_mock_edge_packet()], "视频里那个人是谁", "视频中一名男子起身",
+            visual_input_mode="image",
+        )
+        content = payload["user_content"]
+        assert content.startswith(self._QUERY_BODY), "图片模式不该动用户问题/上一窗 caption"
+        assert content != self._QUERY_BODY, "图片模式仍要在末尾追加主画面序列说明"
+
+    def test_query_image_mode_drops_caption_when_absent(self):
+        """没有 last_caption 时段落拼接不变形(少一个空行就会改变 prompt 结构)。"""
+        from miloco.perception.engine.omni.prompt_builder import build_query_prompt
+
+        payload = build_query_prompt([_mock_edge_packet()], "现在怎么样")
+        assert payload["user_content"].endswith(
+            "音频：silence（能量: 0.000）\n\n\n用户问题：现在怎么样"
+        )
 
     def test_no_replacement_key_is_dead(self):
         """替换表的每个键都得在 prompt 正文里命中。

@@ -1323,7 +1323,11 @@ _SCHEMA_VERSION_MARKERS: tuple[tuple[int, tuple[tuple[str, str], ...]], ...] = (
         ("on_demand_log", "has_audio_artifact"),
     )),
     (4, (("rule", "direction"), ("task", "on_target_actions"))),
-    (3, (("token_usage", "base_url"),)),
+    # v2→v3 动过 token_usage 与 token_usage_daily 两张表, 两张都得当证据: 只列
+    # token_usage 的话, "token_usage 已迁(base_url 在)而 token_usage_daily 没迁
+    # (还是三列主键)"的半迁库会被判成 v3、日表重建整段跳过, 之后 rollup 的
+    # ON CONFLICT(date, model, base_url, type) 对不上三列主键、直接在运行期炸。
+    (3, (("token_usage", "base_url"), ("token_usage_daily", "base_url"))),
 )
 
 
@@ -1339,8 +1343,18 @@ def _detect_schema_version(
     ``ignore_tables`` 是本次启动刚被"缺表兜底建"补出来的表: 它们一律按**当前**
     schema 建, 天然就长着最高一级的 marker 列。拿这种自己刚造出来的表当证据, 老库
     会被判成最新版 —— 迁移整段跳过而 user_version 写着最新, 正是本函数要防的
-    "版本号说补好了、列根本没补"。所以这些表上的 marker 不作数, 该级整个跳过。
-    宁可退回低一级把迁移重跑一遍(各迁移函数幂等), 也不能反过来漏掉。
+    "版本号说补好了、列根本没补"。所以这些表上的 marker 不作数。
+
+    但只滤掉这些表**自己的** marker, 不整级跳过。整级跳过会漏判: 例如 task 缺表被
+    兜底新建、rule 是带 direction 的老表, 这一级就整个不算数了, 于是判成 v3、
+    v3→v4 重跑一遍 —— 而那一步对**每条** rule 无条件按 mode 重算 direction, 存量
+    exit 型 rule 被打回 enter、出路径静默消失(见 _migrate_v3_to_v4 与
+    test_a_v4_db_whose_version_number_was_lost_is_not_migrated_again)。滤到表一级
+    之后, 一级被跳过 ⟺ 该级**全部** marker 表都是本次兜底新建的空表, 该级迁移在
+    这些表上无数据可改, 退回重跑才是安全的 —— 这个等价关系也正是各级 marker 必须
+    覆盖该级迁移动过的**所有**表的原因: 漏列一张, "marker 表全是兜底新建的"就推不出
+    "该级无数据可改", 那张带着老数据的表会随该级一起被跳过、留在老形态上不再迁移
+    (漏列 token_usage_daily 的半迁库即是, 见 _SCHEMA_VERSION_MARKERS 的 v3 注释)。
 
     一级都认不出就退回 v2 让链整个跑一遍。
     """
@@ -1348,10 +1362,15 @@ def _detect_schema_version(
     if _table_columns(cursor, "task_link"):
         return 1
     for version, markers in _SCHEMA_VERSION_MARKERS:
-        if any(table in ignore_tables for table, _ in markers):
+        evidence = [
+            (table, marker)
+            for table, marker in markers
+            if table not in ignore_tables
+        ]
+        if not evidence:
             continue
         if all(
-            marker in _table_columns(cursor, table) for table, marker in markers
+            marker in _table_columns(cursor, table) for table, marker in evidence
         ):
             return version
     return 2
