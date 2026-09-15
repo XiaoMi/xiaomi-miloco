@@ -4,6 +4,7 @@
   - metadata.json         事件元数据 + 用户反馈 + 版本 + 数据完整性记录
   - omni_trace.json.gz    omni 调用记录(prompt + response + 推理参数;Smart Crop 事件含 crop 坐标)
   - clips/{device}/clip.* 视频/音频(零重编,omni 原始输入)
+  - clips/{device}/audio.m4a 图片模式的独立音频(零重编,omni 原始输入;文件名不匹配 clip.* 通配)
   - clips/{device}/frames/*.jpg 图片模式的逐帧输入
   - clips/{device}/ref.jpg 全景参考帧(仅 Smart Crop 事件;crop 视频同附的整帧上下文)
   - gallery/*.{jpg,png}   画廊合成图(可选,用户勾选时包含)
