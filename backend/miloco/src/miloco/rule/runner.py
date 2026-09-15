@@ -66,6 +66,7 @@ from miloco.rule.schema import (
 from miloco.task.state_machine import (
     ActionSlot,
     SignalKind,
+    TaskRuntimeState,
     TaskSignal,
     TaskStateMachine,
     TransitionOutcome,
@@ -443,6 +444,85 @@ class RuleRunner:
             context="iot",
             skip_flicker=True,
         )
+        await self._reconcile_iot_task_state(rule_id, value)
+
+    async def _reconcile_iot_task_state(self, rule_id: str, value: bool) -> None:
+        rule = self._rules.get(rule_id)
+        source = self._iot_source
+        state_machine = self._state_machine
+        if (
+            rule is None
+            or source is None
+            or state_machine is None
+            or not self._is_effectively_enabled(rule)
+            or not state_machine.owns(rule.task_id)
+        ):
+            return
+
+        if rule.resolved_direction is RuleDirection.EXIT and value:
+            if state_machine.runtime_state(rule.task_id) is not TaskRuntimeState.ON:
+                return
+            await self._record_source.settle(rule.task_id)
+            if not self._iot_reconcile_value_is_current(rule_id, True):
+                return
+            if not self._is_effectively_enabled(rule):
+                return
+            if state_machine.runtime_state(rule.task_id) is not TaskRuntimeState.ON:
+                return
+            outcome = state_machine.reconcile_exit(rule.task_id, rule.id)
+            if outcome is not TransitionOutcome.EXITED:
+                return
+            self._record_source.disarm(rule.task_id)
+            self._spawn_fire(
+                rule,
+                RuleEvent.ENTERED,
+                self._sources_currently_true(rule_id),
+                "iot_reconcile_exit",
+                action_slot=ActionSlot.ON_EXIT,
+                actual_exited_at=ms_to_iso_local(now_ms()),
+            )
+            source.record_compensated_exit()
+            logger.info(
+                "IOT_RECONCILE_EXIT: rule=%s task=%s direction=exit",
+                rule.id,
+                rule.task_id,
+            )
+            return
+
+        if rule.resolved_direction is not RuleDirection.SESSION or value:
+            return
+        if state_machine.runtime_state(rule.task_id) is not TaskRuntimeState.ON:
+            return
+        state = self._ensure_state(rule_id)
+        if state.exit_debounce_task is not None:
+            return
+        await self._dispatch_event(
+            rule,
+            RuleEvent.EXITED,
+            self._iot_source_did(rule_id),
+            "iot_reconcile_exit",
+        )
+        if state.exit_debounce_task is not None:
+            logger.info(
+                "IOT_RECONCILE_EXIT: rule=%s task=%s direction=session",
+                rule.id,
+                rule.task_id,
+            )
+
+    def _iot_reconcile_value_is_current(
+        self, rule_id: str, expected: bool
+    ) -> bool:
+        source = self._iot_source
+        rule = self._rules.get(rule_id)
+        if source is None or rule is None or not self._is_effectively_enabled(rule):
+            return False
+        value, _ = source.evaluate_current(rule_id)
+        if value is None:
+            ref = iot_ref_of(rule)
+            if ref is not None:
+                self.mark_source_unknown(rule_id, ref.did)
+            return False
+        return value is expected
 
     def _iot_source_did(self, rule_id: str) -> str:
         ref = self._iot_ref_of_rule(rule_id)
@@ -1227,6 +1307,8 @@ class RuleRunner:
                 # off 之前 —— 翻完再喂会被 NOT_IN_SESSION 拦掉, 这一天的达标就丢了。
                 await self._record_source.settle(rule.task_id)
 
+            await self._refresh_iot_guards(rule.task_id, rule.id)
+
             if not self._state_machine_allows(rule, RuleEvent.ENTERED):
                 # 状态机吞掉了这次边沿（已在态内 / 被对侧条件拦住）。按 STILL_IN
                 # 上报——与帧级抖动吸收同语义：规则确实在态，只是没有新一次进入。
@@ -1366,6 +1448,8 @@ class RuleRunner:
 
         if not self._state_machine_allows(rule, RuleEvent.EXITED):
             return
+        if context == "iot_reconcile_exit" and self._iot_source is not None:
+            self._iot_source.record_compensated_exit()
         self._record_source.disarm(rule.task_id)
 
         # Background-task path: swallow exceptions so they don't surface as
@@ -1379,6 +1463,32 @@ class RuleRunner:
         except Exception:
             logger.exception(
                 "Rule %s debounced exit fire failed", rule.id
+            )
+
+    async def _refresh_iot_guards(self, task_id: str, entering_rule_id: str) -> None:
+        source = self._iot_source
+        if source is None:
+            return
+        for guard in self._rules.values():
+            if (
+                guard.id == entering_rule_id
+                or guard.task_id != task_id
+                or guard.resolved_direction is not RuleDirection.GUARD
+            ):
+                continue
+            ref = iot_ref_of(guard)
+            if ref is None:
+                continue
+            value, _ = source.evaluate_current(guard.id)
+            if value is None:
+                self.mark_source_unknown(guard.id, ref.did)
+                continue
+            await self.update_state(
+                guard.id,
+                ref.did,
+                value,
+                context="iot_guard_sync",
+                skip_flicker=True,
             )
 
     # ---- Fire-and-forget plumbing ----
@@ -1498,6 +1608,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        actual_exited_at: str | None = None,
     ) -> None:
         """Schedule a fire as a background task; record handle to prevent GC."""
         task = asyncio.create_task(
@@ -1506,6 +1617,7 @@ class RuleRunner:
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
                 action_slot=action_slot,
+                actual_exited_at=actual_exited_at,
             )
         )
         self._fire_tasks.add(task)
@@ -1524,6 +1636,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        actual_exited_at: str | None = None,
     ) -> None:
         try:
             await self._fire(
@@ -1531,6 +1644,7 @@ class RuleRunner:
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
                 action_slot=action_slot,
+                actual_exited_at=actual_exited_at,
             )
         except Exception:
             logger.exception(

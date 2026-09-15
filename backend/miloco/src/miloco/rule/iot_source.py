@@ -159,6 +159,7 @@ _ONLINE_PATTERN = "iot/device/*/status/online"
 # 次、避开刚重连时订阅对账抢同一条连接的在飞额度、让断连期间积压的推送先落地（拉回
 # 来的是云端缓存里的旧值，落地晚的会被「last_reported 更晚就不写」挡掉）。
 RECONNECT_PULL_DELAY_SECONDS = 15.0
+RECONCILE_INTERVAL_SECONDS = 4.0
 
 
 class DiagnosticReason(str, Enum):
@@ -176,6 +177,12 @@ def _diagnostics_report(
     *,
     consumer_alive: bool,
     consumer_exit: str,
+    reconcile_alive: bool,
+    reconcile_exit: str,
+    last_reconcile_at: int,
+    reconcile_count: int,
+    reconcile_failed_count: int,
+    compensated_exit_count: int,
     pending: int,
     indexed_rules: int,
     by_reason: dict[str, int],
@@ -190,6 +197,12 @@ def _diagnostics_report(
     return {
         "consumer_alive": consumer_alive,
         "consumer_exit": consumer_exit,
+        "reconcile_alive": reconcile_alive,
+        "reconcile_exit": reconcile_exit,
+        "last_reconcile_at": last_reconcile_at,
+        "reconcile_count": reconcile_count,
+        "reconcile_failed_count": reconcile_failed_count,
+        "compensated_exit_count": compensated_exit_count,
         "pending": pending,
         "indexed_rules": indexed_rules,
         "by_reason": by_reason,
@@ -203,6 +216,12 @@ def source_not_running(reason: str) -> dict:
     return _diagnostics_report(
         consumer_alive=False,
         consumer_exit=reason,
+        reconcile_alive=False,
+        reconcile_exit=reason,
+        last_reconcile_at=0,
+        reconcile_count=0,
+        reconcile_failed_count=0,
+        compensated_exit_count=0,
         pending=0,
         indexed_rules=0,
         by_reason={},
@@ -241,6 +260,7 @@ class IotSource:
         ref_of_rule: Callable[[str], IotRef | None],
         pull_props: Callable[[str, list[str]], Awaitable[None]] | None = None,
         reconnect_pull_delay: float = RECONNECT_PULL_DELAY_SECONDS,
+        reconcile_interval: float = RECONCILE_INTERVAL_SECONDS,
     ) -> None:
         self._store = store
         self._feed = feed
@@ -249,6 +269,9 @@ class IotSource:
         self._ref_of_rule = ref_of_rule
         self._pull_props = pull_props
         self._reconnect_pull_delay = reconnect_pull_delay
+        if reconcile_interval < 1.0:
+            raise ValueError("reconcile_interval must be at least 1 second")
+        self._reconcile_interval = reconcile_interval
 
         # (did, iid) → rule_id 列表。全量重建，不做增量：漏重建的最坏后果是漏触发
         # （查得出来），增量残留是拿已删规则的条目触发（查不出来）。
@@ -260,6 +283,12 @@ class IotSource:
         self._wake = asyncio.Event()
         self._consumer: asyncio.Task | None = None
         self._consumer_exit: str = ""
+        self._reconcile_task: asyncio.Task | None = None
+        self._reconcile_exit: str = ""
+        self._last_reconcile_at = 0
+        self._reconcile_count = 0
+        self._reconcile_failed_count = 0
+        self._compensated_exit_count = 0
         self._unsubscribes: list[Callable[[], None]] = []
 
         self._diagnostics: dict[str, _RuleDiagnostic] = {}
@@ -280,6 +309,11 @@ class IotSource:
         **subscribe 排在 seed 之前。** 容器只投递订阅之后提交的变更，反过来的话两者
         之间落地的变更既不在这一轮 seed 里、也不在订阅里，要等属性下一次变化才被看见。
         """
+        if self._consumer is not None:
+            return
+        self._stopped = False
+        self._consumer_exit = ""
+        self._reconcile_exit = ""
         self.rebuild_index()
         self._unsubscribes.append(
             self._store.subscribe(_PROP_PATTERN, self._on_prop_change)
@@ -287,8 +321,9 @@ class IotSource:
         self._unsubscribes.append(
             self._store.subscribe(_ONLINE_PATTERN, self._on_online_change)
         )
-        self.seed_all()
         self._consumer = asyncio.create_task(self._consume())
+        self._reconcile_task = asyncio.create_task(self._reconcile_loop())
+        self.seed_all()
 
     async def stop(self) -> None:
         """退订 → 停消费协程与在飞的拉取，并等它们真的停下来。
@@ -300,14 +335,19 @@ class IotSource:
         for unsubscribe in self._unsubscribes:
             unsubscribe()
         self._unsubscribes.clear()
-        tasks = [t for t in (self._consumer, self._pull_task) if t is not None]
+        tasks = [
+            t for t in (self._consumer, self._reconcile_task, self._pull_task)
+            if t is not None
+        ]
         self._consumer = None
+        self._reconcile_task = None
         self._pull_task = None
         for task in tasks:
             if not task.done():
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self._pending.clear()
 
     # ── 索引与 seed ─────────────────────────────────────────────
 
@@ -338,6 +378,8 @@ class IotSource:
         所以不需要 barrier、不需要「seed 与 live 谁先 feed」的仲裁；同一条 rule 被
         两边同时放进来也只会算一次。
         """
+        if self._stopped:
+            return
         self._pending.update(rule_ids)
         self._wake.set()
 
@@ -395,6 +437,41 @@ class IotSource:
             self.seed(rule_ids)
 
     # ── 消费协程 ────────────────────────────────────────────────
+
+    async def _reconcile_loop(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(self._reconcile_interval)
+                try:
+                    self._reconcile_once()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._reconcile_failed_count += 1
+                    self._reconcile_exit = f"{type(exc).__name__}: {exc}"
+                    logger.exception("iot 源周期校准失败")
+        except asyncio.CancelledError:
+            self._reconcile_exit = "cancelled"
+            raise
+        except BaseException as exc:  # noqa: BLE001 - 死因要留得下来
+            self._reconcile_exit = f"{type(exc).__name__}: {exc}"
+            logger.exception("iot 源周期校准协程退出")
+            raise
+
+    def _reconcile_once(self) -> None:
+        self.rebuild_index()
+        self.seed_all()
+        self._last_reconcile_at = now_ms()
+        self._reconcile_count += 1
+        logger.info(
+            "IOT_RECONCILE: rules=%d pending=%d count=%d",
+            sum(len(rule_ids) for rule_ids in self._index.values()),
+            len(self._pending),
+            self._reconcile_count,
+        )
+
+    def record_compensated_exit(self) -> None:
+        self._compensated_exit_count += 1
 
     async def _consume(self) -> None:
         try:
@@ -456,6 +533,16 @@ class IotSource:
             logger.warning("rule %s 的 iot 条件项求值失败: %s", ref.rule_id, e)
             return None, DiagnosticReason.EVAL_FAILED
 
+    def evaluate_current(
+        self, rule_id: str
+    ) -> tuple[bool | None, DiagnosticReason]:
+        ref = self._ref_of_rule(rule_id)
+        if ref is None:
+            return None, DiagnosticReason.PATH_MISSING
+        value, reason = self._evaluate(ref)
+        self._record(rule_id, value, reason)
+        return value, reason
+
     def _record(
         self, rule_id: str, value: bool | None, reason: DiagnosticReason
     ) -> None:
@@ -482,6 +569,15 @@ class IotSource:
         return _diagnostics_report(
             consumer_alive=consumer is not None and not consumer.done(),
             consumer_exit=self._consumer_exit,
+            reconcile_alive=(
+                self._reconcile_task is not None
+                and not self._reconcile_task.done()
+            ),
+            reconcile_exit=self._reconcile_exit,
+            last_reconcile_at=self._last_reconcile_at,
+            reconcile_count=self._reconcile_count,
+            reconcile_failed_count=self._reconcile_failed_count,
+            compensated_exit_count=self._compensated_exit_count,
             pending=len(self._pending),
             indexed_rules=sum(len(v) for v in self._index.values()),
             # 按原因汇总: 逐条看答不了「现在有几条规则因为设备离线而瞎着」, 而那是
