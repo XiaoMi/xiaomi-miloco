@@ -234,6 +234,25 @@ class TaskStateMachine:
     def runtime_state(self, task_id: str) -> TaskRuntimeState:
         return self._states.get(task_id, TaskRuntimeState.OFF)
 
+    def reconcile_exit(self, task_id: str, rule_id: str) -> TransitionOutcome:
+        """同步校准 exit 方向规则，将 task 原子切到 ``off``。
+
+        session 校准必须走 runner 的退出防抖链，不能调用这个立即转换入口。
+        """
+        topology = self._topologies.get(task_id)
+        if topology is None:
+            return TransitionOutcome.UNKNOWN_RULE
+        direction = topology.directions.get(rule_id)
+        if direction is not RuleDirection.EXIT:
+            return TransitionOutcome.UNKNOWN_RULE
+        kind = SignalKind.ENTERED
+        slot = slot_for_edge(direction.value, kind)
+        if slot is not ActionSlot.ON_EXIT:
+            return TransitionOutcome.UNKNOWN_RULE
+        return self.handle(
+            TaskSignal(task_id, rule_id, kind, slot), dispatch=False
+        )
+
     # ── 拓扑维护 ──────────────────────────────────────────────────
 
     def register_task(self, task_id: str, directions: dict[str, RuleDirection]) -> None:
