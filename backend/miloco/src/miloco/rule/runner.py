@@ -77,6 +77,7 @@ from miloco.utils.time_utils import ms_to_iso_local, now_ms
 logger = logging.getLogger(__name__)
 
 _EMPTY_RESULT_MSG = "MIoT 返回为空/不可判定,无法确认执行结果"
+_IOT_RECONCILE_CONTEXT = "iot_reconcile_exit"
 
 
 def _summarize_rule_result(obj: object) -> tuple[bool, int | None, str | None]:
@@ -477,7 +478,7 @@ class RuleRunner:
                 rule,
                 RuleEvent.ENTERED,
                 self._sources_currently_true(rule_id),
-                "iot_reconcile_exit",
+                _IOT_RECONCILE_CONTEXT,
                 action_slot=ActionSlot.ON_EXIT,
                 actual_exited_at=ms_to_iso_local(now_ms()),
             )
@@ -500,7 +501,7 @@ class RuleRunner:
             rule,
             RuleEvent.EXITED,
             self._iot_source_did(rule_id),
-            "iot_reconcile_exit",
+            _IOT_RECONCILE_CONTEXT,
         )
         if state.exit_debounce_task is not None:
             logger.info(
@@ -1448,7 +1449,7 @@ class RuleRunner:
 
         if not self._state_machine_allows(rule, RuleEvent.EXITED):
             return
-        if context == "iot_reconcile_exit" and self._iot_source is not None:
+        if context == _IOT_RECONCILE_CONTEXT and self._iot_source is not None:
             self._iot_source.record_compensated_exit()
         self._record_source.disarm(rule.task_id)
 

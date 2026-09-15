@@ -304,7 +304,7 @@ class IotSource:
     # ── 生命周期 ────────────────────────────────────────────────
 
     def start(self) -> None:
-        """订阅 → 全部 rule 进待算集合 → 起消费协程。
+        """订阅 → 起消费/校准协程 → 全部 rule 进待算集合。
 
         **subscribe 排在 seed 之前。** 容器只投递订阅之后提交的变更，反过来的话两者
         之间落地的变更既不在这一轮 seed 里、也不在订阅里，要等属性下一次变化才被看见。
@@ -444,6 +444,7 @@ class IotSource:
                 await asyncio.sleep(self._reconcile_interval)
                 try:
                     self._reconcile_once()
+                    self._reconcile_exit = ""
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -463,7 +464,7 @@ class IotSource:
         self.seed_all()
         self._last_reconcile_at = now_ms()
         self._reconcile_count += 1
-        logger.info(
+        logger.debug(
             "IOT_RECONCILE: rules=%d pending=%d count=%d",
             sum(len(rule_ids) for rule_ids in self._index.values()),
             len(self._pending),
