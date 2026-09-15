@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
 
-# 三元组变化触发的 fire-and-forget reset task 强引用集合;asyncio 只对 task 持弱引用,
+# 指纹变化触发的 fire-and-forget reset task 强引用集合;asyncio 只对 task 持弱引用,
 # 不持强引用短协程可能被 GC 提前回收。done_callback 里自动 discard。
 _RESET_TASKS: set[asyncio.Task] = set()
 
@@ -145,7 +145,7 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
     ``reset_settings()`` 清缓存),即可让新模型在**下一个推理周期**自动生效,无需重启
     进程、不重建引擎。api_key 为空时退回快照值,最终调用点 ``resolve_api_key`` 仍会兜底环境变量。
 
-    副作用:三元组 (model, base_url, api_key) 变化时清熔断状态到 CLOSED。覆盖所有配置源
+    副作用:(model, base_url, api_key, 视觉输入模式) 指纹变化时清熔断状态到 CLOSED。覆盖所有配置源
     (web PUT/activate / CLI set / env / 直接改 config.json)——只要 settings 变了就自动重置。
     """
     from dataclasses import replace
@@ -172,12 +172,45 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
     return resolved
 
 
+def _current_visual_input_mode() -> str:
+    """读当前生效的视觉输入模式,读不到按 ``"video"`` 兜底。
+
+    与 ``pipeline._resolve_visual_input_mode`` 读同一配置项、语义一致(那边每个感知周期
+    读一次);不复用它是因为 pipeline 在 omni_client 上层,反过来 import 会成环。settings
+    读不到(未初始化 / 测试替身只带 model)时返回 "video",与不把这一维计入指纹等价。
+    取值不合法时原样返回:指纹只关心"变没变",归一化由 pipeline 负责。
+    """
+    try:
+        from miloco.config import get_settings
+
+        value = (
+            get_settings()
+            .perception.engine.get("input", {})
+            .get("omni_visual_input_mode", "video")
+        )
+    except Exception:  # noqa: BLE001
+        return "video"
+    return value if isinstance(value, str) else "video"
+
+
 def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
-    """检测 (model, base_url, api_key) 三元组变化,变了就清熔断。跨调用状态保存在
-    函数属性 ``._last_triple`` 上——比 module-level global 更内聚。"""
-    triple = (resolved.model, resolved.base_url, resolve_omni_api_key(resolved.api_key))
-    prev = getattr(_maybe_reset_breaker_on_config_change, "_last_triple", None)
-    if prev is not None and prev != triple:
+    """检测 (model, base_url, api_key, 视觉输入模式) 指纹变化,变了就清熔断。跨调用状态
+    保存在函数属性 ``._last_fingerprint`` 上——比 module-level global 更内聚。
+
+    视觉输入模式为什么算一维: 它决定这套管线送出去的是 video_url 还是 image_url[],
+    两种表达的失败模式互不相关(例如 provider 对图片序列回 400)。而熔断是**两种模式共享
+    同一个计数器**的: 视频模式连挂到阈值后切到图片模式, 新模式会被上一模式的失败计数
+    直接挡在门外, 表现出来是"切了模式还是不通"。清一次计数让新模式从 CLOSED 重新起步,
+    这正是拿这个开关做 A/B 对照时需要的语义。
+    """
+    fingerprint = (
+        resolved.model,
+        resolved.base_url,
+        resolve_omni_api_key(resolved.api_key),
+        _current_visual_input_mode(),
+    )
+    prev = getattr(_maybe_reset_breaker_on_config_change, "_last_fingerprint", None)
+    if prev is not None and prev != fingerprint:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -186,7 +219,7 @@ def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
             task = loop.create_task(get_omni_circuit_breaker().reset_on_config_change())
             _RESET_TASKS.add(task)
             task.add_done_callback(_RESET_TASKS.discard)
-    _maybe_reset_breaker_on_config_change._last_triple = triple  # type: ignore[attr-defined]
+    _maybe_reset_breaker_on_config_change._last_fingerprint = fingerprint  # type: ignore[attr-defined]
 
 
 async def call_omni(

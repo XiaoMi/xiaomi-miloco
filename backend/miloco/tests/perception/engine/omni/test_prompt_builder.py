@@ -2673,3 +2673,63 @@ class TestAdaptiveResolution:
             payload = build_batch_prompt([_adaptive_packet()], OmniContext())
         assert payload["crops"] == []
         assert payload.get("video_base64")
+
+
+def _request_text(messages: list[dict]) -> str:
+    """把 messages 里的文本段按顺序摊平(媒体块丢弃)。
+
+    fused 的 user content 是多模态 list: 文本段 + gallery image_url + 主 video_url。
+    本函数只取文本, 视频字节不进指纹(编码器产物会随 PyAV 版本变, 不该混进 prompt 的
+    逐字节断言)。
+    """
+    out: list[str] = []
+    for m in messages:
+        content = m["content"]
+        if isinstance(content, str):
+            out.append(content)
+        else:
+            out.extend(b["text"] for b in content if b.get("type") == "text")
+    return "\n".join(out)
+
+
+class TestVideoModeGoldenPrompt:
+    """video 模式(默认、存量路径)的 fused request 文本逐字节冻结。
+
+    本 PR 的零回归承诺是"视频模式的请求与 prompt 逐字符不变", 而新加的
+    ``visual_input_mode`` 渗透到三处: system prompt 装配(SceneDescriptor 多一维)、
+    user content 改写(``_adapt_visual_prompt``)、媒体块拼装。任何一处漏判都会静默改变
+    存量视频用户的请求 —— 断言零散字面量钉不住整串(4k+ 字符), 故用 golden 文件比对。
+
+    golden 的来历: 在 PR 基线的 worktree 上跑**同一 fixture** 生成文本, 与本文件逐字节
+    一致后才落库。即它证明的是"与改造前逐字节相同", 不只是"与今天的实现相同"。更新方式:
+    确认 prompt 改动确属有意, 核对过基线差异后再重新生成该文件。
+
+    环境无关性(不控住这两项, 换台机器 golden 就飘): 文本与 adapter 无关 —— mimo / qwen /
+    gemini 三种 adapter 产出同一串(媒体块才分 provider); 但 ``_has_pets_for_scene`` 为真
+    会多出宠物段, 故在测试里钉成 False。
+    """
+
+    def test_fused_video_mode_request_text_is_byte_identical(self, monkeypatch):
+        from pathlib import Path
+
+        from miloco.perception.engine.omni import prompt_builder as pb
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        monkeypatch.setattr(pb, "_has_pets_for_scene", lambda: False)
+        fused = build_fused_payload(
+            packets=[_mock_edge_packet()],
+            context=OmniContext(room_name="study-room"),
+            candidates=[],
+            gallery_snapshot={},
+            visual_input_mode="video",
+        )
+        # 落库的 golden 以换行收尾(文件惯例), 比对时补上这一个字节而不是 rstrip ——
+        # rstrip 会把"末尾空行被吃掉"这种改动一起放过。
+        golden = (
+            Path(__file__).resolve().parents[3]
+            / "fixtures"
+            / "omni_prompt_video_mode.txt"
+        ).read_text(encoding="utf-8")
+        assert _request_text(fused["messages"]) + "\n" == golden, (
+            "video 模式(存量默认路径)的 request 文本变了 —— 本 PR 不该改到它"
+        )
