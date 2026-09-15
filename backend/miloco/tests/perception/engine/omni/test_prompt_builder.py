@@ -665,6 +665,106 @@ class TestFusedAudioRoute:
         assert "video_url" in types
         assert "input_audio" not in types
 
+    def test_fused_image_route_emits_image_blocks(self):
+        """image route 必须能完成 fused 装配并输出图片块。"""
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        fused = build_fused_payload(
+            packets=[_video_route_packet()],
+            context=OmniContext(),
+            candidates=[],
+            gallery_snapshot={},
+            visual_input_mode="image",
+        )
+        user_blocks = _multimodal_user_content(fused["messages"])
+        types = [b["type"] for b in user_blocks]
+        assert "image_url" in types
+        assert "video_url" not in types
+
+
+class TestImagePromptAdaptation:
+    """图片模式的措辞改写(``_adapt_visual_prompt`` + 替换表)。"""
+
+    # 逐字取自 prompt 正文的那两句: 注意"最后一帧"是 **markdown 加粗**的
+    _BBOX_BOLD = (
+        "上方已识别人物、陌生人及待识别 track 中的 bbox=(x1, y1, x2, y2) 均为"
+        "视频**最后一帧**中归一化到 [0, 1000] 区间的位置"
+    )
+
+    def test_bolded_last_frame_anchor_is_adapted(self):
+        """加粗的「视频**最后一帧**」要改成「**最后一张主画面图片**」。
+
+        替换表按序 str.replace, 最后一条单字"视频"垫底会把漏网的都吃掉 —— 键少写两个
+        星号就成了死条目, 该处会被垫底那条改出"按时间排列的画面图片**最后一帧**",
+        图片序列里并没有"帧"。所以这里对着**带加粗的原文**断言, 而不是自己拼一句。
+        """
+        from miloco.perception.engine.omni.prompt_builder import _adapt_visual_prompt
+
+        out = _adapt_visual_prompt(self._BBOX_BOLD, "image")
+        assert "**最后一张主画面图片**" in out
+        assert "视频" not in out
+        assert "最后一帧" not in out
+
+    def test_video_mode_text_is_untouched(self):
+        """video 模式逐字节原样返回 —— 存量视频用户看到的 prompt 不能变。"""
+        from miloco.perception.engine.omni.prompt_builder import _adapt_visual_prompt
+
+        assert _adapt_visual_prompt(self._BBOX_BOLD, "video") == self._BBOX_BOLD
+
+    def test_no_replacement_key_is_dead(self):
+        """替换表的每个键都得在 prompt 正文里命中。
+
+        死条目不报错, 只会静默漏改一处措辞, 灰度期从日志看不出来。语料取真正会被改写
+        的那几个模块: system prompt 的模板常量在 constants.py / field_registry.py, user
+        段在 prompt_builder.py(``build_system_prompt`` 与 ``_build_fused_user_content``
+        两处都会过改写函数)。
+
+        按 AST 取字面量, 再排掉注释与 docstring —— 注释本就不在 AST 里; docstring 在,
+        但它是"描述 prompt 的散文", 在里面命中等于没命中(替换表最初那条 ``视频末帧``
+        就是这么看着像活的)。替换表自身也排除, 免得自证。
+        """
+        import ast
+        import pathlib
+
+        import miloco.perception.engine.omni.prompt_builder as pb
+
+        omni_dir = pathlib.Path(pb.__file__).parent
+        keys = [k for k, _ in pb._IMAGE_PROMPT_REPLACEMENTS]
+        table_strings = set(keys) | {v for _, v in pb._IMAGE_PROMPT_REPLACEMENTS}
+
+        def _docstring_nodes(tree: ast.AST) -> set[int]:
+            ids: set[int] = set()
+            for node in ast.walk(tree):
+                if not isinstance(
+                    node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    continue
+                body = getattr(node, "body", [])
+                first = body[0] if body else None
+                if (
+                    isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)
+                ):
+                    ids.add(id(first.value))
+            return ids
+
+        literals: list[str] = []
+        for name in ("constants.py", "field_registry.py", "prompt_builder.py"):
+            tree = ast.parse((omni_dir / name).read_text())
+            skip = _docstring_nodes(tree)
+            literals.extend(
+                node.value
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in skip
+                and node.value not in table_strings
+            )
+
+        dead = sorted(k for k in keys if not any(k in lit for lit in literals))
+        assert dead == [], f"替换表里这些键在 prompt 正文里不存在: {dead}"
+
 
 class TestFusedPetRefs:
     """P2：has_pets 时 fused 主 user content 注入已登记宠物参考图块。"""
@@ -2257,23 +2357,38 @@ class TestAdaptiveResolution:
 
         断言一律对着「编出的网格」而不是 se/短边 反算的浮点值 —— 送模型的就是这张网格,
         //2*2 取偶也只体现在它上面。
+
+        捕的是 ``_prepare_omni_visual_frames``(canonical 帧准备)而不是编码函数:图片/视频
+        两路共用这一步, 视频的 mp4 编码只是它下游的一层, crop 已不再调 ``_encode_video_mp4``
+        (那会把缩放跑第二遍)。网格直接读它的返回值, 不再拿公式反算一遍自证。
         """
         from types import SimpleNamespace
         from unittest.mock import patch as _patch
 
         import miloco.perception.engine.omni.prompt_builder as pb
 
+        prepared_calls: list = []
+        real_prepare = pb._prepare_omni_visual_frames
+
+        def _capture(*args, **kwargs):
+            result = real_prepare(*args, **kwargs)
+            prepared_calls.append((args, kwargs, result))
+            return result
+
         p1, p2 = self._patches(short_edge=short_edge)
-        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+        with p1, p2, _patch.object(
+            pb, "_prepare_omni_visual_frames", side_effect=_capture
+        ):
             content = self._content(packet=packet, candidates=[])
         assert self._has_ref(content)  # 确认确实走了 crop 分支
-        call = spy.call_args_list[-1]
-        ch, cw = call.args[0][0].shape[:2]
+        # 裁切命中时全景不再预编, 全程只该有这一处准备帧 —— 多出来说明捕错了那一次
+        assert len(prepared_calls) == 1, [c[1] for c in prepared_calls]
+        args, kwargs, prepared = prepared_calls[-1]
+        ch, cw = args[0][0].shape[:2]
         fh, fw = packet.all_frames[0].shape[:2]
-        se = call.kwargs["short_edge"]
         return SimpleNamespace(
-            region=(cw, ch), se=se,
-            out=pb._encode_target_wh(cw, ch, se),
+            region=(cw, ch), se=kwargs["short_edge"],
+            out=(prepared.width, prepared.height),
             pano=pb._encode_target_wh(fw, fh, short_edge),
         )
 
@@ -2388,9 +2503,11 @@ class TestAdaptiveResolution:
 
         pkt = _adaptive_packet(fps=2)
         p1, p2 = self._patches()
-        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+        with p1, p2, _patch.object(
+            pb, "_prepare_omni_visual_frames", wraps=pb._prepare_omni_visual_frames
+        ) as spy:
             self._content(packet=pkt, candidates=[])
-        # reorder 后裁切命中则只编 crop 一次(全景不再预编);该次必须用 frame_info.fps=2
+        # reorder 后裁切命中则只准备一次帧(全景不再预编);该次必须用 frame_info.fps=2
         assert spy.call_count >= 1
         assert all(c.kwargs.get("fps") == 2 for c in spy.call_args_list)
 

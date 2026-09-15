@@ -4,6 +4,7 @@
   - metadata.json         事件元数据 + 用户反馈 + 版本 + 数据完整性记录
   - omni_trace.json.gz    omni 调用记录(prompt + response + 推理参数;Smart Crop 事件含 crop 坐标)
   - clips/{device}/clip.* 视频/音频(零重编,omni 原始输入)
+  - clips/{device}/frames/*.jpg 图片模式的逐帧输入
   - clips/{device}/ref.jpg 全景参考帧(仅 Smart Crop 事件;crop 视频同附的整帧上下文)
   - gallery/*.{jpg,png}   画廊合成图(可选,用户勾选时包含)
 
@@ -27,6 +28,7 @@ from pathlib import Path
 from miloco.perception.snapshot_writer import (
     CLIP_CANDIDATES,
     get_snapshot_root,
+    image_frame_files,
     region_slug,
 )
 from miloco.utils.paths import miloco_home
@@ -111,6 +113,36 @@ def _packs_dir() -> Path:
     return miloco_home() / "packs"
 
 
+def _collect_device_media(
+    event_dir: Path, device_ids: list[str]
+) -> tuple[list[str], list[str], list[str], list[str]]:
+    """收集设备的 video/audio 和 image frames 相对路径及缺失记录."""
+    clips_found: list[str] = []
+    clips_missing: list[str] = []
+    image_frames_found: list[str] = []
+    image_frames_missing: list[str] = []
+
+    for did in device_ids:
+        slug = region_slug(did)
+        device_dir = event_dir / slug
+        has_clip = False
+        for candidate in CLIP_CANDIDATES:
+            if (device_dir / candidate).exists():
+                clips_found.append(f"{slug}/{candidate}")
+                has_clip = True
+                break
+
+        frame_paths = image_frame_files(device_dir)
+        frame_rels = [f"{slug}/frames/{path.name}" for path in frame_paths]
+        image_frames_found.extend(frame_rels)
+        if not frame_rels:
+            image_frames_missing.append(slug)
+        if not has_clip and not frame_rels:
+            clips_missing.append(slug)
+
+    return clips_found, clips_missing, image_frames_found, image_frames_missing
+
+
 
 def build_feedback_pack(
     *,
@@ -154,6 +186,8 @@ def build_feedback_pack(
         "omni_trace_found": False,
         "clips_found": [],
         "clips_missing": [],
+        "image_frames_found": [],
+        "image_frames_missing": [],
         "refs_found": [],
         "gallery_included": False,
     }
@@ -165,17 +199,22 @@ def build_feedback_pack(
     components["omni_trace_found"] = sanitized_trace is not None
 
     device_ids: list[str] = event.get("device_ids", [])
+    (
+        components["clips_found"],
+        components["clips_missing"],
+        components["image_frames_found"],
+        image_frames_missing,
+    ) = _collect_device_media(event_dir, device_ids)
+    # 全设备一帧都没有时不上报"缺帧": 那既可能是本轮压根没走图片模式(常态), 也可能是
+    # 图片模式但一帧没落盘(真故障)。盘上的产物分不开这两者 —— 能分开的只有采集那一刻的
+    # 模式, 而 meaningful_events 不存它(events_service 的 kind 正是从盘上反推的, 无帧即
+    # none, 拿来当判据与这里的写法等价)。真故障仍会由 clips_missing 露出来。
+    components["image_frames_missing"] = (
+        image_frames_missing if components["image_frames_found"] else []
+    )
     for did in device_ids:
         slug = region_slug(did)
         clip_dir = event_dir / slug
-        found = False
-        for candidate in CLIP_CANDIDATES:
-            if (clip_dir / candidate).exists():
-                components["clips_found"].append(f"{slug}/{candidate}")
-                found = True
-                break
-        if not found:
-            components["clips_missing"].append(slug)
         # Smart Crop 参考帧(与 clip 同目录);非 crop 事件无此文件,静默跳过
         if (clip_dir / "ref.jpg").exists():
             components["refs_found"].append(f"{slug}/ref.jpg")
@@ -202,6 +241,8 @@ def build_feedback_pack(
         "omni_trace_found": components["omni_trace_found"],
         "clips_found": components["clips_found"],
         "clips_missing": components["clips_missing"],
+        "image_frames_found": components["image_frames_found"],
+        "image_frames_missing": components["image_frames_missing"],
         "refs_found": components["refs_found"],
         "gallery_included": include_gallery and has_gallery,
     }
@@ -237,6 +278,11 @@ def build_feedback_pack(
                 clip_path = event_dir / clip_rel
                 if clip_path.exists():
                     tar.add(clip_path, arcname=f"clips/{clip_rel}")
+
+            for frame_rel in components["image_frames_found"]:
+                frame_path = event_dir / frame_rel
+                if frame_path.exists():
+                    tar.add(frame_path, arcname=f"clips/{frame_rel}")
 
             for ref_rel in components["refs_found"]:
                 ref_path = event_dir / ref_rel
@@ -276,7 +322,8 @@ def build_on_demand_feedback_pack(
 
     Returns:
         {path, size_bytes, components} — 与 build_feedback_pack 同形状;
-        components 是完整性记录 {omni_trace_found, clips_found, clips_missing},
+        components 是完整性记录 {omni_trace_found, clips_found, clips_missing,
+        image_frames_found, image_frames_missing},
         端点(perception/router.py::submit_on_demand_feedback)需原样回给前端.
     """
     snapshot_root = get_snapshot_root()
@@ -286,6 +333,8 @@ def build_on_demand_feedback_pack(
         "omni_trace_found": False,
         "clips_found": [],
         "clips_missing": [],
+        "image_frames_found": [],
+        "image_frames_missing": [],
     }
 
     trace_path = event_dir / "omni_trace.json.gz"
@@ -295,17 +344,19 @@ def build_on_demand_feedback_pack(
     components["omni_trace_found"] = sanitized_trace is not None
 
     clip_dids: list[str] = row.get("clip_dids", [])
-    for did in clip_dids:
-        slug = region_slug(did)
-        clip_dir = event_dir / slug
-        found = False
-        for candidate in CLIP_CANDIDATES:
-            if (clip_dir / candidate).exists():
-                components["clips_found"].append(f"{slug}/{candidate}")
-                found = True
-                break
-        if not found:
-            components["clips_missing"].append(slug)
+    (
+        components["clips_found"],
+        components["clips_missing"],
+        components["image_frames_found"],
+        image_frames_missing,
+    ) = _collect_device_media(event_dir, clip_dids)
+    # 同 build_feedback_pack: 分不开"没走图片模式"与"走了但没落盘"。这里本可以用
+    # on_demand_log 采集时写下的 visual_artifact_kind, 但读路径 get_on_demand_log 已把它
+    # 覆盖成"盘上反推的当前可回放载体"(为兼容 cleanup 后的 metadata-only), 传到这里仍是
+    # 反推值, 同样等价。真要区分得让采集时那份值单独透出来(另加字段)。
+    components["image_frames_missing"] = (
+        image_frames_missing if components["image_frames_found"] else []
+    )
 
     try:
         miloco_version = _get_pkg_version("miloco")
@@ -328,6 +379,8 @@ def build_on_demand_feedback_pack(
         "omni_trace_found": components["omni_trace_found"],
         "clips_found": components["clips_found"],
         "clips_missing": components["clips_missing"],
+        "image_frames_found": components["image_frames_found"],
+        "image_frames_missing": components["image_frames_missing"],
         "clips_missing_basis": "clip_dids",
     }
 
@@ -362,6 +415,11 @@ def build_on_demand_feedback_pack(
                 clip_path = event_dir / clip_rel
                 if clip_path.exists():
                     tar.add(clip_path, arcname=f"clips/{clip_rel}")
+
+            for frame_rel in components["image_frames_found"]:
+                frame_path = event_dir / frame_rel
+                if frame_path.exists():
+                    tar.add(frame_path, arcname=f"clips/{frame_rel}")
 
         shutil.move(str(tar_tmp), final_path)
 

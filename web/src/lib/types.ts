@@ -181,6 +181,11 @@ export interface ActivityEvent {
   has_trace?: boolean;
   /** 是否有全景参考帧 ref.jpg(= 本事件走了 Smart Crop);前端据此决定是否请求 /ref/ 并渲染参考卡 */
   has_ref?: boolean;
+  /** 回放载体:视频、图片序列、纯音频或无产物。 */
+  visual_artifact_kind?: "video" | "images" | "audio" | "none";
+  /** 图片模式每个 device 的 canonical frame 数。 */
+  image_frame_counts?: Record<string, number>;
+  has_audio_artifact?: boolean;
   /** 该事件是否已有反馈打包 */
   has_feedback?: boolean;
   feedback_pack_path?: string | null;
@@ -198,6 +203,9 @@ export interface OnDemandLogEntry {
   snapshot_count: number;
   clip_dids: string[];
   clip_kinds: Record<string, "mp4" | "m4a">;
+  visual_artifact_kind?: "video" | "images" | "audio" | "none";
+  image_frame_counts?: Record<string, number>;
+  has_audio_artifact?: boolean;
   has_trace: boolean;
   has_feedback: boolean;
   feedback_pack_path: string | null;

@@ -504,13 +504,29 @@ class PipelineProcessor:
             # 同 batch 内空字节的 device 被过滤掉(payload[0] 真值判).
             if result.skipped:
                 artifacts.clips.clear()
+                artifacts.image_frames.clear()
+                artifacts.image_audio.clear()
             else:
                 artifacts.clips = {
                     did: payload
                     for did, payload in artifacts.clips.items()
                     if payload[0]
                 }
-            device_ids = list(artifacts.clips.keys())
+                artifacts.image_frames = {
+                    did: frames
+                    for did, frames in artifacts.image_frames.items()
+                    if frames
+                }
+                artifacts.image_audio = {
+                    did: audio
+                    for did, audio in artifacts.image_audio.items()
+                    if audio
+                }
+            device_ids = sorted(
+                set(artifacts.clips)
+                | set(artifacts.image_frames)
+                | set(artifacts.image_audio)
+            )
 
             await self._perception_engine_proxy.handle_realtime_perception_result(
                 result,
@@ -827,6 +843,16 @@ class PipelineProcessor:
                 did: (clip_bytes, kind)
                 for did, (clip_bytes, kind) in artifacts.clips.items()
                 if clip_bytes
+            }
+            artifacts.image_frames = {
+                did: frames
+                for did, frames in artifacts.image_frames.items()
+                if frames
+            }
+            artifacts.image_audio = {
+                did: audio
+                for did, audio in artifacts.image_audio.items()
+                if audio
             }
 
             return result, artifacts

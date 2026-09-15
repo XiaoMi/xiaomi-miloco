@@ -170,6 +170,38 @@ async def get_on_demand_clip(log_id: str, device_id: str) -> FileResponse:
     raise HTTPException(message="clip expired", status_code=410)
 
 
+@router.get(
+    "/on-demand-logs/{log_id}/images/{device_id}/{frame_index}",
+    summary="Get on-demand image-mode visual frame",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def get_on_demand_image(log_id: str, device_id: str, frame_index: int) -> FileResponse:
+    """Serve one image-mode frame for an on-demand query log entry."""
+    from miloco.perception.snapshot_writer import (
+        clip_download_name,
+        get_snapshot_root,
+        locate_image_frame_file,
+        region_slug,
+    )
+
+    row = manager.perception_service.get_on_demand_log(log_id)
+    if row is None or device_id not in row.get("clip_dids", []):
+        raise HTTPException(message="not found", status_code=404)
+    path = locate_image_frame_file(
+        get_snapshot_root() / log_id / region_slug(device_id), frame_index
+    )
+    if path is None:
+        raise HTTPException(message="image frame expired", status_code=410)
+    return FileResponse(
+        path=path,
+        media_type="image/jpeg",
+        filename=clip_download_name(
+            row["timestamp"], "jpg", prefix=f"frame-{frame_index:03d}"
+        ),
+        content_disposition_type="inline",
+    )
+
+
 class OnDemandFeedbackBody(BaseModel):
     error_types: list[str] = Field(default_factory=list)
     feedback_text: str = Field(default="")
@@ -234,5 +266,4 @@ async def list_devices():
         message="ok",
         data=[asdict(d) for d in devices],
     )
-
 

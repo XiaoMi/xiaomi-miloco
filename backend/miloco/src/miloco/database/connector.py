@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 # 当前 schema 版本。fresh-build 直接落到此值; 老库启动时按 _SCHEMA_MIGRATIONS
 # 步进跑到此值。历史基线 v1 (cron 挪出 task_link + rule 加 FK CASCADE 前)。
 # v4 = task 运行态重构的 expand-contract 阶段 A (只加列, 阶段 B 才删列)。
-_DB_SCHEMA_VERSION = 4
+# v5 = on-demand 日志持久化视觉 artifact 元数据。
+_DB_SCHEMA_VERSION = 5
 
 
 def incremental_vacuum(
@@ -265,7 +266,11 @@ class SQLiteConnector:
                         # 版本号缺失时只能按库的形状认。不能猜 —— 猜高了后面的
                         # 迁移整段跳过, 版本号说是最新而列根本没补, 之后哪个请求
                         # 先读到新列就在那儿炸。
-                        current_version = _detect_schema_version(conn)
+                        # tables_created 排除掉: 刚由兜底建出来的表按当前 schema
+                        # 建, 拿它当形状证据等于自证最新版。
+                        current_version = _detect_schema_version(
+                            conn, ignore_tables=frozenset(tables_created)
+                        )
                         conn.execute(
                             f"PRAGMA user_version = {current_version}"
                         )
@@ -430,6 +435,9 @@ class SQLiteConnector:
                 clip_dids       TEXT NOT NULL DEFAULT '[]',
                 clip_kinds      TEXT NOT NULL DEFAULT '{}',
                 has_trace       INTEGER NOT NULL DEFAULT 0,
+                visual_artifact_kind TEXT NOT NULL DEFAULT 'none',
+                image_frame_counts TEXT NOT NULL DEFAULT '{}',
+                has_audio_artifact INTEGER NOT NULL DEFAULT 0,
                 created_at      INTEGER NOT NULL
             )
         """)
@@ -1309,17 +1317,30 @@ def _table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
 # 每级取该级迁移真正新加的列。判定从高到低, 全中即认这一级。新增迁移必须在这里
 # 补一行, 否则形状兜底那条路会把新库判成上一级、把该级迁移再跑一遍。
 _SCHEMA_VERSION_MARKERS: tuple[tuple[int, tuple[tuple[str, str], ...]], ...] = (
+    (5, (
+        ("on_demand_log", "visual_artifact_kind"),
+        ("on_demand_log", "image_frame_counts"),
+        ("on_demand_log", "has_audio_artifact"),
+    )),
     (4, (("rule", "direction"), ("task", "on_target_actions"))),
     (3, (("token_usage", "base_url"),)),
 )
 
 
-def _detect_schema_version(conn: sqlite3.Connection) -> int:
+def _detect_schema_version(
+    conn: sqlite3.Connection, *, ignore_tables: frozenset[str] = frozenset()
+) -> int:
     """没有 PRAGMA user_version 时, 按表与列的形状认版本。
 
     老库从没显式写过它, 而 ``sqlite3 .dump`` 重建也不保留它 —— 一个 v2 库经 dump
     恢复后版本号是 0 且 task_link 早被 v1→v2 删了, 光看"有没有 task_link"会把它
     判成当前基线, 后面的迁移从此不跑。所以标志按各级迁移真正加的那些列取。
+
+    ``ignore_tables`` 是本次启动刚被"缺表兜底建"补出来的表: 它们一律按**当前**
+    schema 建, 天然就长着最高一级的 marker 列。拿这种自己刚造出来的表当证据, 老库
+    会被判成最新版 —— 迁移整段跳过而 user_version 写着最新, 正是本函数要防的
+    "版本号说补好了、列根本没补"。所以这些表上的 marker 不作数, 该级整个跳过。
+    宁可退回低一级把迁移重跑一遍(各迁移函数幂等), 也不能反过来漏掉。
 
     一级都认不出就退回 v2 让链整个跑一遍。
     """
@@ -1327,6 +1348,8 @@ def _detect_schema_version(conn: sqlite3.Connection) -> int:
     if _table_columns(cursor, "task_link"):
         return 1
     for version, markers in _SCHEMA_VERSION_MARKERS:
+        if any(table in ignore_tables for table, _ in markers):
+            continue
         if all(
             marker in _table_columns(cursor, table) for table, marker in markers
         ):
@@ -1863,11 +1886,34 @@ def _log_v4_report(
     print(report)
 
 
+_V5_ON_DEMAND_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("visual_artifact_kind", "TEXT NOT NULL DEFAULT 'none'"),
+    ("image_frame_counts", "TEXT NOT NULL DEFAULT '{}'"),
+    ("has_audio_artifact", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
+    """v4 → v5: persist on-demand visual artifact metadata."""
+    cursor = conn.cursor()
+    try:
+        added = _add_columns_if_missing(
+            cursor, "on_demand_log", _V5_ON_DEMAND_COLUMNS
+        )
+        cursor.execute("PRAGMA user_version = 5")
+        conn.commit()
+        logger.info("v4→v5 migration done: added=%s", added)
+    except Exception:
+        conn.rollback()
+        raise
+
+
 # schema 步进迁移登记表
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v1_to_v2,
     3: _migrate_v2_to_v3,
     4: _migrate_v3_to_v4,
+    5: _migrate_v4_to_v5,
 }
 
 

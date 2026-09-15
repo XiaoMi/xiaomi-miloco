@@ -355,6 +355,15 @@ export function eventRefUrl(event_id: string, device_id: string): string {
   return impl.realEventRefUrl(event_id, device_id);
 }
 
+/** 图片模式主画面 JPEG URL，frame_index 对应 canonical sequence 顺序。 */
+export function eventImageUrl(
+  event_id: string,
+  device_id: string,
+  frame_index: number,
+): string {
+  return impl.realEventImageUrl(event_id, device_id, frame_index);
+}
+
 /**
  * Smart Crop 裁切区域坐标(画框用).
  *
@@ -388,6 +397,14 @@ export async function listOnDemandLogs(
 
 export function onDemandClipUrl(logId: string, deviceId: string): string {
   return impl.realOnDemandClipUrl(logId, deviceId);
+}
+
+export function onDemandImageUrl(
+  logId: string,
+  deviceId: string,
+  frameIndex: number,
+): string {
+  return impl.realOnDemandImageUrl(logId, deviceId, frameIndex);
 }
 
 export async function submitOnDemandFeedback(
@@ -758,10 +775,12 @@ export async function getProcSeries(
 // ─── Perception Config ─────────────────────────────────────────────────
 
 export type MinSuggestionUrgency = "low" | "medium" | "high";
+export type OmniVisualInputMode = "video" | "image";
 
 export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
+  omni_visual_input_mode: OmniVisualInputMode;
   window_size: number;
   /** Smart Crop 用户开关(backend crop_enhance.user_enabled)。与 video_short_edge
    *  **正交**:裁不裁看这个,多清晰看分辨率档。老后端不返此字段 → undefined。 */

@@ -226,6 +226,7 @@ class SceneDescriptor:
     has_speech: bool = True
     has_pets: bool = False
     identity_match_disabled: bool = False
+    visual_input_mode: Literal["video", "image"] = "video"
 
     def selected_fields(self) -> list[FieldSpec]:
         order = _ORDER_STREAM if self.stream else _ORDER_NORMAL

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -367,12 +368,31 @@ def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
 
     content: list[dict] = [{"type": "text", "text": payload["user_content"]}]
 
-    media_info = payload.get("media_info")
-
-    if payload.get("video_base64"):
+    visual_mode = payload.get("visual_input_mode", "video")
+    image_frames = payload.get("image_frames") or []
+    if visual_mode == "image":
+        if not image_frames and not payload.get("audio_base64"):
+            raise ValueError("image visual input requires image_frames")
+        for frame in image_frames:
+            # 生产侧恒为 _encode_image_frames 产出的 EncodedImageFrame。bytes 过不了 JSON,
+            # 所以不存在"序列化回来变成 dict"这条路 —— 不留 dict 兜底, 免得测试拿裸 dict
+            # 把真实那条分支绕过去。
+            data = frame.data
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(data).decode()}"},
+            })
+    elif payload.get("video_base64"):
+        media_info = payload.get("video_media_info", payload.get("media_info"))
         content.append(adapter.build_video_block(payload["video_base64"], media_info))
-    elif payload.get("audio_base64"):
-        content.append(adapter.build_audio_block(payload["audio_base64"], media_info))
+
+    # 视频容器已经携带音频时，不再重复追加独立 input_audio；只有音频-only
+    # 或图片模式才需要把独立音频作为单独的多模态 block 传入。
+    if payload.get("audio_base64") and (
+        visual_mode == "image" or not payload.get("video_base64")
+    ):
+        audio_info = payload.get("audio_media_info", payload.get("media_info"))
+        content.append(adapter.build_audio_block(payload["audio_base64"], audio_info))
 
     # Crop images (from tracker)
     for crop in payload.get("crops", []):

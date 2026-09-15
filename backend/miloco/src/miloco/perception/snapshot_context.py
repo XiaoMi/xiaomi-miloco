@@ -87,6 +87,8 @@ class OmniEventArtifacts:
     """
 
     clips: dict[str, tuple[bytes, ClipKind]] = field(default_factory=dict)
+    image_frames: dict[str, list[bytes]] = field(default_factory=dict)
+    image_audio: dict[str, bytes] = field(default_factory=dict)
     trace: dict[str, Any] | None = None
     gallery: dict[str, dict[str, bytes]] = field(default_factory=dict)
     ref_frames: dict[str, bytes] = field(default_factory=dict)
@@ -133,6 +135,28 @@ def push_clip_bytes(clip_bytes: bytes, kind: ClipKind) -> None:
     if ctx is None:
         return
     artifacts.clips[ctx.device_id] = (clip_bytes, kind)
+
+
+def push_image_frames(frames: list[bytes]) -> None:
+    """把当前 device 实际发给 Omni 的 JPEG 主画面序列存入 artifacts。"""
+    artifacts = _artifacts.get()
+    if artifacts is None or not frames:
+        return
+    ctx = get_device_context()
+    if ctx is None:
+        return
+    artifacts.image_frames[ctx.device_id] = list(frames)
+
+
+def push_image_audio(audio_bytes: bytes) -> None:
+    """把图片模式随主画面发送的独立 M4A 存入 artifacts。"""
+    artifacts = _artifacts.get()
+    if artifacts is None or not audio_bytes:
+        return
+    ctx = get_device_context()
+    if ctx is None:
+        return
+    artifacts.image_audio[ctx.device_id] = audio_bytes
 
 
 def push_ref_frame(image_bytes: bytes) -> None:
@@ -244,6 +268,9 @@ def push_omni_trace(
             "latency_ms": latency_ms,
             "error": error,
         }
+        visual_input = _summarize_visual_input(request_messages)
+        if visual_input:
+            call_record["visual_input"] = visual_input
         if inference_params:
             call_record["inference_params"] = inference_params
         # Smart Crop:该 device 本次走了裁切 → 把 crop 坐标/尺寸挂进 call 记录,
@@ -281,9 +308,36 @@ def _strip_base64(messages: list[dict[str, Any]]) -> dict[str, Any]:
                 t = block.get("type")
                 if t == "text":
                     user_blocks.append({"type": "text", "text": block.get("text", "")})
-                elif t in ("video_url", "image_url"):
+                elif t in ("video_url", "image_url", "input_audio"):
                     user_blocks.append({"type": t})
     return {"system": system, "user_blocks": user_blocks}
+
+
+def _summarize_visual_input(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize media modality without retaining inline payload bytes."""
+    frame_count = 0
+    audio_attached = False
+    video_attached = False
+    for message in messages:
+        if message.get("role") != "user" or not isinstance(message.get("content"), list):
+            continue
+        for block in message["content"]:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "image_url":
+                frame_count += 1
+            elif block_type == "video_url":
+                video_attached = True
+            elif block_type == "input_audio":
+                audio_attached = True
+    if not frame_count and not video_attached and not audio_attached:
+        return {}
+    return {
+        "mode": "image" if frame_count else ("video" if video_attached else "audio"),
+        "frame_count": frame_count,
+        "audio_attached": audio_attached,
+    }
 
 
 def _pick_response_fields(raw: dict[str, Any] | None) -> dict[str, Any]:

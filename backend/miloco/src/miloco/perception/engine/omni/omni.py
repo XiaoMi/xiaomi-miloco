@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from miloco.database.token_usage_repo import fire_record
-from miloco.perception.engine.config import OmniConfig
+from miloco.perception.engine.config import OmniConfig, VisualInputMode
 from miloco.perception.engine.omni.circuit_breaker import (
     CircuitOpenError,
     get_omni_circuit_breaker,
@@ -90,10 +90,11 @@ def _rule_name_to_id(context: OmniContext) -> dict[str, str]:
 
 
 async def run_omni(
-    edge_packet: IdentityPacket, context: OmniContext, config: OmniConfig
+    edge_packet: IdentityPacket, context: OmniContext, config: OmniConfig,
+    visual_input_mode: VisualInputMode = "video",
 ) -> OmniOutput:
     """Run Omni layer: build prompt → call model → parse response."""
-    payload = build_prompt(edge_packet, context)
+    payload = build_prompt(edge_packet, context, visual_input_mode=visual_input_mode)
     raw_response = await call_omni(payload, config)
     output = parse_omni_response(raw_response, _rule_name_to_id(context))
     output.usage = extract_usage(raw_response)
@@ -101,10 +102,11 @@ async def run_omni(
 
 
 async def run_omni_batch(
-    edge_packets: list[IdentityPacket], context: OmniContext, config: OmniConfig
+    edge_packets: list[IdentityPacket], context: OmniContext, config: OmniConfig,
+    visual_input_mode: VisualInputMode = "video",
 ) -> OmniOutput:
     """Run Omni layer for multiple devices in the same room."""
-    payload = build_batch_prompt(edge_packets, context)
+    payload = build_batch_prompt(edge_packets, context, visual_input_mode=visual_input_mode)
     raw_response = await call_omni(payload, config)
     output = parse_omni_response(raw_response, _rule_name_to_id(context))
     output.usage = extract_usage(raw_response)
@@ -122,6 +124,7 @@ async def run_omni_fused(
     config: OmniConfig,
     identity_engine: "IdentityEngine",
     fused_prompt_config: FusedPromptConfig | None = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> OmniOutput:
     """fused 主调用：构 prompt（含 gallery）→ 调 omni → 解 OmniOutput + identity_assignments。
 
@@ -189,6 +192,7 @@ async def run_omni_fused(
             label_lookup=name_lookup,
             adapter=adapter,
             matching_moot=person_lib_empty,
+            visual_input_mode=visual_input_mode,
         )
         raw_response = await _call_omni_messages(payload["messages"], config, adapter=adapter)
     except OmniError as e:
@@ -474,9 +478,10 @@ async def run_omni_stream(
     on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]]
     | None = None,
     on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> OmniOutput:
     """Run Omni layer with streaming — extracts actionable fields early via callbacks."""
-    payload = build_stream_prompt(edge_packet, context)
+    payload = build_stream_prompt(edge_packet, context, visual_input_mode=visual_input_mode)
     return await _stream_and_parse(
         payload,
         config,
@@ -495,9 +500,10 @@ async def run_omni_batch_stream(
     on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]]
     | None = None,
     on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> OmniOutput:
     """Run Omni layer for multiple devices with streaming — extracts actionable fields early."""
-    payload = build_batch_stream_prompt(edge_packets, context)
+    payload = build_batch_stream_prompt(edge_packets, context, visual_input_mode=visual_input_mode)
     return await _stream_and_parse(
         payload,
         config,

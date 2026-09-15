@@ -214,6 +214,9 @@ class PerceptionService:
         clip_dids: list[str] = []
         clip_kinds: dict[str, str] = {}
         has_trace = False
+        visual_artifact_kind = "none"
+        image_frame_counts: dict[str, int] = {}
+        has_audio_artifact = False
 
         if not result.answer:
             omni_responded = any(
@@ -222,8 +225,10 @@ class PerceptionService:
             )
             if not omni_responded:
                 artifacts.clips = {}
+                artifacts.image_frames = {}
+                artifacts.image_audio = {}
 
-        if artifacts.clips or artifacts.trace:
+        if artifacts.clips or artifacts.image_frames or artifacts.image_audio or artifacts.trace:
             from miloco.config.settings import get_settings
             from miloco.perception.snapshot_writer import (
                 check_disk_space,
@@ -240,6 +245,11 @@ class PerceptionService:
                     if did in artifacts.clips
                 }
                 has_trace = (snapshot_root / log_id / "omni_trace.json.gz").exists()
+                from miloco.perception.events_service import probe_visual_artifacts
+
+                visual_artifact_kind, has_audio_artifact, image_frame_counts = (
+                    probe_visual_artifacts(snapshot_root, log_id, clip_dids)
+                )
 
         # Persist on-demand query log (with artifact metadata).
         # 行写失败必须回滚已落盘的产物:读端点都先过库(router.py:155/194),
@@ -256,6 +266,9 @@ class PerceptionService:
                 clip_dids=clip_dids,
                 clip_kinds=clip_kinds,
                 has_trace=has_trace,
+                visual_artifact_kind=visual_artifact_kind,
+                image_frame_counts=image_frame_counts,
+                has_audio_artifact=has_audio_artifact,
             )
         )
         if not inserted:
@@ -263,7 +276,7 @@ class PerceptionService:
                 "on_demand_log insert failed for %s; discarding orphaned artifacts",
                 log_id,
             )
-            if clip_dids or has_trace:
+            if (get_snapshot_root() / log_id).exists():
                 shutil.rmtree(get_snapshot_root() / log_id, ignore_errors=True)
 
         # Map inference results back to API response items
@@ -355,6 +368,14 @@ class PerceptionService:
             row["has_trace"] = (
                 snapshot_root / row["id"] / "omni_trace.json.gz"
             ).exists()
+            from miloco.perception.events_service import probe_visual_artifacts
+
+            kind, has_audio, counts = probe_visual_artifacts(
+                snapshot_root, row["id"], row.get("clip_dids", [])
+            )
+            row["visual_artifact_kind"] = kind
+            row["image_frame_counts"] = counts
+            row["has_audio_artifact"] = has_audio
             fb = fb_index.get(row["id"])
             row["has_feedback"] = fb is not None
             row["feedback_pack_path"] = fb[0] if fb else None
@@ -371,6 +392,14 @@ class PerceptionService:
             row["has_trace"] = (
                 get_snapshot_root() / row["id"] / "omni_trace.json.gz"
             ).exists()
+            from miloco.perception.events_service import probe_visual_artifacts
+
+            kind, has_audio, counts = probe_visual_artifacts(
+                get_snapshot_root(), row["id"], row.get("clip_dids", [])
+            )
+            row["visual_artifact_kind"] = kind
+            row["image_frame_counts"] = counts
+            row["has_audio_artifact"] = has_audio
         return row
 
     def cleanup_on_demand_logs(self, keep_days: int) -> int:

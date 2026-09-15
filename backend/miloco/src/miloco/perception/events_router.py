@@ -10,6 +10,7 @@ Endpoints:
 - `GET /api/events`                              — list_events
 - `GET /api/events/{event_id}/clip/{device_id}`  — locate_clip + FileResponse(Range/206)
 - `GET /api/events/{event_id}/ref/{device_id}`   — locate_ref + FileResponse(全景参考帧)
+- `GET /api/events/{event_id}/images/{device_id}/{frame_index}` — 图片模式主画面 JPEG
 - `GET /api/events/{event_id}/crop/{device_id}`  — read_crop_meta(crop 区域坐标,画框用)
 - `GET /api/events/stream`                       — SSE
 """
@@ -154,6 +155,38 @@ async def get_event_ref(
         )
     if status == "gone":
         raise HTTPException(message="ref frame not available", status_code=410)
+    raise HTTPException(message="not found", status_code=404)
+
+
+@router.get(
+    "/{event_id}/images/{device_id}/{frame_index}",
+    summary="Get one image-mode visual frame",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def get_event_image(
+    event_id: str,
+    device_id: str,
+    frame_index: int,
+    svc: EventsService = Depends(get_events_service),
+) -> FileResponse:
+    """返回图片模式 canonical sequence 的一张 JPEG。"""
+    status, path, timestamp_ms = await svc.locate_image_frame(
+        event_id, device_id, frame_index
+    )
+    if status == "found":
+        assert path is not None and timestamp_ms is not None
+        from miloco.perception.snapshot_writer import clip_download_name
+
+        return FileResponse(
+            path=path,
+            media_type="image/jpeg",
+            filename=clip_download_name(
+                timestamp_ms, "jpg", prefix=f"frame-{frame_index:03d}"
+            ),
+            content_disposition_type="inline",
+        )
+    if status == "gone":
+        raise HTTPException(message="image frame not available", status_code=410)
     raise HTTPException(message="not found", status_code=404)
 
 

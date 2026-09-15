@@ -28,6 +28,7 @@ import json
 import logging
 import re
 import shutil
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -60,9 +61,14 @@ def region_slug(s: str) -> str:
 
 
 # 视频路径产物 clip.mp4 (H264+AAC);audio-only 路径产物 clip.m4a (仅 AAC,ipod muxer).
+# 图片模式的独立音频落为 audio.m4a,也由 clip 端点提供兼容播放。
 # 探测顺序:先 mp4 后 m4a,先找到的优先返回。
 # 落盘/事件 clip 端点/主动查询 clip 端点/反馈打包四处同源;加新容器改这里 + ClipKind。
-CLIP_CANDIDATES: tuple[str, ...] = ("clip.mp4", "clip.m4a")
+IMAGE_FRAME_DIRNAME = "frames"
+IMAGE_AUDIO_FILENAME = "audio.m4a"
+# 图片模式的音频文件名同时是 clip 候选之一 —— 只留一个来源, 免得改名时读写两侧
+# 各走一个字符串、静默分叉(读写必须同名)。
+CLIP_CANDIDATES: tuple[str, ...] = ("clip.mp4", "clip.m4a", IMAGE_AUDIO_FILENAME)
 MEDIA_TYPE_BY_SUFFIX: dict[str, str] = {".mp4": "video/mp4", ".m4a": "audio/mp4"}
 
 
@@ -72,6 +78,24 @@ def locate_clip_file(device_dir: Path) -> tuple[Path, str] | None:
         if path.exists():
             return path, MEDIA_TYPE_BY_SUFFIX[path.suffix]
     return None
+
+
+def image_frame_files(device_dir: Path) -> list[Path]:
+    """返回图片模式主画面，按 canonical sequence index 排序。"""
+    frames_dir = device_dir / IMAGE_FRAME_DIRNAME
+    if not frames_dir.is_dir():
+        return []
+    files = [p for p in frames_dir.glob("*.jpg") if p.is_file()]
+    return sorted(files, key=lambda p: (int(p.stem) if p.stem.isdigit() else 10**9, p.name))
+
+
+def locate_image_frame_file(device_dir: Path, frame_index: int) -> Path | None:
+    if frame_index < 0:
+        return None
+    path = device_dir / IMAGE_FRAME_DIRNAME / f"{frame_index:03d}.jpg"
+    if not path.is_file():
+        return None
+    return path
 
 
 def clip_download_name(timestamp_ms: int, suffix: str, prefix: str = "clip") -> str:
@@ -141,6 +165,8 @@ def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> list[s
     """
     if (
         not artifacts.clips
+        and not artifacts.image_frames
+        and not artifacts.image_audio
         and artifacts.trace is None
         and not artifacts.gallery
         and not artifacts.ref_frames
@@ -156,13 +182,54 @@ def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> list[s
         return []
 
     clip_dids = _save_clips(event_dir, artifacts.clips)
+    image_dids = _save_image_frames(event_dir, artifacts.image_frames)
+    image_audio_dids = _save_image_audio(event_dir, artifacts.image_audio)
     if artifacts.ref_frames:
         _save_ref_frames(event_dir, artifacts.ref_frames)
     if artifacts.trace is not None:
         _save_trace(event_dir, artifacts.trace)
     if artifacts.gallery:
         _save_gallery(event_dir, artifacts.gallery)
-    return clip_dids
+    return sorted(set(clip_dids) | set(image_dids) | set(image_audio_dids))
+
+
+def _save_image_frames(
+    event_dir: Path,
+    image_frames: dict[str, list[bytes]],
+) -> list[str]:
+    saved: list[str] = []
+    for device_id, frames in image_frames.items():
+        if not frames or any(not frame for frame in frames):
+            continue
+        device_dir = event_dir / region_slug(device_id)
+        temp_dir: Path | None = None
+        try:
+            device_dir.mkdir(parents=True, exist_ok=True)
+            temp_dir = Path(tempfile.mkdtemp(prefix=".frames-", dir=device_dir))
+            for index, frame in enumerate(frames):
+                (temp_dir / f"{index:03d}.jpg").write_bytes(frame)
+            temp_dir.replace(device_dir / IMAGE_FRAME_DIRNAME)
+            saved.append(device_id)
+        except OSError as e:
+            logger.error("Failed to write image frames for %s: %s", device_id, e)
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+    return saved
+
+
+def _save_image_audio(event_dir: Path, image_audio: dict[str, bytes]) -> list[str]:
+    saved: list[str] = []
+    for device_id, audio_bytes in image_audio.items():
+        if not audio_bytes:
+            continue
+        device_dir = event_dir / region_slug(device_id)
+        try:
+            device_dir.mkdir(parents=True, exist_ok=True)
+            (device_dir / IMAGE_AUDIO_FILENAME).write_bytes(audio_bytes)
+            saved.append(device_id)
+        except OSError as e:
+            logger.error("Failed to write image audio for %s: %s", device_id, e)
+    return saved
 
 
 def _save_clips(

@@ -467,7 +467,7 @@ async def test_batch_omni_error_partial():
     tracking = MockTrackingService(create_default_mock_response())
 
     # study-room 的 omni 失败、kitchen 成功（非 fused 路径走 run_omni_batch，edge_packet 带 room_name）
-    async def selective_omni_batch(edge_packets, context, cfg):
+    async def selective_omni_batch(edge_packets, context, cfg, **kwargs):
         if edge_packets[0].room_name == "study-room":
             raise OmniError("cam-1 omni boom")
         return RealtimePerceptionResult(
@@ -570,6 +570,50 @@ async def test_query_rooms_run_concurrently():
     assert max_concurrent == 2, f"on_demand 未并发, max={max_concurrent}"
     assert results["study-room"].answer == "有人在"
     assert results["kitchen"].answer == "有人在"
+
+
+@pytest.mark.asyncio
+async def test_query_resolves_visual_input_mode_once_for_all_rooms():
+    """同一次多 room query 使用同一个 visual_input_mode 快照。"""
+    from miloco.perception.engine.pipeline import run_query_pipeline
+
+    frames = [_solid(100, 100, 100)] * 6
+    audio = np.zeros(16000, dtype=np.int16)
+    snap1 = _make_snapshot("study-room", "cam-study", frames, audio)
+    snap2 = _make_snapshot("kitchen", "cam-kitchen", frames, audio)
+    batch = BatchedSnapshot(snapshots=[snap1, snap2])
+
+    config = PerceptionConfig()
+    config.omni.api_key = "test-key"
+    tracking = MockTrackingService(create_default_mock_response())
+    captured_modes: list[str] = []
+
+    def capture_prompt(*, visual_input_mode, **kwargs):
+        captured_modes.append(visual_input_mode)
+        return {"messages": []}
+
+    with patch(
+        "miloco.perception.engine.pipeline._resolve_visual_input_mode",
+        side_effect=["image", "video"],
+    ) as resolve_mode, patch(
+        "miloco.perception.engine.omni.prompt_builder.build_query_prompt",
+        side_effect=capture_prompt,
+    ), patch(
+        "miloco.perception.engine.omni.omni_client.call_omni",
+        new_callable=AsyncMock,
+        return_value={"mock": "resp"},
+    ), patch(
+        "miloco.perception.engine.omni.response_parser.parse_query_response",
+        return_value="有人在",
+    ):
+        results = await run_query_pipeline(
+            batch, "现在有人吗", config,
+            get_tracking_service=lambda did, room_name: tracking,
+        )
+
+    assert resolve_mode.call_count == 1
+    assert captured_modes == ["image", "image"]
+    assert set(results) == {"study-room", "kitchen"}
 
 
 # =============================================================================

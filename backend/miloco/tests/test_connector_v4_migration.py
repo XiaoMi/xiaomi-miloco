@@ -22,7 +22,12 @@ import json
 import sqlite3
 
 import pytest
+from miloco.database.connector import _DB_SCHEMA_VERSION
 
+# 下面几处断言的是"迁移跑到位的最终版本号"。对着常量断言而不是写死数字:这几个测试
+# 真正钉的是列存活 / 脏数据不中断 / 幂等,版本号只是脚手架,每升一级都要回来改一遍
+# 数字属于白噪声(本次 v4→v5 就漏改了四条)。要钉"某一级新增了什么列"请用
+# _SCHEMA_VERSION_MARKERS 的形状测试,不要退回写死数字。
 _V2_RULE_COLUMNS = [
     "id",
     "name",
@@ -200,7 +205,7 @@ def test_all_v2_columns_survive(v2_db):
     cols = {r[1] for r in conn.execute("PRAGMA table_info(rule)")}
     assert set(_V2_RULE_COLUMNS) <= cols
     assert {"direction", "condition_dnf"} <= cols
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
     conn.close()
 
 
@@ -297,7 +302,7 @@ def test_broken_condition_json_does_not_abort_migration(v2_db):
     _migrate(v2_db)
 
     conn = _raw(v2_db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
     dnf = json.loads(
         conn.execute("SELECT condition_dnf FROM rule WHERE id='r1'").fetchone()[0]
     )
@@ -830,7 +835,7 @@ def test_a_v2_db_whose_version_number_was_lost_still_migrates(v2_db):
     _migrate(v2_db)
 
     conn = _raw(v2_db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
     rule_columns = {r["name"] for r in conn.execute("PRAGMA table_info(rule)")}
     task_columns = {r["name"] for r in conn.execute("PRAGMA table_info(task)")}
     assert "direction" in rule_columns
@@ -846,7 +851,7 @@ def test_a_v2_db_whose_version_number_was_lost_still_migrates(v2_db):
 
 
 def test_a_v4_db_whose_version_number_was_lost_is_not_migrated_again(v2_db):
-    """已经是 v4 形态的库, 版本号丢了要认成 v4, 不能退回 v2 重跑一遍。
+    """已经是当前形态的库, 版本号丢了要认成当前级, 不能退回 v2 重跑一遍。
 
     退回重跑会把 direction 按 mode 重算 —— 存量里 exit 型的 mode 是 event, 重算
     等于把它打回 enter, 出路径静默消失。
@@ -870,7 +875,7 @@ def test_a_v4_db_whose_version_number_was_lost_is_not_migrated_again(v2_db):
     _migrate(v2_db)
 
     conn = _raw(v2_db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == _DB_SCHEMA_VERSION
     assert conn.execute(
         "SELECT direction FROM rule WHERE id='r_exit'"
     ).fetchone()[0] == "exit"
@@ -936,4 +941,37 @@ def test_a_v4_shaped_db_is_detected_as_v4(tmp_path):
         },
     )
     assert _detect_schema_version(conn) == 4
+    conn.close()
+
+
+def test_freshly_backfilled_table_is_not_version_evidence(tmp_path):
+    """兜底建刚造出来的表不能当版本证据。
+
+    兜底建一律按**当前** schema 建表, 于是它新建的表天然长着最高一级的 marker 列。
+    老库 + 缺表兜底建因此会被"自证"成最新版: 迁移整段跳过、user_version 却写成最新,
+    中间几级的列一个没补 —— 之后哪个请求先读到没补的列就在那儿炸。所以落在忽略集里
+    的表命中某级 marker 时该级整个跳过, 宁可退回低一级把迁移重跑一遍(各迁移函数幂等)。
+    """
+    from miloco.database.connector import _detect_schema_version
+
+    # v2 形态 + 刚被兜底建出来的 on_demand_log(当前 schema, 带 v5 三列)
+    conn = _shape_only_db(
+        tmp_path,
+        {
+            "rule": ["id", "mode"],
+            "task": ["task_id", "status"],
+            "token_usage": ["model"],
+            "on_demand_log": [
+                "id",
+                "visual_artifact_kind",
+                "image_frame_counts",
+                "has_audio_artifact",
+            ],
+        },
+    )
+    # 不排除时确实会被自证成最新版 —— 这就是要防的错判
+    assert _detect_schema_version(conn) == 5
+    assert (
+        _detect_schema_version(conn, ignore_tables=frozenset({"on_demand_log"})) == 2
+    )
     conn.close()

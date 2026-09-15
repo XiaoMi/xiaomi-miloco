@@ -66,6 +66,22 @@ from miloco.utils.time_utils import deploy_timezone
 logger = logging.getLogger(__name__)
 
 
+def _resolve_visual_input_mode(default: str) -> str:
+    """Resolve the mode once for a perception cycle; old configs default to video."""
+    try:
+        from miloco.config import get_settings
+
+        value = get_settings().perception.engine.get("input", {}).get(
+            "omni_visual_input_mode", default
+        )
+    except Exception:  # noqa: BLE001
+        value = default
+    if value not in ("video", "image"):
+        logger.warning("invalid omni_visual_input_mode=%r, fallback to video", value)
+        return "video"
+    return value
+
+
 def downsample_snapshot(snapshot: DeviceSnapshot, target_fps: float) -> DeviceSnapshot:
     """Create a new snapshot with frames downsampled to target_fps.
 
@@ -331,16 +347,19 @@ async def run_pipeline(
     omni_packet = _downsample_for_omni(identity_packet, config.input.fps, config.input.omni_fps)
     # omni 配置热更新:每周期从当前 settings 刷新 model/base_url/api_key,web 改完下个周期生效。
     omni_cfg = resolve_live_omni_config(config.omni)
+    visual_input_mode = _resolve_visual_input_mode(config.input.omni_visual_input_mode)
     if use_fused:
         # fused 模式：identity_assignments 合并进主调用
         omni_output = await run_omni_fused(
             [omni_packet], context, omni_cfg, identity_engine,
+            visual_input_mode=visual_input_mode,
         )
     elif omni_cfg.stream:
         omni_output = await run_omni_stream(
             omni_packet,
             context,
             omni_cfg,
+            visual_input_mode=visual_input_mode,
             on_early_speeches=_wrap_speeches_cb(
                 on_early_speeches, room_name, source_device_ids, device_name, time_window
             ),
@@ -356,7 +375,9 @@ async def run_pipeline(
             ),
         )
     else:
-        omni_output = await run_omni(omni_packet, context, omni_cfg)
+        omni_output = await run_omni(
+            omni_packet, context, omni_cfg, visual_input_mode=visual_input_mode
+        )
     timing["omni_ms"] = _ms_since(t)
 
     _inject_source_meta(omni_output, room_name, source_device_ids, device_name, time_window)
@@ -429,6 +450,7 @@ async def run_batch_pipeline(
     """
     batch_timing: dict[str, float] = {}
     t_total = time.monotonic()
+    visual_input_mode = _resolve_visual_input_mode(config.input.omni_visual_input_mode)
 
     # 多相机运行态:展示本窗参与感知的相机数与 <did>-<设备名>,便于盯并发是否按预期
     # 把全部相机一起跑(如 "n_cam=2 | 1178866901-小米智能摄像机C700 | xxxx-yyyy")。
@@ -603,12 +625,14 @@ async def run_batch_pipeline(
             if use_fused:
                 omni_output = await run_omni_fused(
                     [omni_packet], context, omni_cfg, identity_engine,
+                    visual_input_mode=visual_input_mode,
                 )
             elif omni_cfg.stream:
                 omni_output = await run_omni_batch_stream(
                     [omni_packet],
                     context,
                     omni_cfg,
+                    visual_input_mode=visual_input_mode,
                     on_early_speeches=_wrap_speeches_cb(
                         on_early_speeches, room_name, [did], device_name, time_window
                     ),
@@ -626,6 +650,7 @@ async def run_batch_pipeline(
             else:
                 omni_output = await run_omni_batch(
                     [omni_packet], context, omni_cfg,
+                    visual_input_mode=visual_input_mode,
                 )
             room_timing[f"omni_{did}_ms"] = _ms_since(t)
         except OmniError as omni_err:
@@ -802,6 +827,7 @@ async def run_query_pipeline(
     from miloco.perception.engine.types import QueryOutput
 
     captions = last_captions or {}
+    visual_input_mode = _resolve_visual_input_mode(config.input.omni_visual_input_mode)
 
     async def _run_room_query(
         room_name: str, snapshots: list[DeviceSnapshot]
@@ -882,6 +908,7 @@ async def run_query_pipeline(
                 identity_packets=room_identity_packets,
                 query=query,
                 last_caption=captions.get(room_name),
+                visual_input_mode=visual_input_mode,
             )
             raw_response = await call_omni(
                 payload, resolve_live_omni_config(config.omni), type="on_demand"

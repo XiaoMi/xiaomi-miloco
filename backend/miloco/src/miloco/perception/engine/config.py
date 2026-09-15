@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
+
+VisualInputMode = Literal["video", "image"]
 
 
 @dataclass
@@ -28,6 +31,14 @@ class InputConfig:
     # 实测:小目标清晰度主要由输入像素分辨率(video_short_edge)决定,本档位只控每帧 token 预算,
     # 故默认 low;identity 等细节敏感场景可经 CLI 切 high。运行时由 GeminiAdapter 实时读 settings。
     media_resolution: str = ""
+    omni_visual_input_mode: VisualInputMode = "video"
+
+    def __post_init__(self) -> None:
+        if self.omni_visual_input_mode not in ("video", "image"):
+            raise ValueError(
+                "omni_visual_input_mode must be 'video' or 'image', got "
+                f"{self.omni_visual_input_mode!r}"
+            )
 
 
 @dataclass
