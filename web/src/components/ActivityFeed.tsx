@@ -1259,30 +1259,32 @@ function ImageSequenceCard({
   }, [deviceId, frameCount]);
 
   if (!safeFrameCount) return null;
-  if (failed) {
-    return (
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="flex-shrink-0 w-48 h-48 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary"
-        aria-label={t("activity.imageExpiredAria", "图片已过期")}
-      >
-        {t("activity.imageExpired", "图片已过期")}
-      </div>
-    );
-  }
 
+  // 失败态不整卡早退: 序列卡有 N 帧, 一帧加载失败(瞬时网络抖动/后端偶发 500)不该把整卡
+  // 钉死成"已过期" —— 其余帧在盘上完好; 而且翻页正是从坏帧翻走的唯一入口, 早退会让两个
+  // handler 里的 setFailed(false) 变成死代码(它们本意就是"翻页即重试"). 占位块只顶掉
+  // <img> 的位置, 计数角标与翻页按钮照常渲染; 放大按钮在失败态不渲染, 免得灯箱打开坏 src.
   return (
     <div
       onClick={(e) => e.stopPropagation()}
       className="flex-shrink-0 relative group"
     >
-      <img
-        src={src}
-        alt={`${deviceId} ${t("activity.imageFrame", "图片帧")} ${frameIndex + 1}`}
-        onError={() => setFailed(true)}
-        onClick={(e) => e.stopPropagation()}
-        className="w-48 h-48 rounded bg-black border border-border object-contain"
-      />
+      {failed ? (
+        <div
+          className="w-48 h-48 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary"
+          aria-label={t("activity.imageExpiredAria", "图片已过期")}
+        >
+          {t("activity.imageExpired", "图片已过期")}
+        </div>
+      ) : (
+        <img
+          src={src}
+          alt={`${deviceId} ${t("activity.imageFrame", "图片帧")} ${frameIndex + 1}`}
+          onError={() => setFailed(true)}
+          onClick={(e) => e.stopPropagation()}
+          className="w-48 h-48 rounded bg-black border border-border object-contain"
+        />
+      )}
       <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-white text-caption-mono pointer-events-none">
         {frameIndex + 1} / {safeFrameCount}
       </span>
@@ -1312,17 +1314,19 @@ function ImageSequenceCard({
       >
         ›
       </button>
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onOpenLightbox(src, "image");
-        }}
-        aria-label={t("activity.zoomImage", "放大图片")}
-        className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-      >
-        ⛶
-      </button>
+      {!failed && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenLightbox(src, "image");
+          }}
+          aria-label={t("activity.zoomImage", "放大图片")}
+          className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+        >
+          ⛶
+        </button>
+      )}
     </div>
   );
 }
