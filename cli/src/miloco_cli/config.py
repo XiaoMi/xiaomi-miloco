@@ -106,6 +106,14 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "",
         "仅 Gemini：每帧视觉 token 预算档位（\"\"/\"low\"=省，\"high\"=小目标更清但 4× token），下一周期生效",
     ),
+    "perception.engine.input.input_mode": (
+        str,
+        "video",
+        "送 omni 的模态：video=编成 mp4（默认），image=编成一组 JPEG 帧（为兼容只吃"
+        "图像输入的 VLM）。两种模式的帧源与帧数完全一致，只换容器；image 恒不带音频，"
+        "故语音指令类事件不会再产生、只有声音没画面的窗口整个跳过。"
+        "下一周期生效（在 UI 拨这个开关走 admin API，同样热更、免重启）",
+    ),
     # 本表这两个是 Smart Crop 的**全局**闸，相与后仍只是必要条件——还要该机位自己的
     # per-camera 闸也开（`miloco-cli scope camera crop-on/crop-off` 逐路配，默认开），
     # 三闸相与才裁切。默认值同下方注释的对齐约定（yaml 里都是 true）。
@@ -336,6 +344,14 @@ def _coerce(path: str, raw: str) -> Any:
                 f"{path} 仅支持 low / high（留空=默认 low），收到 {raw!r}。"
                 f"注：Gemini media_resolution 有效档位只有 low/high，medium 等同 low。"
             )
+        return norm
+    # input_mode 与 backend _get_input_mode 的合法值域对齐(video/image)。backend 那条路
+    # 对脏值是 fail-open 回 video + 打 warning(不抛,见 prompt_builder._get_input_mode),
+    # 所以这里不拦的后果是"写了拼错的 image 却静默按 video 跑"——写盘前报错比事后翻日志好。
+    if path == "perception.engine.input.input_mode":
+        norm = raw.strip().lower()
+        if norm not in ("video", "image"):
+            raise ValueError(f"{path} 仅支持 video / image，收到 {raw!r}")
         return norm
     # min_suggestion_urgency 与 backend PerceptionSettings 的 Literal 对齐——CLI 先兜住,
     # 让脏值在写盘前就报错,不必等 backend 启动 ValidationError。

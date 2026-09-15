@@ -140,6 +140,31 @@ def test_min_suggestion_urgency_rejects_bogus():
         set_value("perception.min_suggestion_urgency", "urgent")
 
 
+def test_input_mode_accepts_valid_values(isolated_config):
+    """video / image 两档均可写入(大小写不敏感由 _coerce 归一)。
+
+    与 backend _get_input_mode 的合法值域对齐 —— 那条路对脏值是 fail-open 回 video,
+    不在这里拦住的话,"写了拼错的 image 却静默按 video 跑"只能靠翻后端日志才发现。
+    """
+    for v in ("image", "VIDEO", "Image"):
+        set_value("perception.engine.input.input_mode", v)
+        data = json.loads(isolated_config.read_text())
+        assert data["perception"]["engine"]["input"]["input_mode"] == v.lower()
+
+
+def test_input_mode_rejects_bogus():
+    """拼错 / 近似词(images、mp4、frames)一律写盘前报错,不落成脏值。"""
+    for bad in ("images", "mp4", "frames", "IMAGE_MODE"):
+        with pytest.raises(ValueError, match="input_mode"):
+            set_value("perception.engine.input.input_mode", bad)
+
+
+def test_input_mode_default_is_video():
+    """默认 video = 本 PR 之前的行为(零回归);与 backend 的 INPUT_MODE_VIDEO 对齐。"""
+    cfg = load_config()
+    assert cfg["perception"]["engine"]["input"]["input_mode"] == "video"
+
+
 def test_min_suggestion_urgency_default_is_low():
     """默认值 low = 不过滤,与 backend PerceptionSettings.Literal default 对齐。"""
     cfg = load_config()
