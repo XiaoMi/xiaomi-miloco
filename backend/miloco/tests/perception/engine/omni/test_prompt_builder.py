@@ -864,6 +864,98 @@ class TestImagePromptAdaptation:
             "音频：silence（能量: 0.000）\n\n\n用户问题：现在怎么样"
         )
 
+    def _non_fused_context(self) -> OmniContext:
+        """非 fused 内联路径的上下文: 用户规则原文 + 上一窗半句话。"""
+        return OmniContext(
+            room_name="study-room",
+            pending_speech=[{"speaker": "小明", "content": "帮我放个视频"}],
+            rule_conditions=[
+                RuleCondition(rule_id="r1", rule_name="[r1] 看视频超时", query="看视频超过一小时提醒我"),
+            ],
+        )
+
+    @staticmethod
+    def _packet_with_bbox() -> IdentityPacket:
+        """名册带 bbox 的 packet —— 只有名册含位置时才会附坐标系说明供改写。"""
+        ep = _mock_edge_packet()
+        ep.targets = [
+            IdentityTarget(
+                type=ObjectType.HUMAN_WITH_FACE,
+                person_id="pid-uuid",
+                track_id=1,
+                needs_omni_verify=False,
+                box_info=[],
+                bbox_xyxy_norm=(120, 200, 480, 900),
+            ),
+        ]
+        return ep
+
+    def test_non_fused_image_mode_keeps_user_text_verbatim(self):
+        """非 fused 内联路径: 改写只落模板段, 用户规则原文与 last_speech 引文原样。
+
+        fused 靠"用户话语放独立只读消息"隔离改写; 非 fused 把规则/pending_speech 内联
+        进同一条 user 文本, 整串改写会把用户说的"帮我放个视频"改成"帮我放个按时间排列
+        的画面图片"——转写被静默篡改, 并顺着 speeches 流进 agent 与设备控制派发, 且无
+        日志痕迹。模板段(名册 bbox 说明、末尾锚点)仍必须改写, 否则图片模式下这两处还
+        在说"视频**最后一帧**"。
+        """
+        payload = build_prompt(
+            self._packet_with_bbox(), self._non_fused_context(), visual_input_mode="image",
+        )
+        content = payload["user_content"]
+        assert "看视频超过一小时提醒我" in content, "用户规则原文不得被改写"
+        assert "帮我放个视频" in content, "last_speech 引文不得被改写"
+        assert "**最后一张主画面图片**" in content, "名册 bbox 说明属模板, 必须改写"
+        assert "视频**最后一帧**" not in content
+        assert "只描述/判断本轮按时间排列的画面图片与音频" in content, "末尾锚点必须改写"
+
+    def test_non_fused_video_mode_leaves_templates_untouched(self):
+        """video 模式逐字节不变: 模板段仍是原措辞, 恒等改写不引入任何差异。"""
+        payload = build_prompt(self._packet_with_bbox(), self._non_fused_context())
+        content = payload["user_content"]
+        assert "视频**最后一帧**" in content
+        assert "只描述/判断本轮视频与音频的直接观察" in content
+        assert "按时间排列的画面图片" not in content
+        assert "看视频超过一小时提醒我" in content
+
+    def test_system_prompt_user_written_sections_are_never_adapted(self):
+        """机位说明与家庭档案是用户手写原文, 图片模式下也不得被机械替换。"""
+        ep = _mock_edge_packet()
+        camera_prompt = "忽略视频左上角的时间戳水印"
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="# 家庭档案\n客厅的电视平时放动画片, 别让孩子连看视频太久",
+        ):
+            payload = build_prompt(
+                ep, OmniContext(camera_prompt=camera_prompt), visual_input_mode="image",
+            )
+        system = payload["system_prompt"]
+        assert camera_prompt in system, "机位说明正文是用户手写, 不得改写"
+        assert "别让孩子连看视频太久" in system, "家庭档案是用户手写, 不得改写"
+        assert "本摄像头须知" in system
+        # 模板段仍要改写(图片模式下 system 里不能再出现"视频"口径的角色/原则)
+        assert "综合一个或多个设备的画面图片和音频" in system
+        assert "综合一个或多个设备的视频和音频" not in system
+
+    def test_query_system_prompt_home_profile_is_never_adapted(self):
+        """query 的 system prompt 也内联家庭档案 —— 同款漏网, 用户手写段同样不得改写。
+
+        与 ``build_system_prompt`` 的区别只是模板段少（_ROLE / _OUTPUT_MODE_FREE /
+        _COMMONSENSE 三段）, 同样是"模板改写、用户手写原样"。
+        """
+        from miloco.perception.engine.omni.prompt_builder import build_query_prompt
+
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="# 家庭档案\n客厅的电视平时放动画片, 别让孩子连看视频太久",
+        ):
+            payload = build_query_prompt(
+                [_mock_edge_packet()], "现在怎么样", visual_input_mode="image",
+            )
+        system = payload["system_prompt"]
+        assert "别让孩子连看视频太久" in system, "家庭档案不得被改写"
+        assert "综合一个或多个设备的画面图片和音频" in system, "模板段仍要改写"
+
     def test_no_replacement_key_is_dead(self):
         """替换表的每个键都得在 prompt 正文里命中。
 

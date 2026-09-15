@@ -635,7 +635,15 @@ function Lightbox({
       role="dialog"
       // 必须跟着 kind 走:label 写在 kind 分叉之前,读屏会把参考帧对话框念成"事件回放"
       // ——与屏上内容不符,而读屏用户没有画面可以纠正这句描述。
-      aria-label={kind === "image" ? t("activity.refFrame") : t("activity.playback")}
+      // image 还要再分一层:带 crop 的才是 Smart Crop 全景参考帧,图片序列的主画面帧
+      // 走同一个 kind 但没有 crop,念成"全景参考"同样是错描述。
+      aria-label={
+        kind === "image"
+          ? crop
+            ? t("activity.refFrame")
+            : t("activity.imagePlayback")
+          : t("activity.playback")
+      }
     >
       <button
         type="button"

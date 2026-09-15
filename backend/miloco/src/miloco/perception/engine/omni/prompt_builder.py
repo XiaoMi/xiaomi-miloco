@@ -193,13 +193,17 @@ def build_query_prompt(
         _OUTPUT_MODE_FREE,
         _COMMONSENSE,
     ]
+    # 家庭档案是用户手写的 .md, 与 build_system_prompt 同口径: 模板段才改写、用户手写段
+    # 原样(整串包一层会把用户自己写的"视频"字也机械替换掉)。video 模式下改写是恒等变换
+    # → 与改造前逐字节一致。
+    system_parts = [_adapt_visual_prompt("\n\n".join(parts), visual_input_mode)]
     home_profile = get_home_profile_prefix()
     if home_profile:
-        parts.append(home_profile)
+        system_parts.append(home_profile)
     # query 不接 crop(v1 范围外);走 _effective_panorama_short_edge() 兜掉历史 config.json 里
     # 可能残留的 0(早期哨兵),否则 _encode_video_mp4 会算出 scale=0 崩掉按需查询。
     base: dict = {
-        "system_prompt": _adapt_visual_prompt("\n\n".join(parts), visual_input_mode),
+        "system_prompt": "\n\n".join(system_parts),
         # 措辞改写由 _build_query_user_content 内部只对模板段做 —— 整串包一层会把
         # 用户原话与上一窗 caption 一起改掉, 见该函数的 docstring
         "user_content": _build_query_user_content(
@@ -606,10 +610,11 @@ def _build_payload(
     )
     user_text = _build_user_content(
         packets, context, stream=stream, label_lookup=label_lookup,
+        visual_input_mode=visual_input_mode,
     )
     base: dict = {
         "system_prompt": build_system_prompt(scene, include_home_profile=include_home_profile, camera_prompt=context.camera_prompt),
-        "user_content": _adapt_visual_prompt(user_text, visual_input_mode) if route == "video" else user_text,
+        "user_content": user_text,
         "crops": [],
         "visual_input_mode": visual_input_mode,
     }
@@ -757,6 +762,12 @@ def build_system_prompt(
         commonsense,
         _render_examples(scene),
     ]
+    # 图片模式的措辞改写只作用于**模板生成段**：家庭档案与机位说明都是用户手写原文，
+    # 机械替换「视频」会改掉用户自己的话（例：「忽略视频左上角的时间戳水印」）。video
+    # 模式下 `_adapt_visual_prompt` 是恒等变换 → 与改造前逐字节一致。
+    if not is_audio:
+        parts = [_adapt_visual_prompt(p, scene.visual_input_mode) for p in parts]
+    # 用户手写段一律原样：家庭档案（用户写的 .md）与机位说明的正文
     if include_home_profile:
         home_profile = get_home_profile_prefix()
         if home_profile:
@@ -764,14 +775,14 @@ def build_system_prompt(
     # camera_prompt — 低频变动，放在 system prompt 尾部 → prefix cache 能命中前面的共享前缀
     note = camera_prompt.strip() if camera_prompt else ""
     if note:
-        parts.append(
+        note_header = (
             "## 本摄像头须知\n\n"
-            "以下是该机位的环境说明（要关注/忽略什么），请严格遵循以下指导进行感知描述——\n" + note
+            "以下是该机位的环境说明（要关注/忽略什么），请严格遵循以下指导进行感知描述——\n"
         )
-    prompt = "\n\n".join(p for p in parts if p)
-    if not is_audio:
-        return _adapt_visual_prompt(prompt, scene.visual_input_mode)
-    return prompt
+        if not is_audio:
+            note_header = _adapt_visual_prompt(note_header, scene.visual_input_mode)
+        parts.append(note_header + note)
+    return "\n\n".join(p for p in parts if p)
 
 
 def _render_schema_section(scene: SceneDescriptor) -> str:
@@ -880,24 +891,36 @@ def _build_user_content(
     *,
     stream: bool = False,
     label_lookup: "dict[str, str] | None" = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> str:
     # 非 fused 兜底路径：单条 user 文本，规则 + 历史 + 本轮事实内联（fused 路径才把它们
     # 拆成独立 message）。规则用新「# 待判断规则」格式，与 fused 一致。
+    #
+    # 图片模式的措辞改写**只作用于模板生成的段落**（名册 bbox 说明、末尾锚点）：用户规则
+    # 原文、pending_speech 引文都是用户/现场话语，改一个「视频」字就会把转写静默篡改，
+    # 并顺着 speeches 流进 agent 与设备控制派发。fused 路径靠"用户话语放独立只读消息"
+    # 天然隔离，非 fused 内联在同一条文本里，只能在拼装时按段区分。video 模式下
+    # `_adapt_visual_prompt` 是恒等变换 → 逐字节不变。
     parts: list[str] = []
     is_video = _resolve_route(packets) == "video"
     # matched_rules 仅 video 路由有（audio-only 剥离）→ audio 不下发「# 待判断规则」段
     if is_video:
         rule_conditions = _render_rule_conditions(context)
         if rule_conditions:
-            parts.append(rule_conditions)
+            parts.append(rule_conditions)  # 用户规则原文: 原样
         # 名册是视频特征（定位画面里的人），audio route 无视频 → 不渲染
-        parts.extend(_build_device_header(packets, label_lookup=label_lookup))
+        parts.extend(
+            _adapt_visual_prompt(p, visual_input_mode)
+            for p in _build_device_header(packets, label_lookup=label_lookup)
+        )
+    # pending_speech 是用户话语引文: 原样（与 query 路径「用户原话不改写」同一原则）
     parts.extend(_build_context_parts(context, stream=stream))
     if context.current_time:
         parts.append(f"当前时间: {context.current_time}")
     if context.room_name:
         parts.append(f"位置: {context.room_name}")
-    parts.append(_USER_REF_BOUNDARY if is_video else _USER_REF_BOUNDARY_AUDIO)
+    boundary = _USER_REF_BOUNDARY if is_video else _USER_REF_BOUNDARY_AUDIO
+    parts.append(_adapt_visual_prompt(boundary, visual_input_mode) if is_video else boundary)
     text = "\n".join(parts)
     _log_user_content(text)
     return text

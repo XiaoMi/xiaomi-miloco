@@ -324,6 +324,14 @@ def _summarize_visual_input(messages: list[dict[str, Any]]) -> dict[str, Any]:
     ``image_block_count`` 数的是 messages 里**全部** image_url 块, 口径含上面那些
     参考图, 所以它比"主画面帧数"大, 不要拿它当图片模式专属计数用。messages 这一层
     拿不到精确的主画面帧数, 故不叫 frame_count 以免误读。
+
+    **已知残余边界(复盘筛选时要排掉)**: 视频模式有一条既有退化路径——mp4 编码产物不达
+    损坏尺寸闸时跳过 video_url 块、退化成 text-only, 而 gallery 参考图 / Smart Crop
+    全景参考帧(都是 image_url 块)已先进 content。这种窗口 video_attached=False 而
+    image_block_count>0, 会被记成 ``"mode": "image"``, 于是图片组里混进少量"其实是视频
+    模式的退化窗口"。发生频率低(仅 PyAV 产出损坏产物时), 故没有把本窗口权威的
+    ``visual_input_mode`` 一路透传进来。按图片组复盘时, 排除「有 image_url 块但没有
+    主画面序列说明块」的样本(图片模式恒带一段「## 主画面图片序列」说明)。
     """
     image_block_count = 0
     audio_attached = False

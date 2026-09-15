@@ -1148,13 +1148,16 @@ async def _persist_meaningful_event(
         )
 
         # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
-        # 否则 device_ids、artifacts.clips 与 artifacts.ref_frames 必须同步收窄——都是
-        # 按 device 归属的产物:device_ids 驱动"日志展示哪些摄像头",clips 驱动"落盘哪些
-        # 摄像头的 clip",ref_frames 驱动"落盘哪些摄像头的全景参考帧"。不同步会导致不相关
-        # 摄像头的 clip / ref.jpg 被落盘,而其 device_id 已不在 device_ids 内 → ref 经
-        # locate_ref 的 device_ids 校验取不到(404)、也不进 feedback pack,纯占
-        # snapshot_max_disk_mb 配额;snapshot_count 亦与 device_ids 长度对不上
-        # (save_event_artifacts 返回的 clip_dids 必是 artifacts.clips 的子集)。
+        # 否则 device_ids、artifacts.clips / image_frames / image_audio 与
+        # artifacts.ref_frames 必须同步收窄——都是按 device 归属的产物:device_ids 驱动
+        # "日志展示哪些摄像头",clips 驱动"落盘哪些摄像头的 clip",image_frames /
+        # image_audio 驱动"落盘哪些摄像头的图片序列与独立音频",ref_frames 驱动"落盘哪些
+        # 摄像头的全景参考帧"。不同步会导致不相关摄像头的 clip / frames/*.jpg / audio.m4a /
+        # ref.jpg 被落盘,而其 device_id 已不在 device_ids 内 → ref 经 locate_ref 的
+        # device_ids 校验取不到(404)、也不进 feedback pack,纯占 snapshot_max_disk_mb
+        # 配额;snapshot_count 亦与 device_ids 长度对不上(save_event_artifacts 返回的是
+        # 落盘产物的 did 并集,即 clips ∪ image_frames ∪ image_audio,必是收窄后各
+        # artifacts dict 的子集)。
         # trace / gallery / crop_meta 不是按事件相关性归属的产物,不参与收窄。
         relevant_device_ids = _collect_relevant_device_ids(result)
         if relevant_device_ids:
