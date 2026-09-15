@@ -1010,10 +1010,12 @@ class PerceptionEngine(BasePerceptionEngine):
         """query 路径专用:剔除无视频帧的 snapshot。
 
         判据比 realtime 的 ``_drop_empty_snapshots``(「两个模态都没有」)更严,因为 query
-        路径**没有 audio route**:``build_query_prompt`` 只产出 ``video_base64``,而
-        ``_encode_video`` 对零帧直接返回 ``(None, None)`` —— 音频只作为 mp4 音轨随视频走,
-        零帧时连它一起丢。``_build_messages`` 两个 key 都拿不到就一个媒体块都不加,且无
-        warning。留着零帧 snapshot 的唯一效果,是让模型拿着上一窗的 ``last_caption`` 去回答
+        路径**没有 audio route**:``build_query_prompt`` 只产出 ``video_base64``
+        (图像模式则是 ``image_frames_base64``),而 ``_encode_video`` 对零帧直接返回
+        ``(None, None)`` —— 音频只作为 mp4 音轨随视频走,零帧时连它一起丢。两种模态的
+        帧源都是同一批全帧,故这一条判据同时管住它们。``_build_messages`` 两个 key 都
+        拿不到就一个媒体块都不加,且无 warning。留着零帧 snapshot 的唯一效果,是让模型
+        拿着上一窗的 ``last_caption`` 去回答
         「现在怎么样」——用户直接读到的一句听起来正常、但没有本窗画面依据的现场描述。
 
         realtime 侧不能用这个判据:那边零帧+音频过闸有 audio route 接住,按无帧剔除会误杀

@@ -9,6 +9,7 @@
 Endpoints:
 - `GET /api/events`                              — list_events
 - `GET /api/events/{event_id}/clip/{device_id}`  — locate_clip + FileResponse(Range/206)
+- `GET /api/events/{event_id}/frame/{device_id}/{index}` — locate_frame + FileResponse(图像推理帧)
 - `GET /api/events/{event_id}/ref/{device_id}`   — locate_ref + FileResponse(全景参考帧)
 - `GET /api/events/{event_id}/crop/{device_id}`  — read_crop_meta(crop 区域坐标,画框用)
 - `GET /api/events/stream`                       — SSE
@@ -20,7 +21,7 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import FileResponse
 from sse_starlette.sse import EventSourceResponse
 
@@ -115,6 +116,48 @@ async def get_event_clip(
         )
     if status == "gone":
         raise HTTPException(message="clip expired", status_code=410)
+    raise HTTPException(message="not found", status_code=404)
+
+
+@router.get(
+    "/{event_id}/frame/{device_id}/{index}",
+    summary="Get event 第 index 张图像推理帧(omni 看到的字节级 JPEG)",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def get_event_frame(
+    event_id: str,
+    device_id: str,
+    index: int = Path(..., ge=0, description="帧序号,0-based,按时间先后"),
+    svc: EventsService = Depends(get_events_service),
+) -> FileResponse:
+    """拉取指定 event × device 的第 index 张帧 JPEG(图像推理模式事件).
+
+    字节级 = omni 实际上传给 LLM 的那组帧里的第 index 张(零重编).前端据 list 的
+    `frame_counts[device_id]` 遍历 0..N-1 铺平展开;非图像模式事件该 map 为空,不该请求.
+
+    用 FileResponse 走 sendfile(同 ref 端点),不把 JPEG 读进内存;filename 与
+    clip / ref 端点**共用同一个** clip_download_name,只换前缀 — 不设时"另存为"
+    会拿 URL 末段(device_id)当名字且没后缀,设了才能一眼看出是哪天哪个事件的第几帧.
+
+    返回:
+    - 200:frame_{index:03d}.jpg 存在
+    - 404:event 不存在 / device_id 不在 device_ids 内
+    - 410:event 合法但该序号无帧(非图像模式事件 / index 越界 / 已被 cleanup 清);
+      前端用此触发降级 UI(与 clip 端点同)
+    """
+    status, path, timestamp_ms = await svc.locate_frame(event_id, device_id, index)
+    if status == "found":
+        assert path is not None and timestamp_ms is not None
+        from miloco.perception.snapshot_writer import clip_download_name
+
+        return FileResponse(
+            path=path,
+            media_type="image/jpeg",
+            filename=clip_download_name(timestamp_ms, "jpg", prefix=f"frame{index:03d}"),
+            content_disposition_type="inline",
+        )
+    if status == "gone":
+        raise HTTPException(message="frame not available", status_code=410)
     raise HTTPException(message="not found", status_code=404)
 
 

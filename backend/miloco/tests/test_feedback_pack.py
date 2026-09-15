@@ -317,3 +317,121 @@ def test_on_demand_pack_roundtrip(tmp_path, monkeypatch):
         trace_raw = gzip.decompress(tar.extractfile("omni_trace.json.gz").read())
         assert "13800138000" not in trace_raw.decode()
         assert "***" in trace_raw.decode()
+
+
+# ─── 图像推理模式的产物(一整组 frame_*.jpg) ────────────────────────────────
+
+
+def test_build_pack_collects_frame_group(tmp_path, monkeypatch):
+    """图像推理事件:目录里没有 clip.mp4,只有一组 frame_*.jpg → 整组进 clips_found / 包内.
+
+    键名仍叫 clips_*(包格式与前端都按它读),图像模式下装的就是那一组帧。
+    旧逻辑按 CLIP_CANDIDATES 逐个试,一个都不中就记 clips_missing —— 图像模式的事件
+    会被判成"产物缺失",反馈包收不到任何画面,复盘只能看 trace。
+    """
+    event_id = "aaaaaaaa-bbbb-cccc-dddd-ffffffffffff"
+
+    snapshot_root = tmp_path / "snapshots"
+    event_dir = snapshot_root / event_id
+    clip_dir = event_dir / "cam1"
+    clip_dir.mkdir(parents=True)
+    for i in range(3):
+        (clip_dir / f"frame_{i:03d}.jpg").write_bytes(b"\xff\xd8" + bytes([i]) * 40)
+
+    mock_dao = MagicMock()
+    mock_dao.get_by_id.return_value = {
+        "id": event_id,
+        "timestamp": 1234567890000,
+        "text": "test event",
+        "device_ids": ["cam1"],
+    }
+    mock_mgr = MagicMock()
+    mock_mgr.meaningful_events_dao = mock_dao
+
+    monkeypatch.setattr("miloco.admin.feedback_pack.get_snapshot_root", lambda: snapshot_root)
+    monkeypatch.setattr("miloco.admin.feedback_pack.miloco_home", lambda: tmp_path)
+
+    with patch("miloco.manager.get_manager", return_value=mock_mgr):
+        result = build_feedback_pack(
+            event_id=event_id, error_types=["other"], feedback_text="只看图"
+        )
+
+    assert result["components"]["clips_missing"] == []
+    assert result["components"]["clips_found"] == [
+        "cam1/frame_000.jpg",
+        "cam1/frame_001.jpg",
+        "cam1/frame_002.jpg",
+    ]
+    with tarfile.open(result["path"], "r:gz") as tar:
+        names = tar.getnames()
+        assert "clips/cam1/frame_000.jpg" in names
+        assert "clips/cam1/frame_002.jpg" in names
+
+
+def test_build_pack_clip_and_frames_same_device_keeps_clip_only(tmp_path, monkeypatch):
+    """同一 device 目录里 clip 与帧组都在(模式切换后的残留)→ 只收 clip.
+
+    list_artifact_files 的候选顺序即契约:clip 命中就不再展开帧组,否则同一段画面
+    会在包里出现两遍(一份 mp4 + N 张帧),包体积和复盘时的读数都被放大。
+    """
+    event_id = "aaaaaaaa-bbbb-cccc-dddd-999999999999"
+
+    snapshot_root = tmp_path / "snapshots"
+    clip_dir = snapshot_root / event_id / "cam1"
+    clip_dir.mkdir(parents=True)
+    (clip_dir / "clip.mp4").write_bytes(b"fake-mp4")
+    (clip_dir / "frame_000.jpg").write_bytes(b"\xff\xd8" + b"\x00" * 40)
+
+    mock_dao = MagicMock()
+    mock_dao.get_by_id.return_value = {
+        "id": event_id, "timestamp": 1, "text": "t", "device_ids": ["cam1"],
+    }
+    mock_mgr = MagicMock()
+    mock_mgr.meaningful_events_dao = mock_dao
+
+    monkeypatch.setattr("miloco.admin.feedback_pack.get_snapshot_root", lambda: snapshot_root)
+    monkeypatch.setattr("miloco.admin.feedback_pack.miloco_home", lambda: tmp_path)
+
+    with patch("miloco.manager.get_manager", return_value=mock_mgr):
+        result = build_feedback_pack(
+            event_id=event_id, error_types=["other"], feedback_text="x"
+        )
+
+    assert result["components"]["clips_found"] == ["cam1/clip.mp4"]
+
+
+def test_on_demand_pack_collects_frame_group(tmp_path, monkeypatch):
+    """on-demand 主动查询的图像推理产物同款:整组帧进包,不再误报 clips_missing."""
+    log_id = "aaaaaaaa-bbbb-cccc-dddd-222222222222"
+
+    snapshot_root = tmp_path / "snapshots"
+    clip_dir = snapshot_root / log_id / "cam1"
+    clip_dir.mkdir(parents=True)
+    for i in range(2):
+        (clip_dir / f"frame_{i:03d}.jpg").write_bytes(b"\xff\xd8" + bytes([i]) * 40)
+
+    monkeypatch.setattr("miloco.admin.feedback_pack.get_snapshot_root", lambda: snapshot_root)
+    monkeypatch.setattr("miloco.admin.feedback_pack.miloco_home", lambda: tmp_path)
+
+    result = build_on_demand_feedback_pack(
+        log_id=log_id,
+        row={
+            "timestamp": 1234567890000,
+            "query": "谁在客厅?",
+            "answer": "没人",
+            "sources": ["cam1"],
+            "latency_ms": 150,
+            "clip_dids": ["cam1"],
+        },
+        error_types=["other"],
+        feedback_text="x",
+        uid="test_user",
+    )
+
+    assert result["components"]["clips_missing"] == []
+    assert result["components"]["clips_found"] == [
+        "cam1/frame_000.jpg",
+        "cam1/frame_001.jpg",
+    ]
+    with tarfile.open(result["path"], "r:gz") as tar:
+        assert "clips/cam1/frame_000.jpg" in tar.getnames()

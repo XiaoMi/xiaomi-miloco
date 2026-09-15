@@ -5,9 +5,11 @@ omni 推理链路深(processor → client.realtime_perceive → engine.api.run_b
 omni.run_omni_batch → prompt_builder.build_* → _encode_batch_video → _encode_video →
 _encode_video_mp4),透穿 8 层函数签名加 out 参数会让 omni 模块跟 snapshot 模块强耦合.
 
-改用 ContextVar(跟 task 绑定,asyncio-safe)从 omni 内部"旁路"出两类产物:
+改用 ContextVar(跟 task 绑定,asyncio-safe)从 omni 内部"旁路"出三类产物:
 - clip 字节(视频路径 H264+AAC mp4,或 audio-only 路径纯 AAC m4a)— 通过
   push_clip_bytes 在 _encode_video_mp4 / _encode_audio_only_mp4 出口推
+- 逐帧 JPEG 列表(图像推理路径,input_mode="image")— 通过 push_frames 在
+  _encode_frames_as_jpegs 出口推;与 clip 互斥(同一窗只走一种模态)
 - omni HTTP 调用 trace(prompt + response + latency + usage + error)— 通过
   push_omni_trace 在 call_omni / call_omni_stream / _call_omni_messages 的
   finally 里推
@@ -30,13 +32,15 @@ processor 调用前后包一层:
     # artifacts.clips 已被 omni 填上 per-device 的 (bytes, kind) 元组:
     #   - 视频路径 ("...", "mp4"):H264 + AAC
     #   - audio-only 路径 ("...", "m4a"):仅 AAC (ipod muxer)
+    # 图像推理路径则填 artifacts.frames(per-device 的 JPEG 字节列表),与 clips 互斥。
     # artifacts.trace 已被 omni HTTP 调用填上 prompt + response 结构
 
 底层 omni 出口:
 
-    from miloco.perception.snapshot_context import push_clip_bytes, push_omni_trace
+    from miloco.perception.snapshot_context import push_clip_bytes, push_frames, push_omni_trace
 
     push_clip_bytes(mp4_bytes, "mp4")   # 在 _encode_video_mp4 出口
+    push_frames(jpeg_list)              # 在 _encode_frames_as_jpegs 出口(整组覆盖写)
     push_omni_trace(                    # 在 call_omni finally 里
         request_messages=messages,
         response_raw=raw,
@@ -69,6 +73,12 @@ logger = logging.getLogger(__name__)
 # 所以扩展名要跟实际容器一致(M4A 不能伪装成 .mp4).
 ClipKind = Literal["mp4", "m4a"]
 
+# 事件级产物的类型(SSE / list API 的 clip_kind 字段,以及 client 侧取 kind 的标注):
+# 在 clip 容器之外多一档 "frames" —— 图像推理模式没有 clip,落的是 per-device 逐帧 JPEG
+# (见 snapshot_writer.FRAME_PREFIX)。**不并入 ClipKind**:ClipKind 只描述 clip 容器,
+# 塞进 "frames" 会让 push_clip_bytes 的入参语义与 _save_clips 的容器校验一起失真。
+MediaKind = Literal["mp4", "m4a", "frames"]
+
 
 @dataclass
 class OmniEventArtifacts:
@@ -91,6 +101,11 @@ class OmniEventArtifacts:
     gallery: dict[str, dict[str, bytes]] = field(default_factory=dict)
     ref_frames: dict[str, bytes] = field(default_factory=dict)
     crop_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # frames: per-device 逐帧 JPEG 列表(图像推理模式,input_mode="image"),按时间先后排列。
+    # 与 clips 互斥 —— 同一窗口只走一种模态,故落盘时一个 device 要么有 clip 要么有 frames,
+    # 不会两者都有。落盘为 frame_00.jpg / frame_01.jpg…,字节级 = 送模型的帧(零重编)。
+    # 整组覆盖写(见 push_frames),不是逐帧追加 —— 回退路径重编时会整组替换。
+    frames: dict[str, list[bytes]] = field(default_factory=dict)
 
 
 _artifacts: ContextVar[OmniEventArtifacts | None] = ContextVar(
@@ -133,6 +148,35 @@ def push_clip_bytes(clip_bytes: bytes, kind: ClipKind) -> None:
     if ctx is None:
         return
     artifacts.clips[ctx.device_id] = (clip_bytes, kind)
+
+
+def push_frames(jpegs: list[bytes]) -> None:
+    """omni 出口(图像推理模式):把当前 device 本窗的整组帧 JPEG 存到 artifacts.frames.
+
+    device_id 自 observability.DeviceContext 取(pipeline 在 omni call 期间已 set).
+    任一缺失(无 active scope / 无 device_ctx)时静默 no-op.
+
+    jpegs 是图像模式下实际送模型的帧(字节级 = omni 所见),按时间先后排列,落盘
+    frame_00.jpg / frame_01.jpg… 供复盘。
+
+    **整组一次性传入,且是覆盖语义(不是追加)** —— 与 push_clip_bytes 的 dict 赋值对齐:
+    Smart Crop 先编 crop 帧、任一步失败则调用方回退全景再编一遍,若这里改成 append,
+    同窗就会留下 2N 张(crop N 张 + 全景 N 张)、与模型实际收到的 N 张错位。
+    覆盖赋值天然幂等,回退路径重复调用只会留下最后那次(即真正送模型的那组)。
+
+    空列表静默跳过:整批编码失败时不能把上一窗的帧留在 artifacts 里冒充本窗。
+
+    与 push_clip_bytes 互斥 —— 图像模式不产 clip,故不会同时写入 artifacts.clips。
+    """
+    if not jpegs:
+        return
+    artifacts = _artifacts.get()
+    if artifacts is None:
+        return
+    ctx = get_device_context()
+    if ctx is None:
+        return
+    artifacts.frames[ctx.device_id] = list(jpegs)
 
 
 def push_ref_frame(image_bytes: bytes) -> None:

@@ -490,9 +490,16 @@ class OnDemandLogEntry(BaseModel):
     answer: str = Field(..., description="VLM answer")
     sources: list[str] = Field(default_factory=list, description="Device did list")
     latency_ms: int | None = Field(default=None, description="Inference latency in ms")
-    snapshot_count: int = Field(default=0, description="Number of devices with clips on disk")
-    clip_dids: list[str] = Field(default_factory=list, description="Device IDs that have clips on disk")
-    clip_kinds: dict[str, Literal["mp4", "m4a"]] = Field(default_factory=dict, description="Per-device clip kind: {did: 'mp4'|'m4a'}")
+    snapshot_count: int = Field(default=0, description="Number of devices with artifacts on disk")
+    clip_dids: list[str] = Field(default_factory=list, description="Device IDs that have artifacts on disk")
+    clip_kinds: dict[str, Literal["mp4", "m4a", "frames"]] = Field(
+        default_factory=dict,
+        description=(
+            "Per-device artifact type: {did: 'mp4'|'m4a'|'frames'};"
+            "'frames' = 图像推理路径的逐帧 JPEG(input_mode=image)。"
+            "列表 API 另就地注入 frame_counts:{did: 帧数},见 query_on_demand_logs"
+        ),
+    )
     has_trace: bool = Field(
         default=False,
         description="omni_trace.json.gz on disk (list API overrides DB column with live stat)",
@@ -547,14 +554,26 @@ class MeaningfulEvent(BaseModel):
         default=None,
         description="最近一次反馈包的大小(bytes)",
     )
-    clip_kind: Literal["mp4", "m4a"] | None = Field(
+    clip_kind: Literal["mp4", "m4a", "frames"] | None = Field(
         default=None,
         description=(
-            "Container of the persisted clip,服务端 stat 落盘文件后缀计算:"
+            "Persisted artifact type,服务端 stat 落盘文件后缀计算:"
             "'mp4' = H264+AAC video container(omni video 路径产物);"
             "'m4a' = AAC-only audio container(omni audio-only 路径产物);"
-            "None = no clip on disk(metadata-only / cleanup 已清).多 device 共识下"
-            "全 device kind 一致(见 prompt_builder._is_audio_only),取第一个 device 即可."
+            "'frames' = 一组逐帧 JPEG(omni 图像推理路径产物,input_mode=image,无 clip,"
+            "device 目录下 frame_000.jpg…,帧数见 frame_counts);"
+            "None = 盘上无产物(metadata-only / cleanup 已清).多 device 共识下"
+            "全 device kind 一致(见 prompt_builder._is_audio_only / _get_input_mode),"
+            "取第一个 device 即可."
+        ),
+    )
+    frame_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description=(
+            "clip_kind == 'frames' 时非空:{device_id: 该设备本窗送模型的帧数}."
+            "前端据此铺平展开每台摄像头的 N 张帧(GET /events/{id}/frame/{device_id}/{index},"
+            "index 0-based、按时间先后).其余模态恒空 —— 帧数只能由盘上连号文件数出来,"
+            "不从 snapshot_count(那是 device 数)推."
         ),
     )
     has_ref: bool = Field(

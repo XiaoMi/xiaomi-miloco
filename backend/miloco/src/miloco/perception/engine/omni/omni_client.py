@@ -373,6 +373,21 @@ def _build_messages(payload: dict, adapter: OmniProviderAdapter) -> list[dict]:
         content.append(adapter.build_video_block(payload["video_base64"], media_info))
     elif payload.get("audio_base64"):
         content.append(adapter.build_audio_block(payload["audio_base64"], media_info))
+    elif payload.get("image_frames_base64"):
+        # 图像推理模式(input_mode=image):一组 image_url 块替代单个 video_url / input_audio 块。
+        # 说明文字(帧序 + 相邻间隔)由 prompt_builder 生成后随 payload 传来,与图块**同进
+        # 同退** —— 空帧组时 _build_payload 两者都不放,故这里拿不到 base64 也就没有这句。
+        # 位置:紧随 user_content 文本之后、crops 之前,与视频模式「先文字后媒体」一致。
+        intro = payload.get("image_frames_intro")
+        if intro:
+            content.append({"type": "text", "text": intro})
+        for frame_b64 in payload["image_frames_base64"]:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"},
+                }
+            )
 
     # Crop images (from tracker)
     for crop in payload.get("crops", []):

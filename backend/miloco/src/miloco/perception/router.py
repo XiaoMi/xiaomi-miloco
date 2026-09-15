@@ -8,7 +8,7 @@ perception log retrieval, and device listing.
 import logging
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -168,6 +168,45 @@ async def get_on_demand_clip(log_id: str, device_id: str) -> FileResponse:
             content_disposition_type="inline",
         )
     raise HTTPException(message="clip expired", status_code=410)
+
+
+@router.get(
+    "/on-demand-logs/{log_id}/frame/{device_id}/{index}",
+    summary="Get on-demand query 第 index 张图像推理帧(omni 看到的字节级 JPEG)",
+    dependencies=[Depends(verify_token_query_fallback)],
+)
+async def get_on_demand_frame(
+    log_id: str,
+    device_id: str,
+    index: int = Path(..., ge=0, description="帧序号,0-based,按时间先后"),
+) -> FileResponse:
+    """Serve frame_{index:03d}.jpg for an on-demand query log entry.
+
+    仅图像推理模式(input_mode=image)的查询会落帧;前端据列表的 frame_counts 遍历
+    0..N-1(gate 与 clip 端点同款:clip_dids 里没有这台设备就是 404)。
+    """
+    from miloco.perception.snapshot_writer import (
+        clip_download_name,
+        get_snapshot_root,
+        locate_frame_file,
+        region_slug,
+    )
+
+    row = manager.perception_service.get_on_demand_log(log_id)
+    if row is None:
+        raise HTTPException(message="not found", status_code=404)
+    if device_id not in row.get("clip_dids", []):
+        raise HTTPException(message="not found", status_code=404)
+
+    device_dir = get_snapshot_root() / log_id / region_slug(device_id)
+    path = locate_frame_file(device_dir, index)
+    if path is not None:
+        return FileResponse(
+            path=path, media_type="image/jpeg",
+            filename=clip_download_name(row["timestamp"], "jpg", prefix=f"frame{index:03d}"),
+            content_disposition_type="inline",
+        )
+    raise HTTPException(message="frame expired", status_code=410)
 
 
 class OnDemandFeedbackBody(BaseModel):

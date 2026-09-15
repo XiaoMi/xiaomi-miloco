@@ -324,3 +324,78 @@ def test_min_urgency_mixed_with_omni_fps(client):
     assert data["min_suggestion_urgency"] == "high"
     svc.apply_omni_fps_live.assert_awaited_once_with(2)
     svc.apply_config_restart.assert_not_awaited()
+
+
+# ─── input_mode(图像推理开关) ────────────────────────────────────────────────
+
+
+def test_input_mode_roundtrip_neither_path(client):
+    """input_mode 走热读路径:落盘 + reset_settings 后下个感知窗口即生效,不参与热更/重启。
+
+    往与当前值相反的方向写(fixture 未写此字段 → 当前 video),否则「没变」和
+    「写进去了」不可区分。
+    """
+    c, svc = client
+    resp = c.put("/api/admin/perception-config", json={"input_mode": "image"})
+    assert resp.status_code == 200
+    assert resp.json()["data"]["input_mode"] == "image"
+    svc.apply_omni_fps_live.assert_not_awaited()
+    svc.apply_config_restart.assert_not_awaited()
+
+    data = c.get("/api/admin/perception-config").json()["data"]
+    assert data["input_mode"] == "image"
+
+
+def test_input_mode_get_defaults_to_video(client):
+    """fixture 的 config.json 没写 input_mode → 投影回 video(settings.yaml 的默认)。"""
+    c, _ = client
+    assert c.get("/api/admin/perception-config").json()["data"]["input_mode"] == "video"
+
+
+@pytest.mark.parametrize("bad", ["IMAGE", "images", "frames", "mp4", "", "1"])
+def test_input_mode_rejects_bogus_value(client, bad):
+    """Literal 校验:非 video/image 一律 422。
+
+    "IMAGE" 也在拒之列 —— backend 那条热读路径是 fail-open 回 video,大小写宽容会让
+    「拨了 image 却在跑 video」从 422 退化成一条只在日志里的 warning。
+    """
+    c, _svc = client
+    resp = c.put("/api/admin/perception-config", json={"input_mode": bad})
+    assert resp.status_code == 422
+
+
+def test_input_mode_bad_value_in_config_does_not_break_projection(client, tmp_path, monkeypatch):
+    """config.json 里被手写脏值 → GET 退 video,而不是 500 / 非法字面量。
+
+    投影刻意复用 _get_input_mode()(运行时同一条读取路径)而非 raw.get:脏值下前端拿到
+    "IMAGE" 这类非法字面量会让分段控件显示成"一个都没选中",而 500 会把「进 UI 改回来」
+    这条自救路堵死。
+    """
+    import json as _json
+
+    from miloco.config.settings import reset_settings
+
+    cfg = _json.loads((tmp_path / "config.json").read_text())
+    cfg["perception"]["engine"]["input"]["input_mode"] = "IMAGE"
+    (tmp_path / "config.json").write_text(_json.dumps(cfg), encoding="utf-8")
+    reset_settings()
+
+    c, _svc = client
+    resp = c.get("/api/admin/perception-config")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["input_mode"] == "video"
+
+
+def test_input_mode_mixed_with_omni_fps(client):
+    """混合 PUT:input_mode 只改模态,不额外触发重启/hot-reload(omni_fps 该走还走)。"""
+    c, svc = client
+    resp = c.put(
+        "/api/admin/perception-config",
+        json={"input_mode": "image", "omni_fps": 2},
+    )
+    assert resp.status_code == 200
+    svc.apply_omni_fps_live.assert_awaited_once_with(2)
+    svc.apply_config_restart.assert_not_awaited()
+    data = resp.json()["data"]
+    assert data["input_mode"] == "image"
+    assert data["omni_fps"] == 2

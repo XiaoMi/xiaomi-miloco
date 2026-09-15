@@ -210,7 +210,7 @@ class PerceptionService:
         t_end = now_ms()
         log_id = str(uuid.uuid4())
 
-        # Save artifacts (clips + trace) to disk
+        # Save artifacts (clip 或图像帧 + trace) to disk
         clip_dids: list[str] = []
         clip_kinds: dict[str, str] = {}
         has_trace = False
@@ -221,9 +221,12 @@ class PerceptionService:
                 for call in (artifacts.trace or {}).get("calls", [])
             )
             if not omni_responded:
+                # 模型没应答 → 不留产物。两种模态都要清:图像模式落的是 frames,
+                # 只清 clips 会让"没答上"的那次查询照样把帧留在盘上。
                 artifacts.clips = {}
+                artifacts.frames = {}
 
-        if artifacts.clips or artifacts.trace:
+        if artifacts.clips or artifacts.frames or artifacts.trace:
             from miloco.config.settings import get_settings
             from miloco.perception.snapshot_writer import (
                 check_disk_space,
@@ -234,11 +237,15 @@ class PerceptionService:
             snapshot_root = get_snapshot_root()
             if check_disk_space(snapshot_root, settings.perception.snapshot_min_free_disk_mb):
                 clip_dids = save_event_artifacts(log_id, artifacts)
-                clip_kinds = {
-                    did: artifacts.clips[did][1]
-                    for did in clip_dids
-                    if did in artifacts.clips
-                }
+                # 按 clip_dids 顺序取 kind(clips 与 frames 互斥,同一 device 只会命中一边):
+                # "frames" 是图像推理路径,盘上是 frame_000.jpg…;kind 落 DB,帧数不落 ——
+                # 列表 API 就地数盘(query_on_demand_logs),与 has_trace 同款派生。
+                clip_kinds = {}
+                for did in clip_dids:
+                    if did in artifacts.clips:
+                        clip_kinds[did] = artifacts.clips[did][1]
+                    elif did in artifacts.frames:
+                        clip_kinds[did] = "frames"
                 has_trace = (snapshot_root / log_id / "omni_trace.json.gz").exists()
 
         # Persist on-demand query log (with artifact metadata).
@@ -345,7 +352,11 @@ class PerceptionService:
             return {"logs": logs}
 
         from miloco.perception.events_service import EventsService
-        from miloco.perception.snapshot_writer import get_snapshot_root
+        from miloco.perception.snapshot_writer import (
+            count_frames,
+            get_snapshot_root,
+            region_slug,
+        )
 
         snapshot_root = get_snapshot_root()
         fb_index = EventsService.build_feedback_index()
@@ -355,6 +366,14 @@ class PerceptionService:
             row["has_trace"] = (
                 snapshot_root / row["id"] / "omni_trace.json.gz"
             ).exists()
+            # frame_counts 同理就地数盘:只有图像推理模式的行(clip_kinds 含 "frames")
+            # 需要,且必须数当下盘上还剩几张 —— 落盘后 cleanup 可能清掉一部分,
+            # DB 里没记帧数(也不为此加列)。
+            row["frame_counts"] = {
+                did: count_frames(snapshot_root / row["id"] / region_slug(did))
+                for did, kind in (row.get("clip_kinds") or {}).items()
+                if kind == "frames"
+            }
             fb = fb_index.get(row["id"])
             row["has_feedback"] = fb is not None
             row["feedback_pack_path"] = fb[0] if fb else None

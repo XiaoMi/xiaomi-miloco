@@ -217,6 +217,14 @@ class SceneDescriptor:
     identity_match_disabled —— 身份库为空（无任何注册成员）时为 True：``identities`` 字段
         改用精简版 ``IDENTITY_NO_MATCH``（只判 unknown↔no_person、不做成员匹配）。仅在
         ``has_identity=True`` 时有意义；库非空时为 False，用完整匹配版 ``IDENTITY``。
+    input_mode   —— 本轮的视觉模态（``prompt_builder._get_input_mode()`` 的结果）：
+        ``"video"`` = 送一段 mp4，``"image"`` = 送一组按时间先后排列的静态帧。**只影响
+        system prompt 的措辞**（角色 / 总原则 / 任务行把"视频"换成"画面"，见
+        ``build_system_prompt``）—— schema 与字段集合不动：两种模态看到的是同一批帧、
+        同一段时间范围，输出字段该有哪些就还是哪些。
+        与 ``has_audio`` 的关系：image 模式恒不带音频，故调用方一律连同
+        ``has_audio=False`` 一起构（speeches / env_sounds 已被 requires_audio 剥掉），
+        本字段不再重复表达"有没有音频"。
     """
 
     route: Literal["video", "audio"]
@@ -226,6 +234,7 @@ class SceneDescriptor:
     has_speech: bool = True
     has_pets: bool = False
     identity_match_disabled: bool = False
+    input_mode: Literal["video", "image"] = "video"
 
     def selected_fields(self) -> list[FieldSpec]:
         order = _ORDER_STREAM if self.stream else _ORDER_NORMAL

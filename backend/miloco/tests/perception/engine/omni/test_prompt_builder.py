@@ -2403,3 +2403,595 @@ class TestAdaptiveResolution:
             payload = build_batch_prompt([_adaptive_packet()], OmniContext())
         assert payload["crops"] == []
         assert payload.get("video_base64")
+
+
+# =============================================================================
+# 图像推理模式（input_mode=image）
+#
+# 面向只吃图像输入的 VLM：同一批 all_frames、同一套尺寸网格，只把容器从 mp4 换成
+# 逐帧 JPEG。三条硬约束必须成立 —— 换模式不换帧源/帧数、不换像素网格、产物字节 ≡ 模型所见。
+# =============================================================================
+
+
+def _fake_settings(engine: dict):
+    """最小 Settings 替身:_get_input_mode 只读 perception.engine["input"]["input_mode"]。"""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(perception=SimpleNamespace(engine=engine))
+
+
+def _image_mode():
+    """把本窗模态钉成 image(patch 的是唯一的读取点,与生产同一条路径)。"""
+    return patch(
+        "miloco.perception.engine.omni.prompt_builder._get_input_mode",
+        return_value="image",
+    )
+
+
+class TestGetInputMode:
+    """_get_input_mode:每窗热读 + 非法值 fail-open 回 video(不抛)。"""
+
+    def _mode(self, monkeypatch, engine):
+        monkeypatch.setattr("miloco.config.get_settings", lambda: _fake_settings(engine))
+        return _pb_mod._get_input_mode()
+
+    def test_default_video_when_key_absent(self, monkeypatch):
+        assert self._mode(monkeypatch, {"input": {}}) == "video"
+
+    def test_default_video_when_input_block_absent(self, monkeypatch):
+        """engine 里整块 input 都没有(老 config.json)→ 默认 video,不 KeyError。"""
+        assert self._mode(monkeypatch, {}) == "video"
+
+    def test_image(self, monkeypatch):
+        assert self._mode(monkeypatch, {"input": {"input_mode": "image"}}) == "image"
+
+    def test_engine_not_a_dict_fails_open(self, monkeypatch):
+        """engine 被手改成非 dict → 不抛,退 video(该行在推理主路径上)。"""
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            "miloco.config.get_settings",
+            lambda: SimpleNamespace(perception=SimpleNamespace(engine=[1, 2])),
+        )
+        assert _pb_mod._get_input_mode() == "video"
+
+    def test_get_settings_raises_fails_open(self, monkeypatch):
+        def boom():
+            raise RuntimeError("config not ready")
+
+        monkeypatch.setattr("miloco.config.get_settings", boom)
+        assert _pb_mod._get_input_mode() == "video"
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["IMAGE", "Image", "images", "frames", "mp4", "", " video", None, 1, True, ["image"]],
+        ids=["upper", "title", "plural", "frames", "mp4", "empty", "space", "none", "int", "bool", "list"],
+    )
+    def test_invalid_falls_back_to_video_with_warning(self, monkeypatch, caplog, raw):
+        """非法值 fail-open 回 video **并留痕** —— 静默回落会让手改坏的配置永远查不出来。
+
+        推理主路径上抛异常会被 omni.py 折成整相机 skipped:一个手改坏的配置值不该让整个
+        感知停摆,故退默认模态;但要打日志,否则"我从没设过 image 啊"这类问题无从定位。
+        """
+        import logging
+
+        with caplog.at_level(
+            logging.WARNING, logger="miloco.perception.engine.omni.prompt_builder"
+        ):
+            assert self._mode(monkeypatch, {"input": {"input_mode": raw}}) == "video"
+        assert any("event=input_mode_invalid" in r.getMessage() for r in caplog.records), (
+            f"非法值 {raw!r} 未打出 input_mode_invalid 告警"
+        )
+
+    def test_valid_value_does_not_warn(self, monkeypatch, caplog):
+        """合法值不该打告警 —— 否则灰度期这条 event 的计数全是噪声。"""
+        import logging
+
+        with caplog.at_level(
+            logging.WARNING, logger="miloco.perception.engine.omni.prompt_builder"
+        ):
+            assert self._mode(monkeypatch, {"input": {"input_mode": "image"}}) == "image"
+        assert not [r for r in caplog.records if "input_mode_invalid" in r.getMessage()]
+
+
+class TestShouldSkipForInputMode:
+    """图像模式下 audio route 整窗跳过(该模式假定模型也不支持音频理解)。
+
+    判据是 `image AND route == audio`,不是 `image` 单独成立 —— video route 在 image 模式下
+    照常推理,只是媒体块换成帧组。
+    """
+
+    def test_video_mode_keeps_audio_route(self):
+        assert _pb_mod.should_skip_for_input_mode([_audio_only_packet()]) is False
+
+    def test_image_mode_skips_audio_route(self):
+        with _image_mode():
+            assert _pb_mod.should_skip_for_input_mode([_audio_only_packet()]) is True
+
+    def test_image_mode_keeps_video_route(self):
+        with _image_mode():
+            assert _pb_mod.should_skip_for_input_mode([_video_route_packet()]) is False
+
+    def test_image_mode_keeps_trigger_none(self):
+        """trigger=None(主动查询 / 旧路径)不走 audio route → 不跳。"""
+        with _image_mode():
+            assert _pb_mod.should_skip_for_input_mode([_mock_edge_packet()]) is False
+
+    def test_empty_packets_never_skipped(self):
+        """空 batch 不跳 —— 跳过是个"这窗没内容可送"的结论,不该由"没输入"推出来。"""
+        with _image_mode():
+            assert _pb_mod.should_skip_for_input_mode([]) is False
+
+
+class TestEncodeFramesAsJpegs:
+    """_encode_frames_as_jpegs:逐帧 JPEG + 全或无 + 与视频模式同一套像素网格。"""
+
+    @staticmethod
+    def _frames(n=3, h=120, w=160):
+        np.random.seed(5)
+        return [np.random.randint(0, 256, (h, w, 3), dtype=np.uint8) for _ in range(n)]
+
+    def test_returns_one_jpeg_per_frame(self):
+        with patch("miloco.perception.snapshot_context.push_frames"):
+            out = _pb_mod._encode_frames_as_jpegs(self._frames(3), short_edge=64)
+        assert len(out) == 3
+        for jpeg in out:
+            assert jpeg[:2] == b"\xff\xd8"  # JPEG SOI
+            assert jpeg[-2:] == b"\xff\xd9"  # EOI
+
+    def test_grid_matches_video_encoder(self):
+        """换模式不改模型看到的像素网格 —— 与 _encode_video_mp4 真编出来的尺寸对账。
+
+        直接抄 _encode_target_wh 的公式自证是同义反复;这里比对的是两条编码路径的**产物**,
+        任何一侧单独改 resize 口径都会红。
+        """
+        frames = [np.random.randint(0, 256, (480, 640, 3), dtype=np.uint8)]
+        for short_edge in (256, 512, 1080):
+            with patch("miloco.perception.snapshot_context.push_frames"):
+                out = _pb_mod._encode_frames_as_jpegs(frames, short_edge=short_edge)
+            img = cv2.imdecode(np.frombuffer(out[0], dtype=np.uint8), cv2.IMREAD_COLOR)
+            _, mi = _pb_mod._encode_video_mp4(
+                frames, np.empty(0, dtype=np.int16), 16000, fps=1, short_edge=short_edge,
+            )
+            assert (img.shape[1], img.shape[0]) == (mi.video_width, mi.video_height)
+
+    def test_upscale_uses_lanczos_downscale_keeps_area(self):
+        """放大 / 缩小走不同重采样核 —— 与 _encode_video_mp4 同款,两处核不一致 = 两模式口径不一致。"""
+        frames = self._frames(1, h=100, w=200)
+        with patch("miloco.perception.snapshot_context.push_frames"), patch.object(
+            _pb_mod.cv2, "resize", wraps=_pb_mod.cv2.resize
+        ) as spy:
+            _pb_mod._encode_frames_as_jpegs(frames, short_edge=400)  # 放大 2x
+        assert spy.call_args.kwargs["interpolation"] == _pb_mod.cv2.INTER_LANCZOS4
+
+        with patch("miloco.perception.snapshot_context.push_frames"), patch.object(
+            _pb_mod.cv2, "resize", wraps=_pb_mod.cv2.resize
+        ) as spy:
+            _pb_mod._encode_frames_as_jpegs(frames, short_edge=100)  # 缩小 0.5x
+        assert spy.call_args.kwargs["interpolation"] == _pb_mod.cv2.INTER_AREA
+
+    def test_empty_frames_returns_empty(self):
+        with patch("miloco.perception.snapshot_context.push_frames") as push:
+            assert _pb_mod._encode_frames_as_jpegs([]) == []
+        push.assert_not_called()
+
+    def test_zero_sized_frame_returns_empty(self):
+        """空尺寸帧 → 不编(scale 会算出 0/NaN),不抛。"""
+        empty = np.zeros((0, 0, 3), dtype=np.uint8)
+        with patch("miloco.perception.snapshot_context.push_frames"):
+            assert _pb_mod._encode_frames_as_jpegs([empty]) == []
+
+    def test_any_frame_encode_failure_returns_all_empty(self, monkeypatch):
+        """全或无:第 3 帧编不出 → 前两帧也一并丢弃。
+
+        返回"少一帧的部分结果"会同时弄坏两件事:模型只看到 N-1 帧,而落盘产物按 len(frames)
+        记 —— 复盘时"盘上有 2 张"会被当成模型也只看了 2 张。
+        """
+        frames = self._frames(3)
+        real = _pb_mod.cv2.imencode
+        calls = {"n": 0}
+
+        def flaky(ext, img, params=None):
+            calls["n"] += 1
+            if calls["n"] == 3:
+                return False, None
+            return real(ext, img, params)
+
+        monkeypatch.setattr(_pb_mod.cv2, "imencode", flaky)
+        with patch("miloco.perception.snapshot_context.push_frames") as push:
+            assert _pb_mod._encode_frames_as_jpegs(frames, short_edge=64) == []
+        push.assert_not_called()
+
+    def test_too_small_jpeg_returns_all_empty(self, monkeypatch):
+        """产物 < _MIN_JPEG_BYTES 判为编坏(同 _jpeg_block 的 size gate),整批丢弃。"""
+        monkeypatch.setattr(
+            _pb_mod.cv2,
+            "imencode",
+            lambda ext, img, params=None: (True, np.frombuffer(b"\xff\xd8", dtype=np.uint8)),
+        )
+        with patch("miloco.perception.snapshot_context.push_frames") as push:
+            assert _pb_mod._encode_frames_as_jpegs(self._frames(2), short_edge=64) == []
+        push.assert_not_called()
+
+    def test_pushes_frames_only_on_full_success(self):
+        """出口 push 的必须是**成功那一版**整组;失败路径 push 会把编坏的一组落盘成 artifacts。"""
+        frames = self._frames(3)
+        with patch("miloco.perception.snapshot_context.push_frames") as push:
+            out = _pb_mod._encode_frames_as_jpegs(frames, short_edge=64)
+        assert push.call_count == 1
+        assert push.call_args[0][0] == out
+
+
+class TestEncodeBatchFrames:
+    """_encode_batch_frames:取首个有帧设备的帧组(口径同 _encode_batch_video)。"""
+
+    def test_returns_frames_and_fps(self):
+        ep = _video_route_packet()
+        with patch("miloco.perception.snapshot_context.push_frames"):
+            frames, fps = _pb_mod._encode_batch_frames([ep], short_edge=64)
+        assert len(frames) == len(ep.all_frames)
+        assert fps == ep.frame_info.fps
+
+    def test_skips_frameless_leading_packet(self):
+        """首个 packet 无帧 → 顺延到下一个有帧的设备(与 _encode_batch_video 一致)。"""
+        frameless = _video_route_packet()
+        frameless.all_frames = []
+        framed = _video_route_packet()
+        framed.frame_info = FrameInfo(start_timestamp=0, end_timestamp=3000, fps=3)
+        with patch("miloco.perception.snapshot_context.push_frames"):
+            frames, fps = _pb_mod._encode_batch_frames([frameless, framed], short_edge=64)
+        assert frames
+        assert fps == 3
+
+    def test_no_framed_device_returns_empty_and_zero_fps(self):
+        """没有任何设备带帧 → ([], 0)。fps=0 让调用方省掉间隔说明,而不是报一个错的数。"""
+        ep = _video_route_packet()
+        ep.all_frames = []
+        assert _pb_mod._encode_batch_frames([ep], short_edge=64) == ([], 0)
+
+    def test_empty_packets(self):
+        assert _pb_mod._encode_batch_frames([], short_edge=64) == ([], 0)
+
+
+class TestRenderFramesIntro:
+    """_render_frames_intro:JPEG 块本身不带的帧序与间隔,靠这句交代。"""
+
+    def test_non_positive_n_renders_nothing(self):
+        assert _pb_mod._render_frames_intro(0, 1) == ""
+        assert _pb_mod._render_frames_intro(-1, 1) == ""
+
+    def test_states_frame_order(self):
+        out = _pb_mod._render_frames_intro(3, 1)
+        assert "3 张" in out
+        assert "第 1 张最早" in out
+        assert "第 3 张最晚" in out
+        # 帧序是这句的核心:不说清模型可能把"从坐到站"读成"从站到坐"
+        assert "离散采样" in out
+
+    def test_interval_from_fps(self):
+        assert "1.00 秒" in _pb_mod._render_frames_intro(2, 1)
+        assert "0.50 秒" in _pb_mod._render_frames_intro(2, 2)
+        assert "0.33 秒" in _pb_mod._render_frames_intro(2, 3)
+
+    def test_no_interval_when_fps_unknown(self):
+        """fps 取不到时省掉间隔那句 —— 宁可不给,不给一个错的数。"""
+        out = _pb_mod._render_frames_intro(3, 0)
+        assert "间隔" not in out
+        assert "3 张" in out  # 帧序那句照给
+
+
+class TestImageModePayload:
+    """build_prompt(非 fused 兜底路径)在 image 模式下换媒体块,不换其它。"""
+
+    def test_video_route_emits_frames_not_video(self):
+        with _image_mode(), patch("miloco.perception.snapshot_context.push_frames"):
+            payload = build_prompt(_video_route_packet(), OmniContext())
+        assert "video_base64" not in payload
+        assert "media_info" not in payload
+        assert len(payload["image_frames_base64"]) == 1
+        assert "下方 1 张图" in payload["image_frames_intro"]
+        # 帧块是真 JPEG(不是空串占位)
+        import base64
+
+        assert base64.b64decode(payload["image_frames_base64"][0])[:2] == b"\xff\xd8"
+
+    def test_frames_fps_comes_from_packet(self):
+        ep = _video_route_packet()
+        ep.frame_info = FrameInfo(start_timestamp=0, end_timestamp=3000, fps=4)
+        with _image_mode(), patch("miloco.perception.snapshot_context.push_frames"):
+            payload = build_prompt(ep, OmniContext())
+        assert "0.25 秒" in payload["image_frames_intro"]
+
+    def test_video_mode_unchanged(self):
+        """零回归:默认 video 档下 payload 与改动前一致。"""
+        payload = build_prompt(_video_route_packet(), OmniContext())
+        assert payload.get("video_base64")
+        assert "media_info" in payload
+        assert "image_frames_base64" not in payload
+        assert "image_frames_intro" not in payload
+
+    def test_audio_route_still_audio_in_image_mode(self):
+        """image 模式下 audio route 只是**兜底**保持音频措辞 —— 正常由
+        should_skip_for_input_mode 整窗跳过;真走到这里,发音频比发一句"下方 0 张图"正确。
+        """
+        with _image_mode():
+            payload = build_prompt(_audio_only_packet(), OmniContext())
+        assert payload.get("audio_base64")
+        assert "image_frames_base64" not in payload
+
+    def test_no_frames_falls_back_to_text_only(self, caplog):
+        """编不出帧 → 两个键都不发(不留"下方 0 张图"这种句子),并留痕。"""
+        import logging
+
+        ep = _video_route_packet()
+        ep.all_frames = []
+        with _image_mode(), patch(
+            "miloco.perception.snapshot_context.push_frames"
+        ), caplog.at_level(
+            logging.WARNING, logger="miloco.perception.engine.omni.prompt_builder"
+        ):
+            payload = build_prompt(ep, OmniContext())
+        assert "image_frames_base64" not in payload
+        assert "image_frames_intro" not in payload
+        # 空帧组是"上游某道闸失效"的信号(正常态由 gate/引擎入口的空输入闸挡住),
+        # 不留痕就只能靠人逐条读 caption 才发现模型在本窗什么都没看到。
+        assert any("image_frames_empty" in r.getMessage() for r in caplog.records)
+
+    def test_user_boundary_anchor_swaps(self):
+        """image 模式的 user 段末尾锚点必须换 —— 旧锚点写的是"无视频画面时不输出 caption",
+        图像模式下模型手里压根没有 video 块,照发等于用最高优先级指令废掉这个模式。
+        """
+        with _image_mode(), patch("miloco.perception.snapshot_context.push_frames"):
+            user_content = build_prompt(_video_route_packet(), OmniContext())["user_content"]
+        assert "帧序列" in user_content
+        assert "无视频画面时不输出 caption" not in user_content
+
+    def test_system_prompt_uses_image_role_and_principle(self):
+        with _image_mode(), patch("miloco.perception.snapshot_context.push_frames"):
+            sp = build_prompt(_video_route_packet(), OmniContext())["system_prompt"]
+        assert "连续画面（帧序列）" in sp  # _ROLE_IMAGE
+        assert "这组画面是同一段过程的离散采样" in sp  # _PRINCIPLE_IMAGE
+        # 恒不带音频 → schema 与字段说明里的音频字段一并剥掉
+        assert "speeches" not in sp
+        assert "env_sounds" not in sp
+        assert "音频理解" not in sp
+        # 无音频时撤掉输出实例(例句含 speeches/env_sounds,留着与 schema 自相矛盾)
+        assert "# 输出实例" not in sp
+        # caption 照常要求:图像模式只是换了容器,观察任务不变
+        assert "## caption" in sp
+
+
+class TestFusedImageMode:
+    """build_fused_payload 在 image 模式下的装配。"""
+
+    @staticmethod
+    def _fused(packets=None, **kwargs):
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with _image_mode(), patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="",
+        ), patch("miloco.perception.snapshot_context.push_frames"):
+            return build_fused_payload(
+                packets=packets or [_video_route_packet()],
+                context=kwargs.pop("context", OmniContext()),
+                candidates=kwargs.pop("candidates", []),
+                gallery_snapshot=kwargs.pop("gallery_snapshot", {}),
+                **kwargs,
+            )
+
+    def test_emits_image_blocks_not_video(self):
+        blocks = _multimodal_user_content(self._fused()["messages"])
+        types = [b["type"] for b in blocks]
+        assert "image_url" in types
+        assert "video_url" not in types
+        assert "input_audio" not in types  # 恒不带音频
+
+    def test_intro_precedes_first_frame(self):
+        """帧序说明必须在第一张图之前 —— 排在后面就成了马后炮,模型按图序先读了一遍。"""
+        blocks = _multimodal_user_content(self._fused()["messages"])
+        intro_idx = next(
+            i for i, b in enumerate(blocks)
+            if b["type"] == "text" and "下方 1 张图" in b.get("text", "")
+        )
+        img_idx = next(i for i, b in enumerate(blocks) if b["type"] == "image_url")
+        assert intro_idx < img_idx
+
+    def test_frame_data_uri_is_jpeg(self):
+        import base64
+
+        blocks = _multimodal_user_content(self._fused()["messages"])
+        url = next(b for b in blocks if b["type"] == "image_url")["image_url"]["url"]
+        assert url.startswith("data:image/jpeg;base64,")
+        assert base64.b64decode(url.split(",", 1)[1])[:2] == b"\xff\xd8"
+
+    def test_audio_route_untouched_by_image_mode(self):
+        """audio route 走自己的分支,image 模式不改变它(该组合由调用方整窗跳过)。"""
+        fused = self._fused(packets=[_audio_only_packet()])
+        types = [b["type"] for b in _multimodal_user_content(fused["messages"])]
+        assert "input_audio" in types
+        assert "image_url" not in types
+
+    def test_batch_video_mode_unchanged(self):
+        """零回归:不 patch 模态时仍走 mp4 分支。"""
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="",
+        ):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()], context=OmniContext(),
+                candidates=[], gallery_snapshot={},
+            )
+        types = [b["type"] for b in _multimodal_user_content(fused["messages"])]
+        assert "video_url" in types
+        assert "image_url" not in types
+
+    def test_bbox_note_wording_swaps(self):
+        """crop 生效时 bbox 说明句要说"最后一帧**画面**",不是"视频最后一帧" ——
+        图像模式下 prompt 里根本没有视频,照说会让模型去找一个不存在的对象。
+        """
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        cand = IdentityQueryItem(track_id=1, bbox_xyxy_norm=TestAdaptiveResolution._SELF_CONSISTENT_BBOX)
+        p1, p2 = TestAdaptiveResolution()._patches()
+        p3 = patch(
+            "miloco.perception.engine.omni.crop_enhance.compute_crop_region_detail",
+            return_value=((50, 50, 350, 350), "ok"),
+        )
+        with p1, p2, p3:
+            fused = self._fused(packets=[_adaptive_packet()], candidates=[cand])
+        blocks = _multimodal_user_content(fused["messages"])
+        note = next(
+            b["text"] for b in blocks
+            if b.get("type") == "text" and "bbox=(x1, y1, x2, y2)" in b.get("text", "")
+        )
+        assert "最后一帧**画面" in note
+        assert "视频" not in note
+
+    def test_crop_frames_are_what_reaches_the_model(self):
+        """crop 命中时送模型的是 **crop 帧组**,落盘产物也必须是它(push 的覆盖语义兜底)。"""
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+
+        cand = IdentityQueryItem(track_id=1, bbox_xyxy_norm=TestAdaptiveResolution._SELF_CONSISTENT_BBOX)
+        p1, p2 = TestAdaptiveResolution()._patches()
+        p3 = patch(
+            "miloco.perception.engine.omni.crop_enhance.compute_crop_region_detail",
+            return_value=((50, 50, 350, 350), "ok"),
+        )
+        pushed: list[list[bytes]] = []
+
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with _image_mode(), p1, p2, p3, patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="",
+        ), patch(
+            "miloco.perception.snapshot_context.push_frames",
+            side_effect=lambda jpegs: pushed.append(list(jpegs)),
+        ):
+            fused = build_fused_payload(
+                packets=[_adaptive_packet()], context=OmniContext(),
+                candidates=[cand], gallery_snapshot={},
+            )
+        blocks = _multimodal_user_content(fused["messages"])
+        # 只取帧序说明**之后**的图块:全景参考帧(_jpeg_block(ref_jpeg))也带 image/jpeg
+        # 前缀、且排在主画面之前,整段扫会把参考帧算进来。
+        # 认这句话里的"离散采样"(不是"张图" —— 参考帧那句"下方第一张图为全景场景参考"
+        # 也含"张图",拿它定位会把参考帧收进 sent)。
+        intro_idx = next(
+            i for i, b in enumerate(blocks)
+            if b.get("type") == "text" and "离散采样" in b.get("text", "")
+        )
+        sent = [
+            b["image_url"]["url"].split(",", 1)[1]
+            for b in blocks[intro_idx + 1:]
+            if b.get("type") == "image_url"
+        ]
+        import base64
+
+        # pushed 里最后那次即真正送模型的那组(回退路径会覆盖);它必须与消息里的图一一对应。
+        assert pushed, "crop 生效时帧组应已 push 给 artifacts"
+        assert [base64.b64encode(f).decode() for f in pushed[-1]] == sent
+        # 且送的是 crop 那一组(短边 512 的 crop 区域),不是全景帧组
+        assert len(pushed) == 1, "crop 成功后不该再编一组全景帧"
+
+
+    def test_crop_frames_empty_falls_back_to_panorama_frames(self, caplog):
+        """crop 编不出帧 → 回退全景帧组,且送模型的 **就是** 落盘的那组。
+
+        这是 push_frames 覆盖语义真正的用武之地:crop 那组先 push、回退后全景那组再 push
+        覆盖掉它。若 append,crop 那组(5 张)会与全景那组(5 张)在 artifacts 里叠成 10 张,
+        而模型手里只有 5 张。
+        """
+        import base64
+        import logging
+
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        cand = IdentityQueryItem(track_id=1, bbox_xyxy_norm=TestAdaptiveResolution._SELF_CONSISTENT_BBOX)
+        p1, p2 = TestAdaptiveResolution()._patches()
+        p3 = patch(
+            "miloco.perception.engine.omni.crop_enhance.compute_crop_region_detail",
+            return_value=((50, 50, 350, 350), "ok"),
+        )
+        real_encode = _pb_mod._encode_frames_as_jpegs
+        calls: list[int] = []
+
+        def first_call_fails(frames, short_edge=_pb_mod._VIDEO_SHORT_EDGE):
+            calls.append(len(frames))
+            if len(calls) == 1:  # 第 1 次 = crop 那组
+                return []
+            return real_encode(frames, short_edge=short_edge)
+
+        pushed: list[list[bytes]] = []
+        with _image_mode(), p1, p2, p3, patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="",
+        ), patch.object(
+            _pb_mod, "_encode_frames_as_jpegs", side_effect=first_call_fails
+        ), patch(
+            "miloco.perception.snapshot_context.push_frames",
+            side_effect=lambda jpegs: pushed.append(list(jpegs)),
+        ), caplog.at_level(
+            logging.INFO, logger="miloco.perception.engine.omni.prompt_builder"
+        ):
+            fused = build_fused_payload(
+                packets=[_adaptive_packet()], context=OmniContext(),
+                candidates=[cand], gallery_snapshot={},
+            )
+        assert len(calls) == 2, "crop 失败后应重编一组全景帧"
+        assert any(
+            "event=adaptive_crop_fallback reason=frames_empty" in r.getMessage()
+            for r in caplog.records
+        ), "crop 因空帧组回退必须留痕(否则分辨率档静默失效无从发现)"
+        blocks = _multimodal_user_content(fused["messages"])
+        intro_idx = next(
+            i for i, b in enumerate(blocks)
+            if b.get("type") == "text" and "离散采样" in b.get("text", "")
+        )
+        assert f"下方 {calls[1]} 张图" in blocks[intro_idx]["text"]
+        sent = [
+            b["image_url"]["url"].split(",", 1)[1]
+            for b in blocks[intro_idx + 1:]
+            if b.get("type") == "image_url"
+        ]
+        # 只有全景那组被 push(空组的 _encode_frames_as_jpegs 失败路径不 push)
+        assert len(pushed) == 1
+        assert [base64.b64encode(f).decode() for f in pushed[0]] == sent
+
+
+class TestBuildQueryPromptImageMode:
+    """主动查询路径在 image 模式下同样送帧组 —— 换只吃图的 VLM 后这条路径第一个失败。"""
+
+    def test_sends_frames_not_video(self):
+        with _image_mode(), patch("miloco.perception.snapshot_context.push_frames"):
+            payload = build_query_prompt([_video_route_packet()], "现在谁在家？")
+        assert payload["video_base64"] is None
+        assert payload["media_info"] is None
+        assert len(payload["image_frames_base64"]) == 1
+        assert "下方 1 张图" in payload["image_frames_intro"]
+        assert "连续画面（帧序列）" in payload["system_prompt"]
+
+    def test_video_mode_unchanged(self):
+        payload = build_query_prompt([_video_route_packet()], "现在谁在家？")
+        assert payload["video_base64"]
+        assert "image_frames_base64" not in payload
+
+    def test_no_frames_warns_and_omits_both_keys(self, caplog):
+        """编不出帧 → 两键都不发、走 text-only,并留一条 route=query 的痕。"""
+        import logging
+
+        ep = _video_route_packet()
+        ep.all_frames = []
+        with _image_mode(), patch(
+            "miloco.perception.snapshot_context.push_frames"
+        ), caplog.at_level(
+            logging.WARNING, logger="miloco.perception.engine.omni.prompt_builder"
+        ):
+            payload = build_query_prompt([ep], "现在谁在家？")
+        assert "image_frames_base64" not in payload
+        assert "image_frames_intro" not in payload
+        assert any("route=query" in r.getMessage() for r in caplog.records)

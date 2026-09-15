@@ -4,11 +4,12 @@
 """有意义事件 Service 层.
 
 通过 `mgr.events_service` lazy 单例持有(对齐 register_session_manager 套路).
-对接两个 endpoint:
+对接这些 endpoint:
 - `GET /api/events`         → list_events
-- `GET /api/events/{event_id}/clip/{device_id}` → locate_clip → FileResponse
-- `GET /api/events/{event_id}/ref/{device_id}`  → locate_ref → FileResponse
-- `GET /api/events/{event_id}/crop/{device_id}` → read_crop_meta → JSON
+- `GET /api/events/{event_id}/clip/{device_id}`         → locate_clip → FileResponse
+- `GET /api/events/{event_id}/frame/{device_id}/{index}` → locate_frame → FileResponse
+- `GET /api/events/{event_id}/ref/{device_id}`          → locate_ref → FileResponse
+- `GET /api/events/{event_id}/crop/{device_id}`         → read_crop_meta → JSON
 """
 
 from __future__ import annotations
@@ -26,8 +27,10 @@ from pydantic import ValidationError
 from miloco.perception.schema import EventCropMeta, MeaningfulEvent
 from miloco.perception.snapshot_writer import (
     CLIP_CANDIDATES,
+    count_frames,
     get_snapshot_root,
     locate_clip_file,
+    locate_frame_file,
     region_slug,
 )
 from miloco.utils.paths import miloco_home
@@ -178,6 +181,38 @@ class EventsService:
             return ("found", path, row["timestamp"])
         return ("gone", None, None)
 
+    async def locate_frame(
+        self, event_id: str, device_id: str, index: int
+    ) -> tuple[SnapshotStatus, Path | None, int | None]:
+        """定位指定 event × device 的第 index 张帧 JPEG(仅图像推理模式事件有).
+
+        index 0-based,按时间先后 —— 与落盘文件名 frame_%03d.jpg 的序号一致,也与模型
+        收到的那组帧同序(frame_counts 由同一批文件数出来,前端按它遍历).
+
+        与 locate_clip / locate_ref 同款状态语义:
+        - ("found", Path, timestamp_ms):帧存在 → 路由层 FileResponse(image/jpeg);
+          timestamp_ms 是 meaningful_events.timestamp,用途同 locate_clip —— 路由层拼按
+          事件时间命名的下载文件名
+        - ("gone", None, None):event 存在且 device_id 合法,但该序号的帧不在盘上
+          (非图像模式事件 / index 超出本窗帧数 / 已被 cleanup 清)
+        - ("not_found", None, None):event 不存在 / device_id 不在 device_ids 内
+
+        越界与已过期归同一档(410):两者的可观察事实相同 —— 这台设备这个序号上没东西,
+        且都是"列表过期了、前端重新拉一次即可"。前端本就不会主动越界请求(它按
+        frame_counts 遍历),走到这里只可能是 cleanup 在列表与请求之间动过盘。
+        """
+        row = self._dao.get_by_id(event_id)
+        if row is None:
+            return ("not_found", None, None)
+        if device_id not in row["device_ids"]:
+            return ("not_found", None, None)
+        path = locate_frame_file(
+            get_snapshot_root() / event_id / region_slug(device_id), index
+        )
+        if path is not None:
+            return ("found", path, row["timestamp"])
+        return ("gone", None, None)
+
     async def read_crop_meta(
         self, event_id: str, device_id: str
     ) -> tuple[CropMetaStatus, EventCropMeta | None]:
@@ -273,25 +308,39 @@ class EventsService:
         return "unreadable" if ref.exists() else "gone"
 
     @staticmethod
-    def _probe_clip_kind(snapshot_root: Path, event_id: str, device_ids: list[str]) -> str | None:
-        """Stat 落盘文件后缀,推断 clip 容器类型.
+    def _probe_media(
+        snapshot_root: Path, event_id: str, device_ids: list[str]
+    ) -> tuple[str | None, dict[str, int]]:
+        """Stat 落盘文件,推断本事件的产物类型 + 逐帧数量.
 
-        多 device 时取第一个找到 clip 文件的 device 的 kind(同次推理:同 batch
-        要么全走 video 路径,要么全走 audio-only 路径,_is_audio_only 是 batch 级
-        共识 — 见 prompt_builder._is_audio_only;所以多 device 间 kind 一致,
-        取第一个有效结果即可).
+        多 device 时取第一个找到产物的 device 的 kind(同次推理:同 batch 要么全走 video
+        路径、要么全走 audio-only 路径(_is_audio_only 是 batch 级共识 — 见
+        prompt_builder._is_audio_only),要么全走图像帧(input_mode 是 batch 级共识),
+        所以多 device 间 kind 一致,取第一个有效结果即可).
 
-        Returns: "mp4" / "m4a" / None(未落盘 / 已被 cleanup 清掉).
+        frame_counts 则**逐 device** 数(每台摄像头各自编码自己的一组帧,张数不必相同).
+
+        Returns:
+            (kind, frame_counts):kind ∈ {"mp4","m4a","frames",None}(None = 未落盘 /
+            已被 cleanup 清掉);frame_counts 仅 kind == "frames" 时非空.
         """
-        if not device_ids:
-            return None
+        frame_counts: dict[str, int] = {}
+        kind: str | None = None
         for did in device_ids:
             device_dir = snapshot_root / event_id / region_slug(did)
             for filename in CLIP_CANDIDATES:
                 path = device_dir / filename
                 if path.exists():
-                    return path.suffix[1:]
-        return None
+                    if kind is None:
+                        kind = path.suffix[1:]
+                    break
+            else:
+                n = count_frames(device_dir)
+                if n:
+                    frame_counts[did] = n
+                    if kind is None:
+                        kind = "frames"
+        return kind, frame_counts
 
     _UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
@@ -332,12 +381,14 @@ class EventsService:
     ) -> MeaningfulEvent:
         """DAO 行(dict)→ Pydantic 模型;过滤掉内部字段(payload_json/schema_version/created_at).
 
-        clip_kind 由 stat 落盘文件后缀动态计算(50 行列表 = 50×1 stat syscall,
+        clip_kind / frame_counts 由 stat 落盘文件动态计算(50 行列表 = 50×1 stat syscall,
         ms 级开销可接受;避免 schema migration).
         """
         device_ids = row["device_ids"]
         event_id = row["id"]
-        clip_kind = EventsService._probe_clip_kind(snapshot_root, event_id, device_ids)
+        clip_kind, frame_counts = EventsService._probe_media(
+            snapshot_root, event_id, device_ids
+        )
         has_ref = probe_has_ref(snapshot_root, event_id, device_ids)
         has_trace = (snapshot_root / event_id / "omni_trace.json.gz").exists()
         fb = feedback_index.get(event_id)
@@ -359,5 +410,6 @@ class EventsService:
             feedback_pack_path=feedback_pack_path,
             feedback_pack_size=feedback_pack_size,
             clip_kind=clip_kind,
+            frame_counts=frame_counts,
             has_ref=has_ref,
         )

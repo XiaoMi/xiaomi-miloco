@@ -25,8 +25,8 @@ from importlib.metadata import version as _get_pkg_version
 from pathlib import Path
 
 from miloco.perception.snapshot_writer import (
-    CLIP_CANDIDATES,
     get_snapshot_root,
+    list_artifact_files,
     region_slug,
 )
 from miloco.utils.paths import miloco_home
@@ -168,13 +168,13 @@ def build_feedback_pack(
     for did in device_ids:
         slug = region_slug(did)
         clip_dir = event_dir / slug
-        found = False
-        for candidate in CLIP_CANDIDATES:
-            if (clip_dir / candidate).exists():
-                components["clips_found"].append(f"{slug}/{candidate}")
-                found = True
-                break
-        if not found:
+        # 产物可能是 clip.mp4 / clip.m4a,也可能是图像推理模式的一整组 frame_*.jpg ——
+        # list_artifact_files 两种都认.键名仍叫 clips_*(包格式与前端都按它读),
+        # 图像模式下装的就是那一组帧.
+        found = list_artifact_files(clip_dir)
+        if found:
+            components["clips_found"].extend(f"{slug}/{name}" for name in found)
+        else:
             components["clips_missing"].append(slug)
         # Smart Crop 参考帧(与 clip 同目录);非 crop 事件无此文件,静默跳过
         if (clip_dir / "ref.jpg").exists():
@@ -298,13 +298,11 @@ def build_on_demand_feedback_pack(
     for did in clip_dids:
         slug = region_slug(did)
         clip_dir = event_dir / slug
-        found = False
-        for candidate in CLIP_CANDIDATES:
-            if (clip_dir / candidate).exists():
-                components["clips_found"].append(f"{slug}/{candidate}")
-                found = True
-                break
-        if not found:
+        # 同 build_feedback_pack:clip 与图像推理的整组 frame_*.jpg 都算产物.
+        found = list_artifact_files(clip_dir)
+        if found:
+            components["clips_found"].extend(f"{slug}/{name}" for name in found)
+        else:
             components["clips_missing"].append(slug)
 
     try:

@@ -1,12 +1,14 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""有意义事件 artifacts(clip + omni trace)落盘 + 清理工具.
+"""有意义事件 artifacts(clip / 帧 + omni trace)落盘 + 清理工具.
 
 磁盘路径:
 - per-device clip: `{snapshot_root}/{event_id}/{device_id_slug}/clip.{mp4|m4a}`
   (一次推理 1 行 event,参与的每个摄像头各落 1 个;字节级 = omni 上传给 LLM 的内容,
    零重编;`device_id_slug` 通过 region_slug 做 URL-safe 化)
+- per-device 图像推理帧: `{snapshot_root}/{event_id}/{device_id_slug}/frame_000.jpg`…
+  (仅 input_mode="image";与 clip 互斥 —— 同窗只走一种模态。字节级 = omni 所见的同一组帧)
 - per-device 参考帧: `{snapshot_root}/{event_id}/{device_id_slug}/ref.jpg`
   (仅 Smart Crop 模式;与 crop 视频同附上送 LLM 的整帧上下文,字节级 = omni 所见)
 - 事件级 trace: `{snapshot_root}/{event_id}/omni_trace.json.gz`
@@ -74,6 +76,52 @@ def locate_clip_file(device_dir: Path) -> tuple[Path, str] | None:
     return None
 
 
+# 图像推理路径产物:per-device 逐帧 JPEG,`frame_000.jpg` / `frame_001.jpg`…(3 位补零)。
+# 补零不是装饰 —— 帧序即时间序,文件名要能直接按字典序排出来;前缀 frame_ 把它跟同目录的
+# ref.jpg 区分开。落盘 / 事件帧端点 / 主动查询帧端点 / 反馈打包四处同源。
+FRAME_PREFIX = "frame_"
+FRAME_SUFFIX = ".jpg"
+FRAME_MEDIA_TYPE = "image/jpeg"
+
+
+def frame_filename(index: int) -> str:
+    """帧序号 → 落盘文件名(3 位补零,保证字典序 == 帧序)。"""
+    return f"{FRAME_PREFIX}{index:03d}{FRAME_SUFFIX}"
+
+
+def locate_frame_file(device_dir: Path, index: int) -> Path | None:
+    """定位单张帧文件;不存在返 None(调用方据此区分 404 / 410)."""
+    path = device_dir / frame_filename(index)
+    return path if path.exists() else None
+
+
+def list_artifact_files(device_dir: Path) -> list[str]:
+    """列出 device 目录下的产物**文件名**(clip.{mp4|m4a} 或整组 frame_*.jpg).
+
+    clip 与 frames 互斥(同窗只走一种模态,见 OmniEventArtifacts),故至多命中一边.
+    反馈打包用这个统一取产物:只认 CLIP_CANDIDATES 的旧口径在图像模式下会把整组帧
+    判成 missing、一张都不进包,而帧才是那次推理真正送进模型的东西.
+    """
+    result = locate_clip_file(device_dir)
+    if result is not None:
+        return [result[0].name]
+    return [frame_filename(i) for i in range(count_frames(device_dir))]
+
+
+def count_frames(device_dir: Path) -> int:
+    """数 device 目录下**连号**的帧张数(从 0 数到第一个缺号为止).
+
+    帧文件名密排 0..N-1(见 _save_frames),故不必 glob 整个目录再排序 —— 数到缺号即止,
+    天然跳过同目录里的 ref.jpg 等无关文件,也不会被残留的散落文件干扰.
+
+    图像模式与 clip 互斥,所以只有图像模式事件的 device 目录才有帧;其余返 0.
+    """
+    n = 0
+    while (device_dir / frame_filename(n)).exists():
+        n += 1
+    return n
+
+
 def clip_download_name(timestamp_ms: int, suffix: str, prefix: str = "clip") -> str:
     # prefix 参数化是为让参考帧端点(ref-*.jpg)复用同一时间格式,而不是各写一份 strftime
     # ——两处下载名要么一起改、要么一起不改,不能只改一处让用户导出的 clip 与 ref 名字错开。
@@ -121,26 +169,29 @@ def check_disk_space(root: Path, min_free_mb: int) -> bool:
 
 
 def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> list[str]:
-    """落盘一次 omni 触发事件的所有产物(clip 字节 + omni trace).
+    """落盘一次 omni 触发事件的所有产物(clip / 帧字节 + omni trace).
 
     路径:
     - per-device clip: `{snapshot_root}/{event_id}/{region_slug(device_id)}/clip.{mp4|m4a}`
+    - per-device 帧: `{snapshot_root}/{event_id}/{region_slug(device_id)}/frame_000.jpg`…(仅图像模式)
     - per-device 参考帧: `{snapshot_root}/{event_id}/{region_slug(device_id)}/ref.jpg`(仅 Smart Crop)
     - 事件级 trace: `{snapshot_root}/{event_id}/omni_trace.json.gz`
 
     Args:
         event_id: 事件 UUID
-        artifacts: 含 clips / trace / gallery / ref_frames 的容器.四者全空时返空列表、
-            不落任何文件(只有 ref_frames 非空时照样落 ref.jpg).
+        artifacts: 含 clips / frames / trace / gallery / ref_frames 的容器.五者全空时返空
+            列表、不落任何文件(只有 ref_frames 非空时照样落 ref.jpg).
+            clips 与 frames 互斥(同窗只走一种模态,见 OmniEventArtifacts).
 
     Returns:
-        成功落盘的 device_id 列表;trace / gallery / ref 均不计入.
+        成功落盘的 device_id 列表(clip 或帧,谁落成算谁);trace / gallery / ref 均不计入.
         len(result) 等价于原 snapshot_count.
 
     Caller 责任:调用前已 check_disk_space 确认有空间;本函数遇 OSError 静默跳过.
     """
     if (
         not artifacts.clips
+        and not artifacts.frames
         and artifacts.trace is None
         and not artifacts.gallery
         and not artifacts.ref_frames
@@ -155,14 +206,20 @@ def save_event_artifacts(event_id: str, artifacts: OmniEventArtifacts) -> list[s
         logger.error("Failed to create event dir %s: %s", event_dir, e)
         return []
 
-    clip_dids = _save_clips(event_dir, artifacts.clips)
+    saved_dids = _save_clips(event_dir, artifacts.clips)
+    if artifacts.frames:
+        # 按 first-seen 去重:clips 与 frames 互斥,同一 device 正常不会两边都命中;
+        # 真并存时也不能让 snapshot_count 把同一台设备数两次(len(saved_dids) 就是它).
+        for device_id in _save_frames(event_dir, artifacts.frames):
+            if device_id not in saved_dids:
+                saved_dids.append(device_id)
     if artifacts.ref_frames:
         _save_ref_frames(event_dir, artifacts.ref_frames)
     if artifacts.trace is not None:
         _save_trace(event_dir, artifacts.trace)
     if artifacts.gallery:
         _save_gallery(event_dir, artifacts.gallery)
-    return clip_dids
+    return saved_dids
 
 
 def _save_clips(
@@ -194,6 +251,49 @@ def _save_clips(
         except OSError as e:
             logger.error("Failed to write %s: %s", path, e)
             continue
+    return saved
+
+
+def _save_frames(event_dir: Path, frames: dict[str, list[bytes]]) -> list[str]:
+    """落 per-device 逐帧 JPEG 到 `{device_slug}/frame_000.jpg`…(图像推理模式产物).
+
+    整组全成才计入:任一张写失败就删掉该 device 本已写下的帧、不 appends 到返回值 ——
+    半组帧留在盘上比一张不留更坏:读侧按连号数帧(count_frames),半组会被数成一个
+    "看似完整"的 N,而模型手里那组并不是这个 N(与 _encode_frames_as_jpegs 全批成
+    功才 push 同一纪律).
+
+    空列表 → 跳过该 device(与 _save_clips 对空字节的处置一致).
+
+    Returns:
+        成功落盘的 device_id 列表.
+    """
+    saved: list[str] = []
+    for device_id, jpegs in frames.items():
+        if not jpegs:
+            continue
+        device_dir = event_dir / region_slug(device_id)
+        try:
+            device_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.error("Failed to create device dir %s: %s", device_dir, e)
+            continue
+        written: list[Path] = []
+        for i, jpeg in enumerate(jpegs):
+            path = device_dir / frame_filename(i)
+            try:
+                path.write_bytes(jpeg)
+                written.append(path)
+            except OSError as e:
+                logger.error("Failed to write %s: %s", path, e)
+                break
+        if len(written) != len(jpegs):
+            for path in written:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass  # 回滚尽力而为:删不掉也要拦住它被计入
+            continue
+        saved.append(device_id)
     return saved
 
 

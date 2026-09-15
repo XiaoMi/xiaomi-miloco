@@ -3,9 +3,13 @@
 
 """Integration tests for events_router(D3-T10).
 
-用 FastAPI TestClient 测两个 endpoint:
+用 FastAPI TestClient 测以下 endpoint:
 - GET /api/events
 - GET /api/events/{event_id}/clip/{device_id}
+- GET /api/events/{event_id}/ref/{device_id}
+- GET /api/events/{event_id}/frame/{device_id}/{index}(图像推理模式产物)
+- GET /api/events/{event_id}/crop/{device_id}
+- GET /api/events/stream
 
 verify_token 在 settings.server.token="" 时自动 bypass(默认值,测试无需鉴权).
 """
@@ -325,6 +329,74 @@ class TestGetRefEndpoint:
         cd = resp.headers["content-disposition"]
         assert cd.startswith("inline")
         assert re.search(r'filename="ref-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.jpg"', cd), cd
+
+
+class TestGetFrameEndpoint:
+    """GET /events/{id}/frame/{device_id}/{index} — 图像推理模式送进 omni 的逐帧 JPEG."""
+
+    @staticmethod
+    def _save_frames(eid: str, device_id: str, jpegs: list[bytes]) -> None:
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        save_event_artifacts(eid, OmniEventArtifacts(frames={device_id: jpegs}))
+
+    def test_event_not_found_404(self, client):
+        resp = client.get("/api/events/nonexistent/frame/cam_a/0")
+        assert resp.status_code == 404
+
+    def test_device_not_in_event_404(self, client, dao):
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        resp = client.get(f"/api/events/{eid}/frame/cam_kitchen_01/0")
+        assert resp.status_code == 404
+
+    def test_event_exists_but_no_frames_410(self, client, dao):
+        """视频路径事件(盘上是 clip.mp4)没有帧 → 410,前端据此不渲染帧组."""
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        resp = client.get(f"/api/events/{eid}/frame/cam_living_01/0")
+        assert resp.status_code == 410
+
+    def test_index_out_of_range_410(self, client, dao):
+        """帧数之外 → 410(越界与已过期同一档,前端重新拉一次列表即可)."""
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        self._save_frames(eid, "cam_living_01", [b"\xff\xd8\xff\xe0" + b"\x00" * 40] * 2)
+        assert client.get(f"/api/events/{eid}/frame/cam_living_01/1").status_code == 200
+        assert client.get(f"/api/events/{eid}/frame/cam_living_01/2").status_code == 410
+
+    def test_negative_index_422(self, client, dao):
+        """index 声明为 ge=0 —— 负号不该落到 locate_frame 里当文件名拼."""
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        resp = client.get(f"/api/events/{eid}/frame/cam_living_01/-1")
+        assert resp.status_code == 422
+
+    def test_non_integer_index_422(self, client, dao):
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        resp = client.get(f"/api/events/{eid}/frame/cam_living_01/abc")
+        assert resp.status_code == 422
+
+    def test_found_returns_jpeg(self, client, dao):
+        jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 200
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        self._save_frames(eid, "cam_living_01", [b"first-frame", jpg])
+        resp = client.get(f"/api/events/{eid}/frame/cam_living_01/1")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "image/jpeg"
+        assert resp.content == jpg
+        # inline 保证页面内直接显示;filename 按事件本地时间命名,并带上帧序号 ——
+        # 同一事件存多张时只按时间命名会互相覆盖。
+        cd = resp.headers["content-disposition"]
+        assert cd.startswith("inline")
+        assert re.search(
+            r'filename="frame001-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}\.jpg"', cd
+        ), cd
+
+    def test_index_zero_frame_filename_prefix(self, client, dao):
+        """第 0 张的下载名前缀是 frame000 —— 0 不能被当成"没传"省掉."""
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        self._save_frames(eid, "cam_living_01", [b"\xff\xd8\xff\xe0" + b"\x00" * 40])
+        resp = client.get(f"/api/events/{eid}/frame/cam_living_01/0")
+        assert resp.status_code == 200
+        assert re.search(r'filename="frame000-', resp.headers["content-disposition"])
 
 
 class TestGetCropMetaEndpoint:

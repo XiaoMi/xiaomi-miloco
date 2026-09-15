@@ -1,7 +1,8 @@
 """Tests for Omni Layer — Orchestrator."""
 
 import json
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
@@ -16,6 +17,7 @@ from miloco.perception.engine.types import (
     AudioType,
     FrameInfo,
     FrameResolution,
+    GateTrigger,
     IdentityPacket,
     IdentityTarget,
     MotionState,
@@ -205,3 +207,128 @@ class TestStreamLoopbackAbort:
         assert output.skipped is True
         # break 应该发生在复读累计到 10 次 ngram 附近（约 prefix + 30~50 字符）
         assert len(received_chars) < len(prefix) + len(loop_part)
+
+
+# =============================================================================
+# 图像推理模式:audio route 窗口整窗跳过
+#
+# 判据在 prompt_builder.should_skip_for_input_mode(那里有独立单测);此处只钉
+# omni.py 各调用点的**副作用契约** —— 尤其 fused 那条:候选已被 take_fused_pending
+# 取走(inflight 置 True),跳过时必须按既有失败语义回填,否则那些 track 永久挂住。
+# =============================================================================
+
+
+def _pending_with(n_candidates: int):
+    """identity_engine.take_fused_pending() 的返回值替身。"""
+    pending = SimpleNamespace(
+        candidates=[
+            SimpleNamespace(track_id=i, bbox_xyxy_norm=(0, 0, 10, 10))
+            for i in range(n_candidates)
+        ],
+        gallery_snapshot={},
+    )
+    return pending
+
+
+def _fake_identity_engine(n_candidates: int):
+    eng = MagicMock()
+    eng.take_fused_pending.return_value = _pending_with(n_candidates)
+    eng.deliver_fused_failure = AsyncMock()
+    return eng
+
+
+def _audio_only_edge_packet() -> IdentityPacket:
+    """零帧 + 音频过闸 = audio route(见 prompt_builder._resolve_route)。"""
+    ep = _mock_edge_packet()
+    ep.all_frames = []
+    ep.frames = []
+    ep.audio_analysis = AudioAnalysis(
+        type=AudioType.SPEECH, is_urgent=True, energy_level=0.9
+    )
+    ep.trigger = GateTrigger(
+        visual_changed=False,
+        visual_change_score=0.05,
+        audio_active=True,
+        audio_energy_level=0.6,
+    )
+    return ep
+
+
+@pytest.mark.asyncio
+async def test_run_omni_skips_without_calling_model():
+    """跳过 = 一次调用都不发(不是发一次注定空转的请求)。"""
+    ep = _audio_only_edge_packet()
+    with patch(
+        "miloco.perception.engine.omni.omni.should_skip_for_input_mode",
+        return_value=True,
+    ), patch(
+        "miloco.perception.engine.omni.omni.call_omni",
+        new_callable=AsyncMock,
+    ) as call:
+        output = await run_omni(ep, OmniContext(), OmniConfig(api_key="k"))
+    assert output.skipped is True
+    call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_omni_fused_releases_candidates_on_skip():
+    """fused 跳过时必须回填候选 —— 候选已 take 走(inflight=True),不回填就永久挂住:
+    _gc_dead_tracks 跳过 inflight、needs_omni_call 也不再派发它们。
+    """
+    from miloco.perception.engine.omni.omni import run_omni_fused
+
+    eng = _fake_identity_engine(n_candidates=2)
+    with patch(
+        "miloco.perception.engine.omni.omni.should_skip_for_input_mode",
+        return_value=True,
+    ), patch(
+        "miloco.perception.engine.omni.omni._call_omni_messages",
+        new_callable=AsyncMock,
+    ) as call:
+        output = await run_omni_fused(
+            [_audio_only_edge_packet()], OmniContext(), OmniConfig(api_key="k"), eng
+        )
+    assert output.skipped is True
+    eng.deliver_fused_failure.assert_awaited_once()
+    call.assert_not_awaited()  # 跳过即不发请求
+
+
+@pytest.mark.asyncio
+async def test_run_omni_fused_skip_without_candidates_skips_backfill():
+    """无候选 → 没有挂住的 track 要放,不必多调一次回填。"""
+    from miloco.perception.engine.omni.omni import run_omni_fused
+
+    eng = _fake_identity_engine(n_candidates=0)
+    with patch(
+        "miloco.perception.engine.omni.omni.should_skip_for_input_mode",
+        return_value=True,
+    ), patch(
+        "miloco.perception.engine.omni.omni._call_omni_messages",
+        new_callable=AsyncMock,
+    ):
+        output = await run_omni_fused(
+            [_audio_only_edge_packet()], OmniContext(), OmniConfig(api_key="k"), eng
+        )
+    assert output.skipped is True
+    eng.deliver_fused_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_omni_stream_skip_fires_no_early_callbacks():
+    """流式跳过时 early callbacks 一个都不触发 —— 该窗口没有任何可报内容。"""
+    from miloco.perception.engine.omni.omni import run_omni_stream
+
+    on_speeches = AsyncMock()
+    with patch(
+        "miloco.perception.engine.omni.omni.should_skip_for_input_mode",
+        return_value=True,
+    ), patch(
+        "miloco.perception.engine.omni.omni._stream_and_parse", new_callable=AsyncMock
+    ) as stream:
+        output = await run_omni_stream(
+            _audio_only_edge_packet(), OmniContext(), OmniConfig(api_key="k"),
+            on_early_speeches=on_speeches,
+        )
+    assert output.skipped is True
+    stream.assert_not_awaited()
+    on_speeches.assert_not_awaited()

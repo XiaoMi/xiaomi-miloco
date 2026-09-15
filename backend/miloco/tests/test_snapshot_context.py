@@ -5,6 +5,7 @@
 
 覆盖:
 - scope 内 push_clip_bytes 进 artifacts.clips(kind 区分 mp4/m4a)
+- scope 内 push_frames 进 artifacts.frames(图像推理模式,整组覆盖写)
 - scope 内 push_omni_trace 累积 artifacts.trace.calls
 - scope 外 push 静默 no-op
 - 无 device_ctx push_clip_bytes 静默 no-op
@@ -31,6 +32,7 @@ from miloco.perception.snapshot_context import (
     event_artifacts_scope,
     push_clip_bytes,
     push_crop_meta,
+    push_frames,
     push_omni_trace,
     push_ref_frame,
 )
@@ -101,6 +103,84 @@ def test_scope_exit_resets():
         reset_device_context(t)
     # artifacts.clips 没被填(scope 内本来就没 push)
     assert artifacts.clips == {}
+
+
+# ─── push_frames(图像推理模式)───────────────────────────────────────────────
+
+
+def test_push_frames_collects_per_device():
+    """scope 内 push_frames 按 device_id 分组写入 artifacts.frames,整组保序."""
+    artifacts = OmniEventArtifacts()
+    with event_artifacts_scope(artifacts):
+        t1 = set_device_context(DeviceContext(device_trace_id="t1", device_id="cam_a", room_name="r"))
+        try:
+            push_frames([b"a0", b"a1", b"a2"])
+        finally:
+            reset_device_context(t1)
+
+        t2 = set_device_context(DeviceContext(device_trace_id="t2", device_id="cam_b", room_name="r"))
+        try:
+            push_frames([b"b0"])
+        finally:
+            reset_device_context(t2)
+
+    assert artifacts.frames == {"cam_a": [b"a0", b"a1", b"a2"], "cam_b": [b"b0"]}
+
+
+def test_push_frames_overwrites_not_appends():
+    """覆盖语义:Smart Crop 回退重编时,只留最后那组(即真正送模型的那组).
+
+    若改成 append,回退路径会留下 crop N 张 + 全景 N 张共 2N 张,而模型手里只有 N 张
+    —— 落盘产物与推理输入错位,复盘会误判。
+    """
+    artifacts = OmniEventArtifacts()
+    with event_artifacts_scope(artifacts):
+        t = set_device_context(DeviceContext(device_trace_id="t", device_id="cam_a", room_name="r"))
+        try:
+            push_frames([b"crop-0", b"crop-1"])  # 先编 crop 那组
+            push_frames([b"pano-0", b"pano-1"])  # 回退后重编全景
+        finally:
+            reset_device_context(t)
+
+    assert artifacts.frames["cam_a"] == [b"pano-0", b"pano-1"]
+
+
+def test_push_frames_empty_list_keeps_previous():
+    """空列表静默跳过 —— 不能把上一窗的帧留在 artifacts 里冒充本窗."""
+    artifacts = OmniEventArtifacts()
+    with event_artifacts_scope(artifacts):
+        t = set_device_context(DeviceContext(device_trace_id="t", device_id="cam_a", room_name="r"))
+        try:
+            push_frames([])
+        finally:
+            reset_device_context(t)
+
+    assert artifacts.frames == {}
+
+
+def test_push_frames_noop_without_scope_or_ctx():
+    """无 scope / 无 device_ctx → 静默 no-op,不抛(同 push_clip_bytes)."""
+    push_frames([b"x"])  # 无 scope
+
+    artifacts = OmniEventArtifacts()
+    with event_artifacts_scope(artifacts):
+        push_frames([b"x"])  # 有 scope 但 device_ctx 未 set
+    assert artifacts.frames == {}
+
+
+def test_push_frames_copies_input_list():
+    """存的是副本:调用方之后复用/清空那个 list 不该改到已收集的产物."""
+    artifacts = OmniEventArtifacts()
+    src = [b"f0", b"f1"]
+    with event_artifacts_scope(artifacts):
+        t = set_device_context(DeviceContext(device_trace_id="t", device_id="cam_a", room_name="r"))
+        try:
+            push_frames(src)
+            src.clear()
+        finally:
+            reset_device_context(t)
+
+    assert artifacts.frames["cam_a"] == [b"f0", b"f1"]
 
 
 def test_push_omni_trace_accumulates():

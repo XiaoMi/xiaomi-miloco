@@ -86,6 +86,16 @@ perception:
       fps: 3
       omni_fps: 1
       video_short_edge: 512
+      # input_mode —— 送 omni 的模态: video = 编成 mp4 视频(默认), image = 编成一组 JPEG 帧。
+      #   「图像推理」是为兼容只吃图像输入的 VLM(部分模型不收 video_url 块)。两种模式下
+      #   **帧源与帧数完全一致**(同一批 all_frames、同一个 video_short_edge 网格),只是容器
+      #   从 mp4 换成逐帧 JPEG —— 故切换模式不改变模型看到的时间范围与分辨率。
+      #   image 模式恒不带音频(image 块之外不再发 input_audio): 对应的 speeches / env_sounds
+      #   一并从 schema 剥掉(复用 has_audio=False 既有通道,不是另造机制);因此**语音指令类
+      #   事件在 image 模式下不会产生**。只有声音、没有画面的窗口(audio route)在 image 模式
+      #   下无可发内容,整个跳过。
+      #   热读、免重启: 每窗口现读,同 video_short_edge 的生效方式。
+      input_mode: "video"
     # Smart Crop(智能裁切增强): 推理前定向裁切活动区域, 送更高等效分辨率的局部视频 + 全景参考帧。
     # 与 video_short_edge 正交 —— 裁不裁看这里, 多清晰看 video_short_edge; crop 视频等比放到
     # 逐轴贴住同档全景画面、参考帧只缩不放, 都跟着用户档走。热读、免重启。

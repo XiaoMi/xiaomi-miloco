@@ -41,6 +41,7 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_prompt,
     build_stream_prompt,
     format_person_label,
+    should_skip_for_input_mode,
 )
 from miloco.perception.engine.omni.provider import get_adapter
 from miloco.perception.engine.omni.response_parser import (
@@ -93,6 +94,12 @@ async def run_omni(
     edge_packet: IdentityPacket, context: OmniContext, config: OmniConfig
 ) -> OmniOutput:
     """Run Omni layer: build prompt → call model → parse response."""
+    # 图像推理模式下的 audio route 窗口(零帧 + 音频过闸):该模式不带音频、又没有画面,
+    # 送过去只剩时间 + 房间名。整窗跳过而非发一次注定空转的调用(见 prompt_builder 里
+    # should_skip_for_input_mode 的取舍)。skipped=True 在 _merge_results 里即"本设备本轮
+    # 不贡献任何输出",与解析失败走的是同一条既有语义。
+    if should_skip_for_input_mode([edge_packet]):
+        return OmniOutput(skipped=True)
     payload = build_prompt(edge_packet, context)
     raw_response = await call_omni(payload, config)
     output = parse_omni_response(raw_response, _rule_name_to_id(context))
@@ -104,6 +111,10 @@ async def run_omni_batch(
     edge_packets: list[IdentityPacket], context: OmniContext, config: OmniConfig
 ) -> OmniOutput:
     """Run Omni layer for multiple devices in the same room."""
+    # 同 run_omni 的图像模式跳过;batch 语义由 should_skip_for_input_mode 内部的
+    # _resolve_route 决定(全部 packet 都满足 audio-only 才算 audio route)。
+    if should_skip_for_input_mode(edge_packets):
+        return OmniOutput(skipped=True)
     payload = build_batch_prompt(edge_packets, context)
     raw_response = await call_omni(payload, config)
     output = parse_omni_response(raw_response, _rule_name_to_id(context))
@@ -139,6 +150,22 @@ async def run_omni_fused(
     else:
         candidates = []
         gallery_snapshot = {}
+
+    # 图像推理模式下的 audio route 窗口(零帧 + 音频过闸)整窗跳过 —— 见 prompt_builder 里
+    # should_skip_for_input_mode 的取舍。**位置必须在 take_fused_pending 之后**:候选此刻
+    # 已被 take 走、对应 track 的 inflight 已置 True,直接 return 会让它们永久挂住
+    # (_gc_dead_tracks 跳过 inflight、needs_omni_call 也不再派发),故先按既有失败语义回填
+    # deliver_fused_failure(幂等,与下方两处 except 同款),再返回空结果。
+    if should_skip_for_input_mode(edge_packets):
+        logger.info(
+            "event=omni_skip_by_input_mode route=audio n_packets=%d n_candidates=%d",
+            len(edge_packets), len(candidates),
+        )
+        if candidates:
+            await identity_engine.deliver_fused_failure(
+                "input_mode=image skips audio-route window"
+            )
+        return OmniOutput(skipped=True)
 
     # 一次 list_persons 同时构造两张表（始终从 library 构造，不依赖 gallery_snapshot——
     # 后者在 candidates 空时为 {}，会让主调用 prompt「已识别人物：」段渲染出 UUID 而非姓名）：
@@ -476,6 +503,10 @@ async def run_omni_stream(
     on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None = None,
 ) -> OmniOutput:
     """Run Omni layer with streaming — extracts actionable fields early via callbacks."""
+    # 同 run_omni 的图像模式跳过:整窗不发,故 early callbacks(speeches/matched_rules/
+    # suggestions)一个都不会触发 —— 那正是本意(该窗口没有任何可报的内容)。
+    if should_skip_for_input_mode([edge_packet]):
+        return OmniOutput(skipped=True)
     payload = build_stream_prompt(edge_packet, context)
     return await _stream_and_parse(
         payload,
@@ -497,6 +528,9 @@ async def run_omni_batch_stream(
     on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None = None,
 ) -> OmniOutput:
     """Run Omni layer for multiple devices with streaming — extracts actionable fields early."""
+    # 同 run_omni_batch 的图像模式跳过。
+    if should_skip_for_input_mode(edge_packets):
+        return OmniOutput(skipped=True)
     payload = build_batch_stream_prompt(edge_packets, context)
     return await _stream_and_parse(
         payload,

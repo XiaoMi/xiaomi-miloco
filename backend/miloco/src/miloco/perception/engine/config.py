@@ -28,6 +28,12 @@ class InputConfig:
     # 实测:小目标清晰度主要由输入像素分辨率(video_short_edge)决定,本档位只控每帧 token 预算,
     # 故默认 low;identity 等细节敏感场景可经 CLI 切 high。运行时由 GeminiAdapter 实时读 settings。
     media_resolution: str = ""
+    # input_mode: 送 omni 的模态 —— "video"(默认,编 mp4) / "image"(编一组 JPEG 帧,
+    # 兼容只吃图像输入的 VLM)。与 video_short_edge / media_resolution 同款：**仅为接住
+    # InputConfig(**engine_cfg["input"]) 的 kwargs**，运行时真值由 prompt_builder 的
+    # _get_input_mode() 每窗口现读 settings 字典，不从此字段读 —— 别照 fps 的先例在构造前设
+    # config.input.input_mode 期望生效，那样会被静默忽略（改模式免重启，同 video_short_edge）。
+    input_mode: str = "video"
 
 
 @dataclass

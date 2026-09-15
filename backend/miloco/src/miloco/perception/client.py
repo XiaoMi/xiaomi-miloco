@@ -39,7 +39,7 @@ from miloco.perception.event_text_builder import (
 from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.schema import PerceptionBatch
 from miloco.perception.snapshot_context import (
-    ClipKind,
+    MediaKind,
     OmniEventArtifacts,
     event_artifacts_scope,
 )
@@ -1148,19 +1148,24 @@ async def _persist_meaningful_event(
         )
 
         # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
-        # 否则 device_ids、artifacts.clips 与 artifacts.ref_frames 必须同步收窄——都是
-        # 按 device 归属的产物:device_ids 驱动"日志展示哪些摄像头",clips 驱动"落盘哪些
-        # 摄像头的 clip",ref_frames 驱动"落盘哪些摄像头的全景参考帧"。不同步会导致不相关
-        # 摄像头的 clip / ref.jpg 被落盘,而其 device_id 已不在 device_ids 内 → ref 经
-        # locate_ref 的 device_ids 校验取不到(404)、也不进 feedback pack,纯占
+        # 否则 device_ids、artifacts.clips、artifacts.frames 与 artifacts.ref_frames 必须
+        # 同步收窄——都是按 device 归属的产物:device_ids 驱动"日志展示哪些摄像头",clips
+        # 驱动"落盘哪些摄像头的 clip",frames 驱动"落盘哪些摄像头的帧"(与 clips 互斥,
+        # 图像模式走它),ref_frames 驱动"落盘哪些摄像头的全景参考帧"。不同步会导致不相关
+        # 摄像头的 clip / 帧 / ref.jpg 被落盘,而其 device_id 已不在 device_ids 内 → 帧与
+        # ref 经 device_ids 校验的端点取不到(404)、也不进 feedback pack,纯占
         # snapshot_max_disk_mb 配额;snapshot_count 亦与 device_ids 长度对不上
-        # (save_event_artifacts 返回的 clip_dids 必是 artifacts.clips 的子集)。
+        # (save_event_artifacts 返回的 did 列表必是 clips ∪ frames 的子集)。
         # trace / gallery / crop_meta 不是按事件相关性归属的产物,不参与收窄。
         relevant_device_ids = _collect_relevant_device_ids(result)
         if relevant_device_ids:
             device_ids = [did for did in device_ids if did in relevant_device_ids]
             artifacts.clips = {
                 did: payload for did, payload in artifacts.clips.items()
+                if did in relevant_device_ids
+            }
+            artifacts.frames = {
+                did: jpegs for did, jpegs in artifacts.frames.items()
                 if did in relevant_device_ids
             }
             artifacts.ref_frames = {
@@ -1184,12 +1189,17 @@ async def _persist_meaningful_event(
             logger.error("meaningful_events insert failed for %s", event_id)
             return  # INSERT 失败不继续
 
-        # 落盘 event artifacts — 可能因 clips/trace 都缺失 / 磁盘紧张提前 return,
+        # 落盘 event artifacts — 可能因产物/trace 都缺失 / 磁盘紧张提前 return,
         # 此时 count 保持 0;不论哪种降级,row 都已 INSERT,SSE 应该推(否则前端
         # 实时收不到 metadata-only 事件).
+        # 判据与 save_event_artifacts 的提前返回**必须同口径**:少列一项(如 frames)
+        # 会让该模态下根本没走到落盘,事件静默退化成 metadata-only.
         count = 0
+        # 落盘成功的 device(磁盘紧张 / 未走到落盘时留空,下游只认它,不看 artifacts 里的原样)
+        saved_dids: list[str] = []
         if (
             artifacts.clips
+            or artifacts.frames
             or artifacts.trace is not None
             or artifacts.gallery
             or artifacts.ref_frames
@@ -1206,23 +1216,33 @@ async def _persist_meaningful_event(
                 )
                 # count 留 0,继续走 publish
             else:
-                clip_dids = save_event_artifacts(event_id, artifacts)
-                count = len(clip_dids)
+                saved_dids = save_event_artifacts(event_id, artifacts)
+                count = len(saved_dids)
                 if count > 0:
                     dao.update_snapshot_count(event_id, count)
         else:
             logger.debug("no artifacts for event %s, snapshot_count stays 0", event_id)
 
-        # 从 artifacts.clips 取 clip_kind:同 batch 要么全 video 要么全 audio-only
-        # (_is_audio_only 是 batch 级共识,见 prompt_builder._is_audio_only),
-        # 取第一个 device 的 kind 即代表整批.count == 0 时 kind 留 None
-        # (metadata-only / 磁盘紧张 → 没落盘).
-        clip_kind: ClipKind | None = None
-        if count > 0 and artifacts.clips:
+        # 从产物取 clip_kind:同 batch 要么全 video、要么全 audio-only、要么全图像帧
+        # (_is_audio_only 与 input_mode 都是 batch 级共识,见 prompt_builder._is_audio_only /
+        # _get_input_mode),取第一个落盘 device 的 kind 即代表整批.图像模式没有 clip,
+        # 单独判成 "frames".count == 0 时 kind 留 None(metadata-only / 磁盘紧张 → 没落盘).
+        clip_kind: MediaKind | None = None
+        frame_counts: dict[str, int] = {}
+        if count > 0 and artifacts.frames:
+            clip_kind = "frames"
+            # 只报**落盘成功**的 device:save_event_artifacts 对帧是全组全成才算落
+            # (见 _save_frames),整组失败时盘上无帧而 artifacts.frames 里还在,不能报.
+            frame_counts = {
+                did: len(artifacts.frames[did])
+                for did in saved_dids
+                if did in artifacts.frames
+            }
+        elif count > 0 and artifacts.clips:
             clip_kind = next(iter(artifacts.clips.values()))[1]
 
         # B13 SSE 推送:只要 row 入表了就推,不论 count==0 还是 >0.
-        # 落盘完成后 publish,snapshot_count 是真实值,clip_kind 帮 UI 区分 🎬/🎤.
+        # 落盘完成后 publish,snapshot_count 是真实值,clip_kind 帮 UI 区分 🎬/🎤/🖼.
         # has_ref 与 list 通路(events_service._row_to_event)同用 probe_has_ref,
         # 口径一致 —— 否则实时插入的 Smart Crop 事件在刷新前 has_ref 恒 false.
         has_trace = (get_snapshot_root() / event_id / "omni_trace.json.gz").exists()
@@ -1240,6 +1260,7 @@ async def _persist_meaningful_event(
                 device_ids=device_ids,
                 rule_names=rule_names,
                 clip_kind=clip_kind,
+                frame_counts=frame_counts,
                 has_trace=has_trace,
                 has_ref=has_ref,
             )
@@ -1262,6 +1283,7 @@ def _publish_meaningful_event(
     device_ids: list[str],
     rule_names: dict[str, str] | None = None,
     clip_kind: str | None = None,
+    frame_counts: dict[str, int] | None = None,
     has_trace: bool = False,
     has_ref: bool = False,
 ) -> None:
@@ -1270,7 +1292,9 @@ def _publish_meaningful_event(
     payload 字段与 /api/events list 元素同形,前端 EventSource 收到后直接拼到列表顶部.
     pipeline 不可用时(测试 / 引擎未起)静默跳过.
 
-    clip_kind ∈ {"mp4","m4a",None}:UI 区分 🎬 视频 / 🎤 音频事件 / 无回放占位.
+    clip_kind ∈ {"mp4","m4a","frames",None}:UI 区分 🎬 视频 / 🎤 音频事件 / 🖼 图像帧 /
+    无回放占位.frame_counts 仅在 clip_kind == "frames" 时非空({device_id: 帧数}),
+    前端据此铺平展开每台摄像头的 N 张帧.
     """
     from miloco.manager import get_manager
 
@@ -1290,6 +1314,7 @@ def _publish_meaningful_event(
         "device_ids": device_ids,
         "rule_names": rule_names or {},
         "clip_kind": clip_kind,
+        "frame_counts": frame_counts or {},
         "has_trace": has_trace,
         "has_ref": has_ref,
     }

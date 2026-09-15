@@ -455,7 +455,9 @@ class PipelineProcessor:
             # realtime_perceive,让它在 inference 线程的新 loop 入口重新 set ContextVar.
             # artifacts.clips value 是 (bytes, kind) — kind ∈ {"mp4","m4a"} 区分视频/
             # audio-only 路径,持久化层据此选 clip.mp4 / clip.m4a 扩展名 + Content-Type.
-            # artifacts.trace 由 omni HTTP 调用 finally 填入,随 clip 一起落到 event_dir.
+            # 图像推理模式(input_mode=image)没有 clip,走 artifacts.frames(per-device 的
+            # JPEG 列表),与 clips 互斥。artifacts.trace 由 omni HTTP 调用 finally 填入,
+            # 随产物一起落到 event_dir.
             from miloco.perception.snapshot_context import OmniEventArtifacts
 
             artifacts = OmniEventArtifacts()
@@ -496,21 +498,28 @@ class PipelineProcessor:
                 log_ms = _ms_since(t)
 
             # 4. Postprocess (handle_realtime_perception_result checks skipped internally)
-            # clip 复用 omni 产出:artifacts.clips 已由 omni 内部
-            # (_encode_video_mp4 / _encode_audio_only_mp4)字节级 push 填好,**零重编**.
+            # 产物复用 omni 产出:artifacts.clips 已由 omni 内部
+            # (_encode_video_mp4 / _encode_audio_only_mp4)字节级 push 填好,**零重编**;
+            # 图像模式则填 artifacts.frames(_encode_frames_as_jpegs),两者互斥.
             # 视频路径 mp4 = H264+AAC;audio-only 路径 mp4 = 纯 AAC m4a 容器.
-            # engine 异常 / 全 device gate skipped → artifacts.clips 为空,device_ids=[] →
+            # engine 异常 / 全 device gate skipped → 两者皆空,device_ids=[] →
             # _persist 仍入表(metadata-only)给 UI 显示语义提示,但不落盘.
-            # 同 batch 内空字节的 device 被过滤掉(payload[0] 真值判).
+            # 同 batch 内空字节 / 空帧组的 device 被过滤掉(payload[0] 真值判).
+            # device_ids 必须**两种模态都算**:图像模式下 clips 恒空,只看 clips 会让
+            # device_ids 恒为 [] → 事件退化成 metadata-only、帧一张都不落.
             if result.skipped:
                 artifacts.clips.clear()
+                artifacts.frames.clear()
             else:
                 artifacts.clips = {
                     did: payload
                     for did, payload in artifacts.clips.items()
                     if payload[0]
                 }
-            device_ids = list(artifacts.clips.keys())
+                artifacts.frames = {
+                    did: jpegs for did, jpegs in artifacts.frames.items() if jpegs
+                }
+            device_ids = [*artifacts.clips, *artifacts.frames]
 
             await self._perception_engine_proxy.handle_realtime_perception_result(
                 result,
@@ -822,11 +831,14 @@ class PipelineProcessor:
             if result is None:
                 return None
 
-            # Filter out empty clips (same as realtime path)
+            # Filter out empty clips / empty frame groups (same as realtime path)
             artifacts.clips = {
                 did: (clip_bytes, kind)
                 for did, (clip_bytes, kind) in artifacts.clips.items()
                 if clip_bytes
+            }
+            artifacts.frames = {
+                did: jpegs for did, jpegs in artifacts.frames.items() if jpegs
             }
 
             return result, artifacts

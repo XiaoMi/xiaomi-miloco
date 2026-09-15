@@ -20,7 +20,11 @@ from miloco.perception.snapshot_context import OmniEventArtifacts
 from miloco.perception.snapshot_writer import (
     check_disk_space,
     cleanup_snapshots,
+    count_frames,
+    frame_filename,
     get_snapshot_root,
+    list_artifact_files,
+    locate_frame_file,
     region_slug,
     save_event_artifacts,
 )
@@ -131,7 +135,7 @@ class TestSaveEventArtifacts:
         self.root = tmp_path
 
     def test_empty_artifacts_returns_empty_list(self):
-        """clips 和 trace 都空 → 不创建任何文件,返空列表."""
+        """clips / frames / trace / gallery / ref_frames 全空 → 不创建任何文件,返空列表."""
         assert save_event_artifacts("event-1", OmniEventArtifacts()) == []
         assert not (self.root / "event-1").exists()
 
@@ -242,6 +246,167 @@ class TestSaveEventArtifacts:
         artifacts = OmniEventArtifacts(ref_frames={"cam_a": b""})
         save_event_artifacts("event-ref-empty", artifacts)
         assert not (self.root / "event-ref-empty" / "cam_a" / "ref.jpg").exists()
+
+    # ── 图像推理路径:整组帧 ──────────────────────────────────────────────
+
+    def test_frames_saved_as_group(self):
+        """frames → 逐张落 frame_000/001/002.jpg,返回值含该 device."""
+        jpegs = [b"\xff\xd8\xff\xe0" + bytes([i]) * 40 for i in range(3)]
+        artifacts = OmniEventArtifacts(frames={"cam_a": jpegs})
+        assert save_event_artifacts("event-frames", artifacts) == ["cam_a"]
+        device_dir = self.root / "event-frames" / "cam_a"
+        assert sorted(p.name for p in device_dir.iterdir()) == [
+            "frame_000.jpg",
+            "frame_001.jpg",
+            "frame_002.jpg",
+        ]
+        assert (device_dir / "frame_000.jpg").read_bytes() == jpegs[0]
+        assert (device_dir / "frame_002.jpg").read_bytes() == jpegs[2]
+
+    def test_frames_device_id_slug_applied(self):
+        """device_id 含 '/' → 与 clip 同款 slug 化,目录路径合法."""
+        artifacts = OmniEventArtifacts(frames={"cam/living/01": [b"j" * 40]})
+        assert save_event_artifacts("event-frames-slug", artifacts) == ["cam/living/01"]
+        assert (self.root / "event-frames-slug" / "cam_living_01" / "frame_000.jpg").exists()
+
+    def test_frames_empty_list_skipped(self):
+        """某 device 帧列表为空 → 跳过,不建目录,不进返回值(与 clip 空字节同处置)."""
+        artifacts = OmniEventArtifacts(frames={"cam_a": []})
+        assert save_event_artifacts("event-frames-empty", artifacts) == []
+        assert not (self.root / "event-frames-empty" / "cam_a").exists()
+
+    def test_frames_partial_write_rolls_back_group(self):
+        """整组全成才计入:第 3 张写失败 → 前两张也删掉,device 不进返回值.
+
+        半组留在盘上比一张不留更坏:读侧按连号数帧(count_frames),半组会被数成一个
+        "看似完整"的 N,而模型手里那组并不是这个 N.
+        """
+        jpegs = [b"j" * 40] * 3
+        artifacts = OmniEventArtifacts(frames={"cam_a": jpegs})
+        real_write = Path.write_bytes
+        failed_name = frame_filename(2)
+
+        def flaky_write(path, data):
+            if path.name == failed_name:
+                raise OSError("disk full")
+            return real_write(path, data)
+
+        with patch.object(Path, "write_bytes", flaky_write):
+            assert save_event_artifacts("event-frames-rollback", artifacts) == []
+        device_dir = self.root / "event-frames-rollback" / "cam_a"
+        assert list(device_dir.iterdir()) == []
+
+    def test_frames_partial_write_keeps_other_device(self):
+        """一台整组回滚不牵连另一台:好设备照常落盘并出现在返回值里."""
+        artifacts = OmniEventArtifacts(
+            frames={"cam_bad": [b"j" * 40] * 2, "cam_ok": [b"k" * 40]},
+        )
+        real_write = Path.write_bytes
+
+        def flaky_write(path, data):
+            if path.parent.name == "cam_bad" and path.name == frame_filename(1):
+                raise OSError("disk full")
+            return real_write(path, data)
+
+        with patch.object(Path, "write_bytes", flaky_write):
+            assert save_event_artifacts("event-frames-mixed", artifacts) == ["cam_ok"]
+        assert list((self.root / "event-frames-mixed" / "cam_bad").iterdir()) == []
+        assert (self.root / "event-frames-mixed" / "cam_ok" / "frame_000.jpg").exists()
+
+    def test_clips_and_frames_same_device_deduped(self):
+        """clips 与 frames 正常互斥,真并存时同一 device 也不能被数两次.
+
+        save_event_artifacts 的返回值就是事件的 snapshot_count,重复会把"落了 1 台"
+        报成 2 台.
+        """
+        artifacts = OmniEventArtifacts(
+            clips={"cam_a": (b"v" * 40, "mp4")},
+            frames={"cam_a": [b"j" * 40]},
+        )
+        assert save_event_artifacts("event-both-media", artifacts) == ["cam_a"]
+        device_dir = self.root / "event-both-media" / "cam_a"
+        assert (device_dir / "clip.mp4").exists()
+        assert (device_dir / "frame_000.jpg").exists()
+
+
+# ─── 帧产物读取侧辅助函数 ───────────────────────────────────────────────────
+
+
+class TestFrameHelpers:
+    """frame_filename / locate_frame_file / count_frames / list_artifact_files.
+
+    落盘侧写下的帧名、读取侧按连号数出来的帧数、反馈打包列出的产物名,三处必须同源
+    ——任何一处单独改都会让"盘上有几张"和"它们叫什么"对不上.
+    """
+
+    def test_frame_filename_zero_pads_three_digits(self):
+        """补零保证字典序 == 帧序(落盘顺序即时间序)."""
+        assert frame_filename(0) == "frame_000.jpg"
+        assert frame_filename(7) == "frame_007.jpg"
+        assert frame_filename(15) == "frame_015.jpg"
+
+    def test_frame_filename_beyond_999_keeps_four_digits(self):
+        """超 999 帧补零溢出成 4 位:该区间字典序不再等于帧序,但 16 帧上限下不可达.
+
+        这里只钉住"不崩、不截断",不宣称 4 位区间仍有序.
+        """
+        assert frame_filename(1000) == "frame_1000.jpg"
+
+    def test_locate_frame_file_hit_and_miss(self, tmp_path):
+        """命中返路径,缺号返 None(端点据此分 404 / 410)."""
+        device_dir = tmp_path / "cam_a"
+        device_dir.mkdir()
+        assert locate_frame_file(device_dir, 0) is None
+        (device_dir / frame_filename(0)).write_bytes(b"jpg")
+        assert locate_frame_file(device_dir, 0) == device_dir / frame_filename(0)
+        assert locate_frame_file(device_dir, 1) is None
+
+    def test_count_frames_stops_at_first_gap(self, tmp_path):
+        """连号才计数:0/1 在、2 缺、3 在 → 2(_save_frames 已保证不会留洞)."""
+        device_dir = tmp_path / "cam_a"
+        device_dir.mkdir()
+        assert count_frames(device_dir) == 0
+        for i in (0, 1, 3):
+            (device_dir / frame_filename(i)).write_bytes(b"jpg")
+        assert count_frames(device_dir) == 2
+
+    def test_count_frames_ignores_ref_jpg(self, tmp_path):
+        """同目录的 ref.jpg(Smart Crop 参考帧)不能被数成帧."""
+        device_dir = tmp_path / "cam_a"
+        device_dir.mkdir()
+        (device_dir / "ref.jpg").write_bytes(b"jpg")
+        assert count_frames(device_dir) == 0
+
+    def test_count_frames_missing_dir_is_zero(self, tmp_path):
+        """目录不存在(事件已被 cleanup 清掉)→ 0,不抛."""
+        assert count_frames(tmp_path / "nope") == 0
+
+    def test_list_artifact_files_prefers_clip(self, tmp_path):
+        """有 clip 就先返 clip(与 locate_clip_file 同序:先 mp4 后 m4a)."""
+        device_dir = tmp_path / "cam_a"
+        device_dir.mkdir()
+        (device_dir / "clip.m4a").write_bytes(b"a")
+        assert list_artifact_files(device_dir) == ["clip.m4a"]
+        (device_dir / "clip.mp4").write_bytes(b"v")
+        assert list_artifact_files(device_dir) == ["clip.mp4"]
+
+    def test_list_artifact_files_returns_frame_group(self, tmp_path):
+        """无 clip 时返整组帧文件名 —— 旧口径只认 CLIP_CANDIDATES,图像模式下会把整组判 missing."""
+        device_dir = tmp_path / "cam_a"
+        device_dir.mkdir()
+        for i in range(3):
+            (device_dir / frame_filename(i)).write_bytes(b"jpg")
+        assert list_artifact_files(device_dir) == [
+            "frame_000.jpg",
+            "frame_001.jpg",
+            "frame_002.jpg",
+        ]
+
+    def test_list_artifact_files_empty_dir(self, tmp_path):
+        """既无 clip 也无帧 → 空列表(调用方据此记 missing)."""
+        device_dir = tmp_path / "cam_a"
+        device_dir.mkdir()
+        assert list_artifact_files(device_dir) == []
 
 
 # ─── _save_gallery ─────────────────────────────────────────────────────────

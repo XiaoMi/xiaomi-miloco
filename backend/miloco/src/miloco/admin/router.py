@@ -1584,6 +1584,13 @@ class PerceptionConfigBody(BaseModel):
     video_short_edge: int | None = Field(default=None, ge=64, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     window_size: int | None = Field(default=None, ge=1, le=60)
+    input_mode: Literal["video", "image"] | None = Field(
+        default=None,
+        description=(
+            "送 omni 的模态:video=mp4(默认),image=一组 JPEG 帧(兼容只吃图像输入的 VLM)。"
+            "两种模式帧源与帧数一致,只换容器;image 恒不带音频 → 语音类事件不再产生"
+        ),
+    )
     # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
     # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
     # 注意本开关（连同 enabled）只是**必要非充分**条件：还要该机位自己的 per-camera 闸也开
@@ -1604,6 +1611,7 @@ def _perception_config_payload() -> dict:
     from miloco.perception.engine.omni.crop_enhance import (
         crop_enhance_config_from_settings,
     )
+    from miloco.perception.engine.omni.prompt_builder import _get_input_mode
 
     s = get_settings()
     # perception.engine 是 dict[str, Any](值不过校验),input 这一块可能被写成非 mapping
@@ -1635,6 +1643,10 @@ def _perception_config_payload() -> dict:
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
+        # input_mode 不 raw.get:上面那类坏形状(input 不是 mapping / 值写成 "IMAGE")都会让
+        # 前端拿到一个非法字面量、分段控件显示成"一个都没选中"。_get_input_mode() 是运行时
+        # 同一条读取路径,已对这两类 fail-open 回 video 并打 warning,这里直接复用它。
+        "input_mode": _get_input_mode(),
         # 双闸分开暴露:smart_crop_enabled = 用户态(开关位置,取 user_enabled)vs
         # smart_crop_available = 决定开关能不能点(取发版级开关 enabled)。
         # available=false 时前端置灰 + 提示「服务端尚未开放」,避免"开关开着但**发版级闸**
@@ -1673,6 +1685,10 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    if body.input_mode is not None:
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})[
+            "input_mode"
+        ] = body.input_mode
     if body.smart_crop_enabled is not None:
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("crop_enhance", {})[
             "user_enabled"
@@ -1686,6 +1702,8 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
     if update:
         # 各参数生效路径不同，按「新值 != 旧值」判断（前端 drawer 多字段一起 PUT）：
         #   - video_short_edge：每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
+        #   - input_mode：同款热读（prompt_builder._get_input_mode 每窗口现读 settings），
+        #     写盘 + reset_settings 后下个感知窗口即生效，不参与 restart_ok。
         #   - smart_crop_enabled：同上，crop_enhance_config_from_settings 每窗口热读，无需重启。
         #   - omni_fps：pipeline 每窗现读引擎内存 config.input.omni_fps（非 settings），但它经
         #     adjust_fps_for_omni 顶起的 tracker fps 有构造期派生缓存——走 apply_omni_fps_live

@@ -4,8 +4,9 @@
 """Unit tests for EventsService(D3-T9).
 
 覆盖:
-- list_events:分页 / 时间窗 / DESC 排序 / 空 DB
+- list_events:分页 / 时间窗 / DESC 排序 / 空 DB / clip_kind+frame_counts 的 stat 投影
 - locate_clip 三种状态:found / gone(文件已删但 event 存在) / not_found(event 不存在 / device_id 不在 device_ids 内)
+- locate_frame 同款三态(图像推理路径,index 0-based)
 - Pydantic 序列化:不含 payload_json / schema_version / created_at
 """
 
@@ -166,10 +167,11 @@ class TestListEvents:
         assert events[0].clip_kind == "m4a"
 
     async def test_clip_kind_pydantic_literal_rejects_unknown(self):
-        """S3 防御:Pydantic clip_kind 必须是 Literal['mp4','m4a']|None,拒绝其它字符串.
+        """S3 防御:Pydantic clip_kind 必须是 Literal['mp4','m4a','frames']|None,拒绝其它字符串.
 
-        防止未来有人把字段类型回滚到 str|None,绕过前端 isAudioOnly=='m4a' 的严格比较
-        → 出现 'M4A' / 'mov' / 'webm' 等非法 kind 导致 UI 静默走错分支(回归 18:42:05).
+        防止未来有人把字段类型回滚到 str|None,绕过前端对 clip_kind 的严格比较
+        (isFrames / isAudioOnly=='m4a')→ 出现 'M4A' / 'mov' / 'webm' 等非法 kind
+        导致 UI 静默走错分支(回归 18:42:05).
         """
         import pydantic
         from miloco.perception.schema import MeaningfulEvent
@@ -177,6 +179,7 @@ class TestListEvents:
         # 合法值不抛
         MeaningfulEvent(event_id="x", timestamp=0, text="t", clip_kind="mp4")
         MeaningfulEvent(event_id="x", timestamp=0, text="t", clip_kind="m4a")
+        MeaningfulEvent(event_id="x", timestamp=0, text="t", clip_kind="frames")
         MeaningfulEvent(event_id="x", timestamp=0, text="t", clip_kind=None)
         # 非法值抛 ValidationError
         with pytest.raises(pydantic.ValidationError):
@@ -185,6 +188,83 @@ class TestListEvents:
             MeaningfulEvent(event_id="x", timestamp=0, text="t", clip_kind="webm")
         with pytest.raises(pydantic.ValidationError):
             MeaningfulEvent(event_id="x", timestamp=0, text="t", clip_kind="")
+        with pytest.raises(pydantic.ValidationError):
+            MeaningfulEvent(event_id="x", timestamp=0, text="t", clip_kind="FRAMES")
+
+    # ── 图像推理路径:产物是一组帧而非 mp4 ────────────────────────────────
+
+    async def test_clip_kind_frames_when_image_mode(self, svc, dao):
+        """落整组 frame_*.jpg → clip_kind='frames' + 逐 device 帧数(UI 铺平展开)."""
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        eid = _insert(dao, device_ids=["cam_a"])
+        save_event_artifacts(
+            eid, OmniEventArtifacts(frames={"cam_a": [b"\xff\xd8\xff\xe0" + b"\x00" * 40] * 3})
+        )
+        events = await svc.list_events()
+        assert events[0].event_id == eid
+        assert events[0].clip_kind == "frames"
+        assert events[0].frame_counts == {"cam_a": 3}
+
+    async def test_frame_counts_per_device_differ(self, svc, dao):
+        """帧数逐 device 数:两台机位各编各的,张数不必相同."""
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        eid = _insert(dao, device_ids=["cam_a", "cam_b"])
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(
+                frames={
+                    "cam_a": [b"\xff\xd8\xff\xe0"] * 2,
+                    "cam_b": [b"\xff\xd8\xff\xe0"] * 5,
+                }
+            ),
+        )
+        events = await svc.list_events()
+        assert events[0].clip_kind == "frames"
+        assert events[0].frame_counts == {"cam_a": 2, "cam_b": 5}
+
+    async def test_frame_counts_absent_for_clip_event(self, svc, dao):
+        """有 clip 时以 clip 为准,同目录残留的帧既不改 kind 也不进 frame_counts.
+
+        clip 与 frames 正常互斥(同窗只走一种模态),这条钉的是探测顺序:内层先试
+        CLIP_CANDIDATES、命中就 break,不会落到 else 里的数帧分支.盘被外部动过
+        (两种产物混在)时,报出来的 kind 必须仍是 UI 认识的那一个.
+        """
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        eid = _insert(dao, device_ids=["cam_a"])
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(
+                clips={"cam_a": (b"\x00\x00\x00\x20ftypisom", "mp4")},
+                frames={"cam_a": [b"\xff\xd8\xff\xe0"] * 2},
+            ),
+        )
+        events = await svc.list_events()
+        assert events[0].clip_kind == "mp4"
+        assert events[0].frame_counts == {}
+
+    async def test_frame_counts_skips_device_without_frames(self, svc, dao):
+        """某台一张帧都没有(整组落盘失败)→ 只从 frame_counts 里缺席,不填 0.
+
+        缺席与 0 在协议上是两回事:前端拿 count 未定义走"无帧"占位,而 0 会让
+        Array.from({length:0}) 渲染出一个空的帧组 —— 少渲染一台没人会发现.
+        """
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        eid = _insert(dao, device_ids=["cam_ok", "cam_lost"])
+        save_event_artifacts(
+            eid, OmniEventArtifacts(frames={"cam_ok": [b"\xff\xd8\xff\xe0"] * 2})
+        )
+        events = await svc.list_events()
+        assert events[0].clip_kind == "frames"
+        assert events[0].frame_counts == {"cam_ok": 2}
+        assert "cam_lost" not in events[0].frame_counts
 
 
 @pytest.mark.asyncio
@@ -335,6 +415,90 @@ class TestLocateRef:
         events = await svc.list_events()
         assert events[0].event_id == eid
         assert events[0].has_ref is True
+
+
+@pytest.mark.asyncio
+class TestLocateFrame:
+    """locate_frame 三态:found / gone(该序号无帧) / not_found(event 或 device 不认).
+
+    越界与"已过期"刻意归同一档 410:可观察事实相同 —— 这台设备这个序号上没东西.
+    """
+
+    @staticmethod
+    def _save_frames(eid: str, device_id: str, n: int) -> None:
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        save_event_artifacts(
+            eid,
+            OmniEventArtifacts(frames={device_id: [b"\xff\xd8\xff\xe0" + b"\x00" * 40] * n}),
+        )
+
+    async def test_event_not_found_returns_not_found(self, svc):
+        status, path, ts = await svc.locate_frame("does-not-exist", "cam_a", 0)
+        assert status == "not_found"
+        assert path is None
+        assert ts is None
+
+    async def test_device_id_not_in_event_returns_not_found(self, svc, dao):
+        eid = _insert(dao, device_ids=["cam_living_01"])
+        status, path, ts = await svc.locate_frame(eid, "cam_kitchen_01", 0)
+        assert status == "not_found"
+        assert path is None
+        assert ts is None
+
+    async def test_no_frames_returns_gone(self, svc, dao):
+        """event 合法但盘上没有帧(视频路径事件 / 已被 cleanup 清)→ gone."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        status, path, ts = await svc.locate_frame(eid, "cam_a", 0)
+        assert status == "gone"
+        assert path is None
+        assert ts is None
+
+    async def test_index_out_of_range_returns_gone(self, svc, dao):
+        """帧数之外(cleanup 在列表与请求之间删了一张)→ gone,不越界读别的文件."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        self._save_frames(eid, "cam_a", 2)
+        assert (await svc.locate_frame(eid, "cam_a", 1))[0] == "found"
+        assert (await svc.locate_frame(eid, "cam_a", 2))[0] == "gone"
+
+    async def test_found_returns_path_and_timestamp(self, svc, dao):
+        """found 时透传 DB.timestamp —— 路由层据它拼「另存为」的文件名(同 locate_clip)."""
+        jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 40
+        eid = _insert(dao, device_ids=["cam_a"], timestamp=1751000000000)
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        save_event_artifacts(eid, OmniEventArtifacts(frames={"cam_a": [jpg, b"second"]}))
+        status, path, ts = await svc.locate_frame(eid, "cam_a", 0)
+        assert status == "found"
+        assert path is not None
+        assert path.name == "frame_000.jpg"
+        assert path.read_bytes() == jpg
+        assert ts == 1751000000000
+
+    async def test_frame_index_one_not_confused_with_index_zero(self, svc, dao):
+        """第 2 张必须真的取第 2 张 —— 只断言 found 的话,把 index 恒当 0 也能过."""
+        eid = _insert(dao, device_ids=["cam_a"])
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        save_event_artifacts(
+            eid, OmniEventArtifacts(frames={"cam_a": [b"first", b"second", b"third"]})
+        )
+        _, path, _ = await svc.locate_frame(eid, "cam_a", 2)
+        assert path is not None
+        assert path.name == "frame_002.jpg"
+        assert path.read_bytes() == b"third"
+
+    async def test_device_id_with_unsafe_chars(self, svc, dao):
+        """device_id 含 '/' → 落盘与读取用同一套 slug,能找到."""
+        eid = _insert(dao, device_ids=["cam/living/01"])
+        self._save_frames(eid, "cam/living/01", 1)
+        status, path, _ = await svc.locate_frame(eid, "cam/living/01", 0)
+        assert status == "found"
+        assert path is not None
+        assert path.parent.name == "cam_living_01"
 
 
 def _corrupt_trace(eid: str) -> None:

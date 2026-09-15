@@ -853,12 +853,18 @@ async def run_query_pipeline(
         if not room_identity_packets:
             return None
 
-        # Resolve the device whose video will be encoded by build_query_prompt.
+        # Resolve the device whose media will be encoded by build_query_prompt.
         # _encode_batch_video loops edge_packets and returns the first one _encode_video
         # can encode — and _encode_video bails with (None, None) only when all_frames is
         # empty, while push_clip_bytes fires at the tail of _encode_video_mp4 after a
         # successful encode. So this is the same predicate evaluated twice: attribution
         # is exact, not best-effort.
+        # 图像模式(input_mode=image)走 _encode_batch_frames → push_frames,选设备的循环同构;
+        # 但那里的编码出口多了两种"整批返回 []"的失败(imencode 失败 / 单帧 JPEG 小于
+        # _MIN_JPEG_BYTES),所以**理论上**存在"首台有帧设备编不出来、循环落到第二台"时
+        # 产物记到首台名下的错配(video 侧 _encode_video 只在无帧时 bail,没这一档)。
+        # 不为此加机制:与 _encode_batch_video 保持同构更重要,而该错配要么全设备一起中
+        # (同一段编码代码),要么只在一台整窗近乎纯色时出现 —— 那时也没有可用产物可错配。
         # Note: neither _encode_batch_video nor _encode_video_mp4 has an except clause
         # (only try/finally to unlink the temp file), so a PyAV failure on THIS packet
         # propagates out of build_query_prompt → room task raises → _reraise_first below
