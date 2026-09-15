@@ -690,14 +690,24 @@ def _adapt_visual_prompt(text: str, visual_input_mode: VisualInputMode) -> str:
 
 
 def _image_sequence_note(prepared: PreparedVisualFrames) -> str:
+    """图片序列的时间口径: 只给"窗口时长 + 采样率", 不给"相邻间隔"。
+
+    相邻间隔是拿配置帧率反推的(见 ``sampling_fps``), 与实际投递率不符时会把话说错;
+    而"这段画面覆盖多长时间、按什么密度采样"是模型真正需要的两个量, 且都能从本窗口
+    实际送出的帧算出来 —— 模型据此自己就能推断间隔, 不需要我们替它断言。
+    """
     if prepared.frame_count == 1:
         cadence = "仅一张图片"
+    elif prepared.duration_s > 0:
+        cadence = (
+            f"窗口时长约 {prepared.duration_s:g} 秒、"
+            f"采样率约 {round(prepared.sampling_fps, 2):g} fps"
+        )
     elif prepared.fps > 0:
-        cadence = f"采样率约 {prepared.fps} fps，相邻图片约间隔 {1 / prepared.fps:g} 秒"
+        # 时长缺失(老调用方只传 fps)时退回配置帧率; 配置写坏成 0/负则不给采样率。
+        cadence = f"采样率约 {prepared.fps} fps"
     else:
-        # fps 即 frame_info.fps(下采后的真实帧间隔), 正常路径恒 >=1; 配置写坏成 0/负时
-        # 不能拿它当除数 —— 这里只是措辞, 不值得为一个坏配置把整轮推理打断。
-        cadence = "帧间隔未知"
+        cadence = "采样率未知"
     return (
         "## 主画面图片序列\n"
         f"以下 {prepared.frame_count} 张主画面属于同一连续时间窗口，按拍摄时间从早到晚排列，"
@@ -1581,10 +1591,38 @@ class PreparedVisualFrames:
     width: int
     height: int
     fps: int
+    duration_s: float = 0.0  # 采集窗口时长(秒); 0 = 未知
 
     @property
     def frame_count(self) -> int:
         return len(self.frames)
+
+    @property
+    def sampling_fps(self) -> float:
+        """实际采样率 = 帧数 / 窗口时长。
+
+        ``fps`` 是**配置**下的源帧率反推出的有效帧率(``round(src_fps/step)``), 与实际
+        投递率不符时(相机按 18fps 送、配置写 3fps)会偏小一个量级: 那种窗口下 ``fps``
+        说 1fps 而真实间隔是 0.17s。这里的帧数是本窗口实际送出的帧, 时长是窗口自身的
+        时长, 两者相除得的采样率不依赖配置。时长未知时退回 ``fps``。
+        """
+        if self.duration_s > 0:
+            return self.frame_count / self.duration_s
+        return float(self.fps)
+
+
+def _window_duration_s(frame_info: object) -> float:
+    """由 packet.frame_info 的起止时刻(ms)换算出窗口时长(秒)。
+
+    缺失/倒挂/类型不符时返回 0, 调用方退回配置帧率 —— 只影响 prompt 措辞, 不值得为
+    一个坏 packet 打断整轮推理。
+    """
+    start = getattr(frame_info, "start_timestamp", 0)
+    end = getattr(frame_info, "end_timestamp", 0)
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return 0.0
+    span_ms = end - start
+    return span_ms / 1000.0 if span_ms > 0 else 0.0
 
 
 @dataclass(frozen=True)
@@ -1704,6 +1742,7 @@ def _prepare_omni_visual_frames(
     *,
     fps: int,
     short_edge: int,
+    duration_s: float = 0.0,
 ) -> PreparedVisualFrames | None:
     """Create the canonical BGR frame sequence shared by video/image modes."""
     if not frames:
@@ -1739,6 +1778,7 @@ def _prepare_omni_visual_frames(
         width=target_w,
         height=target_h,
         fps=fps,
+        duration_s=duration_s,
     )
 
 
@@ -2045,6 +2085,7 @@ def _encode_images(
         identity_packet.all_frames,
         fps=identity_packet.frame_info.fps,
         short_edge=short_edge,
+        duration_s=_window_duration_s(identity_packet.frame_info),
     )
     if prepared is None:
         return [], None
@@ -2347,6 +2388,7 @@ def _maybe_encode_adaptive(
             cropped,
             fps=ep.frame_info.fps,
             short_edge=cse,
+            duration_s=_window_duration_s(ep.frame_info),
         )
         if prepared is None:
             logger.info("event=adaptive_crop_fallback reason=crop_empty region=%s", region)

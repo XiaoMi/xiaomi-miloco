@@ -919,6 +919,94 @@ class TestImagePromptAdaptation:
         assert dead == [], f"替换表里这些键在 prompt 正文里不存在: {dead}"
 
 
+class TestImageSequenceNote:
+    """图片序列说明里的时间口径: 给"窗口时长 + 采样率", 不给"相邻间隔"。"""
+
+    def _prepared(self, n: int, *, fps: int, duration_s: float):
+        from miloco.perception.engine.omni.prompt_builder import PreparedVisualFrames
+
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        return PreparedVisualFrames(
+            frames=tuple(frame for _ in range(n)),
+            width=8, height=8, fps=fps, duration_s=duration_s,
+        )
+
+    def test_note_states_duration_and_sampling_rate(self):
+        """正常窗口: 4 帧 / 4 秒 → 时长 4 秒、采样率 1 fps。"""
+        from miloco.perception.engine.omni.prompt_builder import _image_sequence_note
+
+        note = _image_sequence_note(self._prepared(4, fps=1, duration_s=4.0))
+        assert "4 张主画面" in note
+        assert "窗口时长约 4 秒" in note
+        assert "采样率约 1 fps" in note
+        assert "间隔" not in note, "相邻间隔是反推出来的, 不再写进 prompt"
+
+    def test_sampling_rate_comes_from_actual_frames_not_config_fps(self):
+        """采样率按"实际帧数 / 窗口时长"算, 不按配置帧率。
+
+        构造的是线上真实出现过的一类窗口: 相机按 ~18fps 投递、配置写 fps=3, 下采那一步
+        用 config 的 3 当除数, 一个 4 秒窗口于是抽出 27 帧、``frame_info.fps`` 被写成
+        round(3/3)=1。此时配置帧率说 1fps(即"相邻 1 秒"), 而送到模型的 27 帧其实挤在
+        0.15 秒的间隔上 —— 按帧数算出来的 6.75fps 才是真的。
+        """
+        from miloco.perception.engine.omni.prompt_builder import _image_sequence_note
+
+        note = _image_sequence_note(self._prepared(27, fps=1, duration_s=4.0))
+        assert "窗口时长约 4 秒" in note
+        assert "采样率约 6.75 fps" in note
+        assert "采样率约 1 fps" not in note
+
+    def test_single_frame_and_unknown_duration(self):
+        """单帧只说明"仅一张图片"; 时长缺失时退回配置帧率。"""
+        from miloco.perception.engine.omni.prompt_builder import _image_sequence_note
+
+        assert "仅一张图片" in _image_sequence_note(
+            self._prepared(1, fps=1, duration_s=4.0)
+        )
+        note = _image_sequence_note(self._prepared(4, fps=2, duration_s=0.0))
+        assert "采样率约 2 fps" in note
+        assert "窗口时长" not in note
+
+    def test_fused_image_route_wires_window_duration(self):
+        """集成: 时长要真的从 packet.frame_info 走到 prompt 里。
+
+        单测直接构造 PreparedVisualFrames, 抓不住"调用点忘了传 duration_s"——
+        那样 note 会静默退回配置帧率, 时间口径又变成反推值。
+        """
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        ep = _video_route_packet()
+        ep.all_frames = [np.zeros((100, 100, 3), dtype=np.uint8) for _ in range(4)]
+        ep.frame_info = FrameInfo(start_timestamp=0, end_timestamp=4000, fps=1)
+        fused = build_fused_payload(
+            packets=[ep], context=OmniContext(), candidates=[],
+            gallery_snapshot={}, visual_input_mode="image",
+        )
+        texts = [
+            b["text"] for b in _multimodal_user_content(fused["messages"])
+            if b["type"] == "text"
+        ]
+        note = next(t for t in texts if "主画面图片序列" in t)
+        assert "4 张主画面" in note
+        assert "窗口时长约 4 秒" in note
+        assert "采样率约 1 fps" in note
+
+    def test_window_duration_from_frame_info(self):
+        """窗口时长由 packet.frame_info 的起止时刻(ms)换算; 倒挂/坏值一律当未知。"""
+        from types import SimpleNamespace
+
+        from miloco.perception.engine.omni.prompt_builder import _window_duration_s
+
+        assert _window_duration_s(
+            SimpleNamespace(start_timestamp=0, end_timestamp=4000)
+        ) == 4.0
+        assert _window_duration_s(
+            SimpleNamespace(start_timestamp=5000, end_timestamp=4000)
+        ) == 0.0
+        assert _window_duration_s(SimpleNamespace()) == 0.0
+        assert _window_duration_s(None) == 0.0
+
+
 class TestFusedPetRefs:
     """P2：has_pets 时 fused 主 user content 注入已登记宠物参考图块。"""
 
