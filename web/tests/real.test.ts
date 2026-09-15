@@ -24,6 +24,8 @@ import {
   realListOmniModels,
   realTestOmniConfig,
   realEventRefUrl,
+  realEventFrameUrl,
+  realOnDemandFrameUrl,
   realEventCropMeta,
   realUpdateRuleQuery,
   realUpdateTaskDescription,
@@ -177,6 +179,43 @@ describe("realListActivity — /api/events 契约", () => {
     expect(events).toEqual([]);
   });
 
+  it("图像推理事件:clip_kind=frames + frame_counts 原样透传", async () => {
+    // frame_counts 是服务端 stat 盘上连号 frame_*.jpg 数出来的(见 events_service
+    // ._probe_media),前端不做任何推断 —— 丢掉它 ActivityRow 就只能渲染空帧组。
+    mockFetch([
+      {
+        event_id: "e-img",
+        timestamp: 1780374052720,
+        text: "x",
+        snapshot_count: 2,
+        device_ids: ["cam_living_01", "cam_kitchen_02"],
+        clip_kind: "frames",
+        frame_counts: { cam_living_01: 4, cam_kitchen_02: 3 },
+      },
+    ]);
+    const events = await realListActivity();
+    expect(events[0].clip_kind).toBe("frames");
+    expect(events[0].frame_counts).toEqual({
+      cam_living_01: 4,
+      cam_kitchen_02: 3,
+    });
+  });
+
+  it("视频/音频事件不带 frame_counts → undefined(帧组是唯一消费者)", async () => {
+    mockFetch([
+      {
+        event_id: "e-vid",
+        timestamp: 1780374052720,
+        text: "x",
+        snapshot_count: 1,
+        device_ids: ["cam_1"],
+        clip_kind: "mp4",
+      },
+    ]);
+    const events = await realListActivity();
+    expect(events[0].frame_counts).toBeUndefined();
+  });
+
   it("query 参数透传(since/before/limit/offset)", async () => {
     const calls: string[] = [];
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
@@ -292,6 +331,45 @@ describe("Smart Crop 参考帧契约 — realEventRefUrl / realEventCropMeta", (
     ) as unknown as typeof fetch;
 
     await expect(realEventCropMeta("e1", "cam_1")).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe("图像推理帧契约 — realEventFrameUrl / realOnDemandFrameUrl", () => {
+  // 同 Smart Crop 那组:resolveToken 读 window.__MILOCO_TOKEN__,用例间要还原。
+  const originalToken = window.__MILOCO_TOKEN__;
+  afterEach(() => {
+    window.__MILOCO_TOKEN__ = originalToken;
+  });
+
+  it("无 token 时是裸路径,index 直拼在末段", () => {
+    window.__MILOCO_TOKEN__ = undefined;
+    expect(realEventFrameUrl("e1", "cam_1", 0)).toBe(
+      "/api/events/e1/frame/cam_1/0",
+    );
+    expect(realOnDemandFrameUrl("log1", "cam_1", 3)).toBe(
+      "/api/perception/on-demand-logs/log1/frame/cam_1/3",
+    );
+  });
+
+  it("有 token 时拼 ?token=,且 event/device/token 都过 encodeURIComponent(index 不走)", () => {
+    window.__MILOCO_TOKEN__ = "tok/en+1";
+    expect(realEventFrameUrl("e 1", "cam#1", 2)).toBe(
+      "/api/events/e%201/frame/cam%231/2?token=tok%2Fen%2B1",
+    );
+  });
+
+  it("index=0 也要拼出来(不能当成 falsy 省掉)", () => {
+    // 0 是合法帧号(第一帧)。URL 拼装里若写成 `index ? ... : ""`,第 0 帧会 404,
+    // 而"少一张第一帧"在缩略图排里几乎看不出来 —— 钉一条。
+    window.__MILOCO_TOKEN__ = undefined;
+    expect(realEventFrameUrl("e1", "cam_1", 0)).toContain("/frame/cam_1/0");
+  });
+
+  it("占位 token 未被注入时不当真 token 用(不拼 query)", () => {
+    window.__MILOCO_TOKEN__ = "__MILOCO_INJECT_TOKEN_HERE__";
+    expect(realEventFrameUrl("e1", "cam_1", 1)).toBe(
+      "/api/events/e1/frame/cam_1/1",
+    );
   });
 });
 

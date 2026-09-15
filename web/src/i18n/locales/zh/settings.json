@@ -1,6 +1,13 @@
 {
   "settings": {
     "title": "设置",
+    "inputMode": "推理输入",
+    "inputModeOption": {
+      "video": "视频",
+      "image": "图像"
+    },
+    "inputModeHint": "视频＝整段 mp4；图像＝把同一批帧改成一串 JPEG 送给模型，用于只吃图像输入的模型。两种模式取的是同一批帧、帧数也一样，只换容器。图像模式不带音频，因此语音类事件不再产生、只有声音没画面的时段整个跳过。下一感知周期生效。",
+    "inputModeUnavailable": "当前后端不支持此开关（可能版本过旧），暂不可配置",
     "videoShortEdge": "分辨率",
     "videoShortEdgeHint": "短边像素，保持原始宽高比",
     "smartCrop": "智能裁切增强",

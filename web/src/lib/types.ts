@@ -172,11 +172,16 @@ export interface ActivityEvent {
   device_ids: string[];
   /** rule_id → rule_name 映射;UI 渲染规则提醒时把 [rule_id] 替换成 rule_name */
   rule_names?: Record<string, string>;
-  /** clip 容器类型,服务端 stat 落盘文件后缀计算:
+  /** 产物容器类型,服务端 stat 落盘文件计算:
    *   "mp4" = 视频路径(H264+AAC,UI 显 🎬)
    *   "m4a" = audio-only 路径(纯 AAC,UI 显 🎤 音频)
+   *   "frames" = 图像推理路径(input_mode=image),每个 device 一组 frame_*.jpg,UI 铺平展开
    *   undefined / null = 未落盘(老 event / metadata-only / 已被 cleanup 清掉) */
-  clip_kind?: "mp4" | "m4a" | null;
+  clip_kind?: "mp4" | "m4a" | "frames" | null;
+  /** clip_kind === "frames" 时非空:{device_id: 该设备本窗送模型的帧数}。
+   *  帧数只能由盘上连号文件数出来(snapshot_count 是 device 数,不是帧数),
+   *  故服务端 stat 后就地注入。其余模态恒空/缺省。 */
+  frame_counts?: Record<string, number>;
   /** omni_trace.json.gz 是否存在;前端据此决定是否显示反馈按钮 */
   has_trace?: boolean;
   /** 是否有全景参考帧 ref.jpg(= 本事件走了 Smart Crop);前端据此决定是否请求 /ref/ 并渲染参考卡 */
@@ -197,7 +202,12 @@ export interface OnDemandLogEntry {
   latency_ms: number | null;
   snapshot_count: number;
   clip_dids: string[];
-  clip_kinds: Record<string, "mp4" | "m4a">;
+  /** {device_id: 产物类型}。三态语义同 ActivityEvent.clip_kind,但这里是**按 device** 给的:
+   *  多机位查询里 A 机可能出视频、B 机只有声音,故不能用一个事件级字段概括。
+   *  "frames" = 图像推理路径的逐帧 JPEG(input_mode=image)。 */
+  clip_kinds: Record<string, "mp4" | "m4a" | "frames">;
+  /** clip_kinds[did] === "frames" 的 device 才有:{did: 帧数}。列表 API 就地 stat 注入。 */
+  frame_counts?: Record<string, number>;
   has_trace: boolean;
   has_feedback: boolean;
   feedback_pack_path: string | null;

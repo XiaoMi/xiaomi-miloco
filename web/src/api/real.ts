@@ -1319,8 +1319,10 @@ interface BackendMeaningfulEvent {
   snapshot_count: number;
   device_ids: string[];
   rule_names?: Record<string, string>;
-  /** 服务端根据落盘文件后缀计算:"mp4" 视频路径 / "m4a" audio-only / null 未落盘. */
-  clip_kind?: "mp4" | "m4a" | null;
+  /** 服务端根据落盘文件计算:"mp4" 视频 / "m4a" audio-only / "frames" 图像推理帧组 / null 未落盘. */
+  clip_kind?: "mp4" | "m4a" | "frames" | null;
+  /** clip_kind === "frames" 时非空:{device_id: 帧数}(盘上连号 frame_*.jpg 的个数). */
+  frame_counts?: Record<string, number>;
   has_trace?: boolean;
   /** 任一 device 目录下有 ref.jpg → 本事件走了 Smart Crop,有全景参考帧可取. */
   has_ref?: boolean;
@@ -1356,6 +1358,7 @@ export async function realListActivity(opts?: {
       device_ids: e.device_ids,
       rule_names: e.rule_names,
       clip_kind: e.clip_kind,
+      frame_counts: e.frame_counts,
       has_trace: e.has_trace,
       has_ref: e.has_ref,
       has_feedback: e.has_feedback,
@@ -1388,6 +1391,17 @@ export async function realListOnDemandLogs(opts?: {
 export function realOnDemandClipUrl(logId: string, deviceId: string): string {
   const token = resolveToken();
   const base = `/api/perception/on-demand-logs/${encodeURIComponent(logId)}/clip/${encodeURIComponent(deviceId)}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+/** 主动查询第 index 张图像推理帧(同款 query token;语义同 realEventFrameUrl). */
+export function realOnDemandFrameUrl(
+  logId: string,
+  deviceId: string,
+  index: number,
+): string {
+  const token = resolveToken();
+  const base = `/api/perception/on-demand-logs/${encodeURIComponent(logId)}/frame/${encodeURIComponent(deviceId)}/${index}`;
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
@@ -1435,6 +1449,24 @@ export function realEventRefUrl(
 ): string {
   const token = resolveToken();
   const base = `/api/events/${encodeURIComponent(event_id)}/ref/${encodeURIComponent(device_id)}`;
+  return token ? `${base}?token=${encodeURIComponent(token)}` : base;
+}
+
+/**
+ * 拼事件第 index 张图像推理帧 JPEG 的 URL(同款 `?token=...` query 鉴权).
+ *
+ * 仅图像推理模式的事件有(input_mode=image):omni 那次看到的不是 mp4,而是 per-device
+ * 一组 JPEG(零重编,字节级 = omni 所见).index 0-based、按时间先后,与盘上
+ * `frame_{index:03d}.jpg` 一一对应.调用方应先看 `event.clip_kind === "frames"` 与
+ * `event.frame_counts[device_id]` 再请求;帧数之外 / 已被 cleanup 清掉后端返 410.
+ */
+export function realEventFrameUrl(
+  event_id: string,
+  device_id: string,
+  index: number,
+): string {
+  const token = resolveToken();
+  const base = `/api/events/${encodeURIComponent(event_id)}/frame/${encodeURIComponent(device_id)}/${index}`;
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
 
@@ -1514,6 +1546,7 @@ export function realSubscribeEvents(
         device_ids: payload.device_ids,
         rule_names: payload.rule_names,
         clip_kind: payload.clip_kind,
+        frame_counts: payload.frame_counts,
         has_trace: payload.has_trace,
         has_ref: payload.has_ref,
         has_feedback: payload.has_feedback,

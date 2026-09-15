@@ -355,6 +355,15 @@ export function eventRefUrl(event_id: string, device_id: string): string {
   return impl.realEventRefUrl(event_id, device_id);
 }
 
+/** 事件第 index 张图像推理帧 URL(仅 clip_kind === "frames" 的事件有,先看 frame_counts). */
+export function eventFrameUrl(
+  event_id: string,
+  device_id: string,
+  index: number,
+): string {
+  return impl.realEventFrameUrl(event_id, device_id, index);
+}
+
 /**
  * Smart Crop 裁切区域坐标(画框用).
  *
@@ -388,6 +397,15 @@ export async function listOnDemandLogs(
 
 export function onDemandClipUrl(logId: string, deviceId: string): string {
   return impl.realOnDemandClipUrl(logId, deviceId);
+}
+
+/** 主动查询第 index 张图像推理帧 URL(仅 clip_kinds[did] === "frames" 时有). */
+export function onDemandFrameUrl(
+  logId: string,
+  deviceId: string,
+  index: number,
+): string {
+  return impl.realOnDemandFrameUrl(logId, deviceId, index);
 }
 
 export async function submitOnDemandFeedback(
@@ -759,10 +777,17 @@ export async function getProcSeries(
 
 export type MinSuggestionUrgency = "low" | "medium" | "high";
 
+/** 送 omni 的模态。"video" = 编成 mp4(默认);"image" = 编成一组 JPEG 帧,为兼容只吃
+ *  图像输入的 VLM。两种模式帧源与帧数完全一致,只换容器。 */
+export type InputMode = "video" | "image";
+
 export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
   window_size: number;
+  /** 老后端不返此字段 → undefined,前端据此置灰该控件(同 smart_crop_available 的降级套路):
+   *  拿不到现值就没法判断"改没改",硬渲染会呈现一个拨了也不知道存没存的开关。 */
+  input_mode?: InputMode;
   /** Smart Crop 用户开关(backend crop_enhance.user_enabled)。与 video_short_edge
    *  **正交**:裁不裁看这个,多清晰看分辨率档。老后端不返此字段 → undefined。 */
   smart_crop_enabled?: boolean;

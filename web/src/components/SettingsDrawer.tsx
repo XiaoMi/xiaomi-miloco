@@ -5,6 +5,7 @@ import {
   getSchedulerConfig,
   updatePerceptionConfig,
   updateSchedulerConfig,
+  type InputMode,
   type MinSuggestionUrgency,
   type PerceptionConfig,
 } from "@/api";
@@ -14,6 +15,10 @@ import { toast } from "./Toast";
 // PerceptionConfig 里 min_suggestion_urgency 声明为可选(老 backend 不返此字段);
 // 但组件 state 需要确定值,单独拎一个具体类型的默认常量兜住:接口"可能没"、控件"永远有"。
 const DEFAULT_MIN_URGENCY: MinSuggestionUrgency = "low";
+// input_mode 同理可选,但这里**不**兜成"永远有":拿不到远端现值就无从判断 dirty,
+// 硬渲染会拨了也存不上,故走 inputModeAvailable 置灰(与 smartCropAvailable 同款)。
+// 默认值仍写成 video,只为初始化 state 的类型收敛。
+const DEFAULT_INPUT_MODE: InputMode = "video";
 
 // 与 backend 默认值对齐：video_short_edge / omni_fps 见 settings.yaml 的
 // perception.engine.input，window_size 见 perception.collect，smart_crop_enabled 见
@@ -29,6 +34,8 @@ const DEFAULTS: PerceptionConfig = {
 
 const SHORT_EDGE_OPTIONS = [360, 512, 768, 1080] as const;
 const FPS_OPTIONS = [1, 2, 3] as const;
+// 输入模态。顺序即展示顺序,默认档(video)排头。
+const INPUT_MODE_OPTIONS: readonly InputMode[] = ["video", "image"] as const;
 const WINDOW_MIN = 2;
 const WINDOW_MAX = 10;
 // slider 顺序即 URGENCY_RANK,index == pydantic Literal 顺序 → 双向 O(1) 映射。
@@ -46,6 +53,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [busy, setBusy] = useState(false);
 
   const [videoShortEdge, setVideoShortEdge] = useState(DEFAULTS.video_short_edge);
+  // 送 omni 的模态。与分辨率档正交:模态决定"送什么容器"(mp4 / 一组 JPEG),
+  // 分辨率决定"多清晰"。两者独立 dirty、独立生效。
+  const [inputMode, setInputMode] = useState<InputMode>(DEFAULT_INPUT_MODE);
   const [omniFps, setOmniFps] = useState(DEFAULTS.omni_fps);
   const [windowSize, setWindowSize] = useState(DEFAULTS.window_size);
   // Smart Crop 用户开关。与分辨率档正交（各自独立 dirty / 各自独立生效），
@@ -78,6 +88,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
       getPerceptionConfig().then((c) => {
         setConfig(c);
         setVideoShortEdge(c.video_short_edge);
+        // 老 backend 不返 input_mode → 保持 state 初值,并由 inputModeAvailable 置灰;
+        // 不沿用上次会话的旧值造成"看着选中了图像、其实根本没提交"的假象。
+        setInputMode(c.input_mode ?? DEFAULT_INPUT_MODE);
         setOmniFps(c.omni_fps);
         setWindowSize(c.window_size);
         setSmartCrop(c.smart_crop_enabled === true);
@@ -121,9 +134,14 @@ export function SettingsDrawer({ open, onClose }: Props) {
   // 决定，且此刻在小字里指向 CLI 会让用户去找一个界面上不存在的开关。待前端补上
   // 逐机位控件时，与该控件一并订正这行文案。
   const smartCropAvailable = config?.smart_crop_available === true;
+  // 老后端不返 input_mode → 该控件不可配置(置灰 + 专属 hint)。判据是"字段在不在",
+  // 不是"值等不等于默认":返了 "video" 也是有效现值,照样可拨。
+  const inputModeAvailable = config?.input_mode != null;
   const perceptionDirty =
     config != null &&
     (videoShortEdge !== config.video_short_edge ||
+      // 不可用时恒 false:置灰的控件不该产出待保存改动
+      (inputModeAvailable && inputMode !== config.input_mode) ||
       omniFps !== config.omni_fps ||
       windowSize !== config.window_size ||
       // 不可用时恒 false：置灰的开关不该产出待保存改动
@@ -156,6 +174,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
       if (perceptionDirty) {
         const updated = await updatePerceptionConfig({
           video_short_edge: videoShortEdge,
+          // 只在后端认这个字段时才提交,不可用时不往后端写一个用户按不动的值
+          ...(inputModeAvailable ? { input_mode: inputMode } : {}),
           omni_fps: omniFps,
           window_size: windowSize,
           // 只在发版级开关放开时才提交,不可用时不往后端写一个用户按不动的值
@@ -194,6 +214,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
 
   function handleReset() {
     setVideoShortEdge(DEFAULTS.video_short_edge);
+    // 同 smartCrop:不可用(老后端)时不动视觉,否则会拨出一个恒不 dirty 的值
+    if (inputModeAvailable) setInputMode(DEFAULT_INPUT_MODE);
     setOmniFps(DEFAULTS.omni_fps);
     setWindowSize(DEFAULTS.window_size);
     // 同 scheduler：不可用（发版级开关未放开，置灰）时不动视觉，否则会拨出一个恒不 dirty 的值
@@ -289,6 +311,39 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 </div>
                 <p className="text-caption text-text-tertiary">
                   {t("settings.videoShortEdgeHint")}
+                </p>
+              </div>
+
+              {/* 推理输入模态 —— 与分辨率档正交：模态决定送 mp4 还是一组 JPEG，
+                  分辨率决定每帧多清晰。两种模式的帧源与帧数一致，只换容器。
+                  注意 image 恒不带音频（后端 has_audio=False），拨过去之后语音类事件
+                  不再产生、只有声音没画面的窗口整个跳过 —— hint 里必须讲明，
+                  这是本开关唯一的破坏性副作用。 */}
+              <div className="space-y-2.5">
+                <label className="text-body font-medium text-text-primary block">
+                  {t("settings.inputMode")}
+                </label>
+                <div className="flex gap-2">
+                  {INPUT_MODE_OPTIONS.map((v) => (
+                    <button
+                      key={v}
+                      type="button"
+                      disabled={!inputModeAvailable}
+                      onClick={() => setInputMode(v)}
+                      className={`flex-1 py-2.5 rounded-xl text-body transition-colors ${
+                        inputMode === v
+                          ? "bg-brand-primary text-white shadow-sm"
+                          : "bg-bg-primary border border-border text-text-primary hover:border-brand-primary"
+                      } ${inputModeAvailable ? "" : "opacity-50 cursor-not-allowed"}`}
+                    >
+                      {t(`settings.inputModeOption.${v}`)}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-caption text-text-tertiary">
+                  {inputModeAvailable
+                    ? t("settings.inputModeHint")
+                    : t("settings.inputModeUnavailable")}
                 </p>
               </div>
 

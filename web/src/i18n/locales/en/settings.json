@@ -1,6 +1,13 @@
 {
   "settings": {
     "title": "Settings",
+    "inputMode": "Model input",
+    "inputModeOption": {
+      "video": "Video",
+      "image": "Images"
+    },
+    "inputModeHint": "Video = one mp4 clip; Images = the same frames sent as a series of JPEGs, for models that only accept image input. Both modes use the same frames and the same frame count — only the container differs. Image mode carries no audio, so voice-only events are no longer produced and windows with sound but no picture are skipped entirely. Takes effect next perception cycle.",
+    "inputModeUnavailable": "This backend doesn't support this toggle (version may be too old); not configurable for now.",
     "videoShortEdge": "Resolution",
     "videoShortEdgeHint": "Short edge pixels, keeps aspect ratio",
     "smartCrop": "Smart Crop Enhance",

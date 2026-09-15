@@ -14,10 +14,12 @@ import { useTranslation } from "react-i18next";
 import {
   eventClipUrl,
   eventCropMeta,
+  eventFrameUrl,
   eventRefUrl,
   listActivity,
   listOnDemandLogs,
   onDemandClipUrl,
+  onDemandFrameUrl,
   revealDir,
   submitEventFeedback,
   submitOnDemandFeedback,
@@ -367,6 +369,8 @@ export function ActivityFeed({
               // 或 publish 重试)时,后到的 clip_kind 应胜出 — 漏掉的话会回归 18:42:05
               // bug(行尾错显 🎬 / 展开走 <video> 黑屏).
               clip_kind: e.clip_kind ?? prev[idx].clip_kind,
+              // 帧数同样是"有则胜出":它是服务端 stat 盘算的,后到的那份更新。
+              frame_counts: e.frame_counts ?? prev[idx].frame_counts,
               has_trace: e.has_trace ?? prev[idx].has_trace,
               has_ref: e.has_ref ?? prev[idx].has_ref,
               has_feedback: e.has_feedback ?? prev[idx].has_feedback,
@@ -536,6 +540,7 @@ export function ActivityFeed({
                   setFeedbackSet(prev => new Set(prev).add(id));
                   setFeedbackPacks(prev => new Map(prev).set(id, { path, size }));
                 }}
+                deviceNames={deviceNames}
               />
             ) : (
               <ActionRow key={`a:${r.action.id}`} row={r.action} t={t} />
@@ -822,21 +827,26 @@ function ActivityRow({
   feedbackSet,
   feedbackPacks,
   onFeedbackSubmitted,
+  deviceNames,
 }: {
   event: ActivityEvent;
   onOpenLightbox: (src: string, kind: LightboxKind, crop?: EventCropMeta | null) => void;
   feedbackSet: Set<string>;
   feedbackPacks: Map<string, { path: string; size: number }>;
   onFeedbackSubmitted: (eventId: string, path: string, size: number) => void;
+  /** did → 可读机位名;缺省时帧组标题退化为不显示机位名。 */
+  deviceNames: Record<string, string>;
 }) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const hasClips = event.snapshot_count > 0;
-  // 区分音频事件 vs 视频事件 — backend stat 落盘文件后缀计算 clip_kind:
+  // 区分三类事件 — backend stat 落盘文件算 clip_kind:
   //   "mp4" → 视频路径 (H264+AAC),UI 🎬
   //   "m4a" → audio-only 路径(纯 AAC,画面静止),UI 🎤 音频
+  //   "frames" → 图像推理路径(input_mode=image):没有 clip,落的是 per-device 逐帧 JPEG,UI 🖼
   //   null/undefined → 未落盘(磁盘满预检失败 / 老库 event),UI 🎤
   const isAudioOnly = event.clip_kind === "m4a";
+  const isFrames = event.clip_kind === "frames";
 
   // humanize 后按 \n\n 分章节渲染.每章节自成一段(line-clamp-2 折叠模式).
   const humanized = useMemo(
@@ -850,14 +860,17 @@ function ActivityRow({
 
   // 行尾标识:
   //   - 视频 clip → 🎬
+  //   - 图像推理帧组 → 🖼(同样是"有画面",但展开后不是播放器而是一排静帧)
   //   - 音频 clip(画面静止 audio-only)→ 🎤
   //   - 无 clip(metadata-only / 老库)→ 🎤
   // 展开状态显"收起".audio-only 跟"无 clip"用同一图标 — 都"没视频"语义一致.
   const trailing = expanded
     ? t("activity.collapse")
-    : hasClips && !isAudioOnly
-      ? "🎬"
-      : "🎤";
+    : hasClips && isFrames
+      ? "🖼"
+      : hasClips && !isAudioOnly
+        ? "🎬"
+        : "🎤";
 
   return (
     <li
@@ -898,7 +911,7 @@ function ActivityRow({
         </span>
       </div>
 
-      {expanded && hasClips && !isAudioOnly && (
+      {expanded && hasClips && !isAudioOnly && !isFrames && (
         <div
           className="mt-3 flex gap-2 overflow-x-auto pb-2 sm:ml-[82px]"
           aria-label={t("activity.videoPlayback")}
@@ -921,6 +934,26 @@ function ActivityRow({
                 />
               )}
             </Fragment>
+          ))}
+        </div>
+      )}
+
+      {expanded && hasClips && isFrames && (
+        <div
+          className="mt-3 flex flex-col gap-2.5 pb-2 sm:ml-[82px]"
+          aria-label={t("activity.framesPlayback")}
+        >
+          {event.device_ids.map((did) => (
+            <FrameGroup
+              key={did}
+              device_id={did}
+              deviceName={deviceNames[did]}
+              // 帧数取自服务端 stat(见 ActivityEvent.frame_counts),不在前端试错:
+              // 少一轮请求往返,也不会出现"先画一张、再补齐"的跳动。
+              count={event.frame_counts?.[did] ?? 0}
+              urlFor={(i) => eventFrameUrl(event.id, did, i)}
+              onOpenLightbox={onOpenLightbox}
+            />
           ))}
         </div>
       )}
@@ -1292,6 +1325,109 @@ function RefFrameCard({
   );
 }
 
+/** 图像推理模式的帧组:把那次推理真正送进模型的 N 张 JPEG 逐张铺平展开.
+ *
+ *  为什么不是 <video>:input_mode=image 时盘上根本没有 mp4,产物就是这一组
+ *  `frame_*.jpg`(见后端 snapshot_writer.FRAME_PREFIX),字节级 = omni 所见.
+ *
+ *  为什么按 device 分组而不是全铺成一排:帧序只在**同一设备内**才有时间含义,多机位
+ *  混排会让"第 3 张"指代不明;且各设备帧数可以不同(某台整组落盘失败就一张都没有).
+ *
+ *  帧数由调用方从服务端 stat 结果传入(ActivityEvent.frame_counts),不在前端按需试错——
+ *  少一轮请求往返,也不会出现"先画 3 张、再补第 4 张"的跳动。
+ *
+ *  两种"拿不到"要分开:
+ *  - count === 0:服务端说这台 device 这次就没有帧(多机位里落盘失败的那台 / 事件目录
+ *    已被 cleanup 清)。显式给占位,别静默少渲染一台 —— 帧恰恰是复盘要看的东西。
+ *  - 单张 404/410:帧数是 stat 出来的,清理任务可能在 stat 与取图之间删掉某一张。
+ *    只把那一张换成占位,其余照常渲染。 */
+function FrameGroup({
+  device_id,
+  deviceName,
+  count,
+  urlFor,
+  onOpenLightbox,
+}: {
+  device_id: string;
+  deviceName?: string;
+  count: number;
+  urlFor: (index: number) => string;
+  onOpenLightbox: (src: string, kind: LightboxKind, crop?: EventCropMeta | null) => void;
+}) {
+  const { t } = useTranslation();
+  // 逐张记失败(用 index 集合,不用单个 bool):一组里坏一张不该把整组藏掉。
+  const [failed, setFailed] = useState<ReadonlySet<number>>(new Set());
+
+  const title = deviceName
+    ? `${deviceName} · ${t("activity.frameCount", { n: count })}`
+    : t("activity.frameCount", { n: count });
+
+  if (count <= 0) {
+    return (
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="self-start px-4 py-3 rounded bg-bg-primary border border-border text-caption-mono text-text-tertiary"
+        aria-label={t("activity.framesMissingAria")}
+      >
+        {deviceName ? `${deviceName} · ` : ""}
+        {t("activity.framesMissing")}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-caption-mono text-text-tertiary">{title}</span>
+      <div className="flex flex-wrap gap-1.5">
+        {Array.from({ length: count }, (_, i) => {
+          if (failed.has(i)) {
+            return (
+              <div
+                key={i}
+                onClick={(e) => e.stopPropagation()}
+                className="w-32 h-32 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary"
+                aria-label={t("activity.frameExpiredAria")}
+              >
+                {t("activity.frameExpired")}
+              </div>
+            );
+          }
+          const src = urlFor(i);
+          return (
+            <div
+              key={i}
+              onClick={(e) => e.stopPropagation()}
+              className="relative group"
+            >
+              <img
+                src={src}
+                alt={`${device_id} ${t("activity.frameN", { n: i + 1 })}`}
+                onError={() => setFailed((prev) => new Set(prev).add(i))}
+                onClick={(e) => e.stopPropagation()}
+                className="w-32 h-32 rounded bg-black border border-border object-contain"
+              />
+              <span className="absolute bottom-1 left-1 px-1.5 rounded bg-black/60 text-white text-caption-mono pointer-events-none">
+                {i + 1}
+              </span>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenLightbox(src, "image", null);
+                }}
+                aria-label={t("activity.zoomFrame")}
+                className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+              >
+                ⛶
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** 把 crop 元数据换算成 svg 几何(viewBox + rect).坏数据返 null = 不画框.
  *
  *  坐标不做任何缩放 —— viewBox 用全景帧原始尺寸,rect 用原始 region 像素坐标,
@@ -1566,13 +1702,19 @@ function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
   const packSize = feedbackPack?.size ?? log.feedback_pack_size ?? null;
   const hasClips = log.snapshot_count > 0;
   const clipDids = log.clip_dids ?? [];
-  const allAudioOnly = hasClips && clipDids.every((did) => (log.clip_kinds?.[did] ?? "mp4") === "m4a");
+  // 产物类型是**按 device** 的:同一窗口里 A 机出视频、B 机只有声音都可能,故不能用
+  // 事件级那套单一 clip_kind。行尾图标按"最像视频的那一档"取:有 mp4 → 🎬,
+  // 否则有帧组 → 🖼,否则(纯音频 / 没落盘)→ 💬。
+  const kindOf = (did: string) => log.clip_kinds?.[did] ?? "mp4";
+  const kinds = clipDids.map(kindOf);
 
   const trailing = expanded
     ? t("activity.collapse")
-    : hasClips && !allAudioOnly
+    : hasClips && kinds.includes("mp4")
       ? "🎬"
-      : "💬";
+      : hasClips && kinds.includes("frames")
+        ? "🖼"
+        : "💬";
 
   return (
     <li
@@ -1595,12 +1737,37 @@ function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
       </div>
 
       {expanded && hasClips && (
-        <div className="mt-3 flex gap-2 overflow-x-auto pb-2 sm:ml-[82px]">
-          {clipDids.map((did) =>
-            (log.clip_kinds?.[did] ?? "mp4") === "m4a"
-              ? <OnDemandAudioPlayer key={did} logId={log.id} deviceId={did} />
-              : <OnDemandClipPlayer key={did} logId={log.id} deviceId={did} onOpenLightbox={onOpenLightbox} />,
-          )}
+        // 帧组要纵向铺开(每台机位一行),播放器则沿用横向一排。两者不会混:产物类型由
+        // input_mode 决定,而它是全局的、一次查询里只有一个值,所以按"有没有帧"二选一即可。
+        <div
+          className={
+            kinds.includes("frames")
+              ? "mt-3 flex flex-col gap-2.5 pb-2 sm:ml-[82px]"
+              : "mt-3 flex gap-2 overflow-x-auto pb-2 sm:ml-[82px]"
+          }
+        >
+          {clipDids.map((did) => {
+            const kind = kindOf(did);
+            if (kind === "frames") {
+              return (
+                <FrameGroup
+                  key={did}
+                  device_id={did}
+                  deviceName={deviceNames[did]}
+                  count={log.frame_counts?.[did] ?? 0}
+                  urlFor={(i) => onDemandFrameUrl(log.id, did, i)}
+                  // 查询侧的 lightbox 回调只声明了 src,多出的 kind/crop 参数自然丢弃。
+                  onOpenLightbox={onOpenLightbox}
+                />
+              );
+            }
+            if (kind === "m4a") {
+              return <OnDemandAudioPlayer key={did} logId={log.id} deviceId={did} />;
+            }
+            return (
+              <OnDemandClipPlayer key={did} logId={log.id} deviceId={did} onOpenLightbox={onOpenLightbox} />
+            );
+          })}
         </div>
       )}
 
