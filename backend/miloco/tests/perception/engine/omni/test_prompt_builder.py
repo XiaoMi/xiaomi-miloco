@@ -386,10 +386,12 @@ class TestDeviceHeaderRoster:
         ep_empty = self._packet([self._target(1, "pending", (1, 2, 3, 4))])
         assert all("归一化到 [0, 1000]" not in ln
                    for ln in _build_device_header([ep_empty], label_lookup={}))
-        # 有 bbox 的成员 → 末尾一句说明
+        # 有 bbox 的成员 → 坐标系说明句 + 紧随其后的定位语义句
         ep_bbox = self._packet([self._target(1, "pid-x", (1, 2, 3, 4))])
         lines = _build_device_header([ep_bbox], label_lookup={"pid-x": "王五"})
-        assert "归一化到 [0, 1000]" in lines[-1]
+        assert any("归一化到 [0, 1000]" in ln for ln in lines)
+        # 名册是定位线索,不是"当前有人"的断言 —— 空椅人体误检被名册安上姓名即由此而来
+        assert any("不得沿用姓名" in ln for ln in lines)
 
 
 class TestFormatTrackLine:
@@ -2044,7 +2046,7 @@ class TestAdaptiveResolution:
                 assert "[bbox=(156, 208, 281, 458)]" in roster
             note = self._bbox_note(content)
             assert "最后一帧" in note
-            assert "视频里的人" in note
+            assert "不替代本轮画面对" in note  # bbox 是定位线索,不是"有人"的证据
             assert "全景参考图" not in note  # 参考图不再充当 bbox 锚点
 
     def test_bbox_note_emitted_for_candidate_only_bbox(self):

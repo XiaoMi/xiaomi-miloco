@@ -257,7 +257,7 @@ def build_fused_payload(
 
     # audio route：无视觉信息，候选作废。与 video 同款 message 隔离（待判断规则/只读历史
     # 各自独立 user 消息）；本轮事实只放"当前时间 + 音频"——audio 无视频，不渲染名册/gallery/
-    # 待识别 track（名册的 bbox 是为"把姓名对应到视频里的人"，audio 场景无意义）。
+    # 待识别 track（名册的 bbox 是为"定位名册项对应的目标"，audio 场景无意义）。
     if _resolve_route(packets) == "audio":
         scene = SceneDescriptor(route="audio", has_identity=False, stream=False)
         system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
@@ -879,7 +879,9 @@ def _build_fused_user_content(
         content.append({"type": "text", "text": (
             "上方已识别人物、陌生人及待识别 track 中的 bbox=(x1, y1, x2, y2) 均为视频**最后一帧**中"
             "归一化到 [0, 1000] 区间的位置（左上 0,0；右下 1000,1000），"
-            "用于把姓名 / track_id 对应到视频里的人；画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+            "用于定位名册项 / track 对应的目标；它不替代本轮画面对‘是否有人’的判断。"
+            "框内若是非人体，不得沿用姓名，也不算有人。"
+            "画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
         )})
 
     # 参考帧图块:引导语与图块同进同退,避免只留文字不留图。
@@ -1073,7 +1075,14 @@ def _build_device_header(
     if emit_bbox_note and any("[bbox=" in ln for ln in lines):
         lines.append(
             "上方已识别人物、陌生人中 [bbox=(x1, y1, x2, y2)] 为该人在视频**最后一帧**中归一化到 [0, 1000] 区间的位置"
-            "（左上 0,0；右下 1000,1000），用于把姓名对应到视频里的人；画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+            "（左上 0,0；右下 1000,1000），用于定位名册项对应的目标，不替代本轮画面对‘是否有人’的判断；"
+            "画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+        )
+    # 空椅坏例的关键防护：名册条目是历史状态/定位信息，不是对当前画面有人存在的断言。
+    # 只在确实发出 bbox 时追加，避免无位置的常态名册增加无必要的 token。
+    if any("[bbox=" in ln for ln in lines):
+        lines.append(
+            "名册仅供定位；bbox 若对应非人体，不得沿用姓名，也不算有人。"
         )
     return lines
 
