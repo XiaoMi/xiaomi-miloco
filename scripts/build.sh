@@ -67,8 +67,7 @@ check_prerequisites() {
     command -v python3 >/dev/null 2>&1 || die 4 "python3 未安装"
 
     if should_build "openclaw" || should_build "web"; then
-        command -v pnpm >/dev/null 2>&1 || die 4 "pnpm 未安装"
-        command -v npm >/dev/null 2>&1 || die 4 "npm 未安装"
+        command -v pnpm >/dev/null 2>&1 || curl -fsSL https://get.pnpm.io/install.sh | sh -
     fi
 
     [ -f "$PROJECT_ROOT/backend/miot/pyproject.toml" ] || die 4 "不在项目根目录"

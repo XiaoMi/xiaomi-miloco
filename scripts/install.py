@@ -654,14 +654,7 @@ class Installer:
             self.ui.step_skip(self.ui.i18n.t("platform.skip_non_interactive"))
             return
 
-        openclaw_label = self.ui.i18n.t("platform.openclaw_option")
-        hermes_label = self.ui.i18n.t("platform.hermes_option")
-        choice = self.ui.prompt_select(
-            self.ui.i18n.t("platform.ask"),
-            choices=[openclaw_label, hermes_label],
-            default=openclaw_label,
-        )
-        self.agent_platform = "hermes" if choice == hermes_label else "openclaw"
+        self.agent_platform = "openclaw"
         self.ui.step_ok(self.ui.i18n.t("platform.selected", self.agent_platform))
 
     def _step_header(self, title_key: str, subtitle_key: str) -> None:
@@ -1848,14 +1841,7 @@ def _decide_agent_platform(
         or not plat.is_interactive
     ):
         return "openclaw"
-    openclaw_label = ui.i18n.t("platform.openclaw_option")
-    hermes_label = ui.i18n.t("platform.hermes_option")
-    choice = ui.prompt_select(
-        ui.i18n.t("platform.ask"),
-        choices=[openclaw_label, hermes_label],
-        default=openclaw_label,
-    )
-    return "hermes" if choice == hermes_label else "openclaw"
+    return "openclaw"
 
 
 def _default_miloco_home(agent_platform: str) -> Path:
@@ -1893,11 +1879,11 @@ def main() -> None:
             plat=plat,
             ui=ui,
             downloader=downloader,
-            dev=args.dev,
+            dev=True,
             omni_api_key=args.omni_api_key,
             account_auth=args.account_auth,
             miloco_home=miloco_home,
-            skip_openclaw=args.skip_openclaw,
+            skip_openclaw=True,
             agent_platform=agent_platform,
         )
         atexit.register(installer._stop_service)
@@ -1942,11 +1928,11 @@ def main() -> None:
         plat=plat,
         ui=ui,
         downloader=downloader,
-        dev=args.dev,
+        dev=True,
         omni_api_key=args.omni_api_key,
         account_auth=args.account_auth,
         miloco_home=miloco_home,
-        skip_openclaw=args.skip_openclaw,
+        skip_openclaw=True,
         agent_platform=agent_platform,
     )
 
