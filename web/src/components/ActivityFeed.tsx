@@ -668,7 +668,11 @@ function Lightbox({
         <div className="relative w-full h-full">
           <img
             src={src}
-            alt={t("activity.refFrame")}
+            // 跟对话框 aria 同一判据: 带 crop 的才是 Smart Crop 全景参考帧, 图片序列的
+            // 主画面帧走同一个 kind 但没有 crop. 这里若恒念"全景参考帧", 读屏用户从序列卡
+            // 打开放大就会听见对话框报"图片序列"、紧接着图片本体报"全景参考帧"——同一个
+            // 弹层里两句话互相矛盾(上轮修的是 dialog 层, 错描述从 img 层漏了下来).
+            alt={crop ? t("activity.refFrame") : t("activity.imagePlayback")}
             className="w-full h-full object-contain"
           />
           {crop && <CropBoxOverlay crop={crop} />}
@@ -1270,12 +1274,24 @@ function ImageSequenceCard({
       className="flex-shrink-0 relative group"
     >
       {failed ? (
-        <div
-          className="w-48 h-48 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary"
-          aria-label={t("activity.imageExpiredAria", "图片已过期")}
+        // 占位块本身可点重试。N≥2 时翻页就是重试入口, 但 frameCount===1 的短窗口下
+        // frameIndex 恒 0 —— prev 的 `frameIndex === 0`、next 的 `0 >= 0` 双双成立,
+        // 两个按钮都 disabled, 两处 setFailed(false) 对这个形状依旧不可达(短窗口/掉帧时
+        // image_frame_counts 可以为 1)。真过期时点按 → <img> 重新挂载 → 再次 onError
+        // → 回到占位, 无副作用。
+        // 用真 <button> 而不是可点 div: 可点 div 不可聚焦、键盘不可达, 且 aria 仍念
+        // "图片已过期" —— 交互元素只报状态、不报动作, 读屏用户不知道它能点。
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setFailed(false);
+          }}
+          className="w-48 h-48 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary cursor-pointer"
+          aria-label={t("activity.imageExpiredRetry", "图片已过期，点按重新加载")}
         >
           {t("activity.imageExpired", "图片已过期")}
-        </div>
+        </button>
       ) : (
         <img
           src={src}

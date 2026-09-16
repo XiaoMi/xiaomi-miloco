@@ -185,7 +185,8 @@ export interface ActivityEvent {
   visual_artifact_kind?: "video" | "images" | "audio" | "none";
   /** 图片模式每个 device 的 canonical frame 数。 */
   image_frame_counts?: Record<string, number>;
-  /** 图片模式随主画面单独上送的音频(audio.m4a)是否存在。
+  /** 是否存在独立持久化的音频产物(图片模式随主画面单独上送的 audio.m4a, 或
+   *  audio-only 事件的 clip.m4a —— 后者在图片模式上线前就存在)。
    *
    *  接口透传字段，UI 不消费: 图片模式选中的 VLM 默认不支持音频(多数 VLM 亦如此),
    *  模型听不到这段音频, 界面也就不给它播放入口 —— 回放区在图片模式下整行走图片序列
