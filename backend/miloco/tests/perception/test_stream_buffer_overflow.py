@@ -50,7 +50,7 @@ def test_clear_action_resets_and_counts():
     _fill_ready(buf, 6, 100)
 
     dropped, ovf_cnt, max_depth, last_action = buf.consume_drop_stats()
-    assert dropped > 0
+    assert dropped == 4
     assert ovf_cnt >= 1
     assert max_depth > 2
     assert last_action == "clear"

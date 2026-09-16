@@ -224,7 +224,7 @@ class MultiTrackSyncBuffer:
                 self._overflow_count_since_drain += 1
 
                 if self._buffer_full_action == "clear":
-                    dropped = ready_before + active_before
+                    dropped = active_before
                     self._windows.clear()
                     self._ready_queue.clear()
                     self._ready_keys.clear()
