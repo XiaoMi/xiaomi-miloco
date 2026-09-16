@@ -1486,6 +1486,11 @@ async def omni_health_stream():
 # =============================================================================
 
 
+# 全局感知系统提示词长度上限（字符）：与 prompt 预算对齐的宽松护栏，挡住误贴整份
+# 文档把每窗 system prompt 撑爆；正常住户配置远低于此。
+_GLOBAL_SYSTEM_PROMPT_MAX_LEN = 8000
+
+
 class PerceptionConfigBody(BaseModel):
     video_short_edge: int | None = Field(default=None, ge=64, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
@@ -1498,6 +1503,16 @@ class PerceptionConfigBody(BaseModel):
         description=(
             "把 urgency 低于该阈值的 suggestion 从 dispatch→agent 通路丢弃;"
             "low=不过滤(默认),medium=丢弃 low,high=只保留 high"
+        ),
+    )
+    # 全局感知系统提示词（web「设置」页）：写进
+    # perception.engine.global_system_prompt，热读下个感知窗口生效；空串 = 清空不注入。
+    global_system_prompt: str | None = Field(
+        default=None,
+        max_length=_GLOBAL_SYSTEM_PROMPT_MAX_LEN,
+        description=(
+            "追加到感知 system prompt 的全局补充指导（内置角色/总原则/schema 保留）；"
+            "空串 = 不注入"
         ),
     )
 
@@ -1534,6 +1549,15 @@ def _perception_config_payload() -> dict:
             "event=perception_config_crop_enhance_read_failed 报 available=false", exc_info=True
         )
         ce = CropEnhanceConfig()
+    # 全局感知系统提示词:同样 fail-safe 读——非 str(env 写数字 / config.json 手写数组)
+    # 一律当未配置,别让 GET/PUT 500(理由同上面的 input 块)。
+    global_system_prompt = s.perception.engine.get("global_system_prompt", "")
+    if not isinstance(global_system_prompt, str):
+        logger.warning(
+            "event=perception_config_bad field=global_system_prompt reason=not_str raw=%r 退空",
+            global_system_prompt,
+        )
+        global_system_prompt = ""
     return {
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
@@ -1547,6 +1571,8 @@ def _perception_config_payload() -> dict:
         "smart_crop_enabled": ce.user_enabled,
         "smart_crop_available": ce.enabled,
         "min_suggestion_urgency": s.perception.min_suggestion_urgency,
+        # 全局感知系统提示词(web「设置」页)；热读下个感知窗口生效。
+        "global_system_prompt": global_system_prompt,
     }
 
 
@@ -1581,6 +1607,12 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         # get_settings() 现读,update_shared_config 已含 reset_settings,下个 cycle 即生效,
         # 不参与下方 restart_ok(不需要重启引擎)。
         update.setdefault("perception", {})["min_suggestion_urgency"] = body.min_suggestion_urgency
+    if body.global_system_prompt is not None:
+        # 全局感知系统提示词同样热读:prompt_builder._global_system_prompt 每窗现读
+        # settings。空串是合法新值(= 清空注入),故判 None 而非判空。
+        update.setdefault("perception", {}).setdefault("engine", {})[
+            "global_system_prompt"
+        ] = body.global_system_prompt
     payload = _perception_config_payload()
     if update:
         # 各参数生效路径不同，按「新值 != 旧值」判断（前端 drawer 多字段一起 PUT）：

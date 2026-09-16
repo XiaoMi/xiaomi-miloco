@@ -335,6 +335,71 @@ def test_rule_only_system_prompt_override_empty_uses_builtin():
     assert '忽略窗外' in sp, '未覆盖时 camera_prompt 照常追加'
 
 
+# ---- 全局感知系统提示词（web「设置」页，追加而非替换） ----
+
+
+def test_global_system_prompt_appended_to_rule_only():
+    """global_system_prompt 非空 → 追加「# 全局感知须知」，内置内容全部保留。"""
+    scene = SceneDescriptor(route='video', rule_only=True, has_audio=False, has_speech=False)
+    engine = {
+        'rule_only_system_prompt': '',
+        'global_system_prompt': '全局：始终关注门口地面；忽略电视屏幕内容。',
+    }
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(mock_gs, engine)
+        sp = build_system_prompt(scene, camera_prompt='本机位：忽略窗外')
+    assert '规则判定引擎' in sp, '内置角色保留'
+    assert 'matched_rules' in sp, '内置 schema 保留'
+    assert '# 全局感知须知' in sp
+    assert '始终关注门口地面' in sp
+    assert '本机位：忽略窗外' in sp
+    # 全局段在 camera_prompt 之前（全局对所有机位相同 → 与内置段同为共享前缀）
+    assert sp.index('# 全局感知须知') < sp.index('本机位：忽略窗外')
+
+
+def test_global_system_prompt_empty_not_injected():
+    scene = SceneDescriptor(route='video', rule_only=True, has_audio=False, has_speech=False)
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(
+            mock_gs, {'rule_only_system_prompt': '', 'global_system_prompt': '   '}
+        )
+        sp = build_system_prompt(scene)
+    assert '# 全局感知须知' not in sp
+
+
+def test_global_system_prompt_not_str_ignored():
+    """配置误写成非字符串 → 视为未设置，不注入（防御配置误写）。"""
+    scene = SceneDescriptor(route='video', rule_only=True, has_audio=False, has_speech=False)
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(
+            mock_gs, {'rule_only_system_prompt': '', 'global_system_prompt': ['x']}
+        )
+        sp = build_system_prompt(scene)
+    assert '# 全局感知须知' not in sp
+
+
+def test_global_system_prompt_appended_to_full_perception():
+    """全量感知（非 rule_only）也追加全局感知须知。"""
+    scene = SceneDescriptor(route='video', has_identity=False, stream=False, has_audio=False, has_speech=False)
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(mock_gs, {'global_system_prompt': '全局：注意地面水渍'})
+        sp = build_system_prompt(scene, include_home_profile=False)
+    assert '家庭场景理解智能助手' in sp
+    assert '# 全局感知须知' in sp
+    assert '注意地面水渍' in sp
+
+
+def test_override_wins_over_global_system_prompt():
+    """rule_only_system_prompt 全量覆盖仍优先：非空时原样返回，不追加全局须知。"""
+    scene = SceneDescriptor(route='video', rule_only=True, has_audio=False, has_speech=False)
+    override = '自定义全量 prompt。'
+    engine = {'rule_only_system_prompt': override, 'global_system_prompt': '全局：不该出现'}
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(mock_gs, engine)
+        sp = build_system_prompt(scene, camera_prompt='也不该出现')
+    assert sp == override
+
+
 def test_rule_only_messages_build_image_url_blocks():
     """_build_messages 遇 image_frames → 逐帧 image_url 块，不落 video/audio。
 

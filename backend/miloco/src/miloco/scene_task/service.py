@@ -134,6 +134,7 @@ class SceneTaskService:
             rule_id=rule.id,
             enabled=rule.enabled,
             query=rule.condition.query,
+            scene_notes=rule.condition.scene_notes,
             perceive_device_ids=rule.condition.perceive_device_ids,
             enter_scene_id=enter.did if enter is not None else None,
             enter_scene_name=names.get(enter.did) if enter is not None else None,
@@ -182,6 +183,8 @@ class SceneTaskService:
             condition=RuleCondition(
                 perceive_device_ids=req.perceive_device_ids,
                 query=req.query,
+                # 空白串归一到 None（"配了但没内容" = 未注入，避免渲染空分节）。
+                scene_notes=(req.scene_notes or '').strip() or None,
             ),
             on_enter_actions=(
                 [self._scene_action(req.enter_scene_id, req.cooldown_minutes)]
@@ -251,6 +254,8 @@ class SceneTaskService:
             cond.query = req.query
         if 'perceive_device_ids' in fields and req.perceive_device_ids is not None:
             cond.perceive_device_ids = req.perceive_device_ids
+        if 'scene_notes' in fields:  # None / '' / 空白 = 清空该规则的场景补充说明
+            cond.scene_notes = (req.scene_notes or '').strip() or None
         if cond.model_fields_set:
             update.condition = cond
         if 'enter_scene_id' in fields or 'cooldown_minutes' in fields:

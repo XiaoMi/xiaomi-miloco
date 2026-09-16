@@ -25,7 +25,12 @@ const DEFAULTS: PerceptionConfig = {
   window_size: 4,
   smart_crop_enabled: true,
   min_suggestion_urgency: DEFAULT_MIN_URGENCY,
+  global_system_prompt: "",
 };
+
+// 全局感知系统提示词长度上限：与后端 PerceptionConfigBody 的 max_length 对齐，
+// 前端先挡住以免用户写完才吃 422。
+const GLOBAL_PROMPT_MAX = 8000;
 
 const SHORT_EDGE_OPTIONS = [360, 512, 768, 1080] as const;
 const FPS_OPTIONS = [1, 2, 3] as const;
@@ -53,6 +58,10 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [smartCrop, setSmartCrop] = useState(DEFAULTS.smart_crop_enabled === true);
   const [minUrgency, setMinUrgency] = useState<MinSuggestionUrgency>(
     DEFAULT_MIN_URGENCY,
+  );
+  // 全局感知系统提示词：非空时后端追加到感知 system prompt 尾部（内置内容保留）。
+  const [globalPrompt, setGlobalPrompt] = useState(
+    DEFAULTS.global_system_prompt ?? "",
   );
 
   // 内置定时任务自动管理开关（scheduler.enabled）。缺省 true = 自动管理。
@@ -84,6 +93,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
         // 老 backend 若不返 min_suggestion_urgency 时回退到"不过滤"默认,与 backend 的
         // Literal default 对齐,不误导用户以为拿到了远端值。
         setMinUrgency(c.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY);
+        // 老 backend 不返该字段 → 回退空串（= 不注入），与 backend 读取侧一致。
+        setGlobalPrompt(c.global_system_prompt ?? "");
       }),
       getSchedulerConfig().then((s) => {
         setSchedulerLoaded(s.enabled);
@@ -113,7 +124,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
       windowSize !== config.window_size ||
       // 不可用时恒 false：置灰的开关不该产出待保存改动
       (smartCropAvailable && smartCrop !== (config.smart_crop_enabled === true)) ||
-      minUrgency !== (config.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY));
+      minUrgency !== (config.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY) ||
+      globalPrompt.trim() !== (config.global_system_prompt ?? "").trim());
   // schedulerLoaded === null 表示这次没读到服务端值（接口缺失 / 版本错位）：
   // 此时 schedulerDirty 恒 false，拨动开关不会写盘，故置灰禁用避免呈现「看着能动、
   // 实则静默丢弃」的控件。
@@ -146,9 +158,12 @@ export function SettingsDrawer({ open, onClose }: Props) {
           // 只在发版级开关放开时才提交,不可用时不往后端写一个用户按不动的值
           ...(smartCropAvailable ? { smart_crop_enabled: smartCrop } : {}),
           min_suggestion_urgency: minUrgency,
+          global_system_prompt: globalPrompt.trim(),
         });
         setConfig(updated);
         setSmartCrop(updated.smart_crop_enabled === true);
+        // 回填后端规范化后的值（未来若后端做 trim/截断，前端随之收敛）。
+        setGlobalPrompt(updated.global_system_prompt ?? "");
         if (updated.restart_ok === false) {
           toast(t("settings.restartFailed"), "warn");
         } else {
@@ -184,6 +199,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
     // 同 scheduler：不可用（发版级开关未放开，置灰）时不动视觉，否则会拨出一个恒不 dirty 的值
     if (smartCropAvailable) setSmartCrop(DEFAULTS.smart_crop_enabled === true);
     setMinUrgency(DEFAULT_MIN_URGENCY);
+    setGlobalPrompt(DEFAULTS.global_system_prompt ?? "");
     // 仅在开关可配置时才回默认 ON；不可用（schedulerLoaded===null，置灰）时保持
     // 当前视觉，避免把置灰的开关拨到 ON 且 schedulerDirty 恒 false 无从写盘。
     if (schedulerAvailable) setSchedulerEnabled(true);
@@ -401,6 +417,30 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 </div>
                 <p className="text-caption text-text-tertiary">
                   {t("settings.minUrgencyHint")}
+                </p>
+              </div>
+
+              {/* 全局感知系统提示词 —— 追加到感知 system prompt，对全部机位生效；
+                  内置角色/总原则/schema 保留。逐场景判定细则在「场景联动」每条规则里配。 */}
+              <div className="space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="text-body font-medium text-text-primary">
+                    {t("settings.globalPrompt")}
+                  </label>
+                  <span className="text-caption text-text-tertiary num">
+                    {globalPrompt.length}/{GLOBAL_PROMPT_MAX}
+                  </span>
+                </div>
+                <textarea
+                  value={globalPrompt}
+                  onChange={(e) => setGlobalPrompt(e.target.value)}
+                  rows={6}
+                  maxLength={GLOBAL_PROMPT_MAX}
+                  placeholder={t("settings.globalPromptPlaceholder")}
+                  className="w-full rounded-xl bg-bg-primary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary resize-y"
+                />
+                <p className="text-caption text-text-tertiary leading-relaxed">
+                  {t("settings.globalPromptHint")}
                 </p>
               </div>
 

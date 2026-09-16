@@ -224,6 +224,23 @@ class TestRuleRepoRoundtrip:
         assert got.duration_seconds is None
         assert got.duration_ratio == 0.8
 
+    def test_exit_debounce_zero_round_trip_not_coerced_to_default(self, rule_repo):
+        """exit_debounce_seconds=0 是合法值（条件一变假立即退出），读回不能被兜底成 60。
+
+        回归：``int(data.get(...) or 60)`` 把 0 当 falsy 读成默认 60，导致 web 上
+        「退出确认时间」改 0 后刷新又变 60。
+        """
+        rule = _make_static_rule(name=_name("debounce0"))
+        rule.exit_debounce_seconds = 0
+        rid = rule_repo.create(rule)
+        got = rule_repo.get_by_id(rid)
+        assert got is not None
+        assert got.exit_debounce_seconds == 0
+        # update 路径同样保留 0（web 走 PATCH）
+        got.exit_debounce_seconds = 0
+        assert rule_repo.update(got) is True
+        assert rule_repo.get_by_id(rid).exit_debounce_seconds == 0
+
     def test_duration_fields_round_trip(self, rule_repo):
         """duration_seconds + duration_ratio create → get_by_id round-trip。"""
         rule = Rule(

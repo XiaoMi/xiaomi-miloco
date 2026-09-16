@@ -26,7 +26,7 @@ from collections.abc import Iterable
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class RuleMode(str, Enum):
@@ -192,6 +192,21 @@ class RuleCondition(BaseModel):
         ..., description="Perception device IDs (OR semantics: any match triggers)"
     )
     query: str = Field(..., description="Natural language condition description")
+    # 场景补充说明：住户在 web「场景联动」里为该条规则手写的场景细节 / 注意事项
+    # （要关注什么、哪些目标区域参与判断、什么情况算/不算），随规则一并下发给 omni，
+    # 作为该规则在「# 待判断规则」JSONL 行里的 scene_notes 字段注入（与全局感知系统
+    # 提示词正交，见 prompt_builder._render_rule_conditions）。
+    # None/空 = 不注入。存进 condition JSON blob（无独立列 / 无 DB 迁移）。
+    # validation_alias 兼容过渡期旧键 ``system_context``（该字段短暂用过此名）：
+    # 老 DB 行 / 老前端请求带旧键时仍按本字段读入，不会静默丢配置；写出恒用 scene_notes。
+    scene_notes: str | None = Field(
+        None,
+        validation_alias=AliasChoices("scene_notes", "system_context"),
+        description=(
+            "Per-rule scene notes injected into the omni prompt (scene-specific "
+            "details / cautions / judging hints); None/empty = not injected"
+        ),
+    )
 
 
 class Rule(BaseModel):
@@ -289,16 +304,22 @@ class Rule(BaseModel):
 
 
 class RuleConditionUpdate(BaseModel):
-    """Partial condition update -- both fields optional.
+    """Partial condition update -- all fields optional.
 
     Used by ``RuleUpdate.condition`` so PATCH can change one of
-    ``perceive_device_ids`` / ``query`` without forcing the caller to resend
-    the full RuleCondition. Service layer merges set fields into the
-    persisted Rule.condition.
+    ``perceive_device_ids`` / ``query`` / ``scene_notes`` without forcing the
+    caller to resend the full RuleCondition. Service layer merges set fields into
+    the persisted Rule.condition.
     """
 
     perceive_device_ids: list[str] | None = Field(None)
     query: str | None = Field(None)
+    # 显式置 None = 清空该规则的场景补充说明（与 query 的"None=不动"语义不同：
+    # 该字段本就允许为空，故清空是合法新值；由 service 层按 model_fields_set 区分
+    # "没传" 与 "显式清空"）。validation_alias 同 RuleCondition，兼容旧键 system_context。
+    scene_notes: str | None = Field(
+        None, validation_alias=AliasChoices("scene_notes", "system_context")
+    )
 
 
 class RuleUpdate(BaseModel):

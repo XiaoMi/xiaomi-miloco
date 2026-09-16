@@ -795,6 +795,9 @@ export interface SceneTask {
   enabled: boolean;
   // 进入条件（自然语言；退出 = 条件不再满足并持续 exitDebounceSeconds）
   query: string;
+  // 该规则的场景补充说明（场景细节 / 注意事项：要关注什么、目标区域、什么算/不算）。
+  // null/空 = 不注入。随规则下发给 omni。
+  sceneNotes?: string | null;
   perceiveDeviceIds: string[];
   // 进入 / 退出时触发的场景（null = 该方向不联动）
   enterSceneId?: string | null;
@@ -815,6 +818,8 @@ export interface SceneTaskInput {
   description?: string;
   perceiveDeviceIds?: string[];
   query?: string;
+  // null / "" = 清空该规则的场景补充说明（PATCH 下是合法新值，非"不动"）。
+  sceneNotes?: string | null;
   enterSceneId?: string | null;
   exitSceneId?: string | null;
   cooldownMinutes?: number;

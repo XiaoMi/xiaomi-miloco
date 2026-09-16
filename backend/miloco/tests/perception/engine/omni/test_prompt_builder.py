@@ -11,6 +11,7 @@ from miloco.perception.engine.omni.prompt_builder import (
     _encode_video,
     _render_examples,
     _resolve_route,
+    agent_rule_ids,
     build_prompt,
     build_query_prompt,
     build_stream_prompt,
@@ -32,6 +33,22 @@ from miloco.perception.engine.types import (
     SelectedFrame,
     TrackingBoxInfo,
 )
+
+
+def _rule_json_lines(user_content: str) -> list[str]:
+    """取「# 待判断规则」段里的规则 JSONL 行（返回解析前的裸 JSON 串）。
+
+    容忍可选的 Markdown bullet 前缀（渲染侧用过 ``- {json}``）：本 helper 只校验"一行
+    一个 JSON 对象"，前缀形态由渲染侧决定，测试不锁死。
+    """
+    out: list[str] = []
+    for raw in user_content.splitlines():
+        line = raw.strip()
+        if line.startswith("- "):
+            line = line[2:].lstrip()
+        if line.startswith("{") and "rule_id" in line:
+            out.append(line)
+    return out
 
 
 def _mock_edge_packet() -> IdentityPacket:
@@ -132,7 +149,7 @@ class TestBuildPrompt:
         assert "忽略窗外马路" in sp
 
     def test_rule_rendered_by_name_without_evidence_suffix(self):
-        """规则按 rule_name 渲染进「# 待判断规则」，不带已删除的 ｜允许证据= 后缀。"""
+        """规则以 JSONL 渲染进「# 待判断规则」，不带已删除的 ｜允许证据= 后缀。"""
         ep = _mock_edge_packet()
         ctx = OmniContext(
             rule_conditions=[
@@ -144,8 +161,161 @@ class TestBuildPrompt:
             ],
         )
         payload = build_prompt(ep, ctx)
-        assert "[help] 求救：用户呼救" in payload["user_content"]
+        # JSONL：一行一条，含 rule_id / rule_name / target_scene 三个字段
+        # （prompt 侧把内部 condition.query 渲染成更直白的 target_scene）
+        assert (
+            '{"rule_id": "help", "rule_name": "[help] 求救", "target_scene": "用户呼救"}'
+            in payload["user_content"]
+        )
         assert "允许证据" not in payload["user_content"]
+
+    def test_rule_list_rendered_as_jsonl(self):
+        """多条规则 → 一行一条 JSON，含 rule_id / rule_name / target_scene（便于精准提取）。"""
+        import json as _json
+
+        ep = _mock_edge_packet()
+        ctx = OmniContext(
+            rule_conditions=[
+                RuleCondition(
+                    rule_id="uuid-b", rule_name="[b] 第二条", query="条件 B"
+                ),
+                RuleCondition(
+                    rule_id="uuid-a", rule_name="[a] 第一条", query="条件 A"
+                ),
+            ],
+        )
+        uc = build_prompt(ep, ctx)["user_content"]
+        json_lines = _rule_json_lines(uc)
+        # sort by rule_id：uuid-a 在前
+        assert [ _json.loads(ln)["rule_id"] for ln in json_lines ] == [
+            "uuid-a",
+            "uuid-b",
+        ]
+        first = _json.loads(json_lines[0])
+        assert first == {
+            "rule_id": "uuid-a",
+            "rule_name": "[a] 第一条",
+            "target_scene": "条件 A",
+        }
+        # 内部字段名 query 不进 prompt（只经 target_scene 暴露给模型）
+        assert all("query" not in _json.loads(ln) for ln in json_lines)
+
+    def test_rule_scene_notes_folded_into_jsonl_line(self):
+        """逐规则场景补充说明 → 作为 scene_notes 字段跟在该规则的 JSONL 行里（不再单独成段）。"""
+        import json as _json
+
+        ep = _mock_edge_packet()
+        ctx = OmniContext(
+            rule_conditions=[
+                RuleCondition(
+                    rule_id="uuid-1",
+                    rule_name="[read] 有人读书",
+                    query="有人在床上看书",
+                    scene_notes="必须低头翻阅纸质书，手机/平板不算。",
+                ),
+                RuleCondition(
+                    rule_id="uuid-2", rule_name="[floor] 地面有垃圾", query="地面有垃圾"
+                ),
+            ],
+        )
+        uc = build_prompt(ep, ctx)["user_content"]
+        # 旧实现把细则单独渲染成「# 场景判定补充细则」段；现随规则同一行给出。
+        assert "# 场景判定补充细则" not in uc
+        json_lines = _rule_json_lines(uc)
+        by_id = {_json.loads(ln)["rule_id"]: _json.loads(ln) for ln in json_lines}
+        assert (
+            by_id["uuid-1"]["scene_notes"]
+            == "必须低头翻阅纸质书，手机/平板不算。"
+        )
+        # 未配置细则的规则不落该字段
+        assert "scene_notes" not in by_id["uuid-2"]
+
+    def test_rule_without_scene_notes_has_no_field(self):
+        """全部规则都无场景补充说明 → JSONL 行里不出现 scene_notes 字段。"""
+        ep = _mock_edge_packet()
+        ctx = OmniContext(
+            rule_conditions=[
+                RuleCondition(rule_id="uuid-1", rule_name="[a] 规则", query="条件"),
+            ],
+        )
+        uc = build_prompt(ep, ctx)["user_content"]
+        assert "# 待判断规则" in uc
+        assert "scene_notes" not in uc
+
+    def test_rule_scene_notes_blank_stripped(self):
+        """空白串场景补充说明（如 "\\n  "）不落字段。"""
+        ep = _mock_edge_packet()
+        ctx = OmniContext(
+            rule_conditions=[
+                RuleCondition(
+                    rule_id="uuid-1",
+                    rule_name="[a] 规则",
+                    query="条件",
+                    scene_notes="   \n  ",
+                ),
+            ],
+        )
+        uc = build_prompt(ep, ctx)["user_content"]
+        assert "scene_notes" not in uc
+
+    # ── 短 rule_id：prompt 只给 UUID 前 6 位（省模型复述长 id 的输出 token）────────
+
+    def test_rule_id_in_prompt_is_short_uuid_prefix(self):
+        """完整 UUID 不进 prompt：rule_id 只渲染前 6 位，其余靠解析侧映射还原。"""
+        import json as _json
+
+        full_id = "d7d9e575-5ab9-49c5-ab8a-ffd3928f7593"
+        ep = _mock_edge_packet()
+        ctx = OmniContext(
+            rule_conditions=[
+                RuleCondition(rule_id=full_id, rule_name="[read] 读书", query="有人在看书"),
+            ],
+        )
+        uc = build_prompt(ep, ctx)["user_content"]
+        lines = _rule_json_lines(uc)
+        assert len(lines) == 1
+        assert _json.loads(lines[0])["rule_id"] == "d7d9e5"
+        assert full_id not in uc
+
+    def test_rule_id_widens_when_short_ids_collide(self):
+        """同窗前 6 位撞车 → 统一加长到互不相同（共用短 id 会让解析串规则）。"""
+        import json as _json
+
+        a = "d7d9e5aa-1111-4111-8111-111111111111"
+        b = "d7d9e5bb-2222-4222-8222-222222222222"
+        ep = _mock_edge_packet()
+        ctx = OmniContext(
+            rule_conditions=[
+                RuleCondition(rule_id=a, rule_name="[a] 一", query="条件 A"),
+                RuleCondition(rule_id=b, rule_name="[b] 二", query="条件 B"),
+            ],
+        )
+        ids = {
+            _json.loads(ln)["rule_id"]
+            for ln in _rule_json_lines(build_prompt(ep, ctx)["user_content"])
+        }
+        assert ids == {"d7d9e5a", "d7d9e5b"}
+
+    def test_agent_rule_ids_stable_and_order_independent(self):
+        """同一组规则无论传入顺序如何，短 id 一致：prompt 与解析各自调用，必须同口径。"""
+        a = "aaaaaaaa-1111-4111-8111-111111111111"
+        b = "bbbbbbbb-2222-4222-8222-222222222222"
+        ctx1 = OmniContext(
+            rule_conditions=[
+                RuleCondition(rule_id=a, rule_name="[a] 一", query="条件 A"),
+                RuleCondition(rule_id=b, rule_name="[b] 二", query="条件 B"),
+            ],
+        )
+        ctx2 = OmniContext(
+            rule_conditions=[
+                RuleCondition(rule_id=b, rule_name="[b] 二", query="条件 B"),
+                RuleCondition(rule_id=a, rule_name="[a] 一", query="条件 A"),
+            ],
+        )
+        assert agent_rule_ids(ctx1) == agent_rule_ids(ctx2) == {a: "aaaaaa", b: "bbbbbb"}
+
+    def test_agent_rule_ids_empty_context(self):
+        assert agent_rule_ids(OmniContext(rule_conditions=[])) == {}
 
     def test_empty_context(self):
         ep = _mock_edge_packet()

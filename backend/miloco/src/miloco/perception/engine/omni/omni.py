@@ -35,6 +35,7 @@ from miloco.perception.engine.omni.omni_client import (
 )
 from miloco.perception.engine.omni.prompt_builder import (
     FusedPromptConfig,
+    agent_rule_ids,
     build_batch_prompt,
     build_batch_stream_prompt,
     build_fused_payload,
@@ -78,15 +79,23 @@ def _has_loopback_tail(buffer: str) -> bool:
 
 
 def _rule_name_to_id(context: OmniContext) -> dict[str, str]:
-    """本窗 rule_name → rule_id(UUID) 映射，供 response_parser 把 matched_rules 里模型
-    照抄的 rule_name 还原回 rule_id（下游去重/触发用 UUID）。
+    """本窗 rule 引用 → rule_id(完整 UUID) 映射，供 response_parser 把 matched_rules 里模型
+    照抄的标识还原回 rule_id（下游去重/触发用 UUID）。
 
-    key 必须与 _render_rule_conditions 写进 prompt 的标识一致：rule_name 为空时同样回退
-    [rule_id]，否则模型照抄的 [rule_id] 在映射里找不到，命中的 matched_rules 会被静默丢弃。"""
-    return {
-        (rc.rule_name or f"[{rc.rule_id}]"): rc.rule_id
-        for rc in context.rule_conditions
-    }
+    key 与 ``_render_rule_conditions`` 写进「# 待判断规则」JSONL 的标识一一对应，三类都收：
+    - **短 id**（``agent_rule_ids``：完整 UUID 前 6 位，prompt 里 ``rule_id`` 字段实际渲染的
+      值，模型首选照抄的就是它）；
+    - 完整 ``rule_id``（兼容旧 prompt / 模型自行补全成 UUID / 历史回放）；
+    - ``rule_name``（展示名；rule_name 为空时回退 ``[rule_id]``）。
+    否则模型照抄的标识在映射里找不到，命中的 matched_rules 会被静默丢弃。"""
+    mapping: dict[str, str] = {}
+    # 短 id 先落：它是 prompt 里唯一出现的 id 形态，同窗唯一（前缀冲突已由 agent_rule_ids 加长）。
+    for full_id, short_id in agent_rule_ids(context).items():
+        mapping.setdefault(short_id, full_id)
+    for rc in context.rule_conditions:
+        mapping.setdefault(rc.rule_id, rc.rule_id)
+        mapping.setdefault(rc.rule_name or f"[{rc.rule_id}]", rc.rule_id)
+    return mapping
 
 
 async def run_omni(

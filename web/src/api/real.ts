@@ -2161,6 +2161,7 @@ interface BackendSceneTask {
   rule_id: string;
   enabled: boolean;
   query: string;
+  scene_notes?: string | null;
   perceive_device_ids: string[];
   enter_scene_id?: string | null;
   enter_scene_name?: string | null;
@@ -2182,6 +2183,9 @@ function toSceneTaskPayload(input: SceneTaskInput): Record<string, unknown> {
     p.perceive_device_ids = input.perceiveDeviceIds;
   }
   if (input.query !== undefined) p.query = input.query;
+  if (input.sceneNotes !== undefined) {
+    p.scene_notes = input.sceneNotes;
+  }
   if (input.enterSceneId !== undefined) p.enter_scene_id = input.enterSceneId;
   if (input.exitSceneId !== undefined) p.exit_scene_id = input.exitSceneId;
   if (input.cooldownMinutes !== undefined) {
@@ -2209,6 +2213,7 @@ function mapSceneTask(t: BackendSceneTask): SceneTask {
     ruleId: t.rule_id,
     enabled: t.enabled,
     query: t.query,
+    sceneNotes: t.scene_notes ?? null,
     perceiveDeviceIds: t.perceive_device_ids ?? [],
     enterSceneId: t.enter_scene_id ?? null,
     enterSceneName: t.enter_scene_name ?? null,

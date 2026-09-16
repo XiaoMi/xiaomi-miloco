@@ -154,22 +154,23 @@ ENV_SOUNDS = FieldSpec(
 
 MATCHED_RULES = FieldSpec(
     name="matched_rules",
-    schema_literal='"matched_rules":[{"rule_name":"规则名","reason":"判断依据","hit":true|false}]',
+    schema_literal='"matched_rules":[{"rule_id":"规则id","rule_name":"规则名","reason":"判断依据","hit":true|false}]',
     spec_md="""## matched_rules
 - 基于本轮观察判断"# 待判断规则"是否满足；与本轮明显无关的可不列（系统只对 hit=true 触发）
 - reason 先写证据、再定 hit：hit=true 必须 reason 给出"规则每个要素都满足"的本轮证据——规则点名的人以本轮 identities 为准（没被 identities 识别在场的人 → 该规则 hit=false，不从 gallery / 家庭档案推断是谁），活动 / 状态只据本轮画面判断（听到的话 / 声音不作规则命中依据，音频不稳；见总原则）且不得与 caption 相矛盾；证据不全、靠推测、或与 caption / identities 抵触 → hit=false
-- rule_name 只能从"# 待判断规则"段原样照抄某一条完整名称（方括号开头那串，如 [pet_safety] 宠物破坏家具），严禁自创；reason 引用本轮具体观察、别复述规则原文；该段为空则 matched_rules 输出 []""",
+- rule_id / rule_name 只能从"# 待判断规则"段原样照抄某一条：**优先照抄该条的 rule_id**（规则短 id，逐条唯一、最抗改写；照抄那几位即可、**不要补全成完整 UUID、不要改大小写**），rule_name 便于人工核对；严禁自创、改写或把多条规则合并。该段为空则 matched_rules 输出 []
+- 规则行里带 scene_notes 字段时（"# 待判断规则"的 JSONL），它是该住户为这条规则配置的场景补充说明 / 注意事项，判定该规则必须遵循它（优先级高于 target_scene 字面；没带的规则不受影响）""",
     # 规则判断本质需视觉证据（现有规则全是"见到人/姿势/在场"这类）；纯音频无画面，
     # 做 matched_rules 只会脑补或恒空、零正当价值——故 audio-only 轮直接剥离本字段
     # （见 selected_fields）。可听见的危险（求救/玻璃碎/报警）改由 audio 版 suggestions 兜底。
     requires_video=True,
     # rule_only 变体：本模式无 identities / caption / suggestions，规则点名的人无法经身份
-    # 识别确认在场——按画面中可见人物与外观判断，无法确认则宁可不命中。
+    # 识别确认在场——按画面中可见人物与外观判断，无法确认则宁可不命中。刻意压到最短：
+    # 该模式 system prompt 只此一个字段，判定原则里已声明"宁缺毋滥 / 别把规则文字当画面事实"。
     spec_md_rule_only="""## matched_rules
-- 只基于本轮视频画面判断"# 待判断规则"是否满足；与本轮画面明显无关的可不列（系统只对 hit=true 触发）
-- reason 先写证据、再定 hit：hit=true 必须 reason 给出"规则每个要素都满足"的本轮画面证据（如"画面中有人躺在床上翻书"）；证据不全、靠推测、或画面模糊看不清 → hit=false
-- 规则点名具体人名时：本轮不进行身份识别，若画面中可见人物与点名者外观特征（体型/衣着/发型）明显不符或无法判断 → hit=false，宁漏勿误
-- rule_name 只能从"# 待判断规则"段原样照抄某一条完整名称（方括号开头那串，如 [pet_safety] 宠物破坏家具），严禁自创；reason 引用本轮具体观察、别复述规则原文；该段为空则 matched_rules 输出 []""",
+- 对「# 待判断规则」逐条判断，只输出 hit=true 的 item。
+- rule_id（短 id，如 d7d9e5）原样照抄，不要补全成完整 UUID、不要改大小写；严禁自创或合并；该段为空则输出 []。
+- hit=true 必须给出小于 10 个字的直接画面证据，证据不全 / 靠推测 / 模糊 → hit=false。""",
 )
 
 SUGGESTIONS = FieldSpec(

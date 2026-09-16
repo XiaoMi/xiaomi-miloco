@@ -17,6 +17,9 @@
     "conditionLabel": "Trigger condition (enter)",
     "conditionPlaceholder": "e.g. someone is reading in bed (ongoing state)",
     "conditionHint": "Describe an ongoing state, not an assertion like \"detected…\" (assertive wording makes the model treat it as already true and re-fire constantly)",
+    "sceneNotesLabel": "Scene notes (optional)",
+    "sceneNotesPlaceholder": "Scene details or cautions for this rule, e.g. only the white floor right of the rug counts; two consecutive frames must show it; shoe shadows / cables / protective film don't count…",
+    "sceneNotesHint": "Applies only to this rule and is injected into the perception model with it, clarifying how this rule should be judged and what counts as a hit. Put cross-scene guidance under Settings → Global perception system prompt. Empty = not injected.",
     "enterSceneLabel": "Scene on enter",
     "exitSceneLabel": "Scene on exit",
     "scenePlaceholder": "Pick a Mi Home automation scene",
@@ -56,6 +59,7 @@
     "errScene": "Configure at least one of enter / exit scene",
     "cameraCount": "{{count}} cameras",
     "enterDebounceBadge": "enter after {{seconds}}s confirm",
-    "dwellBadge": "auto-exit in {{seconds}}s"
+    "dwellBadge": "auto-exit in {{seconds}}s",
+    "sceneNotesBadge": "has scene notes"
   }
 }

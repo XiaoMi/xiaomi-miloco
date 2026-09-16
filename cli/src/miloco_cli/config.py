@@ -123,12 +123,19 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "固定输入源（本地测试用）：本地视频 clip 路径。配置后无论摄像头是否在线，都以该视频"
         "作为模型输入画面（替换摄像头），没有摄像头也能跑通整个感知管线；空=关闭。下一周期生效",
     ),
+    "perception.engine.global_system_prompt": (
+        str,
+        "",
+        "全局感知系统提示词（同 web「设置」页）：非空时追加到感知 system prompt，"
+        "作为对全部机位生效的补充指导（内置角色/总原则/schema 保留）；空=不注入。下一周期生效",
+    ),
     "perception.engine.rule_only_system_prompt": (
         str,
         "",
-        "场景联动(rule_only)全量 system prompt（默认全文在随包 settings.yaml，可直接改）："
-        "非空时原样作为 system prompt 发给 omni，完全跳过拼接逻辑（camera_prompt/家庭档案/"
-        "schema 均不注入）；置空=回退代码内置装配版。下一周期生效",
+        "【高级/调试】场景联动(rule_only)全量 system prompt 覆盖：非空时原样作为 system "
+        "prompt 发给 omni，完全跳过拼接逻辑（camera_prompt/家庭档案/schema/全局感知提示词"
+        "均不注入）；置空=回退代码内置装配版。日常改用 global_system_prompt + 逐规则"
+        "「场景补充说明」。下一周期生效",
     ),
     # Smart Crop 双闸相与，两者都 true 才裁切；默认值同下方注释的对齐约定（yaml 里都是 true）。
     # 写「重启生效」而非「热读」：闸位在**后端进程内**确实是每窗口热读的，但 get_settings() 有

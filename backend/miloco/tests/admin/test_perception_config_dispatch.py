@@ -324,3 +324,69 @@ def test_min_urgency_mixed_with_omni_fps(client):
     assert data["min_suggestion_urgency"] == "high"
     svc.apply_omni_fps_live.assert_awaited_once_with(2)
     svc.apply_config_restart.assert_not_awaited()
+
+
+# ── 全局感知系统提示词（web「设置」页）─────────────────────────────────────
+
+
+def test_global_system_prompt_defaults_empty(client):
+    c, _svc = client
+    assert c.get("/api/admin/perception-config").json()["data"]["global_system_prompt"] == ""
+
+
+def test_global_system_prompt_roundtrip_no_restart(client):
+    """写入 / 清空全局感知提示词：热读路径，不触发热更也不触发重启。"""
+    c, svc = client
+    resp = c.put(
+        "/api/admin/perception-config",
+        json={"global_system_prompt": "始终关注门口地面，忽略电视屏幕。"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["global_system_prompt"] == "始终关注门口地面，忽略电视屏幕。"
+    assert c.get("/api/admin/perception-config").json()["data"]["global_system_prompt"] == (
+        "始终关注门口地面，忽略电视屏幕。"
+    )
+    svc.apply_omni_fps_live.assert_not_awaited()
+    svc.apply_config_restart.assert_not_awaited()
+
+    # 空串是合法新值 = 清空注入（不能因"空"被当成未传而静默保留旧值）
+    resp = c.put("/api/admin/perception-config", json={"global_system_prompt": ""})
+    assert resp.status_code == 200
+    assert resp.json()["data"]["global_system_prompt"] == ""
+    assert c.get("/api/admin/perception-config").json()["data"]["global_system_prompt"] == ""
+
+
+def test_global_system_prompt_too_long_rejected(client):
+    """超长提示词被 pydantic 挡下（422），避免把每窗 system prompt 撑爆。"""
+    c, _svc = client
+    resp = c.put(
+        "/api/admin/perception-config",
+        json={"global_system_prompt": "x" * 8001},
+    )
+    assert resp.status_code == 422
+
+
+def test_global_system_prompt_non_str_degrades(client, tmp_path):
+    """配置里写成非字符串 → GET 报空串而不是 500（与 input/crop 同款 fail-safe）。"""
+    from miloco.config.settings import reset_settings
+
+    c, _svc = client
+    (tmp_path / "config.json").write_text(
+        _json.dumps(
+            {
+                "perception": {
+                    "engine": {
+                        "input": {"omni_fps": 1, "video_short_edge": 512},
+                        "global_system_prompt": ["oops"],
+                    },
+                    "collect": {"window_size": 8},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    reset_settings()
+
+    resp = c.get("/api/admin/perception-config")
+    assert resp.status_code == 200
+    assert resp.json()["data"]["global_system_prompt"] == ""

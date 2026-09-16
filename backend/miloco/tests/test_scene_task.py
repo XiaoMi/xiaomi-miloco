@@ -430,6 +430,19 @@ async def test_update_clears_enter_confirm(svc, rule_service_mock):
 
 
 @pytest.mark.asyncio
+async def test_update_sets_exit_debounce_zero(svc, rule_service_mock):
+    """退出确认时间 0 是合法新值（条件一变假立即退出），必须原样下发不丢。
+
+    回归：service 层若写成 ``req.exit_debounce_seconds or 60``（把 0 当"未设置"），
+    web 改 0 会被静默改回 60。
+    """
+    await svc.update(TASK_ID, SceneTaskUpdateRequest(exit_debounce_seconds=0))
+    update = rule_service_mock.patch_rule.await_args.args[1]
+    assert update.exit_debounce_seconds == 0
+    assert 'exit_debounce_seconds' in update.model_fields_set
+
+
+@pytest.mark.asyncio
 async def test_update_changes_scene_and_query(svc, rule_service_mock, task_service_mock):
     await svc.update(
         TASK_ID,
@@ -485,3 +498,108 @@ async def test_trigger_delegates_to_rule_trigger(svc, rule_service_mock):
     await svc.trigger(TASK_ID)
     rule_service_mock.trigger_rule.assert_awaited_once()
     assert rule_service_mock.trigger_rule.await_args.args[0] == 'rule-scene'
+
+
+# ---- 场景补充说明（逐规则随 JSONL 行注入 omni 的场景细节 / 注意事项） ----
+
+def _capturing_rule_service(rule_service_mock):
+    """create_rule 捕获传入的 rule，并让 get_all_rules 回查该 rule（供 create 末尾 get()）。"""
+    created: dict = {}
+
+    def _capture(rule):
+        created['rule'] = rule
+        return 'rule-new'
+
+    rule_service_mock.create_rule = AsyncMock(side_effect=_capture)
+    rule_service_mock.get_all_rules = AsyncMock(
+        side_effect=lambda enabled_only=False: [created['rule']] if 'rule' in created else [],
+    )
+    return created
+
+
+@pytest.mark.asyncio
+async def test_create_passes_scene_notes(svc, rule_service_mock):
+    created = _capturing_rule_service(rule_service_mock)
+    view = await svc.create(_create_req(scene_notes='目标区只限白色地板；鞋影不算'))
+    assert created['rule'].condition.scene_notes == '目标区只限白色地板；鞋影不算'
+    # 视图回读同值（web 编辑抽屉据此回填）
+    assert view.scene_notes == '目标区只限白色地板；鞋影不算'
+
+
+@pytest.mark.asyncio
+async def test_create_blank_scene_notes_normalized_to_none(svc, rule_service_mock):
+    created = _capturing_rule_service(rule_service_mock)
+    await svc.create(_create_req(scene_notes='   '))
+    assert created['rule'].condition.scene_notes is None
+
+
+@pytest.mark.asyncio
+async def test_list_returns_scene_notes(svc, rule_service_mock):
+    rule = _make_scene_state_rule()
+    rule.condition.scene_notes = '必须连续两帧看到'
+    rule_service_mock.get_all_rules = AsyncMock(return_value=[rule])
+    views = await svc.list()
+    assert views[0].scene_notes == '必须连续两帧看到'
+
+
+@pytest.mark.asyncio
+async def test_update_sets_scene_notes(svc, rule_service_mock):
+    await svc.update(TASK_ID, SceneTaskUpdateRequest(scene_notes='新细则：忽略窗外'))
+    update = rule_service_mock.patch_rule.await_args.args[1]
+    assert update.condition.scene_notes == '新细则：忽略窗外'
+    assert 'scene_notes' in update.condition.model_fields_set
+
+
+@pytest.mark.asyncio
+async def test_update_clears_scene_notes(svc, rule_service_mock):
+    """显式传 None（或 ""）→ 清空该规则的场景补充说明（合法新值，非"不动"）。"""
+    await svc.update(TASK_ID, SceneTaskUpdateRequest(scene_notes=None))
+    update = rule_service_mock.patch_rule.await_args.args[1]
+    assert update.condition.scene_notes is None
+    assert 'scene_notes' in update.condition.model_fields_set
+
+
+@pytest.mark.asyncio
+async def test_update_without_scene_notes_untouched(svc, rule_service_mock):
+    """未传 scene_notes → 不进 condition fields_set，patch_rule 保留原值。"""
+    await svc.update(TASK_ID, SceneTaskUpdateRequest(query='新条件'))
+    update = rule_service_mock.patch_rule.await_args.args[1]
+    assert 'scene_notes' not in update.condition.model_fields_set
+
+
+# ---- 字段改名过渡：旧键 system_context → scene_notes ----
+# 该字段短暂用过 system_context 这个名字（未发布）。老 DB 行（condition JSON blob）
+# 与老前端缓存请求可能仍带旧键；schema 用 validation_alias 读旧键、写恒用新键，
+# 保证不 422、不静默丢配置。
+
+
+def test_rule_condition_reads_legacy_system_context_key():
+    """rule_repo 反序列化旧行：condition blob 里的 system_context 读进 scene_notes。"""
+    cond = RuleCondition(
+        perceive_device_ids=['cam-001'], query='条件',
+        **{'system_context': '旧键细则'},
+    )
+    assert cond.scene_notes == '旧键细则'
+    dumped = cond.model_dump()
+    assert dumped['scene_notes'] == '旧键细则'
+    assert 'system_context' not in dumped
+
+
+def test_scene_task_create_accepts_legacy_system_context_key():
+    """旧键请求体（extra='forbid' 下）仍可接受，且规范化成 scene_notes。"""
+    req = SceneTaskCreateRequest(
+        description='床上看书自动开灯',
+        perceive_device_ids=['cam-001'],
+        query='有人在床上看书',
+        enter_scene_id='scene-1',
+        **{'system_context': '旧键细则'},
+    )
+    assert req.scene_notes == '旧键细则'
+    assert req.model_dump()['scene_notes'] == '旧键细则'
+
+
+def test_scene_task_update_accepts_legacy_system_context_key():
+    """旧键 PATCH：字段进入 scene_notes 的 fields_set（仍能被 service 识别为已传）。"""
+    req = SceneTaskUpdateRequest(**{'system_context': None})
+    assert req.scene_notes is None
+    assert 'scene_notes' in req.model_fields_set

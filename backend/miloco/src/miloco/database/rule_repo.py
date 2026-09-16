@@ -78,7 +78,14 @@ class RuleRepo:
             on_exit_desc=data.get("on_exit_desc"),
             on_target_desc=data.get("on_target_desc"),
             terminate_when=data.get("terminate_when"),
-            exit_debounce_seconds=int(data.get("exit_debounce_seconds") or 60),
+            # 0 是合法值（条件一变假立即退出，web「退出确认时间」可设 0）——不能写
+            # `or 60`：0 是 falsy，会把用户存的 0 读回成默认 60（改 0 刷新跳回 60 的 bug）。
+            # 仅 NULL（老行 / 未设置）才落默认 60。
+            exit_debounce_seconds=(
+                int(data["exit_debounce_seconds"])
+                if data.get("exit_debounce_seconds") is not None
+                else 60
+            ),
             duration_seconds=(
                 int(data["duration_seconds"])
                 if data.get("duration_seconds") is not None

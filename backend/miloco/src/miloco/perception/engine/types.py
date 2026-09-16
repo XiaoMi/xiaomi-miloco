@@ -277,6 +277,10 @@ class RuleCondition:
     rule_id: str
     rule_name: str
     query: str  # natural language condition for Omni to judge
+    # 该规则的「场景补充说明」：住户在 web「场景联动」里写的判定补充细则，随规则注入
+    # prompt 的「# 待判断规则」JSONL 行（scene_notes 字段，见
+    # prompt_builder._render_rule_conditions）。None/空 = 该规则无补充细则。
+    scene_notes: str | None = None
 
 
 @dataclass

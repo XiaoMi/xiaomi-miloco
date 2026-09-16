@@ -119,6 +119,7 @@ class OnboardingTriggerService:
         条件判定回调抛异常按「不满足」处理——主动邀请是锦上添花，绝不能
         把启动 / 授权主流程带崩。
         """
+        return False
         async with self._lock:
             if self._fired:
                 logger.debug("onboarding trigger skipped: already fired this run")

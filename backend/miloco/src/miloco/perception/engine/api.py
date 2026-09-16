@@ -1022,6 +1022,11 @@ class PerceptionEngine(BasePerceptionEngine):
                         rule_id=r["id"],
                         rule_name=r.get("name", ""),
                         query=r.get("condition", {}).get("query", ""),
+                        # 场景补充说明（web「场景联动」逐规则配置）：空/缺失 = 该规则无
+                        # 补充细则；空白串归一到 None，渲染侧判空跳过。
+                        scene_notes=(
+                            r.get("condition", {}).get("scene_notes") or None
+                        ),
                     )
                     for r in dispatched
                 ]

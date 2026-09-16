@@ -480,6 +480,12 @@ class RuleService:
                 )
             if "query" in cond_fields and cond_update.query is not None:
                 existing.condition.query = cond_update.query
+            # scene_notes 允许显式清空：None / "" 都是合法新值，只要字段出现在
+            # model_fields_set 里就覆盖（与 query 的"None=不动"语义不同）。
+            if "scene_notes" in cond_fields:
+                existing.condition.scene_notes = (
+                    cond_update.scene_notes or None
+                )
 
         # list 字段：CLI 用 [] 表达"清空"；不传 → 不动。
         if "actions" in fields and update.actions is not None:

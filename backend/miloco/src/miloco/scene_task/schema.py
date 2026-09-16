@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, model_validator
 
 
 class SceneTaskCreateRequest(BaseModel):
@@ -33,6 +33,17 @@ class SceneTaskCreateRequest(BaseModel):
     description: str = Field(..., min_length=1, max_length=200, description="任务名（同时作为 rule.name）")
     perceive_device_ids: list[str] = Field(..., description="感知设备 did 列表（任一命中即触发）")
     query: str = Field(..., description="进入条件（自然语言，进行时状态描述）")
+    scene_notes: str | None = Field(
+        None,
+        max_length=8000,
+        # 兼容过渡期旧键 system_context（该字段短暂用过此名）——老前端缓存里的请求
+        # 不会被 extra='forbid' 挡下、也不会丢配置；写出恒用 scene_notes。
+        validation_alias=AliasChoices("scene_notes", "system_context"),
+        description=(
+            "该规则的场景补充说明 / 注意事项（场景细节、目标区域、"
+            "什么算/不算），随规则下发给 omni；None/空 = 不注入"
+        ),
+    )
     enter_scene_id: str | None = Field(None, description="进入时触发的米家场景 id；不配 = 只退出联动")
     exit_scene_id: str | None = Field(None, description="退出时触发的米家场景 id；不配 = 只进入联动")
     cooldown_minutes: int = Field(5, ge=1, le=1440, description="场景触发冷却（分钟），进入/退出共用")
@@ -59,6 +70,13 @@ class SceneTaskUpdateRequest(BaseModel):
     description: str | None = Field(None, min_length=1, max_length=200)
     perceive_device_ids: list[str] | None = None
     query: str | None = None
+    # 显式置 None / "" = 清空该规则的场景补充说明（合法新值，非"不动"）。
+    # validation_alias 兼容旧键 system_context（同 create）。
+    scene_notes: str | None = Field(
+        None,
+        max_length=8000,
+        validation_alias=AliasChoices("scene_notes", "system_context"),
+    )
     enter_scene_id: str | None = None
     exit_scene_id: str | None = None
     cooldown_minutes: int | None = Field(None, ge=1, le=1440)
@@ -82,6 +100,7 @@ class SceneTaskView(BaseModel):
     rule_id: str
     enabled: bool
     query: str
+    scene_notes: str | None = None
     perceive_device_ids: list[str]
     enter_scene_id: str | None = None
     enter_scene_name: str | None = None

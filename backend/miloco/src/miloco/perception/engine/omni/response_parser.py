@@ -373,15 +373,41 @@ def _parse_caption(raw: Any) -> list[CaptionEntry]:
 def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | None":
     """rule_name → rule_id(UUID)。``mapping is None``（调用方未提供映射，仅测试 / streaming
     benchmark 走此路）时原样返回 name（best-effort）；有映射（含空 dict=本轮零规则）但匹配
-    不上时返回 None（丢弃，防 bogus rule_id 入下游）。容错模型对名称的轻微改写。"""
+    不上时返回 None（丢弃，防 bogus rule_id 入下游）。容错模型对名称的轻微改写。
+
+    ``mapping`` 现同时含 ``rule_id`` / ``rule_name`` 两类 key（见 omni._rule_name_to_id）；
+    空串直接判 None——否则下面的子串兜底会把 "" 当成任意串的子串，误映射到第一条规则。"""
+    if not name:
+        return None
     if mapping is None:
-        return name or None
+        return name
     if name in mapping:
         return mapping[name]
     for rn, rid in mapping.items():
         if rn and (rn in name or name in rn):
             return rid
     return None
+
+
+def _resolve_rule_ref(
+    item: dict, name: str, mapping: "dict[str, str] | None"
+) -> "str | None":
+    """matched_rules 单条 → rule_id：优先模型照抄的 ``rule_id``（精准锚），缺失 / 对不上时
+    回退 ``rule_name`` 反查（兼容只写 name 的旧输出与名称轻微改写）。
+
+    ``rule_id`` 现为**短 id**（完整 UUID 前 6 位小写十六进制，如 ``d7d9e5``），模型偶尔会
+    全大写回抄 → 精确匹配失败后再折叠大小写试一次。只做大小写折叠、不做子串模糊：
+    ``raw_id`` 可能是单字符，子串匹配会误命中任意 key。"""
+    raw_id = str(item.get("rule_id", "") or "").strip()
+    if raw_id:
+        if mapping is None:
+            return raw_id
+        if raw_id in mapping:
+            return mapping[raw_id]
+        for variant in (raw_id.lower(), raw_id.upper()):
+            if variant != raw_id and variant in mapping:
+                return mapping[variant]
+    return _resolve_rule_name(name, mapping)
 
 
 def _sanitize_for_log(s: str) -> str:
@@ -428,13 +454,15 @@ def _parse_matched_rules(
             isinstance(hit, str) and hit.strip().lower() in ("false", "0", "no")
         ):
             continue
-        # rule_name（模型照抄的完整规则名）→ 还原 rule_id（下游稳定键）；rule_name 一并存供展示
+        # rule 标识 → 还原 rule_id（下游稳定键）：优先照抄的 rule_id，回退 rule_name；
+        # rule_name 一并存供展示。
         name = str(item.get("rule_name", ""))
-        rid = _resolve_rule_name(name, rule_name_to_id)
+        rid = _resolve_rule_ref(item, name, rule_name_to_id)
         if rid is None:
             logger.error(
-                "omni 输出了不在「# 待判断规则」列表中的 rule_name=%r，判定为幻觉，丢弃不触发",
-                name,
+                "omni 输出了不在「# 待判断规则」列表中的 rule_id=%r / rule_name=%r，"
+                "判定为幻觉，丢弃不触发",
+                item.get("rule_id", ""), name,
             )
             continue
         reason = str(item.get("reason", ""))

@@ -324,6 +324,96 @@ class TestParseOmniResponse:
         assert len(result.matched_rules) == 1
         assert result.matched_rules[0].rule_id == "[read] 阅读"
 
+    # ── JSONL 规则列表引入 rule_id 后的解析（id 优先，name 回退）─────────────
+
+    def test_rule_id_resolved_directly(self):
+        """模型照抄 rule_id → 直接还原（不依赖中文名）。"""
+        data = {
+            "matched_rules": [
+                {"rule_id": "uuid-1", "rule_name": "[read] 阅读", "reason": "正在看书", "hit": True},
+            ]
+        }
+        mapping = {"uuid-1": "uuid-1", "[read] 阅读": "uuid-1"}
+        result = parse_omni_response(_wrap(json.dumps(data)), mapping)
+        assert [r.rule_id for r in result.matched_rules] == ["uuid-1"]
+
+    def test_rule_id_wins_over_rule_name(self):
+        """id 与 name 同时给出且互不一致 → id 优先（id 是精准锚）。"""
+        data = {
+            "matched_rules": [
+                {"rule_id": "uuid-2", "rule_name": "[read] 阅读", "reason": "正在看书", "hit": True},
+            ]
+        }
+        mapping = {
+            "uuid-1": "uuid-1", "uuid-2": "uuid-2",
+            "[read] 阅读": "uuid-1", "[drink] 喝水": "uuid-2",
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)), mapping)
+        assert [r.rule_id for r in result.matched_rules] == ["uuid-2"]
+
+    def test_bogus_rule_id_falls_back_to_rule_name(self):
+        """模型改写了 id（对不上）→ 回退按 rule_name 反查，仍能命中。"""
+        data = {
+            "matched_rules": [
+                {"rule_id": "bogus", "rule_name": "[read] 阅读", "reason": "正在看书", "hit": True},
+            ]
+        }
+        mapping = {"uuid-1": "uuid-1", "[read] 阅读": "uuid-1"}
+        result = parse_omni_response(_wrap(json.dumps(data)), mapping)
+        assert [r.rule_id for r in result.matched_rules] == ["uuid-1"]
+
+    def test_rule_id_only_without_name(self):
+        """只写 rule_id、不写 rule_name → 仍能命中（name 空不再误映射到第一条）。"""
+        data = {"matched_rules": [{"rule_id": "uuid-9", "reason": "画面证据", "hit": True}]}
+        mapping = {"uuid-8": "uuid-8", "uuid-9": "uuid-9"}
+        result = parse_omni_response(_wrap(json.dumps(data)), mapping)
+        assert [r.rule_id for r in result.matched_rules] == ["uuid-9"]
+
+    def test_unknown_rule_id_and_empty_name_dropped(self, caplog):
+        """id 对不上且 name 缺失 → 丢弃（不得因空 name 误命中第一条）。"""
+        import logging
+
+        data = {"matched_rules": [{"rule_id": "ghost", "reason": "x", "hit": True}]}
+        with caplog.at_level(logging.ERROR):
+            result = parse_omni_response(
+                _wrap(json.dumps(data)), {"uuid-1": "uuid-1"}
+            )
+        assert result.matched_rules == []
+        assert any("幻觉" in r.message for r in caplog.records)
+
+    def test_short_rule_id_resolves_to_full_uuid(self):
+        """prompt 只给短 id（UUID 前 6 位）→ 解析后下游拿到完整 UUID（触发链路不认短 id）。"""
+        full = "d7d9e575-5ab9-49c5-ab8a-ffd3928f7593"
+        data = {
+            "matched_rules": [
+                {"rule_id": "d7d9e5", "reason": "画面里有人在看书", "hit": True},
+            ]
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)), {"d7d9e5": full, full: full})
+        assert [r.rule_id for r in result.matched_rules] == [full]
+
+    def test_upper_cased_short_rule_id_resolves(self):
+        """短 id 是小写十六进制，模型偶尔全大写回抄 → 折叠大小写后仍命中（不误丢）。"""
+        full = "d7d9e575-5ab9-49c5-ab8a-ffd3928f7593"
+        data = {
+            "matched_rules": [
+                {"rule_id": "D7D9E5", "reason": "画面里有人在看书", "hit": True},
+            ]
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)), {"d7d9e5": full})
+        assert [r.rule_id for r in result.matched_rules] == [full]
+
+    def test_full_uuid_echo_still_resolves(self):
+        """兼容旧 prompt / 模型自行补全：完整 UUID 回抄仍按完整 id 命中。"""
+        full = "d7d9e575-5ab9-49c5-ab8a-ffd3928f7593"
+        data = {
+            "matched_rules": [
+                {"rule_id": full, "reason": "画面里有人在看书", "hit": True},
+            ]
+        }
+        result = parse_omni_response(_wrap(json.dumps(data)), {"d7d9e5": full, full: full})
+        assert [r.rule_id for r in result.matched_rules] == [full]
+
     def test_suggestion_events(self):
         data = {
             "caption": [],

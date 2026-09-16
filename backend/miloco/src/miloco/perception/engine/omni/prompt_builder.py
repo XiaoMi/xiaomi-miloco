@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -180,6 +181,11 @@ def build_query_prompt(
     home_profile = get_home_profile_prefix()
     if home_profile:
         parts.append(home_profile)
+    # 全局感知系统提示词（web「设置」页配置）对主动查询同样生效——住户对"该关注什么"
+    # 的补充指导与实时感知一致。
+    global_prompt = _global_system_prompt()
+    if global_prompt:
+        parts.append("# 全局感知须知\n\n" + global_prompt)
     # query 不接 crop(v1 范围外);走 _effective_panorama_short_edge() 兜掉历史 config.json 里
     # 可能残留的 0(早期哨兵),否则 _encode_video_mp4 会算出 scale=0 崩掉按需查询。
     video_b64, media_info = _encode_batch_video(
@@ -426,11 +432,53 @@ def _assemble_fused_messages(
     return messages
 
 
-def _render_rule_conditions(context: OmniContext) -> str | None:
-    """渲染「# 待判断规则」段：每条 ``- <rule.name>：<query>``；无规则返回 None。
+# 喂给模型的 rule 短 id 长度：rule_id(UUID) 前 6 位（如 ``d7d9e5``）。
+# 模型要在 matched_rules 里逐条照抄这个 id，长度直接进输出 token / 生成耗时——36 位
+# UUID 抄一遍纯属浪费（真实数据里 matched_rules 是唯一需要模型复述长串的字段）。
+# 单窗规则数只有个位数，6 位前缀撞车概率极低；真撞了由 ``agent_rule_ids`` 统一加长，
+# 保证同窗内短 id 唯一（唯一性是映射能还原回 UUID 的前提）。
+_AGENT_RULE_ID_LEN = 6
 
-    rule_name 是 ``[task_id] 描述`` 形式的完整名称（逐条 rule 唯一），模型在 matched_rules
-    里照抄它，response_parser 用 name→rule_id 映射还原回 UUID。sort by rule_id 求顺序确定。
+
+def agent_rule_ids(context: OmniContext) -> dict[str, str]:
+    """本窗 ``rule_id(完整 UUID) → 给模型看的短 id`` 映射。
+
+    prompt 渲染（``_render_rule_conditions``）与解析还原（``omni._rule_name_to_id``）
+    共用这一份口径，两边必须一致，否则模型照抄的短 id 在映射里找不到、命中会被丢弃。
+
+    短 id 取 ``rule_id`` 前 6 位；**同一窗内**若多条规则前缀相同则统一加长（7、8…直到
+    互不相同），避免两条规则共用一个短 id → 模型输出无法区分 → 映射互相覆盖串规则。
+    只在渲染/解析层换名，DB / 下游触发链路仍是完整 UUID。
+    """
+    ids = [rc.rule_id for rc in context.rule_conditions]
+    width = _AGENT_RULE_ID_LEN
+    max_len = max((len(i) for i in ids), default=0)
+    while width < max_len and len({i[:width] for i in ids}) != len(ids):
+        width += 1
+    return {rc.rule_id: rc.rule_id[:width] for rc in context.rule_conditions}
+
+
+def _render_rule_conditions(context: OmniContext) -> str | None:
+    """渲染「# 待判断规则」段：每条规则一行 JSON（JSONL），无规则返回 None。
+
+    每行结构为 ``{"rule_id": ..., "rule_name": ..., "target_scene": ..., "scene_notes"?: ...}``：
+    - ``rule_id`` 是**短 id**（完整 UUID 前 6 位，见 ``agent_rule_ids``；同窗前缀冲突会自动
+      加长）。模型在 matched_rules 里**优先照抄它**（解析侧按短 id 精确还原回完整 UUID，
+      见 response_parser._parse_matched_rules），比照抄中文名更抗改写；短 id 同时省掉模型
+      复述 36 位 UUID 的输出 token；
+    - ``rule_name`` 是展示名，继续保留是为了可读性与向后兼容（模型只写 name 时按 name→id
+      反查）；
+    - ``target_scene`` 是这条规则要检测的目标场景描述（内部字段仍是 ``condition.query``，
+      只在 prompt 里换成对模型更直白的名字；它描述"要找什么"，不是当前画面）；
+    - ``scene_notes`` 是该规则可选的场景补充说明 / 注意事项（住户在 web「场景联动」逐规则
+      配置），**仅在该规则配了时才出现**；它与规则同处一条 JSON，模型无需跨段对应即可拿到。
+
+    结构化 JSONL 取代旧的 ``- <name>：<query>`` 纯文本拼接：字段边界显式，模型不会把
+    "规则名里带冒号 / 描述里带换行" 与分隔符混淆，名称与 id 都能被精准提取。
+
+    rule_name 为空时回退 ``[rule_id]``，与 ``_rule_name_to_id`` 写进映射的 key 一致
+    （否则模型照抄的标识在映射里找不到，命中的 matched_rules 会被静默丢弃）。
+    sort by rule_id 求顺序确定。
 
     无规则时返回 None（整段不渲染）：此时 matched_rules 字段仍在 schema 里，「无规则段 →
     matched_rules 必须为空数组」的约束写在 field_registry 的 matched_rules spec 里（恒在
@@ -438,11 +486,28 @@ def _render_rule_conditions(context: OmniContext) -> str | None:
     """
     if not context.rule_conditions:
         return None
+    ordered = sorted(context.rule_conditions, key=lambda x: x.rule_id)
+    short_ids = agent_rule_ids(context)
     lines = [
-        f"- {rc.rule_name or f'[{rc.rule_id}]'}：{rc.query}"
-        for rc in sorted(context.rule_conditions, key=lambda x: x.rule_id)
+        "# 待判断规则",
+        "以下每行是一条待判断规则（JSON，一行一条）：",
     ]
-    return "# 待判断规则\n" + "\n".join(lines)
+    for rc in ordered:
+        item: dict[str, str] = {
+            # 只给模型短 id（完整 UUID 前 6 位）：matched_rules 里照抄它即可，省输出 token；
+            # 解析侧 _rule_name_to_id 把短 id 映射回完整 UUID（下游触发仍用 UUID）。
+            "rule_id": short_ids.get(rc.rule_id, rc.rule_id),
+            "rule_name": rc.rule_name or f"[{rc.rule_id}]",
+            # prompt 侧字段名 target_scene：对模型直白表达"要检测的目标场景"；
+            # 内部/DB/API 仍是 condition.query（零迁移，仅渲染层换名）。
+            "target_scene": rc.query,
+        }
+        # 场景补充说明随该规则同一条 JSON 输出；空白串视为未配置（不落字段，保持行精简）。
+        ctx_text = (rc.scene_notes or "").strip()
+        if ctx_text:
+            item["scene_notes"] = ctx_text
+        lines.append("- "+json.dumps(item, ensure_ascii=False))
+    return "\n".join(lines)
 
 
 def _build_readonly_history(context: OmniContext) -> str | None:
@@ -596,16 +661,14 @@ def build_system_prompt(
         override = _rule_only_system_prompt_override()
         if override:
             return override
-        # 纯场景触发：角色/总原则/任务/常识全部收敛到"只判规则"，不注入家庭档案
-        # （无 caption/建议可挂档案偏好；身份识别已剥离，档案里的成员名没有可用锚点）。
+        # 纯场景触发：极简装配——只有 matched_rules 一个输出字段，故角色已含任务与输出
+        # 约束、不再单列「# 任务」，也不注入通用常识 / 实例 / 家庭档案 / 输出模式段；
+        # 输出格式与字段说明压到最短，把 token 留给真正要判的规则本身。
         parts: list[str] = [
             _ROLE_RULE_ONLY,
-            _OUTPUT_MODE_JSON,
             _PRINCIPLE_RULE_ONLY,
-            _render_task_list(scene),
             "# 输出格式\n\n" + _render_schema_section(scene),
             "# 字段说明\n\n" + render_field_spec(scene),
-            _render_examples(scene),
         ]
     else:
         role = _ROLE_AUDIO if is_audio else _ROLE
@@ -634,6 +697,13 @@ def build_system_prompt(
             home_profile = get_home_profile_prefix()
             if home_profile:
                 parts.append(home_profile)
+    # 全局感知系统提示词（web「设置」页配置，热读）——住户对全部机位生效的补充指导
+    # （关注的场景 / 通用判定口径 / 全局约束），不替代内置的角色 / 总原则 / schema /
+    # 字段说明。放在 camera_prompt 之前：它对所有机位相同，与内置段一起构成跨机位的
+    # 共享前缀（camera_prompt 逐机位不同，保持最后）。
+    global_prompt = _global_system_prompt()
+    if global_prompt:
+        parts.append("# 全局感知须知\n\n" + global_prompt)
     # camera_prompt — 低频变动，放在 system prompt 尾部 → prefix cache 能命中前面的共享前缀
     note = camera_prompt.strip() if camera_prompt else ""
     if note:
@@ -650,12 +720,15 @@ def _render_schema_section(scene: SceneDescriptor) -> str:
     if scene.stream:
         order = " → ".join(f.name for f in scene.selected_fields())
         return f"必须严格按字段顺序输出：{order}\n{schema}"
-    return schema
+    return schema.replace('"rule_name":"规则名",','') + "\n输出 reason 语言：English"
 
 
 def _render_task_list(scene: SceneDescriptor) -> str:
     """按场景渲染「# 任务」概览（动态编号）：身份识别仅有候选时、视频理解仅 video 场景；
-    规则/建议措辞按 route 取"视频和音频"或"音频"（audio 场景不提视频）。"""
+    规则/建议措辞按 route 取"视频和音频"或"音频"（audio 场景不提视频）。
+
+    仅完整感知路径使用；rule_only（纯场景触发）不列任务——角色已声明唯一任务，
+    见 build_system_prompt 的极简装配。"""
     # 措辞跟随本轮实际模态：video 无音频时只提"视频"，不提音频（与剥离的 schema 一致）
     if scene.route == "audio":
         av = av2 = "音频"
@@ -663,9 +736,6 @@ def _render_task_list(scene: SceneDescriptor) -> str:
         av, av2 = "视频和音频", "视频、音频"
     else:
         av = av2 = "视频"
-    if scene.rule_only:
-        # 纯场景触发：唯一任务是规则判定（schema 也只含 matched_rules，二者保持一致）。
-        return "\n".join(["# 任务", "1. 规则判定：基于本轮画面判断「# 待判断规则」是否成立"])
     items: list[str] = []
     if scene.has_identity:
         if scene.identity_match_disabled:
@@ -1450,6 +1520,29 @@ def _rule_only_system_prompt_override() -> str:
         from miloco.config import get_settings
 
         val = get_settings().perception.engine.get("rule_only_system_prompt", "")
+        if not isinstance(val, str):
+            return ""
+        return val.strip()
+    except Exception:
+        return ""
+
+
+def _global_system_prompt() -> str:
+    """全局感知系统提示词（web「设置」页可配）。
+
+    读取 ``perception.engine.global_system_prompt``（settings.yaml 默认 / config.json /
+    admin ``PUT /api/admin/perception-config`` 写盘后经 reset_settings 热读；下个感知窗口
+    生效，免重启）。与 ``_rule_only_system_prompt_override`` 的区别：本项是**追加**——
+    内置角色 / 总原则 / schema / 字段说明全部保留，只在其后补一段「# 全局感知须知」
+    （位于逐机位 ``camera_prompt`` 之前）；覆盖项非空时仍以覆盖项为准（全量替换，
+    不追加本项）。
+
+    只认非空 ``str``（其余类型一律视为未设置，防御配置误写）。
+    """
+    try:
+        from miloco.config import get_settings
+
+        val = get_settings().perception.engine.get("global_system_prompt", "")
         if not isinstance(val, str):
             return ""
         return val.strip()

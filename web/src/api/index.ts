@@ -802,6 +802,10 @@ export interface PerceptionConfig {
   // 老 backend(<0.10.x)不返此字段,前端在读取处 ?? DEFAULTS.min_suggestion_urgency 回退。
   // 声明成可选是为了把这层运行时兼容语义显式化,别让未来维护者把 ?? 当成死代码删。
   min_suggestion_urgency?: MinSuggestionUrgency;
+  /** 全局感知系统提示词(backend perception.engine.global_system_prompt):非空时追加到
+   *  感知 system prompt 尾部,作为对全部机位生效的补充指导;"" = 不注入。老后端不返此
+   *  字段 → undefined,读取处回退空串。 */
+  global_system_prompt?: string;
 }
 
 export async function getPerceptionConfig(): Promise<PerceptionConfig> {

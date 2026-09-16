@@ -17,6 +17,9 @@
     "conditionLabel": "触发条件（进入）",
     "conditionPlaceholder": "如：有人在床上看书（进行时状态描述）",
     "conditionHint": "请用进行时状态描述，不要用「检测到 / 识别到」开头（感知模型会把断言性措辞当成已发生事实，导致连续误触发）",
+    "sceneNotesLabel": "场景补充说明（可选）",
+    "sceneNotesPlaceholder": "这条规则的场景细节或注意事项。如：目标区只限地毯右侧的白色地板；必须连续两帧都看到才算命中；鞋影 / 电线 / 保护膜不算……",
+    "sceneNotesHint": "只对这条规则生效，随规则一起注入感知模型，用于补充「这条规则怎么判、什么算命中」；全局通用的关注点请在「设置 → 全局感知系统提示词」里配置。留空 = 不注入。",
     "enterSceneLabel": "进入时触发的场景",
     "exitSceneLabel": "退出时触发的场景",
     "scenePlaceholder": "选择米家自动化场景",
@@ -56,6 +59,7 @@
     "errScene": "进入 / 退出场景至少配置一个",
     "cameraCount": "{{count}} 台摄像头",
     "enterDebounceBadge": "{{seconds}}s 确认后进入",
-    "dwellBadge": "{{seconds}}s 后自动退出"
+    "dwellBadge": "{{seconds}}s 后自动退出",
+    "sceneNotesBadge": "含场景说明"
   }
 }

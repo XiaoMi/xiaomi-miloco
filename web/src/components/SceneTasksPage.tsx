@@ -120,6 +120,7 @@ function SceneSelect({
 interface Draft {
   description: string;
   query: string;
+  sceneNotes: string;
   cameraDids: string[];
   enterSceneId: string;
   exitSceneId: string;
@@ -134,6 +135,7 @@ function draftFromTask(task: SceneTask): Draft {
   return {
     description: task.description,
     query: task.query,
+    sceneNotes: task.sceneNotes ?? "",
     cameraDids: [...task.perceiveDeviceIds],
     enterSceneId: task.enterSceneId ?? "",
     exitSceneId: task.exitSceneId ?? "",
@@ -149,6 +151,7 @@ function emptyDraft(): Draft {
   return {
     description: "",
     query: "",
+    sceneNotes: "",
     cameraDids: [],
     enterSceneId: "",
     exitSceneId: "",
@@ -180,6 +183,10 @@ function buildPatch(draft: Draft, task: SceneTask): SceneTaskInput {
   const debounce = num(draft.exitDebounceSeconds);
   if (draft.description !== task.description) patch.description = draft.description;
   if (draft.query !== task.query) patch.query = draft.query;
+  // 场景补充说明：trim 后比对；清空 → null（后端 PATCH 收到 null/"" 即清除）。
+  if (draft.sceneNotes.trim() !== (task.sceneNotes ?? "").trim()) {
+    patch.sceneNotes = draft.sceneNotes.trim() || null;
+  }
   if (!sameIds(draft.cameraDids, task.perceiveDeviceIds)) {
     patch.perceiveDeviceIds = [...draft.cameraDids];
   }
@@ -201,6 +208,7 @@ function buildInput(draft: Draft): SceneTaskInput {
   return {
     description: draft.description.trim(),
     query: draft.query.trim(),
+    sceneNotes: draft.sceneNotes.trim() || null,
     perceiveDeviceIds: [...draft.cameraDids],
     enterSceneId: draft.enterSceneId || null,
     exitSceneId: draft.exitSceneId || null,
@@ -413,6 +421,22 @@ function SceneTaskDrawer({
             />
             <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
               {t("sceneTasks.conditionHint")}
+            </p>
+          </Section>
+
+          {/* 场景补充说明：只作用于本条规则的判定细则，随规则注入 omni 的
+              「# 场景判定补充细则」段（与「设置」页的全局感知提示词正交）。 */}
+          <Section title={t("sceneTasks.sceneNotesLabel")}>
+            <textarea
+              value={draft.sceneNotes}
+              onChange={(e) => set({ sceneNotes: e.target.value })}
+              rows={4}
+              maxLength={8000}
+              placeholder={t("sceneTasks.sceneNotesPlaceholder")}
+              className={`${inputCls} resize-y`}
+            />
+            <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
+              {t("sceneTasks.sceneNotesHint")}
             </p>
           </Section>
 
@@ -756,6 +780,11 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
                           {t("sceneTasks.dwellBadge", {
                             seconds: task.maxDwellSeconds,
                           })}
+                        </span>
+                      )}
+                      {task.sceneNotes && (
+                        <span className="text-caption text-brand-primary bg-brand-soft px-1.5 py-0.5 rounded">
+                          {t("sceneTasks.sceneNotesBadge")}
                         </span>
                       )}
                     </div>

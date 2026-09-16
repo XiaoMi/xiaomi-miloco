@@ -8,9 +8,11 @@ import pytest
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni.omni import (
     _has_loopback_tail,
+    _rule_name_to_id,
     _stream_and_parse,
     run_omni,
 )
+from miloco.perception.engine.omni.prompt_builder import _render_rule_conditions
 from miloco.perception.engine.types import (
     AudioAnalysis,
     AudioType,
@@ -91,6 +93,90 @@ async def test_run_omni_with_mock():
     assert len(output.matched_rules) == 1
     assert output.matched_rules[0].rule_id == "reading_light"
     assert output.speeches == []
+
+
+# =============================================================================
+# 短 rule_id：prompt 给模型前 6 位，解析还原回完整 UUID
+# =============================================================================
+
+FULL_RULE_ID = "d7d9e575-5ab9-49c5-ab8a-ffd3928f7593"
+SHORT_RULE_ID = "d7d9e5"
+OTHER_FULL_RULE_ID = "0a1b2c3d-4444-4555-8666-777777777777"
+
+
+def _response_with_matched_rules(items: list[dict]) -> dict:
+    return {
+        "id": "mock",
+        "choices": [
+            {
+                "message": {
+                    "content": json.dumps({"matched_rules": items})
+                }
+            }
+        ],
+    }
+
+
+def test_rule_name_to_id_maps_short_id_and_full_id_and_name():
+    """映射三类 key 齐备：短 id（prompt 实际渲染值）/ 完整 UUID / rule_name。"""
+    ctx = OmniContext(
+        rule_conditions=[
+            RuleCondition(rule_id=FULL_RULE_ID, rule_name="[r] 读书", query="是否在读书"),
+        ],
+    )
+    mapping = _rule_name_to_id(ctx)
+    assert mapping[SHORT_RULE_ID] == FULL_RULE_ID
+    assert mapping[FULL_RULE_ID] == FULL_RULE_ID
+    assert mapping["[r] 读书"] == FULL_RULE_ID
+
+
+def test_rendered_rule_id_is_parser_mapping_key():
+    """prompt 渲染的 rule_id 必须正是解析映射的 key——两处口径分叉会让命中被静默丢弃。"""
+    ctx = OmniContext(
+        rule_conditions=[
+            RuleCondition(rule_id=FULL_RULE_ID, rule_name="[r] 读书", query="是否在读书"),
+            RuleCondition(rule_id=OTHER_FULL_RULE_ID, rule_name="[s] 关灯", query="是否关灯"),
+        ],
+    )
+    section = _render_rule_conditions(ctx)
+    assert section is not None
+    rendered_ids: list[str] = []
+    for raw in section.splitlines():
+        line = raw.strip()
+        if line.startswith("- "):
+            line = line[2:].lstrip()
+        if line.startswith("{"):
+            rendered_ids.append(json.loads(line)["rule_id"])
+    mapping = _rule_name_to_id(ctx)
+    assert rendered_ids == ["0a1b2c", SHORT_RULE_ID]  # sort by rule_id：0a1b… 在前
+    for rid in rendered_ids:
+        assert mapping[rid] in {FULL_RULE_ID, OTHER_FULL_RULE_ID}
+
+
+@pytest.mark.asyncio
+async def test_run_omni_resolves_short_rule_id_back_to_uuid():
+    """模型照抄 prompt 里的短 id → 下游 matched_rules 拿到完整 UUID（触发链路用 UUID）。"""
+    ep = _mock_edge_packet()
+    ctx = OmniContext(
+        rule_conditions=[
+            RuleCondition(rule_id=FULL_RULE_ID, rule_name="[r] 读书", query="是否在读书"),
+        ],
+    )
+    config = OmniConfig(api_key="test-key")
+    response = _response_with_matched_rules(
+        [{"rule_id": SHORT_RULE_ID, "reason": "画面里有人在看书", "hit": True}]
+    )
+
+    with patch(
+        "miloco.perception.engine.omni.omni.call_omni",
+        new_callable=AsyncMock,
+        return_value=response,
+    ):
+        output = await run_omni(ep, ctx, config)
+
+    assert [m.rule_id for m in output.matched_rules] == [FULL_RULE_ID]
+    # 落库 / 展示用的 rule_name 仍按映射还原（模型这次没写 name）
+    assert output.matched_rules[0].rule_name == ""
 
 
 # =============================================================================
