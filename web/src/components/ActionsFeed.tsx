@@ -44,8 +44,10 @@ export async function fetchActions(
   sinceMs?: number,
   untilMs?: number,
   homeId?: string,
+  /** 拉多少条，默认整页。传 1 可当"有没有新动作"的廉价探针（见 ActivityFeed 的轮询）。 */
+  limit: number = ACTIONS_LIMIT,
 ): Promise<BackendActionRow[]> {
-  const params = new URLSearchParams({ limit: String(ACTIONS_LIMIT) });
+  const params = new URLSearchParams({ limit: String(limit) });
   if (failedOnly) params.set("failed_only", "1");
   if (sinceMs !== undefined) params.set("since_ms", String(sinceMs));
   if (untilMs !== undefined) params.set("until_ms", String(untilMs));

@@ -12,6 +12,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  clearActivityLogs,
   eventClipUrl,
   eventCropMeta,
   eventRefUrl,
@@ -72,6 +73,10 @@ const EMPTY_OD_LOGS: OnDemandLogEntry[] = [];
 // SSE 事件常成串到达(一次 agent 控制伴随多条事件),每条都全量重拉 500 行动作太重。
 // 合并突发:末条到达后 ~1.5s 才拉一次(trailing debounce)。mount / homeId 切换仍即时拉。
 const SSE_ACTIONS_DEBOUNCE_MS = 1500;
+
+/** 动作台账轮询间隔：退出场景这类动作没有对应的感知事件（不会触发 SSE 重拉），
+ *  只能自己轮询。3s 足够"看起来是实时的"，而探针只拉 1 行。 */
+const ACTIONS_POLL_MS = 3000;
 
 /** 单流合并后的行:事件 or 动作(tagged union),供渲染层分派 ActivityRow / ActionRow。 */
 export type FeedRow =
@@ -166,6 +171,10 @@ export function ActivityFeed({
   const [activeTab, setActiveTab] = useState<ActivityTab>("events");
   const [odCount, setOdCount] = useState((initialOdLogs ?? EMPTY_OD_LOGS).length);
   const [odHasMore, setOdHasMore] = useState((initialOdLogs ?? EMPTY_OD_LOGS).length === OD_PAGE_SIZE);
+  // 「清理」:清空当前全部日志(感知事件 + 按需日志,两张表各一个 POST)。
+  // 与用量页一致用行内二次确认(不弹模态),避免误点清掉现场。
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
   const handleOdCount = useCallback((n: number, hasMore: boolean) => {
     setOdCount(n);
     setOdHasMore(hasMore);
@@ -211,6 +220,10 @@ export function ActivityFeed({
    *  无 home 过滤请求 / 切家前旧请求若晚返回,不得覆盖已按新 home 过滤的结果。 */
   const actionsGenRef = useRef(0);
 
+  /** 当前列表里最新一条动作的 id。轮询探针用它比对"有没有新动作"，放 ref 是为了
+   *  不让定时器随 actions 每次变化重建。 */
+  const newestActionIdRef = useRef<string | undefined>(undefined);
+
   /** 动作重拉:mount / homeId 切换 / 时间窗变化 / 手动 reload 时调,失败静默(不阻断事件流)。
    *  带上当前应用的时间窗(appliedSince/appliedBefore),让动作与事件同段,不混入范围外记录;
    *  带上 activeHomeId,切家后动作流只显当前家(依赖变化自动重拉,不再是空转)。
@@ -219,7 +232,10 @@ export function ActivityFeed({
     const gen = ++actionsGenRef.current;
     fetchActions(false, appliedSince, appliedBefore, activeHomeId)
       .then((rows) => {
-        if (gen === actionsGenRef.current) setActions(rows);
+        if (gen === actionsGenRef.current) {
+          newestActionIdRef.current = rows[0]?.id;
+          setActions(rows);
+        }
       })
       .catch(() => {
         /* 动作流失败不影响事件流;保留上次结果 */
@@ -248,6 +264,31 @@ export function ActivityFeed({
   useEffect(() => {
     reloadActions();
   }, [reloadActions, homeId]);
+
+  // 动作流轮询：`/api/events/stream` 只在**感知事件**落库时推消息，而"退出场景"这类
+  // 动作没有对应的新事件（退出那一窗在 rule_only 下不会成为感知事件）—— 只靠 SSE
+  // 就会等到住户切走再切回来才看见。这里独立轮询动作台账：先拉 1 条比对最新 id，
+  // 变了才全量重拉（正常情况下每轮就 1 行，代价可忽略）。
+  useEffect(() => {
+    if (!showActions) return;
+    const id = setInterval(() => {
+      // 后台标签页不轮询（不看就不拉）。
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      const gen = actionsGenRef.current;
+      fetchActions(false, appliedSince, appliedBefore, activeHomeId, 1)
+        .then((rows) => {
+          // 探针发出后若已有别的重拉完成，以那次结果为准（gen 变了就丢弃本轮）。
+          if (gen !== actionsGenRef.current) return;
+          const newest = rows[0]?.id;
+          if (newest && newest !== newestActionIdRef.current) reloadActions();
+        })
+        .catch(() => {
+          /* 服务不可用 / 切家空窗：静默，下一轮再说 */
+        });
+    }, ACTIONS_POLL_MS);
+    return () => clearInterval(id);
+    // 时间窗/家变化会让 reloadActions 换新身份，定时器随之重建并立刻用新条件探。
+  }, [showActions, reloadActions, appliedSince, appliedBefore, activeHomeId]);
 
   const filterActive = appliedSince !== undefined || appliedBefore !== undefined;
 
@@ -424,6 +465,44 @@ export function ActivityFeed({
   // "查看更早" 仅在展示事件时有意义(动作已一次拉全 500,无分页)。
   const showLoadMore = showEvents && hasMore && events.length > 0;
 
+  /** 一键清理:清空全部日志(感知事件 + 按需日志)。成败都重拉,把真实状态拉回来。 */
+  const doClear = async () => {
+    setClearing(true);
+    try {
+      const {
+        events: clearedEvents,
+        onDemand: clearedLogs,
+        actions: clearedActions,
+      } = await clearActivityLogs();
+      setConfirmingClear(false);
+      toast(
+        t("activity.clearSuccess", {
+          events: clearedEvents,
+          logs: clearedLogs,
+          actions: clearedActions,
+        }),
+        "ok",
+      );
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("activity.clearFailed"), "danger");
+    } finally {
+      setClearing(false);
+      // 乐观复位:清空后数字/列表立刻归零,随后的重拉若发现没清干净会再纠正回来。
+      setOdCount(0);
+      setOdHasMore(false);
+      setEvents([]);
+      setActions([]);
+      setOffset(0);
+      setHasMore(false);
+      // 筛选态由 fetchPage 主导(prop sync effect 会忽略 initial 变化);
+      // 非筛选态让父组件重拉,经 prop sync 刷新列表。动作流一起刷,免得留半条旧的。
+      if (filterActive) fetchPage({ pageOffset: 0 });
+      else onRetryEvents?.();
+      onRetryOnDemand();
+      reloadActions();
+    }
+  };
+
   return (
     <section
       className="rounded-xl bg-bg-secondary border border-border shadow-sm anim-in"
@@ -476,10 +555,41 @@ export function ActivityFeed({
         </div>
       </div>
 
-      {/* Sub-tabs */}
-      <div className="flex gap-0 px-5 border-b border-border" role="tablist" aria-label={t("activity.title")}>
-        <SubTab active={activeTab === "events"} onClick={() => setActiveTab("events")} label={t("activity.tabEvents")} id="tab-events" controls="panel-events" />
-        <SubTab active={activeTab === "queries"} onClick={() => setActiveTab("queries")} label={t("activity.tabOnDemand")} id="tab-queries" controls="panel-queries" />
+      {/* Sub-tabs（右侧:一键清理当前全部日志,两个 tab 共用一个入口） */}
+      <div className="flex items-center justify-between gap-3 px-5 border-b border-border">
+        <div className="flex gap-0" role="tablist" aria-label={t("activity.title")}>
+          <SubTab active={activeTab === "events"} onClick={() => setActiveTab("events")} label={t("activity.tabEvents")} id="tab-events" controls="panel-events" />
+          <SubTab active={activeTab === "queries"} onClick={() => setActiveTab("queries")} label={t("activity.tabOnDemand")} id="tab-queries" controls="panel-queries" />
+        </div>
+        {confirmingClear ? (
+          <span className="inline-flex items-center gap-2 text-caption shrink-0">
+            <span className="text-text-secondary">{t("activity.clearConfirmPrompt")}</span>
+            <button
+              type="button"
+              onClick={doClear}
+              disabled={clearing}
+              className="px-2.5 py-1 rounded-md bg-error text-white hover:opacity-90 disabled:opacity-60"
+            >
+              {clearing ? t("activity.clearing") : t("activity.clearConfirm")}
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingClear(false)}
+              disabled={clearing}
+              className="px-2.5 py-1 rounded-md bg-bg-primary border border-border text-text-primary"
+            >
+              {t("activity.cancel")}
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setConfirmingClear(true)}
+            className="text-caption text-text-tertiary hover:text-error shrink-0"
+          >
+            {t("activity.clearData")}
+          </button>
+        )}
       </div>
 
       {/* Tab panels */}

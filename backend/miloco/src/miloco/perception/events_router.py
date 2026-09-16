@@ -12,6 +12,7 @@ Endpoints:
 - `GET /api/events/{event_id}/ref/{device_id}`   — locate_ref + FileResponse(全景参考帧)
 - `GET /api/events/{event_id}/crop/{device_id}`  — read_crop_meta(crop 区域坐标,画框用)
 - `GET /api/events/stream`                       — SSE
+- `POST /api/events/clear`                       — clear_all(「日志」页一键清理)
 """
 
 from __future__ import annotations
@@ -67,6 +68,21 @@ async def list_events(
     return NormalResponse(
         code=0, message="ok", data=EventListResponse(events=events)
     )
+
+
+@router.post(
+    "/clear",
+    summary="Clear all meaningful events (不可恢复)",
+    response_model=NormalResponse,
+    dependencies=[Depends(verify_token)],
+)
+async def clear_events(svc: EventsService = Depends(get_events_service)):
+    """清空 meaningful_events 全部行,返回删除条数。供「日志」页的「清理」按钮用。
+
+    动作审计(action_ledger,仅完整版 + perf 打开时存在)不在本端点范围内,它有各自的保留期。
+    """
+    deleted = await svc.clear_all()
+    return NormalResponse(code=0, message="ok", data={"deleted": deleted})
 
 
 @router.get(

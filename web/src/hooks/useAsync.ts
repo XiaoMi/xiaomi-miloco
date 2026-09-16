@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "@/components/Toast";
 import i18n from "@/i18n";
+import { isServiceDown } from "@/lib/serviceStatus";
 
 export interface AsyncState<T> {
   data: T | undefined;
@@ -59,7 +60,10 @@ export function useAsync<T>(
         if (cancelled) return;
         const err = e instanceof Error ? e : new Error(String(e));
         setError(err);
-        if (options.errorLabel) {
+        // 后端服务已确认停止（菜单里点了「停止服务」，或进程崩了）：此刻所有拉取都会
+        // 失败，十几条「加载某某失败」toast 只会盖住顶部那条真正有用的「服务已停止」。
+        // error 照旧进 state（组件仍可显内联错误），只是不弹 toast。
+        if (options.errorLabel && !isServiceDown()) {
           toast(i18n.t("common.errorToast", { label: options.errorLabel }), "warn");
         }
       })

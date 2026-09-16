@@ -71,6 +71,10 @@
     "miotConnected": "Xiaomi Home connected",
     "miotDevicesCount": "{{n}} devices",
     "miotNotConnected": "Xiaomi Home not connected",
-    "miotCtaConnect": "Connect now"
+    "miotCtaConnect": "Connect now",
+    "serviceRunning": "Service running",
+    "serviceStopped": "Service stopped",
+    "serviceChecking": "Checking service",
+    "serviceCtaRetry": "Retry"
   }
 }

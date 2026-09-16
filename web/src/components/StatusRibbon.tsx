@@ -11,6 +11,7 @@
 import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type { HomeStatus } from "@/lib/types";
+import type { ServiceStatus } from "@/hooks/useServiceStatus";
 
 type Tone = "ok" | "info" | "warn" | "danger" | "brand";
 
@@ -132,6 +133,12 @@ interface Props {
   onJumpDevices?: () => void;
   /** running=true 但 ready=false（如模型缺失）时点「重启引擎」：stop + start */
   onRestartEngine: () => void;
+  /**
+   * 后端服务（进程）状态。可不传（老调用方 / 单测）：不传就不显这一项。
+   * 「看家」说的是感知引擎跑不跑，这一项说的是**后端进程在不在** —— 菜单栏里
+   * 点了「停止服务」之后，感知状态那条会一直是老数据，只有这条能说清发生了什么。
+   */
+  service?: ServiceStatus;
 }
 
 export function StatusRibbon({
@@ -141,6 +148,7 @@ export function StatusRibbon({
   onWakeUp,
   onJumpDevices,
   onRestartEngine,
+  service,
 }: Props) {
   const { t } = useTranslation();
   // ── Item 1:感知状态 3 态 ─────────────────────────
@@ -206,6 +214,28 @@ export function StatusRibbon({
     />
   );
 
+  // ── Item 3：后端服务（进程）─────────────────
+  // up       → 绿，服务运行中
+  // down     → 红，服务已停止（附「重试」入口；恢复后页面会自动刷新）
+  // checking → 蓝，首帧探测还没回来（不让状态条先闪一下「已停止」）
+  const serviceItem = !service ? null : (
+    // data-miloco：给自动化/实机巡检一个稳定的锚点（launcher 的 UI 探针靠它读状态条，
+    // 不靠"第几个 div"这种一改布局就失效的选择器）。
+    <span data-miloco="service-status" className="inline-flex">
+      {service.state === "up" ? (
+        <StatusItem tone="ok" label={t("hero.serviceRunning")} />
+      ) : service.state === "down" ? (
+        <StatusItem
+          tone="danger"
+          label={t("hero.serviceStopped")}
+          cta={{ text: t("hero.serviceCtaRetry"), onClick: service.recheck }}
+        />
+      ) : (
+        <StatusItem tone="info" label={t("hero.serviceChecking")} />
+      )}
+    </span>
+  );
+
   return (
     <div
       className="flex items-center gap-x-6 gap-y-2 px-5 md:px-8 py-2.5 border-b border-border bg-bg-primary flex-wrap"
@@ -213,6 +243,7 @@ export function StatusRibbon({
     >
       {watchItem}
       {miotItem}
+      {serviceItem}
     </div>
   );
 }

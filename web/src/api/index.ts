@@ -442,6 +442,18 @@ export async function submitOnDemandFeedback(
   return impl.realSubmitOnDemandFeedback(logId, errorTypes, feedbackText);
 }
 
+/**
+ * 清空「日志」页全部记录(感知事件 + 按需查询日志 + 动作台账/触发场景,不可恢复)。
+ * 返回各自删除条数。
+ */
+export async function clearActivityLogs(): Promise<{
+  events: number;
+  onDemand: number;
+  actions: number;
+}> {
+  return impl.realClearActivityLogs();
+}
+
 // ── 摄像头 ────────────────────────────────────────────────
 // ── 米家多家庭 ────────────────────────────────────────────
 export async function listScopeHomes(homeId?: HomeId): Promise<ScopeHome[]> {

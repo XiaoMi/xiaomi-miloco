@@ -75,6 +75,12 @@ grep -qE "menubar=svg\(transparent=[1-9][0-9]*,solid=[1-9][0-9]*\)" <<<"$SELFTES
     || fail "菜单栏图标不是透明且有内容的 SVG：$SELFTEST_OUT"
 pass "菜单栏图标为透明模板 SVG（房子线稿，无底色）"
 
+# 不显示 Dock 图标：生命周期归菜单栏图标管，Dock 图标只是窗口开关，容易被误当成"关掉=停服务"。
+# 退回 .regular 就会重新长出 Dock 图标 —— 用字段断言卡住（accessory=无 Dock 图标）。
+grep -q "activation=accessory" <<<"$SELFTEST_OUT" \
+    || fail "launcher 激活策略不是 accessory（会显示 Dock 图标）：$SELFTEST_OUT"
+pass "无 Dock 图标（激活策略 accessory，Dock 不驻留、不进 ⌘-Tab）"
+
 # 界面语言：默认英文、中文系统中文、可用 MILOCO_APP_LANG 强制
 LANG_ZH_OUT="$(MILOCO_APP_LANG=zh "$APP/Contents/MacOS/Miloco" --selftest)"
 LANG_EN_OUT="$(MILOCO_APP_LANG=en "$APP/Contents/MacOS/Miloco" --selftest)"
@@ -155,7 +161,7 @@ import json, sys
 cfg = json.load(open(sys.argv[1]))
 assert cfg['app']['edition'] == 'slim', cfg.get('app')
 assert cfg['perception']['engine']['rule_only'] is True, cfg['perception']
-assert cfg['perf']['enabled'] is False, cfg['perf']
+assert cfg['perf']['enabled'] is True, cfg['perf']
 assert cfg['features']['pet_recognition'] is False, cfg['features']
 assert cfg['server']['host'] == '127.0.0.1', cfg['server']
 assert cfg['server']['port'] == 1812, cfg['server']  # App 固定端口，和 CLI 版 1810 分开
@@ -207,8 +213,11 @@ IDENTITY_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
 pass "身份路由未注册（404）"
 
 [[ -f "$HOME_DIR/miloco.db" ]] || fail "数据库未创建：$HOME_DIR/miloco.db"
-[[ ! -e "$HOME_DIR/observability.db" ]] || fail "perf 关闭时不应创建 observability.db"
-pass "miloco.db 已创建，observability.db 未创建（perf.enabled=false 生效）"
+# perf 必须开着:它是 action_ledger 的总开关,而日志页的「动作/触发场景」流走 /api/actions。
+# 关掉 perf → observability.db 不建 + observability_router 不挂 → 住户在日志里看不到场景
+# 进入/退出（曾经的回归）。这里把「开了」和「读得到」都卡住。
+[[ -f "$HOME_DIR/observability.db" ]] || fail "observability.db 未创建（perf.enabled 被关了？）"
+pass "miloco.db / observability.db 均已创建（perf.enabled=true 生效）"
 
 # bootstrap 只允许往 config.json 里深合并 server.token，不能把默认配置冲掉。
 "$PY" -c "
@@ -216,12 +225,121 @@ import json, sys
 cfg = json.load(open(sys.argv[1]))
 assert cfg['app']['edition'] == 'slim', cfg.get('app')
 assert cfg['perception']['engine']['rule_only'] is True, cfg.get('perception')
-assert cfg['perf']['enabled'] is False, cfg.get('perf')
+assert cfg['perf']['enabled'] is True, cfg.get('perf')
 assert cfg['schedule']['enabled'] is False, cfg.get('schedule')
 assert cfg['server']['token'], cfg.get('server')
 assert cfg['server']['port'] == 1812, cfg.get('server')
 " "$HOME_DIR/config.json" || fail "bootstrap 后默认配置被破坏"
 pass "bootstrap 后 config.json 默认项完整保留（仅新增 token）"
+
+# 「日志」页的一键清理:三处存储各一个 POST —— meaningful_events / on_demand_log(miloco.db)
+# 与 action_ledger(observability.db,「触发场景」在这本台账里;早期版本漏了它)。
+# 这里直接往库里插一行再清 —— 单元测试用 stub 顶掉了 perception_service,只有真服务
+# 才验证得了「路由挂上了(slim 也挂) + 鉴权 + 真删到行」这条完整链路。
+"$PY" - "$HOME_DIR/miloco.db" <<'SMOKESEED' || fail "插入待清理的日志行失败"
+import sqlite3, sys
+now = 1_700_000_000_000
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    "INSERT INTO meaningful_events (id, timestamp, text, payload_json, has_rule_hit,"
+    " has_suggestion, has_asr, snapshot_count, device_ids, rule_names, home_id, created_at)"
+    " VALUES ('smoke-ev-1', ?, 'smoke', '{}', 0, 0, 0, 0, '[]', '{}', NULL, ?)",
+    (now, now),
+)
+conn.execute(
+    "INSERT INTO on_demand_log (id, timestamp, query, answer, sources, latency_ms,"
+    " snapshot_count, clip_dids, clip_kinds, has_trace, created_at)"
+    " VALUES ('smoke-od-1', ?, '谁在客厅', '没有人', '[]', 1, 0, '[]', '{}', 0, ?)",
+    (now, now),
+)
+conn.commit()
+conn.close()
+SMOKESEED
+"$PY" - "$HOME_DIR/observability.db" <<'SMOKESEEDACT' || fail "插入待清理的动作台账失败"
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    "INSERT INTO action_ledger (id, timestamp, action_type, did, value_json, success,"
+    " source, source_id, home_id) VALUES ('smoke-act-clear', 1700000000000, 'scene_trigger',"
+    " 'scene.smoke.clear', '{\"scene_name\": \"冒烟清理场景\"}', 1, 'rule', 'rule-smoke-clear',"
+    " 'home-smoke')",
+)
+conn.commit()
+conn.close()
+SMOKESEEDACT
+EVENTS_JSON="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/events")"
+OD_JSON="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/perception/on-demand-logs")"
+ACT_JSON="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/actions?action_type=scene_trigger")"
+"$PY" -c "
+import json, sys
+events = json.loads(sys.argv[1])['data']['events']
+logs = json.loads(sys.argv[2])['data']['logs']
+acts = json.loads(sys.argv[3])
+assert len(events) == 1 and events[0]['event_id'] == 'smoke-ev-1', events
+assert len(logs) == 1 and logs[0]['id'] == 'smoke-od-1', logs
+assert len(acts) == 1 and acts[0]['id'] == 'smoke-act-clear', acts
+" "$EVENTS_JSON" "$OD_JSON" "$ACT_JSON" || fail "插入的日志行没能通过接口读到"
+
+CLEAR_EVENTS="$(curl -fsS --max-time 5 -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/events/clear")"
+CLEAR_OD="$(curl -fsS --max-time 5 -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/perception/on-demand-logs/clear")"
+CLEAR_ACT="$(curl -fsS --max-time 5 -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/actions/clear")"
+"$PY" -c "
+import json, sys
+ev = json.loads(sys.argv[1])
+od = json.loads(sys.argv[2])
+act = json.loads(sys.argv[3])
+assert ev['code'] == 0 and ev['data']['deleted'] == 1, ev
+assert od['code'] == 0 and od['data']['deleted'] == 1, od
+assert act['deleted'] == 1, act
+" "$CLEAR_EVENTS" "$CLEAR_OD" "$CLEAR_ACT" || fail "清理接口返回的删除条数不对"
+
+EVENTS_JSON="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/events")"
+OD_JSON="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/perception/on-demand-logs")"
+ACT_JSON="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/actions?action_type=scene_trigger")"
+"$PY" -c "
+import json, sys
+assert json.loads(sys.argv[1])['data']['events'] == [], sys.argv[1]
+assert json.loads(sys.argv[2])['data']['logs'] == [], sys.argv[2]
+assert json.loads(sys.argv[3]) == [], sys.argv[3]
+" "$EVENTS_JSON" "$OD_JSON" "$ACT_JSON" || fail "清理后列表仍有残留（触发场景没清掉？）"
+pass "一键清理：事件 + 按需日志 + 动作台账（触发场景）都清空，清理后列表为空"
+
+# 日志页的「动作」流（含"触发场景"）读 /api/actions ← action_ledger(observability.db)。
+# 台账是 RuleRunner 触发场景时写的（source=rule / source_id=rule_id），这里插一行再读回来，
+# 守住「slim 下 perf 开着、路由器挂着、按 action_type 过滤可用」这条链路。
+"$PY" - "$HOME_DIR/observability.db" <<'SMOKEACT' || fail "插入动作台账失败"
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    "INSERT INTO action_ledger (id, timestamp, action_type, did, value_json, success,"
+    " source, source_id, home_id) VALUES ('smoke-act-1', ?, 'scene_trigger', 'scene.smoke.1',"
+    " '{\"scene_name\": \"冒烟场景\"}', 1, 'rule', 'rule-smoke-1', 'home-smoke')",
+    (1_700_000_000_000,),
+)
+conn.commit()
+conn.close()
+SMOKEACT
+ACTIONS_JSON="$(curl -fsS --max-time 5 -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:$PORT/api/actions?action_type=scene_trigger")"
+"$PY" -c "
+import json, sys
+rows = json.loads(sys.argv[1])
+assert len(rows) == 1, rows
+row = rows[0]
+assert row['action_type'] == 'scene_trigger', row
+assert row['source'] == 'rule' and row['source_id'] == 'rule-smoke-1', row
+assert json.loads(row['value_json'])['scene_name'] == '冒烟场景', row
+" "$ACTIONS_JSON" || fail "slim 下 /api/actions 读不到场景触发台账（活动日志页会缺这一条流）"
+pass "活动日志「动作」流可用：场景触发台账可写可读（source=rule）"
 
 # ─── 5. 优雅退出 ────────────────────────────────────────────────────────────
 

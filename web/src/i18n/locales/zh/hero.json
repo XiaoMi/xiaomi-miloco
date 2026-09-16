@@ -71,6 +71,10 @@
     "miotConnected": "米家已连",
     "miotDevicesCount": "{{n}} 件设备",
     "miotNotConnected": "米家未连",
-    "miotCtaConnect": "去连一下"
+    "miotCtaConnect": "去连一下",
+    "serviceRunning": "服务运行中",
+    "serviceStopped": "服务已停止",
+    "serviceChecking": "服务检查中",
+    "serviceCtaRetry": "重试"
   }
 }

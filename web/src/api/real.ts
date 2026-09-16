@@ -1390,6 +1390,40 @@ export async function realListOnDemandLogs(opts?: {
   return resp.data.logs;
 }
 
+/**
+ * 清空「日志」页的全部记录:感知事件 + 按需查询日志。
+ *
+ * 两张表分属 events_router / perception_router(各自管自己的存储),所以一次点击 =
+ * 两个 POST;两边都是幂等 DELETE,再点一次返回 deleted=0。任一失败即整体抛出,
+ * 调用方负责提示 + 无论成败都重拉一次(失败时也要把真实状态拉回来)。
+ */
+export async function realClearActivityLogs(): Promise<{
+  events: number;
+  onDemand: number;
+  actions: number;
+}> {
+  const [events, onDemand, actions] = await Promise.all([
+    apiFetch<Normal<{ deleted: number }>>("/api/events/clear", { method: "POST" }),
+    apiFetch<Normal<{ deleted: number }>>("/api/perception/on-demand-logs/clear", {
+      method: "POST",
+    }),
+    // 动作台账（含"触发场景"）落在 observability.db，由 perf.enabled 决定挂不挂载。
+    // 它没挂载时（住户手动关了 perf）这里会 404 —— 那种部署下日志页本来就没有动作流，
+    // 按 0 条处理，不能让整次清理因为一条本来就不存在的流而报失败。
+    apiFetch<{ deleted: number }>("/api/actions/clear", { method: "POST" }).catch(
+      (e: unknown) => {
+        if (e instanceof ApiError && e.status === 404) return { deleted: 0 };
+        throw e;
+      },
+    ),
+  ]);
+  return {
+    events: events.data.deleted,
+    onDemand: onDemand.data.deleted,
+    actions: actions.deleted,
+  };
+}
+
 export function realOnDemandClipUrl(logId: string, deviceId: string): string {
   const token = resolveToken();
   const base = `/api/perception/on-demand-logs/${encodeURIComponent(logId)}/clip/${encodeURIComponent(deviceId)}`;

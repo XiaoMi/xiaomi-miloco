@@ -18,7 +18,7 @@
     "pet_reid_diverse": false
   },
   "perf": {
-    "enabled": false
+    "enabled": true
   },
   "schedule": {
     "enabled": false

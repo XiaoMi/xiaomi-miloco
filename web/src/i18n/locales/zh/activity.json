@@ -75,6 +75,13 @@
       "voice": "语音识别错误",
       "ruleFalse": "规则/建议误触发",
       "other": "其他"
-    }
+    },
+    "clearData": "清理日志",
+    "clearConfirmPrompt": "清空当前全部日志？不可恢复",
+    "clearing": "清理中…",
+    "clearConfirm": "确认清空",
+    "cancel": "取消",
+    "clearSuccess": "已清空 {{events}} 条感知事件、{{logs}} 条按需日志、{{actions}} 条动作日志（含触发场景）",
+    "clearFailed": "清空失败"
   }
 }

@@ -117,6 +117,10 @@ class EventsService:
         feedback_index = self.build_feedback_index()
         return [self._row_to_event(row, snapshot_root, feedback_index) for row in rows]
 
+    async def clear_all(self) -> int:
+        """清空全部感知事件(「日志」页的「清理」按钮).返回删除条数."""
+        return self._dao.delete_all()
+
     async def locate_clip(
         self, event_id: str, device_id: str
     ) -> tuple[SnapshotStatus, Path | None, str | None, int | None]:

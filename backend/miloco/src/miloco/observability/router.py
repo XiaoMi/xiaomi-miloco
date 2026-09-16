@@ -188,6 +188,24 @@ def list_actions(
         conn.close()
 
 
+@router.post("/api/actions/clear")
+def clear_actions(request: Request):
+    """清空动作台账（agent 控设备 / 播 TTS / **触发场景** 的持久审计），返回删除条数。
+
+    日志页的「清理日志」必须把这本台账一起清：住户眼里的"日志"是那一整条时间线，
+    只清感知事件与按需日志会留下一屏「触发场景」，看起来就像清理没生效。
+    连接走 autocommit（``connect()`` 的 isolation_level=None），DELETE 即刻落盘；
+    与 MetricsClient 的后台写入连接并发由 sqlite3 默认 5s busy_timeout 兜住。
+    """
+    db_path = request.app.state.obs_db_path
+    conn = connect(db_path)
+    try:
+        cursor = conn.execute("DELETE FROM action_ledger")
+        return {"deleted": cursor.rowcount}
+    finally:
+        conn.close()
+
+
 @router.get("/api/events")
 def list_events(
     request: Request,

@@ -180,6 +180,20 @@ class MeaningfulEventDao:
             logger.error("Failed to delete old meaningful events: %s", e)
             return 0
 
+    def delete_all(self) -> int:
+        """清空整张 meaningful_events 表(「日志」页的一键清理用).
+
+        与 delete_before_days 的区别:不看 created_at,直接删全部行。
+
+        Returns:
+            删除的行数
+        """
+        try:
+            return self.db_connector.execute_update("DELETE FROM meaningful_events", ())
+        except Exception as e:
+            logger.error("Failed to clear meaningful events: %s", e)
+            return 0
+
     @staticmethod
     def _row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
         """SQLite row → dict;device_ids / rule_names JSON 反序列化;has_* INTEGER → bool."""

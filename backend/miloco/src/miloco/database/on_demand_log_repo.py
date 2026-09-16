@@ -159,6 +159,18 @@ class OnDemandLogRepo:
             logger.error("Failed to count on-demand logs: %s", e)
             return 0
 
+    def delete_all(self) -> int:
+        """Delete every on-demand log row (「日志」页的一键清理用).
+
+        Returns:
+            Number of deleted rows.
+        """
+        try:
+            return self.db_connector.execute_update("DELETE FROM on_demand_log", ())
+        except Exception as e:
+            logger.error("Failed to clear on-demand logs: %s", e)
+            return 0
+
     def delete_before_days(self, days: int) -> int:
         """Delete on-demand logs older than N days.
 

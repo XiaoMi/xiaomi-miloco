@@ -509,6 +509,8 @@ final class SleepGuard {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
+    /// 上次写进菜单栏的状态文字（变了才打日志，避免每秒刷屏）。
+    private var lastStatusTitle = ""
     private let backend = BackendProcess()
     private var healthTimer: Timer?
     private var healthFailures = 0
@@ -517,10 +519,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var isQuitting = false
     /// 状态文本存英/中一对，读取时才按当前语言渲染 —— 这样切语言后状态栏文案
     /// 不用等下一次状态变化才更新。
+    /// 服务状态的语义色。菜单弹窗里那颗圆点 + 状态文字用它上色 —— 状态是住户点开菜单
+    /// 最需要一眼看到的信息，不能和版本号一样是灰的。
+    enum ServiceTone {
+        case running, stopped, busy, warning, idle
+
+        var color: NSColor {
+            switch self {
+            case .running: return .systemGreen
+            case .stopped: return .systemRed
+            case .busy: return .systemYellow
+            case .warning: return .systemOrange
+            case .idle: return .secondaryLabelColor
+            }
+        }
+    }
+
     private var statePair: (en: String, zh: String) = ("Stopped", "已停止")
+    private var stateTone: ServiceTone = .stopped
     private var stateText: String { t(statePair.en, statePair.zh) }
 
-    private func setState(_ en: String, _ zh: String) { statePair = (en, zh) }
+    private func setState(_ en: String, _ zh: String, tone: ServiceTone = .idle) {
+        statePair = (en, zh)
+        stateTone = tone
+        // 所有状态迁移都经过这里（启动中 / 运行中 / 已停止 / 重启中 / 异常退出…）。
+        // 菜单栏图标不再显示文字（住户要求：图标旁只留图标），状态进菜单弹窗 —— 但 tooltip
+        // 仍跟着更新，鼠标悬停就能看到。
+        syncStatusItem()
+    }
+
     /// 信号源必须持有强引用，否则会被立刻回收、信号无人处理。
     private var signalSources: [DispatchSourceSignal] = []
     /// 本 App 自带的管理页面窗口（WKWebView）。
@@ -560,8 +587,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: 生命周期
 
+    /// 无 Dock 图标：Miloco 的生命周期由**菜单栏图标**掌握（有服务在跑、能退出），
+    /// Dock 图标只是"内置窗口开关"，摆在那里反而让人以为关掉窗口/退出 Dock 就等于停服务。
+    /// accessory 下窗口照常显示、聚焦时仍有自己的菜单栏（⌘V/⌘Q 靠它），只是不占 Dock
+    /// 与 ⌘-Tab。Launchpad / Finder 里仍能找到并双击启动。
+    static let activationPolicy: NSApplication.ActivationPolicy = .accessory
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSApp.setActivationPolicy(.regular)
+        NSApp.setActivationPolicy(Self.activationPolicy)
+        Log.line("激活策略：accessory（不显示 Dock 图标，生命周期由菜单栏图标掌握）")
         DistributedNotificationCenter.default().addObserver(
             self, selector: #selector(handleShowPageNotification),
             name: kShowPageNotification, object: nil)
@@ -612,7 +646,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         isQuitting = true
         healthTimer?.invalidate()
         sleepGuard.release()
-        setState("Quitting…", "正在退出…")
+        setState("Quitting…", "正在退出…", tone: .idle)
         refreshMenu()
         DispatchQueue.global().async { [weak self] in
             self?.backend.stop()
@@ -651,6 +685,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             try? fm.copyItem(at: AppPaths.defaultsConfig, to: AppPaths.configFile)
             Log.line("首启：已写入包内默认 config.json")
+        }
+        repairPerfLedgerFlag()
+    }
+
+    /// 一次性修复：slim 版早期默认配置把 `perf.enabled` 写成 `false`，而它同时是动作台账
+    /// `action_ledger` 的总开关 —— 关掉之后 `/api/actions` 连路由都不挂载，日志页的
+    /// 「动作 / 触发场景」流整条消失，住户没法在日志里确认场景**进入/退出**（实测回归）。
+    /// 只动这一个键，且只认 slim 版：全量版住户自己关掉 perf 的选择不该被覆盖。
+    private func repairPerfLedgerFlag() {
+        guard let data = try? Data(contentsOf: AppPaths.configFile),
+            var cfg = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+            let app = cfg["app"] as? [String: Any], (app["edition"] as? String) == "slim",
+            var perf = cfg["perf"] as? [String: Any], (perf["enabled"] as? Bool) == false
+        else { return }
+
+        perf["enabled"] = true
+        cfg["perf"] = perf
+        guard let out = try? JSONSerialization.data(
+            withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        ) else { return }
+        do {
+            try out.write(to: AppPaths.configFile)
+            Log.line("已修复 config.json：perf.enabled=false → true（动作台账/日志页「触发场景」流需要它）")
+        } catch {
+            Log.line("修复 perf.enabled 失败：\(error.localizedDescription)")
         }
     }
 
@@ -727,6 +786,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: 菜单
 
     private func buildMenu() {
+        // 图标旁只放图标（住户要求）：状态文字一律进菜单弹窗，菜单栏保持干净。
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             button.image = statusBarIcon()
@@ -735,7 +795,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         statusItem = item
         buildMainMenu()
+        syncStatusItem()
         refreshMenu()
+    }
+
+    /// 菜单栏图标只更新 tooltip（悬停可见完整状态）；状态本身画在菜单弹窗里。
+    private func syncStatusItem() {
+        guard let button = statusItem?.button else { return }
+        button.toolTip = "Miloco · \(stateText)"
+        // 状态变化落一条日志：出问题时能直接看出"当时状态是什么"。
+        if lastStatusTitle != stateText {
+            lastStatusTitle = stateText
+            Log.line("服务状态：\(stateText)")
+        }
+    }
+
+    /// 菜单里的状态圆点：实心小圆，颜色 = 语义色（不走模板渲染，否则会被压成单色）。
+    private func statusDotImage(_ tone: ServiceTone) -> NSImage {
+        let side: CGFloat = 9
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            tone.color.setFill()
+            NSBezierPath(ovalIn: rect.insetBy(dx: 0.5, dy: 0.5)).fill()
+            return true
+        }
+        image.isTemplate = false  // 彩色点必须关掉模板渲染
+        return image
+    }
+
+    /// 状态行文字：加粗 + 语义色（版本号那行是灰的，状态这行要跳出来）。
+    private func statusAttributedTitle(_ text: String) -> NSAttributedString {
+        NSAttributedString(
+            string: text,
+            attributes: [
+                .foregroundColor: stateTone.color,
+                .font: NSFont.boldSystemFont(ofSize: NSFont.systemFontSize),
+            ])
     }
 
     /// 菜单栏图标就用 App 自己的图标（和停靠栏、Finder 里一致），不是 Symbol 摄像头。
@@ -901,9 +995,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshMenu() {
         let menu = NSMenu()
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-        let header = NSMenuItem(title: "Miloco \(version) · \(stateText)", action: nil, keyEquivalent: "")
+        // 弹窗顶部两行：版本号（灰、次要）+ 服务状态（彩色圆点 + 语义色粗体）。
+        // 原来两者挤在一行、都是灰的，住户看不到状态，故拆开并把状态做成视觉主体。
+        // autoenablesItems 关掉：信息行的颜色/可用性由这里显式决定（默认校验会把没有
+        // action 的行判成 disabled，而 disabled 会把文字颜色压成灰）。
+        menu.autoenablesItems = false
+
+        let header = NSMenuItem(title: "Miloco \(version)", action: nil, keyEquivalent: "")
+        header.attributedTitle = NSAttributedString(
+            string: "Miloco \(version)",
+            attributes: [
+                .foregroundColor: NSColor.secondaryLabelColor,
+                .font: NSFont.menuFont(ofSize: 0),
+            ])
         header.isEnabled = false
         menu.addItem(header)
+
+        let svc = NSMenuItem(title: stateText, action: nil, keyEquivalent: "")
+        svc.attributedTitle = statusAttributedTitle(stateText)
+        svc.image = statusDotImage(stateTone)
+        // 信息行：给住户一个能"停住"菜单的落点，颜色也不会被 disabled 压灰。
+        svc.isEnabled = true
+        svc.toolTip = stateText
+        menu.addItem(svc)
         menu.addItem(.separator())
 
         let open = NSMenuItem(
@@ -938,6 +1052,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         restart.target = self
         restart.isEnabled = running
         menu.addItem(restart)
+
+        let check = NSMenuItem(
+            title: t("Check Service Status", "检查服务状态"),
+            action: #selector(checkServiceStatus), keyEquivalent: "")
+        check.target = self
+        menu.addItem(check)
         menu.addItem(.separator())
 
         let autostart = NSMenuItem(
@@ -1001,7 +1121,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 notify(t("Miloco is reusing a running backend", "Miloco 复用了已运行的后端"), msg)
             }
             adoptedPort = port
-            setState("Running (127.0.0.1:\(port))", "运行中（127.0.0.1:\(port)）")
+            setState(
+                "Running (127.0.0.1:\(port))", "运行中（127.0.0.1:\(port)）", tone: .running)
             syncSleepGuard()
             refreshMenu()
             if openPageWhenReady { openAdminPage() }
@@ -1010,13 +1131,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let port = BackendProcess.pickPort() else {
             setState(
                 "Cannot start: ports \(kPortRange.lowerBound)-\(kPortRange.upperBound) are all in use",
-                "无法启动：\(kPortRange.lowerBound)-\(kPortRange.upperBound) 端口全被占用")
+                "无法启动：\(kPortRange.lowerBound)-\(kPortRange.upperBound) 端口全被占用",
+                tone: .warning)
             Log.line(stateText)
             refreshMenu()
             notify(t("Miloco cannot start", "Miloco 无法启动"), stateText)
             return
         }
-        setState("Starting…", "启动中…")
+        setState("Starting…", "启动中…", tone: .busy)
         refreshMenu()
         // 启动前自检配置：损坏就自愈（备份 + 回默认），否则后端会在 import 期直接退出，
         // 住户只会看到“服务反复异常退出”而不知道原因。
@@ -1031,7 +1153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } catch {
             setState(
                 "Start failed: \(error.localizedDescription)",
-                "启动失败：\(error.localizedDescription)")
+                "启动失败：\(error.localizedDescription)", tone: .warning)
             Log.line("启动失败：\(error)")
             refreshMenu()
             notify(t("Miloco failed to start", "Miloco 启动失败"), error.localizedDescription)
@@ -1049,7 +1171,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         guard let self else { return }
                         self.adoptedPort = nil
                         self.setState(
-                            "Running (127.0.0.1:\(port))", "运行中（127.0.0.1:\(port)）")
+                            "Running (127.0.0.1:\(port))", "运行中（127.0.0.1:\(port)）",
+                            tone: .running)
                         self.healthFailures = 0
                         self.healthySince = Date()
                         self.syncSleepGuard()
@@ -1064,7 +1187,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.setState("Start timed out (see logs)", "启动超时（详见日志）")
+                self.setState(
+                    "Start timed out (see logs)", "启动超时（详见日志）", tone: .warning)
                 self.refreshMenu()
                 Log.line("后端在 \(Int(kStartupTimeout))s 内未就绪")
                 self.notify(
@@ -1082,7 +1206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if consecutiveRestarts > kMaxConsecutiveRestarts {
             setState(
                 "Service keeps crashing; auto-restart stopped",
-                "服务反复异常退出，已停止自动重启")
+                "服务反复异常退出，已停止自动重启", tone: .warning)
             refreshMenu()
             Log.line("连续异常退出 \(consecutiveRestarts) 次，停止自动重启")
             syncSleepGuard()
@@ -1096,7 +1220,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let delay = min(30.0, pow(2.0, Double(consecutiveRestarts - 1)))
         setState(
             "Crashed (exit=\(code)); restarting in \(Int(delay))s",
-            "异常退出（exit=\(code)），\(Int(delay))s 后重启")
+            "异常退出（exit=\(code)），\(Int(delay))s 后重启", tone: .warning)
         refreshMenu()
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.isQuitting, !self.backend.isRunning else { return }
@@ -1143,19 +1267,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: 菜单动作
 
     /// 管理页地址：优先用已知端口，未知再探一次。
-    /// `autoLanguage: true` 表示「住户刚在菜单里选了跟随系统」：除了不带 ?lang=，
-    /// 还要显式让页面清掉它自己存过的语言偏好（?lang=auto），否则页面会把自己存的
-    /// 语言回报给原生，把「跟随系统」立刻顶回去。
+    ///
+    /// `?lang=auto` 让页面**清掉自己 localStorage 里存过的语言**、按系统语言渲染。
+    /// 「跟随系统」必须走它 —— 否则页面把上次存的 `web:lang=en` 回报给原生，原生又
+    /// 采纳回 en，于是「跟随系统」在重启后被静默顶掉（实测：系统 zh，App 起来是 en，
+    /// 日志里紧跟着一条「页面请求把界面语言切到 en」）。原生端选了明确语言时则带
+    /// `?lang=xx` 直接指定。
     private func adminURL(autoLanguage: Bool = false) -> URL? {
         let port = currentPort() ?? BackendProcess.findRunningPort() ?? kPreferredPort
-        let query: String
-        if autoLanguage {
-            query = "?lang=auto"
-        } else {
-            // 原生端选了明确语言（菜单「语言」或 MILOCO_APP_LANG）时把选择带给页面；
-            // 「跟随系统」就不带，让页面跟随系统 / 页面里存过的偏好。
-            query = AppLanguage.menuSelection == "system" ? "" : "?lang=\(AppLanguage.code)"
-        }
+        let query = (autoLanguage || AppLanguage.menuSelection == "system")
+            ? "?lang=auto"
+            : "?lang=\(AppLanguage.code)"
         return URL(string: "http://127.0.0.1:\(port)/\(query)")
     }
 
@@ -1190,6 +1312,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshMenu()
     }
 
+    /// 手动重探一次服务状态：住户在别处把后端停掉/换进程时，菜单栏文字可能还停在
+    /// 旧结论（自动巡检 15s 一轮，且只在 backend.isRunning 时探）。这里给一个手动入口。
+    @objc private func checkServiceStatus() {
+        let port = backend.port > 0 ? backend.port : (adoptedPort ?? kPreferredPort)
+        let running = backend.isRunning
+        DispatchQueue.global().async { [weak self] in
+            let ok = isMilocoHealthy(port: port)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if ok {
+                    self.adoptedPort = running ? self.adoptedPort : port
+                    self.setState(
+                        "Running (127.0.0.1:\(port))", "运行中（127.0.0.1:\(port)）",
+                        tone: .running)
+                } else if running {
+                    // 进程还在但健康检查不通：交给巡检判断，这里只如实报一句
+                    self.setState(
+                        "No response (see logs)", "无响应（详见日志）", tone: .warning)
+                } else {
+                    self.adoptedPort = nil
+                    self.setState("Stopped", "已停止", tone: .stopped)
+                }
+                self.syncSleepGuard()
+                self.refreshMenu()
+            }
+        }
+    }
+
     @objc private func startService() {
         consecutiveRestarts = 0
         startServer(openPageWhenReady: true)
@@ -1198,13 +1348,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func stopService() {
         backend.stop()
         adoptedPort = nil
-        setState("Stopped", "已停止")
+        setState("Stopped", "已停止", tone: .stopped)
         syncSleepGuard()
         refreshMenu()
     }
 
     @objc private func restartService() {
-        setState("Restarting…", "重启中…")
+        setState("Restarting…", "重启中…", tone: .busy)
         refreshMenu()
         DispatchQueue.global().async { [weak self] in
             guard let self else { return }
@@ -1322,6 +1472,7 @@ if CommandLine.arguments.contains("--selftest") {
             "quit=\(t("Quit Miloco", "退出 Miloco"))",
             "langquery=\(langQuery)",
             "menubar=\(AppDelegate.menuBarIconCheck())",
+            "activation=\(AppDelegate.activationPolicy == .accessory ? "accessory" : "regular")",
         ]
         print(fields.joined(separator: " "))
         exit(0)
@@ -1331,6 +1482,9 @@ if CommandLine.arguments.contains("--selftest") {
 }
 
 let app = NSApplication.shared
+// run() 之前就定下激活策略：晚到 applicationDidFinishLaunching 的话，Dock 会先画一下
+// 图标再收回去（能看到闪一下）。
+app.setActivationPolicy(AppDelegate.activationPolicy)
 let delegate = AppDelegate()
 app.delegate = delegate
 app.run()

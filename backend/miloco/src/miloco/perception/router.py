@@ -138,6 +138,17 @@ async def query_on_demand_logs(
     return NormalResponse(code=0, message="ok", data=data)
 
 
+@router.post(
+    "/on-demand-logs/clear",
+    summary="Clear all on-demand query logs (不可恢复)",
+    dependencies=[Depends(verify_token)],
+)
+async def clear_on_demand_logs():
+    """清空 on_demand_log 全部行,返回删除条数。供「日志」页的「清理」按钮用。"""
+    deleted = manager.perception_service.clear_on_demand_logs()
+    return NormalResponse(code=0, message="ok", data={"deleted": deleted})
+
+
 @router.get(
     "/on-demand-logs/{log_id}/clip/{device_id}",
     summary="Get on-demand query clip (omni 看到的字节级 mp4/m4a)",

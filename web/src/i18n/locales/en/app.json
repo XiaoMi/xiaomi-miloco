@@ -34,6 +34,9 @@
     "engineStoppedWakeManuallyNoMsg": "Engine stopped, wake it manually",
     "stopFail": "Couldn't stop, try again later",
     "miotBound": "Xiaomi Home connected",
-    "loadOnDemandLogsFail": "Failed to load on-demand logs"
+    "loadOnDemandLogsFail": "Failed to load on-demand logs",
+    "serviceDown": "Backend service is stopped",
+    "serviceDownHint": "Use “Start Service” in the menu bar · retrying every {{seconds}}s; the page reloads by itself once it is back",
+    "serviceRetry": "Retry now"
   }
 }

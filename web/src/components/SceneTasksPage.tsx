@@ -140,7 +140,7 @@ function draftFromTask(task: SceneTask): Draft {
     cameraDids: [...task.perceiveDeviceIds],
     enterSceneId: task.enterSceneId ?? "",
     exitSceneId: task.exitSceneId ?? "",
-    cooldownMinutes: String(task.cooldownMinutes ?? 5),
+    cooldownMinutes: String(task.cooldownMinutes ?? 1),
     enterDebounceSeconds: String(task.enterDebounceSeconds ?? 0),
     exitDebounceSeconds: String(task.exitDebounceSeconds),
     maxDwellSeconds: task.maxDwellSeconds ? String(task.maxDwellSeconds) : "",
@@ -148,7 +148,7 @@ function draftFromTask(task: SceneTask): Draft {
   };
 }
 
-function emptyDraft(): Draft {
+export function emptyDraft(): Draft {
   return {
     description: "",
     query: "",
@@ -156,9 +156,9 @@ function emptyDraft(): Draft {
     cameraDids: [],
     enterSceneId: "",
     exitSceneId: "",
-    cooldownMinutes: "5",
+    cooldownMinutes: "1",
     enterDebounceSeconds: "0",
-    exitDebounceSeconds: "60",
+    exitDebounceSeconds: "0",
     maxDwellSeconds: "",
     enabled: true,
   };
@@ -205,7 +205,7 @@ function buildPatch(draft: Draft, task: SceneTask): SceneTaskInput {
   return patch;
 }
 
-function buildInput(draft: Draft): SceneTaskInput {
+export function buildInput(draft: Draft): SceneTaskInput {
   return {
     description: draft.description.trim(),
     query: draft.query.trim(),
@@ -213,9 +213,9 @@ function buildInput(draft: Draft): SceneTaskInput {
     perceiveDeviceIds: [...draft.cameraDids],
     enterSceneId: draft.enterSceneId || null,
     exitSceneId: draft.exitSceneId || null,
-    cooldownMinutes: num(draft.cooldownMinutes) ?? 5,
+    cooldownMinutes: num(draft.cooldownMinutes) ?? 1,
     enterDebounceSeconds: num(draft.enterDebounceSeconds) ?? 0,
-    exitDebounceSeconds: num(draft.exitDebounceSeconds) ?? 60,
+    exitDebounceSeconds: num(draft.exitDebounceSeconds) ?? 0,
     maxDwellSeconds: num(draft.maxDwellSeconds),
     enabled: draft.enabled,
   };

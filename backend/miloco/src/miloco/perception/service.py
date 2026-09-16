@@ -377,6 +377,10 @@ class PerceptionService:
         """清理过期主动查询日志。"""
         return self._od_log_repo.delete_before_days(keep_days)
 
+    def clear_on_demand_logs(self) -> int:
+        """清空全部主动查询日志(「日志」页的「清理」按钮)。返回删除条数。"""
+        return self._od_log_repo.delete_all()
+
     # ---- Device management ----
 
     async def get_devices(self, online_only: bool = True) -> list[PerceptionDevice]:

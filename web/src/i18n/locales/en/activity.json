@@ -75,6 +75,13 @@
       "voice": "Voice recognition error",
       "ruleFalse": "Rule / suggestion false trigger",
       "other": "Other"
-    }
+    },
+    "clearData": "Clear logs",
+    "clearConfirmPrompt": "Clear all current logs? This cannot be undone",
+    "clearing": "Clearing…",
+    "clearConfirm": "Confirm clear",
+    "cancel": "Cancel",
+    "clearSuccess": "Cleared {{events}} events, {{logs}} on-demand logs and {{actions}} action logs (incl. scene triggers)",
+    "clearFailed": "Couldn't clear logs"
   }
 }

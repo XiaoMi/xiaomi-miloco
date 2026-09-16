@@ -12,7 +12,7 @@
 
 ```
 Miloco.app/
-├── Contents/MacOS/Miloco            启动器（菜单栏/停靠栏，管生命周期）
+├── Contents/MacOS/Miloco            启动器（菜单栏图标，管生命周期；**不驻留 Dock**）
 └── Contents/Resources/
     ├── py/                          内嵌 CPython 3.12 + 精简依赖（不写进用户目录）
     ├── defaults/config.json         slim 默认配置（首次启动写入数据目录）
@@ -47,7 +47,16 @@ Miloco.app/
 
 > 不要用 App 图标（`Miloco.icns`）当菜单栏图标：icns 是 QuickLook 渲的、**背景不透明**，
 > 缩到 18px 放进菜单栏就是一块带白边的方块（模板渲染更会整块变实心）。
-> `app/smoke_test.sh` 会用像素统计把这条卡住。点一下图标提供：
+> `app/smoke_test.sh` 会用像素统计把这条卡住。
+
+**没有 Dock 图标**：启动器把自己的激活策略设成 `accessory`（`app/launcher/main.swift` 的
+`activationPolicy`，`--selftest` 输出 `activation=accessory`，构建期断言），所以 Dock 与
+⌘-Tab 都不驻留 —— 生命周期的唯一入口就是菜单栏图标（能看状态、能启停、能退出）。Dock 图标
+原来只是"内置窗口开关"，摆在那儿反而让人以为关窗口/退 Dock 就是停服务。窗口仍在：菜单栏
+「打开管理页面」、Finder 双击、菜单栏状态行都能打开；聚焦时 App 依旧是前台应用，自己的菜单栏
+（含 Edit→Paste ⌘V、⌘Q）照常生效。Launchpad / Finder 里也照常能找到并启动。
+
+点一下图标提供：
 
 | 菜单项 | 说明 |
 | --- | --- |
@@ -61,8 +70,9 @@ Miloco.app/
 | 打开日志目录 | 同上 `/log`，`launcher.log` 是启动器日志，`miloco-backend_*.log` 是后端日志 |
 | 退出 Miloco | 停掉后端并退出（⌘Q 同效） |
 
-点停靠栏图标、或再点一次 App 图标都会打开内置窗口；**关窗 ≠ 退出**，服务继续在菜单栏跑，
-⌘Q / 菜单「退出 Miloco」才停服务并退出。
+**关窗 ≠ 退出**：窗口关掉后服务继续在菜单栏跑，再点菜单栏「打开管理页面」（或 Finder 里
+双击 App）就能把窗口叫回来。没有 Dock 图标，所以退出只有两条路：⌘Q，或菜单「退出 Miloco」
+（会先 SIGTERM 停后端）。
 
 ### 界面语言：跟随系统，默认英文
 
@@ -164,7 +174,7 @@ images/          事件截图    log/  日志    miot_cache/  米家本地缓存
 
 > 真要把 CLI 版的账号与规则搬过来，属于手工操作：退出 App，把 `~/.openclaw/miloco/` 里的
 > `config.json` 与 `miloco.db` 拷进上面的目录，再启动。注意 `config.json` 里必须
-> `perception.engine.rule_only = true`、建议 `perf.enabled = false` —— 全量版配置会让 slim
+> `perception.engine.rule_only = true`、`perf.enabled` 保持 `true` —— 全量版配置会让 slim
 > 去加载它根本没打包的端侧模型（onnxruntime），直接起不来。
 
 ### 本地网络权限
@@ -178,10 +188,26 @@ slim 版的界面只有四个 tab —— **概览 / 场景联动 / 日志 / 模�
 
 - **概览**：摄像头实时画面 + 每路「投喂 / 拾音」开关（家人、宠物、token 入口都不显示）；
   顶部状态条上是全局感知控制（感知状态 · 唤醒 / 重启引擎）。
-- **场景联动 / 日志**：规则触发的联动与活动流。
+- **场景联动 / 日志**：规则触发的联动与活动流。日志页右上角有**清理**按钮（行内二次确认，不用弹窗），
+  一次清空当前全部日志 —— 三处存储各一个 `POST /clear`、返回各自删除条数：
+  `meaningful_events`（感知事件）、`on_demand_log`（按需查询日志）、`action_ledger`
+  （动作台账，**「触发场景」就在这本台账里**；漏了它住户清完仍会看到一屏触发场景）。
+  事件截图/片段是文件，不归这个按钮管：它们由后端自己的 TTL（`perception.snapshot_ttl_days`）
+  + 磁盘上限（`snapshot_max_disk_mb`）两阶段清理。
+  动作流**独立轮询**（3s）：`/api/events/stream` 只在感知事件落库时推消息，而"退出场景"
+  这类动作没有对应的新事件（退出那一窗在 rule_only 下不会成为感知事件），只靠 SSE 会
+  等到切走再切回来才显示。轮询先拉 1 条比对最新 id，变了才全量重拉。
 - **模型**：只看 / 配模型（Base URL、API Key、模型、测试连接），不带 token 用量统计。
 - **设置**：对全局上下文（全局感知系统提示词）等仍然生效的项开放；帧率、事件紧急度、
   agent 定时任务这些在 slim 下拨了也没用的项隐藏。
+- **服务状态**：菜单栏**只有图标**（透明模板房子图，不跟状态文字、也不置灰，避免菜单栏变宽
+  和「置灰看不出是在跑还是被系统禁用」）；鼠标悬停的 tooltip 是完整状态。点开菜单，顶部
+  两行 = 版本号（灰、次要）+ 服务状态（**彩色圆点 + 语义色粗体**：运行中=绿、已停止=红、
+  启动中/重启中=黄、无响应/反复崩溃=橙），一眼能看出后端有没有在跑。菜单里另有
+  「检查服务状态」可手动重探（自动巡检 15s 一轮，且只在进程还在时探）。菜单里点「停止服务」后，
+  已打开的内置网页 2s 内显示「服务已停止」+ 一条说明横幅，并每 2s 自动重试；
+  服务回来后**页面自动整页重载**（各 tab 的 SSE、相机流、分页游标都是按老进程建的），
+  重载前把当前 tab 记进 `sessionStorage`，不把住户弹回概览页。
 
 以下能力**整体不注册**（不是隐藏入口，而是后端路由与后台任务都没有）：
 
@@ -189,7 +215,10 @@ slim 版的界面只有四个 tab —— **概览 / 场景联动 / 日志 / 模�
   （身份/宠物那半边依赖 ONNX 端侧模型，全量包才有）
 - agent 动态动作（openclaw/hermes 插件、CLI 工具链）
 - 在线一键升级（升级 = 用新版 `Miloco.app` 覆盖安装）
-- 性能观测（`perf.enabled=false`，不采集、不建 `observability.db`）
+- 性能观测**页面**（`capabilities.observability=false`，导航里没有）。但 `perf.enabled` 保持
+  `true` —— 它同时是动作台账 `action_ledger` 的总开关，而日志页的「动作」流（设备控制 / TTS /
+  **场景触发**）读 `/api/actions`；关掉 perf 会让住户在日志里看不到场景进入/退出（曾经的回归）。
+  slim 下性能采集本身几乎不产生数据（没有 agent，`agent_runs` / trace 恒空），只多一行场景触发台账。
 
 Web 端会读 `GET /api/admin/edition` 自动收敛导航与首屏请求（身份/宠物/家庭档案这三条在
 slim 未注册的路由**根本不发请求**，否则首屏会弹三条「加载失败」告警）；如果后端不可达或
@@ -238,8 +267,10 @@ dmg 文件名）——正式对外发布建议先打 tag，或用 `--version` �
 5. 自检：`MILOCO_EDITION=slim` 下能 import `miloco.main`，且 `/api/person`、`/api/pet`、
    `/api/home_profile` 路由**没有**被注册
 6. `swiftc` 编译启动器 → ad-hoc 签名（内嵌 Mach-O → 主程序 → bundle）
-7. `app/smoke_test.sh`：真起服务，验 `/health`、`/api/admin/edition`、身份路由 404、
-   `observability.db` 不生成、bootstrap 不破坏默认配置、SIGTERM 优雅退出
+7. `app/smoke_test.sh`：先跑 `Miloco --selftest` 卡住布局与可见行为（固定端口 1812、
+   菜单栏图标是透明模板 SVG、界面语言默认英文/跟随系统、**`activation=accessory` 即无 Dock 图标**），
+   再真起服务，验 `/health`、`/api/admin/edition`、身份路由 404、`observability.db` 已生成且
+   `/api/actions` 读得到场景触发台账、一键清理清空三处存储、bootstrap 不破坏默认配置、SIGTERM 优雅退出
 
 ### 依赖裁剪
 

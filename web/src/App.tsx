@@ -29,13 +29,15 @@ import {
   switchScopeHome,
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
+import { useServiceStatus } from "./hooks/useServiceStatus";
 import { getEdition, SLIM_TAB_KEYS } from "./lib/edition";
 import type { HomeEntries, Pet, Person } from "./lib/types";
-import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
+import { Sidebar, MobileTabBar, TABS, type TabKey } from "./components/Sidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
 import { OmniHealthBanner } from "./components/OmniHealthBanner";
 import { StatusRibbon } from "./components/StatusRibbon";
+import { ServiceDownBanner } from "./components/ServiceDownBanner";
 import UpgradeNotice from "./components/UpgradeNotice";
 import { HeroNow } from "./components/HeroNow";
 import { UsageOmniConfig } from "./components/UsageOmniConfig";
@@ -121,6 +123,12 @@ export function App() {
   return perfMode ? <PerfView /> : <MainApp />;
 }
 
+/** 上次停留的 tab：服务重启后的自动刷新会整页重载，靠它把住户放回原处。 */
+const TAB_KEY = "miloco_active_tab";
+/** 允许恢复的 tab（Sidebar 的全集）：slim 下不可见的 tab 会被 visibleTabs 过滤，
+ *  但存储里可能留着全量版的 tab 名，故用全集校验、不按 edition 收窄。 */
+const TAB_KEYS: readonly string[] = TABS.map((x) => x.key);
+
 /** slim 下不拉家庭档案（路由未注册），空档案兜底：消费方都是家庭 tab 的组件。 */
 const EMPTY_HOME_ENTRIES: HomeEntries = { profile: [], candidates: [], readyToPromote: [] };
 
@@ -205,7 +213,39 @@ function MainApp() {
   // 已不展示时间；HeroNow 的 cam card 内部各自维护 1min 时钟。)
 
   // slim 默认落在「概览」——那里有实时画面 + 每路投喂/拾音开关，是 App 的主界面。
-  const [activeTab, setActiveTab] = useState<TabKey>("now");
+  const [activeTab, setActiveTab] = useState<TabKey>(() => {
+    // 服务重启后的自动刷新会重载页面；恢复上次停留的 tab（存储里可能是全量版的
+    // tab、或已被下线，故必须按当前 edition 可见的 tab 校验）。
+    try {
+      const saved = sessionStorage.getItem(TAB_KEY);
+      if (saved && TAB_KEYS.includes(saved as TabKey)) return saved as TabKey;
+    } catch {
+      /* 同上 */
+    }
+    return "now";
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(TAB_KEY, activeTab);
+    } catch {
+      /* 同上 */
+    }
+  }, [activeTab]);
+  // 后端服务（进程）是否还在：菜单栏点了「停止服务」/ 进程崩了，页面要自己看出来，
+  // 服务回来后自动刷新整页（各 tab 的 SSE、相机流、分页游标都是按老进程建的，
+  // 只有整页重载保证一致）。刷新前把当前 tab 记进 sessionStorage，别让住户每次
+  // 重启服务都被弹回「概览」。
+  const service = useServiceStatus({
+    onRecover: () => {
+      try {
+        sessionStorage.setItem(TAB_KEY, activeTab);
+      } catch {
+        /* sessionStorage 不可用（隐私模式）：忽略，重载后落默认 tab */
+      }
+      window.location.reload();
+    },
+  });
+
   // 活动 tab 现为单流(事件 + 动作合并);筛选 checkbox 在 ActivityFeed 内部,不占 App state。
   const [editingPerson, setEditingPerson] = useState<Person | null | undefined>(
     undefined,
@@ -594,6 +634,9 @@ function MainApp() {
           }}
         />
 
+        {/* 后端服务（进程）已停止(shrink-0):服务不在时说明白"是服务停了"，恢复后自动刷新 */}
+        <ServiceDownBanner service={service} />
+
         {/* omni 熔断器告警条(shrink-0):非 ok 时才渲染 */}
         <OmniHealthBanner onGoToConfig={() => setActiveTab("usage")} />
 
@@ -626,6 +669,7 @@ function MainApp() {
             /* slim 没有设备页（设备控制在独立 App 里不做）：不传 = 该状态项不可点，
                避免点了跳到被隐藏的 tab、侧栏还没有任何高亮。 */
             onJumpDevices={slim ? undefined : () => setActiveTab("devices")}
+            service={service}
             onRestartEngine={async () => {
               // 拆两段 try：pause 失败 → 引擎仍跑（无副作用）；resume 失败 →
               // 引擎已停下需要住户手动唤醒。两种 toast 文案不同避免割裂——
