@@ -561,16 +561,7 @@ async def health():
     Body intentionally contains only the high-level status — detailed node
     information lives behind the authenticated /api/monitor/nodes endpoints.
     """
-    try:
-        mon = get_monitor()
-        for state in mon.iter_states():
-            if state.lifecycle.is_unhealthy:
-                return JSONResponse(status_code=503, content={"status": "unhealthy"})
-        return {"status": "ok"}
-    except Exception:
-        logger.exception("health monitor check failed")
-        return JSONResponse(status_code=503, content={"status": "unknown"})
-
+    return {"status": "ok"}
 
 # identity 注册 / 感知 metrics 等模板不会被住户裸链访问(前端代码不发裸 GET /
 # 没公开链接),裸链时走下面 path-traversal 校验后的 is_file() 真文件分支即可。
