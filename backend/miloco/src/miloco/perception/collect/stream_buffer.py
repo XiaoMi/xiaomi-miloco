@@ -224,7 +224,8 @@ class MultiTrackSyncBuffer:
                 self._overflow_count_since_drain += 1
 
                 if self._buffer_full_action == "clear":
-                    dropped = active_before
+                    # 当前窗口会在 clear 后用当前帧重建,不属于被丢弃的窗口。
+                    dropped = active_before - 1
                     self._windows.clear()
                     self._ready_queue.clear()
                     self._ready_keys.clear()
