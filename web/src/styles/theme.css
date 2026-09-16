@@ -335,6 +335,16 @@ select:focus-visible {
   animation: fade-in-up var(--duration-slow) var(--easing-emphasized);
 }
 
+/* 兜底：全屏遮罩不吃父容器给的 margin。
+   `fixed inset-0` 只定义 top/left/bottom/right = 0，**父容器加的 margin 依然会把盒子推走**：
+   页面根容器常用 space-y-6（给除首个以外的子元素加 margin-top: 24px），直接挂在页面里的
+   抽屉遮罩会从 y=24 开始、少 24px 高（实测 rect = 0,24 1280x836 → 顶部漏一条边）。
+   真正的修法是 portal（src/lib/modalPortal.ts）；这条规则兜住其余同类弹层。
+   全仓没有「inset-0 + margin」的用法（auto 居中技巧等），所以清零 margin 不会误伤。 */
+.fixed.inset-0 {
+  margin: 0 !important;
+}
+
 /* 尊重系统"减少动态效果"偏好：关掉入场动画与脉冲等循环动效（a11y / 前庭敏感用户）。 */
 @media (prefers-reduced-motion: reduce) {
   .anim-in,

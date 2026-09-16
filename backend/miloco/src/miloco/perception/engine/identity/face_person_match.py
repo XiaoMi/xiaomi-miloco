@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 if TYPE_CHECKING:
     # 仅 type hint 用;运行时不 import 避免跟 tracker package init 形成循环
@@ -244,7 +243,9 @@ class FacePersonMatcher:
                     cost_matrix[i, j] = 1.0 - affinity
                 # affinity < 0 (即 -1.0) 保持 cost=2.0, 不可能被匹配
 
-        # 执行匈牙利算法
+        # 执行匈牙利算法（scipy 惰性 import：slim 版不安装 scipy）
+        from scipy.optimize import linear_sum_assignment
+
         row_indices, col_indices = linear_sum_assignment(cost_matrix)
 
         # 收集匹配结果, 阈值过滤 (对应C++ cost_matrix(row, col) < 0.99)

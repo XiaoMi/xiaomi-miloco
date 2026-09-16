@@ -304,7 +304,7 @@ class PerceptionEngineProxy:
 
         if validation.status == EngineReadiness.NOT_CONFIGURED:
             self._status = "no_omni_api_key"
-            self._status_message = "多模态大模型 API Key 未配置"
+            self._status_message = "Configure model first."
             logger.warning("感知引擎不可用: %s", self._status_message)
             mon.set_lifecycle(NodeName.ENGINE, Lifecycle.PREREQ_MISSING, error=self._status_message)
             return

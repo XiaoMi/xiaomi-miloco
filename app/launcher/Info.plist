@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 界面语言由启动器自己按系统首选语言选（默认英文）；这里声明开发语言与支持的
+	     本地化，让系统在 Finder/关于本机里也认为本 App 支持 en + 简体中文。 -->
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleLocalizations</key>
+	<array>
+		<string>en</string>
+		<string>zh-Hans</string>
+	</array>
+	<key>CFBundleExecutable</key>
+	<string>Miloco</string>
+	<key>CFBundleIdentifier</key>
+	<string>@BUNDLE_ID@</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Miloco</string>
+	<key>CFBundleDisplayName</key>
+	<string>Miloco</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@BUILD_NUMBER@</string>
+	<!-- 内嵌依赖的硬门槛：av 的 arm64 wheel 是 macosx_14_0，opencv 是 13_0；
+	     写 13.0 会让 macOS 13 用户装上一个运行时必炸的包，所以如实写 14.0。 -->
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2025 Xiaomi Corporation</string>
+	<!-- 内置 WebView 要直连 127.0.0.1 的后端，也要能加载局域网/云端的摄像头流；
+	     只对 WebView 内容放宽 ATS，App 自身的网络请求仍受默认策略约束。 -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Miloco 需要访问本地网络，用于发现同一局域网内的米家摄像头并建立点对点视频连接。</string>
+</dict>
+</plist>

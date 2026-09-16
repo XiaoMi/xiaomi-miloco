@@ -26,6 +26,7 @@ from sse_starlette.sse import EventSourceResponse
 from miloco.admin import log_pack as _log_pack_mod
 from miloco.config import get_settings
 from miloco.database.token_usage_repo import get_token_usage_repo
+from miloco.edition import get_edition, is_slim_edition
 from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
@@ -84,11 +85,49 @@ async def get_system_status(current_user: str = Depends(verify_token)):
             "total_rules": total_rules,
             "enabled_rules": enabled_rules,
         },
+        "edition": get_edition(),
     }
 
     logger.info("System status retrieved: %s", data)
     return NormalResponse(
         code=0, message="System status retrieved successfully", data=data
+    )
+
+
+@router.get("/edition", summary="发行版本与能力集", response_model=NormalResponse)
+async def get_edition_info(current_user: str = Depends(verify_token)):
+    """返回发行版本（full/slim）与能力集，供 web 端隐藏精简版不具备的功能。
+
+    slim = 独立 App（仅 rule_only 场景触发 + 管理页）：不注册身份/宠物/家庭档案路由，
+    不启动 agent dispatcher 与定时任务，且升级走整体替换 App 包而非在线安装脚本。
+    """
+    slim = is_slim_edition()
+    settings = get_settings()
+    # perception.engine 在 settings 里是自由 dict（schema 由 perception 侧校验），
+    # 故不能直接取属性。
+    engine_cfg = settings.perception.engine
+    rule_only = (
+        bool(engine_cfg.get("rule_only"))
+        if isinstance(engine_cfg, dict)
+        else bool(getattr(engine_cfg, "rule_only", False))
+    )
+    return NormalResponse(
+        code=0,
+        message="edition",
+        data={
+            "edition": get_edition(),
+            "slim": slim,
+            "capabilities": {
+                "identity": not slim,
+                "pet": not slim,
+                "home_profile": not slim,
+                "tasks": not slim,
+                "schedule": bool(settings.schedule.enabled) and not slim,
+                "observability": bool(settings.perf.enabled),
+                "one_click_upgrade": not slim,
+                "rule_only": rule_only or slim,
+            },
+        },
     )
 
 
@@ -239,11 +278,14 @@ def _scrub_log(value: object) -> str:
 
 
 def _deploy_kind() -> str:
-    """release = 正式发布版（干净 CalVer tag）；dev = git checkout / 未打 tag 的构建。
+    """release = 正式发布版（干净 CalVer tag）；dev = git checkout / 未打 tag 的构建；
+    app = 独立 App（slim edition，运行时内置于 .app，升级 = 整体替换 App 包）。
 
     用**包版本串**判定而非 ``git rev-parse``：后者会沿目录向上误命中 $HOME / venv 所在的
     无关 .git 仓库（如 dotfiles 仓），把正式 wheel 部署误判成 dev、白白禁用一键升级。
     hatch-vcs 对非 tag 构建会写 ``.dev<N>`` / ``+g<sha>`` 本地段；干净 tag 版则没有。"""
+    if is_slim_edition():
+        return "app"
     v = _pkg_version()
     if v == "unknown":
         return "release"
@@ -319,6 +361,24 @@ async def upgrade_check(
     kind = _deploy_kind()
     now = time.time()
 
+    # 独立 App（slim）：运行时内置于 .app，官方 install.sh 会往用户目录装 uv/supervisor
+    # 那一套，在 App 里既不该跑也跑不通。不联网查 GitHub，直接给"下载新版 App"的入口。
+    if kind == "app":
+        return NormalResponse(
+            code=0,
+            message="upgrade check",
+            data={
+                "current": current,
+                "latest": None,
+                "has_update": False,
+                "deploy_kind": kind,
+                "release_url": f"https://github.com/{_GH_REPO}/releases/latest",
+                "reachable": True,
+                "checked_at": 0,
+                "dismissed": _read_dismissed(),
+            },
+        )
+
     # 负缓存：失败(rel=None)也缓存，但用更短 TTL 退避——ts==0 表示从未查过。
     # force：用户手动检查，跳过缓存强制现查（结果仍写回缓存）。
     ts = _upgrade_check_cache["ts"]
@@ -391,6 +451,14 @@ async def upgrade_run(current_user: str = Depends(verify_token)):
     仅 release 部署可用；dev(git) 拒绝。升级进程脱离 backend 进程组，backend 被安装器
     重启也不影响它；日志落 ``<log_dir>/upgrade.log``。roll-forward、不回滚——失败由
     前端引导用户重跑 install.sh / 查日志。"""
+    if is_slim_edition():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "独立 App 版不支持在线一键升级（升级 = 用新版 Miloco.app 覆盖安装）："
+                f"请到 https://github.com/{_GH_REPO}/releases/latest 下载"
+            ),
+        )
     if _deploy_kind() != "release":
         raise HTTPException(
             status_code=400,

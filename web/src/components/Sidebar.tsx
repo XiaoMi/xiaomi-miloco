@@ -18,6 +18,7 @@ import { useRef } from "react";
 import type { ComponentType, SVGProps } from "react";
 import { useTranslation } from "react-i18next";
 import type { HomeStatus } from "@/lib/types";
+import { getEdition, visibleTabs } from "@/lib/edition";
 import { updateAvailable } from "@/lib/upgrade";
 import { useUpgradeInfo, requestOpenUpgrade } from "@/hooks/useUpgrade";
 import { MiotAccountButton } from "./MiotAccountButton";
@@ -132,6 +133,10 @@ export function Sidebar({
   // 共用同一"已确认版本"——点了入口 / 关了 banner 即消，直到出现更新的版本才再现。
   const upgradeInfo = useUpgradeInfo();
   const hasUpdate = updateAvailable(upgradeInfo);
+  // slim（独立 App）只保留设备/场景/活动：身份、宠物、家庭档案、任务、用量这些 tab
+  // 背后依赖的路由在 slim 后端根本没注册，露出来只会点出 404。
+  const slim = getEdition().slim;
+  const tabs = visibleTabs(TABS);
   // 红点 = 只要存在可升级新版就常驻显示（被动指示器），**不受 dismiss 影响**——顶部 banner
   // 才是可按版本关闭的 naggy 提示。此前红点也跟 banner 共用 dismiss，导致"确认过某版本后红点
   // 就再也不冒"；用户要的是"更新版本存在红点就在"，故解耦：红点看 hasUpdate、banner 看 dismiss。
@@ -188,7 +193,7 @@ export function Sidebar({
         className="flex-1 px-2 py-2.5 space-y-0.5 overflow-y-auto"
         aria-label={t("nav.aria")}
       >
-        {TABS.map((tab) => {
+        {tabs.map((tab) => {
           const on = active === tab.key;
           const Icon = tab.Icon;
           return (
@@ -299,6 +304,12 @@ export function Sidebar({
           banner 的 5px 点 + 3px brand-soft 环）；无新版时点击 = 现查一次更新（结果在弹窗里给：
           最新 / 无法检查 / dev）。是否弹确认 vs 检查由 UpgradeNotice 据 info 决定，本组件只
           发意图（requestOpenUpgrade），确认某版本也由 UpgradeNotice 落。 */}
+      {slim ? (
+        // slim 版升级 = 整体替换 App 包，没有在线一键升级，故只显示版本号。
+        <div className="w-full flex items-start justify-between gap-1 px-3 pb-2 pt-1 text-caption-mono text-text-tertiary">
+          <span className="truncate">{versionText}</span>
+        </div>
+      ) : (
       <button
         type="button"
         onClick={requestOpenUpgrade}
@@ -327,6 +338,7 @@ export function Sidebar({
           />
         )}
       </button>
+      )}
     </aside>
   );
 }
@@ -348,6 +360,7 @@ export function MobileTabBar({
   onOpenSettings?: () => void;
 }) {
   const { t } = useTranslation();
+  const tabs = visibleTabs(TABS);
   return (
     <nav
       aria-label={t("nav.aria")}
@@ -360,7 +373,7 @@ export function MobileTabBar({
         paddingBottom: "env(safe-area-inset-bottom, 0)",
       }}
     >
-      {TABS.map((tab) => {
+      {tabs.map((tab) => {
         const on = active === tab.key;
         const Icon = tab.Icon;
         return (

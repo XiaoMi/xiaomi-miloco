@@ -26,6 +26,18 @@ dependencies = [
   "scipy>=1.15.0",
   "tokenizers>=0.23.1",
   "uvicorn[standard]>=0.49.0",
+  # 以下三个是**直接 import 却一直未声明**的依赖：过去靠
+  # miloco-miot → fastmcp → mcp → {pydantic-settings, sse-starlette, pyyaml} 传递进来。
+  # slim（独立 App）不装 fastmcp，这条链断掉后会直接 ImportError，故显式声明：
+  #   - pydantic-settings: config/settings.py
+  #   - sse-starlette:     admin/router.py、perception/events_router.py
+  #   - pyyaml:            config/settings.py、identity/config_loader.py
+  #   - python-multipart:  FastAPI 的 Form/File 参数（person/router.py、pet/router.py）
+  #     在 add_api_route 阶段就会 RuntimeError，不是可选的运行时依赖。
+  "pydantic-settings>=2.0",
+  "sse-starlette>=3.0",
+  "pyyaml>=6.0",
+  "python-multipart>=0.0.9",
   "miloco-miot",
 ]
 

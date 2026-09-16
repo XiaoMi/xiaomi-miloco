@@ -29,7 +29,8 @@ import {
   switchScopeHome,
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
-import type { Pet, Person } from "./lib/types";
+import { getEdition, SLIM_TAB_KEYS } from "./lib/edition";
+import type { HomeEntries, Pet, Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
@@ -37,6 +38,7 @@ import { OmniHealthBanner } from "./components/OmniHealthBanner";
 import { StatusRibbon } from "./components/StatusRibbon";
 import UpgradeNotice from "./components/UpgradeNotice";
 import { HeroNow } from "./components/HeroNow";
+import { UsageOmniConfig } from "./components/UsageOmniConfig";
 import { DevicesByRoom } from "./components/DevicesByRoom";
 import { ActivityFeed } from "./components/ActivityFeed";
 import { FamilyStrip } from "./components/FamilyStrip";
@@ -119,6 +121,9 @@ export function App() {
   return perfMode ? <PerfView /> : <MainApp />;
 }
 
+/** slim 下不拉家庭档案（路由未注册），空档案兜底：消费方都是家庭 tab 的组件。 */
+const EMPTY_HOME_ENTRIES: HomeEntries = { profile: [], candidates: [], readyToPromote: [] };
+
 function MainApp() {
   const { t } = useTranslation();
   // ── 当前家 ────────────────────────────────────────
@@ -126,11 +131,18 @@ function MainApp() {
   // switchScopeHome + window.location.reload(),不靠前端 homeId 状态触发 reload。
   const homeId: HomeId = "primary";
 
+  // slim（独立 App）没有身份 / 宠物 / 家庭档案 / 设备页这些视图 —— 后端**根本没注册**
+  // 对应路由。必须先于下面的数据加载拿到：那三条路由在 slim 拉了只会 404，还会各弹一条
+  // 「加载家人 / 宠物 / 家庭档案失败，请稍后再试」的 toast（首屏必现）。
+  const slim = getEdition().slim;
+
   // ── 数据加载（按当前家拉取；mock 家走 empty）─────────
   const status = useAsync(() => getHomeStatus(homeId), [homeId], {
     errorLabel: t("app.loadHomeStatusFail"),
   });
-  const persons = useAsync(() => listPersons(homeId), [homeId], {
+  // 身份 / 宠物 / 家庭档案：slim 下不拉（路由未注册，拉了必 404 + 弹 toast），直接给空
+  // 数据。useAsync 的 hook 数量与调用顺序不变，只是 fetcher 内部短路。
+  const persons = useAsync(async () => (slim ? [] : listPersons(homeId)), [homeId, slim], {
     errorLabel: t("app.loadPersonsFail"),
   });
   const cameras = useAsync(() => listCameras(homeId), [homeId], {
@@ -167,9 +179,11 @@ function MainApp() {
     [devices.data],
   );
   // 家庭档案（候选区 + 正式区记忆）——家庭 tab 用，成员抽屉与非人面板共享。
-  const home = useAsync(() => listHomeEntries(homeId), [homeId], {
-    errorLabel: t("app.loadHomeEntriesFail"),
-  });
+  const home = useAsync<HomeEntries>(
+    async () => (slim ? EMPTY_HOME_ENTRIES : listHomeEntries(homeId)),
+    [homeId, slim],
+    { errorLabel: t("app.loadHomeEntriesFail") },
+  );
   // miloco 为家庭创建的持续任务——家庭 tab 家庭档案卡下方展示。
   const tasks = useAsync(() => listTasks(homeId), [homeId], {
     errorLabel: t("app.loadTasksFail"),
@@ -179,7 +193,7 @@ function MainApp() {
     errorLabel: t("app.loadSceneTasksFail"),
   });
   // 宠物花名册（实验性，pet_recognition 开启才有意义）+ 功能开关状态。
-  const pets = useAsync(() => listPets(homeId), [homeId], {
+  const pets = useAsync(async () => (slim ? [] : listPets(homeId)), [homeId, slim], {
     errorLabel: t("app.loadPetsFail"),
   });
   const features = useAsync(() => getFeatures(), [], {
@@ -190,6 +204,7 @@ function MainApp() {
   // (原本有 now state + 30s setInterval 给 Sidebar 显示时间，现 Sidebar
   // 已不展示时间；HeroNow 的 cam card 内部各自维护 1min 时钟。)
 
+  // slim 默认落在「概览」——那里有实时画面 + 每路投喂/拾音开关，是 App 的主界面。
   const [activeTab, setActiveTab] = useState<TabKey>("now");
   // 活动 tab 现为单流(事件 + 动作合并);筛选 checkbox 在 ActivityFeed 内部,不占 App state。
   const [editingPerson, setEditingPerson] = useState<Person | null | undefined>(
@@ -213,7 +228,11 @@ function MainApp() {
 
   // ── 主区 tab 内容渲染 ────────────────────────────────────
   const renderTab = () => {
-    switch (activeTab) {
+    // slim 下若 activeTab 落在被隐藏的 tab 上（状态残留 / 旧链接），回落到概览页，
+    // 不渲染那些必然报错的视图。
+    const tab: TabKey =
+      slim && !SLIM_TAB_KEYS.includes(activeTab) ? "now" : activeTab;
+    switch (tab) {
       case "now": {
         // scopeCameras 进错误聚合：listScopeCameras 失败时（米家 SDK 限频 -704 /
         // 网络断），不能让 HeroNow 拿 `scopeCameras.data ?? []` 退化成"账号下没
@@ -222,7 +241,9 @@ function MainApp() {
         // devices 也纳入聚合:HeroNow 用 devices 推 miotHasCamera,devices 拉
         // 失败时 `(devices.data ?? []).some(...)` 会兜底成 false → 米家上明明有
         // 摄像头但 hero 显"家里还没有摄像头",住户被误导去米家 app 加而非排查网络。
-        const err = persons.error ?? cameras.error ?? scopeCameras.error ?? devices.error;
+        const err = slim
+          ? (scopeCameras.error ?? devices.error)
+          : (persons.error ?? cameras.error ?? scopeCameras.error ?? devices.error);
         if (err) {
           return (
             <TabPanelError
@@ -236,17 +257,23 @@ function MainApp() {
             />
           );
         }
-        if (!persons.data || !cameras.data || !scopeCameras.data || !devices.data) {
+        const ready = slim
+          ? scopeCameras.data && devices.data
+          : persons.data && cameras.data && scopeCameras.data && devices.data;
+        if (!ready) {
           return <TabPanelLoading text={t("app.tabHomeLoading")} />;
         }
         return (
           <div className="space-y-6">
             <HeroNow
-              persons={persons.data}
-              pets={pets.data}
+              /* slim：只渲染实时画面 + 每路投喂/拾音开关（家人区 / 宠物区 / token 入口
+                 在 HeroNow 内部按 slim 关掉）。 */
+              slim={slim}
+              persons={persons.data ?? []}
+              pets={pets.data ?? []}
               petsEnabled={features.data?.petRecognition ?? false}
-              scopeCameras={scopeCameras.data}
-              miotHasCamera={devices.data.some(
+              scopeCameras={scopeCameras.data ?? []}
+              miotHasCamera={(devices.data ?? []).some(
                 (d) => d.category === "camera",
               )}
               /* 投喂上限唯一来源:后端 MAX_ENABLED_CAMERAS，经 /api/miot/status 下发。
@@ -501,7 +528,16 @@ function MainApp() {
         );
       }
       case "usage":
-        return <UsagePage />;
+        // slim 的「模型」页只做查看 / 配置模型：Token 用量统计、周期选择器都不进来
+        // （不做用量统计不影响触发链路）。
+        return slim ? (
+          <div className="space-y-4">
+            <p className="text-body text-text-secondary">{t("settings.slimModelHint")}</p>
+            <UsageOmniConfig />
+          </div>
+        ) : (
+          <UsagePage />
+        );
     }
   };
 
@@ -587,7 +623,9 @@ function MainApp() {
                 toast(e instanceof Error ? e.message : t("app.wakeFail"), "warn");
               }
             }}
-            onJumpDevices={() => setActiveTab("devices")}
+            /* slim 没有设备页（设备控制在独立 App 里不做）：不传 = 该状态项不可点，
+               避免点了跳到被隐藏的 tab、侧栏还没有任何高亮。 */
+            onJumpDevices={slim ? undefined : () => setActiveTab("devices")}
             onRestartEngine={async () => {
               // 拆两段 try：pause 失败 → 引擎仍跑（无副作用）；resume 失败 →
               // 引擎已停下需要住户手动唤醒。两种 toast 文案不同避免割裂——
@@ -621,8 +659,9 @@ function MainApp() {
           />
         )}
 
-        {/* 升级提示 banner（仅 release 部署 + 有新版 + 未按版本 dismiss 时显示）*/}
-        <UpgradeNotice />
+        {/* 升级提示 banner（仅 release 部署 + 有新版 + 未按版本 dismiss 时显示）；
+            slim 版升级 = 换 App 包，没有在线升级通道。*/}
+        {!slim && <UpgradeNotice />}
 
         {/* tab 内容——这里是唯一会滚的区域 */}
         <main className="flex-1 overflow-y-auto min-h-0">

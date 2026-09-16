@@ -12,6 +12,7 @@
 
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { modalPortal } from "@/lib/modalPortal";
 import {
   createSceneTask,
   deleteSceneTask,
@@ -321,7 +322,8 @@ function SceneTaskDrawer({
     }
   };
 
-  return (
+  // 同 TaskDetailSheet：页面根 space-y-6 的 margin-top 会把遮罩推下去 24px，portal 到 body。
+  return modalPortal(
     <div
       className="fixed inset-0 z-[65] flex items-end md:items-center justify-center bg-black/40 backdrop-blur-sm"
       onClick={(e) => {

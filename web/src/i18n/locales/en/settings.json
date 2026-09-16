@@ -36,6 +36,7 @@
     },
     "globalPrompt": "Global perception system prompt",
     "globalPromptPlaceholder": "e.g. Always watch the floor by the door; ignore the TV screen; a person must be fully visible to count as present…",
-    "globalPromptHint": "Appended to the perception system prompt for every camera (built-in role / principles / output schema are kept). Use it for cross-scene guidance; put scene-specific details and cautions in each rule's scene notes under Scene Rules."
+    "globalPromptHint": "Appended to the perception system prompt for every camera (built-in role / principles / output schema are kept). Use it for cross-scene guidance; put scene-specific details and cautions in each rule's scene notes under Scene Rules.",
+    "slimModelHint": "Scene matching is done by a multimodal (omni) cloud model. Configure and activate one first — the perception engine stays idle until then."
   }
 }

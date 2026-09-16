@@ -9,6 +9,7 @@ import {
   type PerceptionConfig,
 } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
+import { getEdition } from "@/lib/edition";
 import { toast } from "./Toast";
 
 // PerceptionConfig 里 min_suggestion_urgency 声明为可选(老 backend 不返此字段);
@@ -46,6 +47,9 @@ interface Props {
 
 export function SettingsDrawer({ open, onClose }: Props) {
   const { t } = useTranslation();
+  // slim（独立 App）不跑 omni 判定、不跑 agent 定时任务：帧率/紧急度/全局提示词/
+  // 自动调度这四项在 slim 下拨了也不会有任何效果，直接不呈现，避免"看着能配、实则无效"。
+  const slim = getEdition().slim;
   const [config, setConfig] = useState<PerceptionConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -326,7 +330,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 </p>
               </div>
 
-              {/* 帧率 */}
+              {/* 帧率（omni 采样率，slim 不跑 omni）*/}
+              {!slim && (
               <div className="space-y-2.5">
                 <label className="text-body font-medium text-text-primary block">
                   {t("settings.omniFps")}
@@ -351,6 +356,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   {t("settings.omniFpsHint")}
                 </p>
               </div>
+              )}
 
               {/* 感知窗口 */}
               <div className="space-y-2.5">
@@ -380,7 +386,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 </div>
               </div>
 
-              {/* 事件提醒 —— urgency 过滤(3-stop slider,与感知窗口视觉对齐) */}
+              {/* 事件提醒 —— urgency 过滤(3-stop slider,与感知窗口视觉对齐)；omni 判定阈值，slim 不适用 */}
+              {!slim && (
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
                   <label className="text-body font-medium text-text-primary">
@@ -419,9 +426,13 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   {t("settings.minUrgencyHint")}
                 </p>
               </div>
+              )}
 
               {/* 全局感知系统提示词 —— 追加到感知 system prompt，对全部机位生效；
-                  内置角色/总原则/schema 保留。逐场景判定细则在「场景联动」每条规则里配。 */}
+                  内置角色/总原则/schema 保留。逐场景判定细则在「场景联动」每条规则里配。
+                  slim（独立 App）走 rule_only，但它同样被拼进 prompt、同样热生效，所以
+                  这里保留（上方帧率/紧急度与下方定时任务是 omni 判定与 agent 调度参数，
+                  slim 下拨了也没用，仍然隐藏）。 */}
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
                   <label className="text-body font-medium text-text-primary">
@@ -444,7 +455,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 </p>
               </div>
 
-              {/* 内置定时任务自动管理开关 */}
+              {/* 内置定时任务自动管理开关（agent 定时任务，slim 不启动 ScheduleRunner）*/}
+              {!slim && (
               <div className="space-y-2.5 pt-1 border-t border-border">
                 <div className="flex items-center justify-between pt-5">
                   <label className="text-body font-medium text-text-primary">
@@ -473,6 +485,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
                     : t("settings.autoScheduleUnavailable")}
                 </p>
               </div>
+              )}
 
               {/* 恢复默认 */}
               <div className="flex justify-end">

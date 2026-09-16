@@ -8,6 +8,7 @@ Provides FastAPI application setup, middleware configuration, and server startup
 
 import asyncio
 import functools
+import importlib
 import logging
 import os
 import time
@@ -31,7 +32,7 @@ from miloco.admin.router import router as admin_router
 from miloco.config import get_settings, register_reset_hook
 from miloco.database.connector import init_database
 from miloco.dispatch import AgentDispatcher, set_agent_dispatcher
-from miloco.home_profile.router import router as home_profile_router
+from miloco.edition import is_slim_edition
 from miloco.manager import get_manager
 from miloco.middleware.exception_handler import handle_exception
 from miloco.miot.router import router as miot_router
@@ -59,8 +60,6 @@ from miloco.observability.metrics_db import init_schema as obs_init_schema
 from miloco.observability.router import router as observability_router
 from miloco.perception.events_router import router as events_router
 from miloco.perception.router import router as perception_router
-from miloco.person.router import router as person_router
-from miloco.pet.router import router as pet_router
 from miloco.rule.router import router as rule_router
 from miloco.scene_task.router import router as scene_task_router
 from miloco.schedule.router import router as schedule_router
@@ -348,15 +347,22 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # 直接调 dispatch_event;若 dispatcher 还是 None,启动窗口内到达的事件(如启动那
     # 几秒里在米家 App 绑的新设备 bind push)会被 WARN drop。dispatcher 无依赖 manager
     # 的初始化(drainer 内 track_agent_run 在 poller 缺省时自短路),故安全前置。
-    dispatcher = AgentDispatcher()
-    await dispatcher.start()
-    set_agent_dispatcher(dispatcher)
-    _app.state.dispatcher = dispatcher
+    dispatcher = None
+    if is_slim_edition():
+        # slim（独立 App）：规则动作只有米家设备/场景，不存在 agent 派发路径。
+        # 不起 dispatcher 也就不会对不存在的 openclaw/hermes 网关做 3 次重试 + WARN；
+        # 若真有 producer 触发派发，dispatch_event 会 WARN-drop（无 singleton）。
+        logger.info("slim edition: agent dispatcher 未启动（无 agent 派发）")
+    else:
+        dispatcher = AgentDispatcher()
+        await dispatcher.start()
+        set_agent_dispatcher(dispatcher)
+        _app.state.dispatcher = dispatcher
 
     # ScheduleRunner: cron/at/every 定时器. kill switch (settings.schedule.enabled=false)
     # 时完全跳过 start + rebuild, CRUD 端点降级为 DB-only。
     # rebuild 失败 fail-fast: in-memory 空 = cron 全静默停跑, 依赖 systemd 拉起重试。
-    if settings.schedule.enabled:
+    if settings.schedule.enabled and not is_slim_edition():
         schedule_runner = get_schedule_runner()
         schedule_runner.start()
         try:
@@ -408,16 +414,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         set_agent_meta_poller(agent_meta_poller)
         _app.state.agent_meta_poller = agent_meta_poller
 
-    # 启动后台补齐 tier_a 缺失的 ReID .npy(历史/迁移库遗留); 幂等、零阻塞
-    _backfill_task = asyncio.create_task(_backfill_tier_a_reid_embeddings())
-    _BG_TASKS.add(_backfill_task)
-    _backfill_task.add_done_callback(_BG_TASKS.discard)
+    if is_slim_edition():
+        # slim：身份库不存在（rule_only 链路不建 IdentityLibrary），ReID 补齐无对象；
+        # onboarding 邀请要经 agent 派发，slim 无网关。两者都跳过。
+        logger.info("slim edition: 跳过 ReID 补齐与 onboarding 邀请")
+    else:
+        # 启动后台补齐 tier_a 缺失的 ReID .npy(历史/迁移库遗留); 幂等、零阻塞
+        _backfill_task = asyncio.create_task(_backfill_tier_a_reid_embeddings())
+        _BG_TASKS.add(_backfill_task)
+        _backfill_task.add_done_callback(_BG_TASKS.discard)
 
-    # 全新安装主动 onboarding 邀请：条件不满足 / 已邀请过自然静默；上次发送
-    # 失败（KV 标记未置位）在这里得到重试。fire-and-forget，不阻塞启动。
-    _onboarding_task = asyncio.create_task(_maybe_trigger_onboarding())
-    _BG_TASKS.add(_onboarding_task)
-    _onboarding_task.add_done_callback(_BG_TASKS.discard)
+        # 全新安装主动 onboarding 邀请：条件不满足 / 已邀请过自然静默；上次发送
+        # 失败（KV 标记未置位）在这里得到重试。fire-and-forget，不阻塞启动。
+        _onboarding_task = asyncio.create_task(_maybe_trigger_onboarding())
+        _BG_TASKS.add(_onboarding_task)
+        _onboarding_task.add_done_callback(_BG_TASKS.discard)
 
     cleanup_task = asyncio.create_task(_log_cleanup_loop())
 
@@ -525,9 +536,32 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(miot_router, prefix="/api")
 # person_router 与 pet_router 共用 prefix="/identity"：路径首段互斥（/persons* vs /pets*）、
 # 两侧都无首段通配路由，故注册顺序无关；新增路由须维持这一互斥，否则先注册者会遮蔽后者。
-app.include_router(person_router, prefix="/api")
-app.include_router(pet_router, prefix="/api")
-app.include_router(home_profile_router, prefix="/api")
+#
+# slim（独立 App）不注册这三套：它们服务身份/宠物/家庭档案，rule_only 场景触发用不到，
+# 且 pet / home_profile 的 import 会把 scipy 与身份链路拉进启动图（slim 不装 scipy）。
+_EDITION_ROUTERS: tuple[tuple[str, str], ...] = (
+    ("miloco.person.router", "router"),
+    ("miloco.pet.router", "router"),
+    ("miloco.home_profile.router", "router"),
+)
+
+
+def _include_edition_routers() -> None:
+    """按 edition 注册可选路由（full：身份/宠物/家庭档案；slim：跳过）。
+
+    惰性 import：模块级条件 import 会让类型检查器认为名字可能未绑定，且顺序敏感。
+    """
+    if is_slim_edition():
+        logger.warning(
+            "slim edition: 身份/宠物/家庭档案路由未注册（独立 App 仅场景触发）"
+        )
+        return
+    for module_name, attr_name in _EDITION_ROUTERS:
+        router = getattr(importlib.import_module(module_name), attr_name)
+        app.include_router(router, prefix="/api")
+
+
+_include_edition_routers()
 app.include_router(rule_router, prefix="/api")
 app.include_router(scene_task_router, prefix="/api")
 app.include_router(schedule_router, prefix="/api")

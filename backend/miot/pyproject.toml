@@ -9,11 +9,19 @@ dependencies = [
   "aiofiles>=25.1.0",
   "aiohttp>=3.14.1",
   "av>=17.1.0",
+  # cryptography / pyyaml 同样是直接 import 却未声明的依赖（过去靠 mcp → pyjwt[crypto]
+  # 传递进来）；slim（独立 App）不装 fastmcp/mcp，链断后会 ImportError，故显式声明：
+  #   - cryptography: cloud.py 的 X-Client-Secret RSA/AES 加解密
+  #   - pyyaml:       camera.py / common.py / i18n.py 的 spec 与 i18n 解析
+  "cryptography>=42.0",
+  "pyyaml>=6.0",
   "fastmcp>=3.4.2",
   "paho-mqtt>=2.1.0",
   "pillow>=12.2.0",
   "psutil>=7.2.2",
   "pydantic>=2.13.4",
+  # zeroconf 仅被 miot/mdns.py 使用，而该模块除测试外无任何 import（mDNS 是死桩；
+  # 局域网发现实际走 lan.py 的 UDP 54321 广播）。保留声明兼容上游，slim 不安装。
   "zeroconf>=0.149.16",
 ]
 

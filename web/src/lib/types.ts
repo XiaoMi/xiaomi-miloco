@@ -68,6 +68,24 @@ export interface Features {
   petReidDiverse: boolean; // 参考图多样性用人体 ReID 特征距离选多姿态；关或模型不可用回退 dHash
 }
 
+/** 发行版本能力集（GET /api/admin/edition）。slim = 独立 App 版。 */
+export interface EditionCapabilities {
+  identity: boolean;
+  pet: boolean;
+  home_profile: boolean;
+  tasks: boolean;
+  schedule: boolean;
+  observability: boolean;
+  one_click_upgrade: boolean;
+  rule_only: boolean;
+}
+
+export interface EditionInfo {
+  edition: "full" | "slim";
+  slim: boolean;
+  capabilities: EditionCapabilities;
+}
+
 // observe 建议类不阻断提示（后端算）：species_mismatch / generic_look / refs_inconsistent / multiple_pets
 export interface PetObserveWarning {
   type: string;

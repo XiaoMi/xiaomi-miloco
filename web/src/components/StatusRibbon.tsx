@@ -128,7 +128,8 @@ interface Props {
   allCamerasOff?: boolean;
   onConnectMiot: () => void;
   onWakeUp: () => void;
-  onJumpDevices: () => void;
+  /** 点「米家已连接」跳设备页。slim（独立 App）没有设备页 → 不传 = 该状态项不可点。 */
+  onJumpDevices?: () => void;
   /** running=true 但 ready=false（如模型缺失）时点「重启引擎」：stop + start */
   onRestartEngine: () => void;
 }
@@ -195,7 +196,7 @@ export function StatusRibbon({
           {t("hero.miotDevicesCount", { n: status.miot.devicesCount })}
         </span>
       }
-      onClick={onJumpDevices}
+      {...(onJumpDevices ? { onClick: onJumpDevices } : {})}
     />
   ) : (
     <StatusItem

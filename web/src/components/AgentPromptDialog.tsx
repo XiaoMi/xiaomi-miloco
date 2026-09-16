@@ -7,6 +7,7 @@
  */
 
 import { useTranslation } from "react-i18next";
+import { modalPortal } from "@/lib/modalPortal";
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconX } from "@/lib/icons";
 
@@ -22,7 +23,8 @@ export function AgentPromptDialog({ title, hint, examples, onClose }: Props) {
   const { t } = useTranslation();
   useEscClose(true, onClose);
 
-  return (
+  // portal 到 body：这个弹层也挂在 space-y-6 的页面根里，同样会被父容器 margin 顶开。
+  return modalPortal(
     <div
       className="fixed inset-0 z-[70] flex items-end md:items-center justify-center bg-black/40 backdrop-blur-sm"
       onClick={(e) => {

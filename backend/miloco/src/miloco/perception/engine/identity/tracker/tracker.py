@@ -12,8 +12,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Tuple
 
 import numpy as np
-import scipy.linalg
-from scipy.optimize import linear_sum_assignment
 
 from .config import TrackerConfig
 from .detector import Detection, Detector
@@ -296,6 +294,9 @@ class KalmanFilter:
         # Solve S x = (P H^T)^T => x = S^{-1} (P H^T)^T, then K = x^T
         cross_cov = covariance @ self._update_mat.T  # 8x4
         chol_factor = np.linalg.cholesky(projected_cov)  # 4x4 lower triangular
+        # scipy 惰性 import：slim 版不安装 scipy（DeepSort 链路只在完整版使用）
+        import scipy.linalg
+
         kalman_gain = scipy.linalg.cho_solve(
             (chol_factor, True),
             cross_cov.T,  # solve S x = cross_cov^T (4x8)
@@ -641,7 +642,9 @@ class MultiObjectTracker:
         # Clamp超过阈值的entry (对应C++ line 322-330)
         cost_matrix[cost_matrix > max_distance] = max_distance + 1e-5
 
-        # 匈牙利求解
+        # 匈牙利求解（scipy 惰性 import：slim 版不安装 scipy）
+        from scipy.optimize import linear_sum_assignment
+
         row_indices, col_indices = linear_sum_assignment(cost_matrix)
 
         matches = []

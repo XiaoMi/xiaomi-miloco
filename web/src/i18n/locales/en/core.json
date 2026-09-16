@@ -2,7 +2,8 @@
   "lang": {
     "label": "Language",
     "zh": "中文",
-    "en": "English"
+    "en": "English",
+    "pageTitle": "My Home"
   },
   "theme": {
     "toLight": "Switch to light",

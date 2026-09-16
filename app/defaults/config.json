@@ -1,0 +1,32 @@
+{
+  "app": {
+    "edition": "slim"
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 1812
+  },
+  "perception": {
+    "engine": {
+      "rule_only": true
+    }
+  },
+  "features": {
+    "pet_recognition": false,
+    "pet_head_grounding": false,
+    "pet_body_grounding": false,
+    "pet_reid_diverse": false
+  },
+  "perf": {
+    "enabled": false
+  },
+  "schedule": {
+    "enabled": false
+  },
+  "scheduler": {
+    "enabled": false
+  },
+  "directories": {
+    "models": ""
+  }
+}

@@ -2,6 +2,8 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import "./i18n";
 import { App } from "./App";
+import { getEdition } from "./api";
+import { setEditionInfo } from "./lib/edition";
 import "./styles/theme.css";
 
 // 主题决议优先级：URL ?theme= > localStorage > 跟随系统（不设 data-theme）。
@@ -19,8 +21,20 @@ if (themeParam === "dark" || themeParam === "light") {
   document.documentElement.setAttribute("data-theme", savedTheme);
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-);
+function render() {
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  );
+}
+
+// 发行版本（full/slim）决定导航与功能入口，先取一次再 render，避免首帧闪出一排
+// 马上要消失的 tab。3s 超时 + 失败回退 full：绝不因为老后端 / 一次网络抖动砍功能。
+const editionReady = Promise.race([
+  getEdition()
+    .then(setEditionInfo)
+    .catch(() => setEditionInfo(null)),
+  new Promise<void>((resolve) => window.setTimeout(resolve, 3000)),
+]);
+void editionReady.finally(render);

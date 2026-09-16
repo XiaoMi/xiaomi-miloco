@@ -231,6 +231,15 @@ class AppSettings(BaseModel):
         description="OpenAPI 描述",
     )
     version: str = Field(default_factory=_resolve_version, description="服务版本号")
+    edition: Literal["full", "slim"] = Field(
+        default="full",
+        description=(
+            "发行版本：full=完整版（全量感知 + agent 联动 + 定时任务）；"
+            "slim=独立 App 版（仅 rule_only 场景触发 + web 管理页，不注册身份/宠物/"
+            "家庭档案路由，不启动 agent dispatcher/定时任务）。"
+            "环境变量 MILOCO_EDITION 优先级更高，见 miloco.edition。"
+        ),
+    )
 
 
 class MiotSettings(BaseModel):

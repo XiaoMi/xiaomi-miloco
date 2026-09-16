@@ -84,6 +84,12 @@ interface Props {
   onClearCameraPrompt: (did: string) => void | Promise<void>;
   /** 手动刷新未感知设备状态（force 刷新相机在线 / 镜头 + await 列表重拉落地）。 */
   onRefresh?: () => void | Promise<void>;
+  /**
+   * slim（独立 App）：只保留「实时画面 + 每路投喂/拾音开关」。
+   * 家人区、宠物区、token 用量入口都要去掉——slim 没有身份/宠物/用量统计链路，
+   * 那些区块只会显示空态或跳到不存在的页面。
+   */
+  slim?: boolean;
 }
 
 // 排序:已认识在前,未认识统一靠后
@@ -111,6 +117,7 @@ export function HeroNow({
   onSetCameraPrompt,
   onClearCameraPrompt,
   onRefresh,
+  slim = false,
 }: Props) {
   const { t } = useTranslation();
   const sorted = sortPersons(persons);
@@ -158,7 +165,7 @@ export function HeroNow({
             now
           </span>
         </h2>
-        {todayUsage.data && (
+        {!slim && todayUsage.data && (
           <button
             type="button"
             onClick={onJumpUsage}
@@ -179,22 +186,26 @@ export function HeroNow({
         )}
       </div>
 
-      {/* 家人 */}
-      <SectionLabel>{t("hero.familyLabel")}</SectionLabel>
-      {sorted.length === 0 ? (
-        <div className="text-body text-text-secondary mb-5">
-          {t("hero.familyEmpty")}
-        </div>
-      ) : (
-        <div className="flex flex-wrap gap-2 mb-5">
-          {sorted.map((p) => (
-            <PersonChip
-              key={p.id}
-              person={p}
-              onClick={onPersonClick ? () => onPersonClick(p) : undefined}
-            />
-          ))}
-        </div>
+      {/* 家人 —— slim 无身份链路，整块不渲染（家人 chip 只会是空态） */}
+      {!slim && (
+        <>
+        <SectionLabel>{t("hero.familyLabel")}</SectionLabel>
+        {sorted.length === 0 ? (
+          <div className="text-body text-text-secondary mb-5">
+            {t("hero.familyEmpty")}
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-2 mb-5">
+            {sorted.map((p) => (
+              <PersonChip
+                key={p.id}
+                person={p}
+                onClick={onPersonClick ? () => onPersonClick(p) : undefined}
+              />
+            ))}
+          </div>
+        )}
+        </>
       )}
 
       {/* 宠物成员——仅在宠物识别开关打开且有宠物时，于家人后追加展示（关闭即不显示）。 */}

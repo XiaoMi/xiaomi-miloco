@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 
 # 固定输入源虚拟设备 did（clip_source）：本地视频替换所有摄像头画面，规则全量下发到它。
 # 仅取常量，模块顶层无重依赖（clip_source 的 cv2/settings 均为函数内懒加载）。
+from miloco.edition import is_slim_edition
 from miloco.perception.collect.clip_source import DID as _CLIP_SOURCE_DID
 from miloco.perception.engine.identity.tier_u import cam_id_from_device_id
 from miloco.perception.engine_base import BasePerceptionEngine
@@ -311,15 +312,18 @@ class PerceptionEngine(BasePerceptionEngine):
         self._sugg_table: dict[str, dict[int, dict]] = {}           # key: device_id
 
         # suggestion 语义去重的句向量编码器；缺模型/依赖时降级为精确文本匹配，不影响主流程。
+        # rule_only（纯场景触发）不产 suggestion；slim 版不装 onnxruntime/tokenizers 也无模型，
+        # 两种情况都直接跳过构造，省掉一次注定失败的 import 尝试与 WARN 日志。
         self._embedder = None
-        try:
-            from miloco.config import get_settings
-            from miloco.perception.engine.omni.dedup_embedder import EventEmbedder
-            self._embedder = EventEmbedder(get_settings().directories.models_dir)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "EventEmbedder 初始化失败，suggestion 去重降级为精确文本匹配：%s", e
-            )
+        if not self._config.rule_only and not is_slim_edition():
+            try:
+                from miloco.config import get_settings
+                from miloco.perception.engine.omni.dedup_embedder import EventEmbedder
+                self._embedder = EventEmbedder(get_settings().directories.models_dir)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "EventEmbedder 初始化失败，suggestion 去重降级为精确文本匹配：%s", e
+                )
         self._next_sugg_id: dict[str, int] = {}                     # key: device_id
         self._pending_speech: dict[str, list[dict]] = {}            # key: device_id
         self._pending_speech_rounds: dict[str, int] = {}            # key: device_id

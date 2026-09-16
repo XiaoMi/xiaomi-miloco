@@ -2,7 +2,8 @@
  * i18n 资源不变量 —— 守两类静默 bug：
  *  1. zh/en key 不对齐：en 缺 key 会被 fallbackLng 回退成中文，英文模式露中文。
  *  2. 插值占位符不一致：zh 用 {{msg}}、en 误写 {{message}}，运行期插值静默失效。
- * 外加 i18n 接线 smoke：默认 zh、切 en 生效、能切回。
+ * 外加 i18n 接线 smoke：node 测试环境默认 zh(无 localStorage)、切 en 生效、能切回。
+ * 生产环境没存过偏好时跟随系统语言(navigator.language)，非中文一律英文。
  */
 import { describe, it, expect, afterAll } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
@@ -65,7 +66,7 @@ describe("i18n 接线 smoke", () => {
     await i18n.changeLanguage("zh");
   });
 
-  it("默认 zh,glob 合并后取词正常", () => {
+  it("node 环境(无 localStorage)默认 zh,glob 合并后取词正常", () => {
     expect(i18n.language).toBe("zh");
     expect(i18n.t("nav.home")).toBe("概览");
   });

@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.optimize import linear_sum_assignment
 
 from miloco.perception.engine.identity._fps_utils import sec_to_frames
 
@@ -255,6 +254,10 @@ def _associate(
 
     # 用匈牙利算法求 cost = -IoU 的最小化匹配
     # scipy.optimize.linear_sum_assignment 返回 (row_idx, col_idx)
+    # 惰性 import：scipy 只服务身份跟踪，slim（独立 App，仅 rule_only 场景触发）
+    # 不安装 scipy，但本模块仍会被 SortConfig 的 dataclass 构造间接引用。
+    from scipy.optimize import linear_sum_assignment
+
     row_idx, col_idx = linear_sum_assignment(-iou)
 
     matches: list[tuple[int, int]] = []

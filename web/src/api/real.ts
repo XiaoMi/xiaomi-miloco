@@ -12,6 +12,7 @@ import type {
   ActivityEvent,
   Device,
   DeviceCategory,
+  EditionInfo,
   DeviceProperty,
   EventCropMeta,
   HomeEntries,
@@ -535,6 +536,12 @@ function mapFeatures(f: BackendFeatures): Features {
 export async function realGetFeatures(): Promise<Features> {
   const r = await apiFetch<Normal<BackendFeatures>>("/api/admin/features");
   return mapFeatures(r.data);
+}
+
+/** 发行版本与能力集；老后端（无该端点）会抛错，由 lib/edition 侧回退 full。 */
+export async function realGetEdition(): Promise<EditionInfo> {
+  const r = await apiFetch<Normal<EditionInfo>>("/api/admin/edition");
+  return r.data;
 }
 
 export async function realSetFeatures(patch: Partial<Features>): Promise<Features> {

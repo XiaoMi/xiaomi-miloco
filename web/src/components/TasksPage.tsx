@@ -29,6 +29,7 @@ import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
 import type { Task, TaskRecordSummary, TaskRuleBrief } from "@/lib/types";
 import { AgentPromptDialog } from "./AgentPromptDialog";
+import { modalPortal } from "@/lib/modalPortal";
 import { toast } from "./Toast";
 
 interface Props {
@@ -417,7 +418,9 @@ function TaskDetailSheet({
     }
   };
 
-  return (
+  // portal 到 body：页面根是 space-y-6，它给的 margin-top 会把 fixed inset-0 的遮罩
+  // 从 y=24 开始往下推（实测 rect=0,24 1280x836），顶部就漏出一条没盖住。
+  return modalPortal(
     <div
       className="fixed inset-0 z-[65] flex items-end md:items-center justify-center bg-black/40 backdrop-blur-sm"
       onClick={(e) => {

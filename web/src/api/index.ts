@@ -11,6 +11,7 @@ import { apiFetch } from "./client";
 import type {
   ActivityEvent,
   Device,
+  EditionInfo,
   EventCropMeta,
   HomeEntries,
   HomeEntryType,
@@ -182,6 +183,12 @@ export async function uploadPetReferenceCrops(
   mode: "replace" | "append" = "replace",
 ): Promise<Pet> {
   return impl.realUploadPetReferenceCrops(petId, crops, mode);
+}
+
+// ── 发行版本（full/slim）────────────────────────────────
+// 唯一调用点是 main.tsx 的启动预取（写进 lib/edition 的模块级缓存），组件不直接用。
+export async function getEdition(): Promise<EditionInfo> {
+  return impl.realGetEdition();
 }
 
 // ── 实验性功能开关 ─────────────────────────────────────────
