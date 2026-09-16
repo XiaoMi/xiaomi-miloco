@@ -2069,6 +2069,22 @@ class TestAdaptiveResolution:
         assert "bbox=(100, 200, 300, 400)" in roster  # track 行带 bbox
         assert "最后一帧" in self._bbox_note(content)  # 说明句照发
 
+    def test_roster_disclaimer_not_duplicated_on_fused_path(self):
+        # 名册否证条件("名册仅供定位;bbox 若对应非人体…")与坐标系说明同门:fused 入口传
+        # emit_bbox_note=False,该判据由组合说明句出,整条 user 消息里只该出现一次。门一松、
+        # 或入口漏传该参数,同一条消息里就会出现两句近逐字相同的话 —— 白付 token,且同一
+        # 判据存两份,改一处忘一处即漂移。
+        # 断言走 build_fused_payload(真实入口):只调 _build_device_header 并显式传参的话,
+        # 入口漏传那个参数照样绿,守的就不是要守的东西。
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        # 显式关掉 crop:本条数的是措辞出现几次,坐标口径不参与。
+        p1, p2 = self._patches(user_enabled=False)
+        with p1, p2:
+            content = self._content(packet=member, candidates=[])
+        text = self._roster_text(content)
+        assert "已识别人物：p-alice[bbox=" in text  # 前置:名册确实带了 bbox,条件句该发
+        assert text.count("不得沿用姓名") == 1
+
     def test_ref_block_failure_drops_guidance_but_keeps_bbox(self):
         # 契约防御:_jpeg_block 抛错时,引导语与图块**同进同退**,不留悬空指代。
         # 但 bbox 说明**不受影响** —— 坐标已换算进 crop 坐标系、锚的是视频而非参考图,

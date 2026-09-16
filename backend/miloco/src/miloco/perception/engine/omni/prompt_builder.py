@@ -1067,20 +1067,20 @@ def _build_device_header(
                 lines.append(f"  陌生人：{', '.join(strangers)}")
             lines.append("")
 
-    # 名册含位置时附一句坐标系说明（非 fused 路径用）；fused 路径传 emit_bbox_note=False，
+    # 名册含位置时附说明（非 fused 路径用）；fused 路径传 emit_bbox_note=False，
     # 由 _build_fused_user_content 统一出一句覆盖名册 + 待识别 track，避免两处重复。
     # 「最后一帧」与 fused 侧同口径:bbox 只标末帧位置(engine._normalize_bbox_to_1000 按
     # all_frames[-1] 归一化),视频却跨整个窗口,不写明会让模型拿它去读中间帧。
     # 此路(非 fused/legacy)恒走全景、不接 Smart Crop,故无需坐标换算。
+    #
+    # 两句同门:第二句(空椅坏例的关键防护)若自己判"名册里有没有 bbox",fused 路径就会在名册
+    # 处多出它一份,而 fused 侧的说明句已含同款否证条件 —— 同一判据存两份,改一处忘一处即漂移。
     if emit_bbox_note and any("[bbox=" in ln for ln in lines):
         lines.append(
             "上方已识别人物、陌生人中 [bbox=(x1, y1, x2, y2)] 为该人在视频**最后一帧**中归一化到 [0, 1000] 区间的位置"
             "（左上 0,0；右下 1000,1000），用于定位名册项对应的目标，不替代本轮画面对‘是否有人’的判断；"
             "画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
         )
-    # 空椅坏例的关键防护：名册条目是历史状态/定位信息，不是对当前画面有人存在的断言。
-    # 只在确实发出 bbox 时追加，避免无位置的常态名册增加无必要的 token。
-    if any("[bbox=" in ln for ln in lines):
         lines.append(
             "名册仅供定位；bbox 若对应非人体，不得沿用姓名，也不算有人。"
         )
