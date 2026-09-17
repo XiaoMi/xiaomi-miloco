@@ -28,16 +28,16 @@ from typing import Any
 
 
 def _default_runtime_env() -> Path:
-    """Return the default pointer path using the current user home."""
+    """返回当前用户的默认 runtime 指针文件路径。"""
     return Path.home() / ".config" / "miloco" / "default.env"
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
-    """Read a small, conservative KEY=VALUE env file.
+    """读取格式受限的 ``KEY=VALUE`` 环境文件。
 
-    Keep this parser aligned with ``scripts/install.py::_read_runtime_pointer``;
-    the Hermes installer has an equivalent writer at step 1.95 because the
-    standalone installer cannot import the CLI package.
+    解析规则需与 ``scripts/install.py::_read_runtime_pointer`` 保持一致；
+    Hermes 安装脚本在 1.95 步骤中也有等价写入逻辑，因为独立安装脚本不能
+    导入 CLI 包。
     """
     if not path.is_file():
         return {}
@@ -77,7 +77,7 @@ def _runtime_env_candidates() -> list[Path]:
 
 
 def read_runtime_env() -> dict[str, str]:
-    """Read the default pointer with an optional profile layered on top."""
+    """读取默认指针，并将可选 profile 覆盖到默认值之上。"""
     merged: dict[str, str] = {}
     for path in reversed(_runtime_env_candidates()):
         merged.update(_read_env_file(path))
@@ -85,12 +85,11 @@ def read_runtime_env() -> dict[str, str]:
 
 
 def bootstrap_runtime_env() -> None:
-    """Load the installed runtime pointer before any config path is resolved.
+    """在解析配置路径前加载已安装的 runtime 指针。
 
-    ``$MILOCO_HOME/.env`` cannot discover itself when ``MILOCO_HOME`` is absent.
-    The installer therefore writes a stable user-level pointer at
-    ``~/.config/miloco/default.env``. ``MILOCO_RUNTIME_ENV`` is an explicit
-    override for service managers or multiple platform profiles.
+    ``MILOCO_HOME`` 未设置时无法通过 ``$MILOCO_HOME/.env`` 找到自身，因此
+    安装器会写入稳定的用户级指针 ``~/.config/miloco/default.env``。
+    ``MILOCO_RUNTIME_ENV`` 可用于服务管理器或多平台 profile 的显式覆盖。
     """
     if os.environ.get("MILOCO_HOME"):
         return
@@ -104,7 +103,7 @@ def bootstrap_runtime_env() -> None:
 
 
 def miloco_home() -> Path:
-    """Return ``$MILOCO_HOME`` after bootstrapping the installed runtime pointer."""
+    """加载 runtime 指针后返回 ``$MILOCO_HOME``。"""
     if env := os.environ.get("MILOCO_HOME"):
         return Path(env).expanduser()
     bootstrap_runtime_env()

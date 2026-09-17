@@ -8,16 +8,16 @@
 # [tool.uv]
 # exclude-newer = "2026-04-30"
 # ///
-"""Miloco Installer — Python core logic.
+"""Miloco 安装器——Python 核心逻辑。
 
-Handles the full installation flow:
-  Phase 1: Environment check
-  Phase 2: Package install + supervisor (web 静态资源由 miloco wheel 自带)
-  Phase 3: Initialize service (engine warm-up; 仅临时拉起，退出时自动 stop)
-  Phase 4: Mi Home account binding
-  Phase 5: Omni model configuration
-  Phase 6: Perception model download
-  Phase 7: OpenClaw plugin installation (optional)
+完整处理以下安装流程：
+  阶段 1：环境检查
+  阶段 2：安装软件包和 supervisor（web 静态资源由 miloco wheel 自带）
+  阶段 3：初始化服务（仅临时拉起，退出时自动停止）
+  阶段 4：绑定米家账号
+  阶段 5：配置 Omni 模型
+  阶段 6：下载感知模型
+  阶段 7：安装 OpenClaw 插件（可选）
 """
 
 from __future__ import annotations
@@ -1871,7 +1871,7 @@ def _runtime_pointer_candidates() -> list[Path]:
 
 
 def _read_runtime_pointer(path: Path) -> dict[str, str]:
-    """Read the pointer format shared with CLI config and Hermes step 1.95."""
+    """读取与 CLI 配置及 Hermes 1.95 步骤共用的指针格式。"""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -2007,10 +2007,10 @@ def _decide_agent_platform(
 
 
 def _default_miloco_home(agent_platform: str) -> Path:
-    """Return the platform default Miloco home.
+    """返回指定平台的 Miloco 默认数据目录。
 
-    Hermes owns its runtime root through ``HERMES_HOME``; OpenClaw retains its
-    historical ``~/.openclaw/miloco`` default for compatibility.
+    Hermes 通过 ``HERMES_HOME`` 管理 runtime 根目录；OpenClaw 为保持兼容性，
+    继续使用历史默认目录 ``~/.openclaw/miloco``。
     """
     if agent_platform == "hermes":
         hermes_home = Path(
@@ -2021,7 +2021,7 @@ def _default_miloco_home(agent_platform: str) -> Path:
 
 
 def _write_runtime_pointer(miloco_home: Path, agent_platform: str) -> Path:
-    """Persist the pointer format shared with CLI config and Hermes step 1.95."""
+    """写入与 CLI 配置及 Hermes 1.95 步骤共用的指针格式。"""
     runtime_dir = _default_runtime_pointer().parent
     runtime_file = runtime_dir / "default.env"
     runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -2067,7 +2067,7 @@ def _resolve_uninstall_home() -> Path:
 
 
 def _warn_legacy_hermes_home(miloco_home: Path, agent_platform: str) -> None:
-    """Warn before silently abandoning the pre-HERMES_HOME data directory."""
+    """在忽略 HERMES_HOME 之前警告用户旧版数据目录仍然存在。"""
     if agent_platform != "hermes":
         return
     legacy_home = Path.home() / ".hermes" / "miloco"

@@ -257,19 +257,19 @@ def _resolve_timezone() -> str | None:
 
 
 def _read_runtime_env() -> dict[str, str]:
-    """Read the selected user-level runtime env for supervisor inheritance."""
+    """读取用户级 runtime 环境，供 supervisord 继承。"""
     return read_runtime_env()
 
 
 def _ensure_miloco_home_in_env() -> None:
-    """Ensure os.environ['MILOCO_HOME'] is set from the runtime pointer.
+    """确保从 runtime 指针文件设置 ``os.environ['MILOCO_HOME']``。
 
-    调用顺序：
-      1. os.environ 已有 MILOCO_HOME → 用
-      2. 否则从 ~/.config/miloco/default.env 写到 os.environ
-      3. 都没有 → 设成 miloco_home() 当前 fallback（保持原行为）
+    优先级：
+      1. ``os.environ`` 已有 ``MILOCO_HOME``，直接使用；
+      2. 否则从 ``~/.config/miloco/default.env`` 注入；
+      3. 都没有时使用 ``miloco_home()`` 的当前 fallback，保持原行为。
 
-    不修改 miloco_home() / 不修改 .env，只确保 os.environ 这一刻有值。
+    本函数不修改 ``miloco_home()`` 或 ``.env``，只确保当前进程环境已有值。
     """
     if os.environ.get("MILOCO_HOME"):
         return
@@ -277,7 +277,7 @@ def _ensure_miloco_home_in_env() -> None:
     if "MILOCO_HOME" in runtime_env:
         os.environ["MILOCO_HOME"] = runtime_env["MILOCO_HOME"]
         return
-    # Last-resort fallback — keep old behavior of writing miloco_home() result.
+    # 最后使用 miloco_home() 的结果，保持原有 fallback 行为。
     os.environ["MILOCO_HOME"] = str(miloco_home())
 
 
@@ -285,7 +285,7 @@ _SUPERVISOR_INLINE_COMMENT_RE = re.compile(r"\s[#;]")
 
 
 def _escape_supervisor_env_value(value: str) -> str:
-    """Escape a value for supervisord's quoted ``environment=`` syntax."""
+    """转义 supervisord 带引号的 ``environment=`` 配置值。"""
     if "\n" in value or "\r" in value:
         raise click.ClickException(
             "runtime env 的值不能包含换行符，请修正 ~/.config/miloco/default.env"
