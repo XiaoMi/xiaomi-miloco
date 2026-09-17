@@ -101,7 +101,9 @@ App 也**不会**去接管 1810 上的 CLI 后端。只有 1812 被非 Miloco �
 | `input.video_short_edge` | **768** | 送模型画面的短边。清晰度主要由它决定（小目标/文字），调低省 CPU 与 token |
 | `input.media_resolution` | **high** | 仅 Gemini：视频请求里**显式**带 `MEDIA_RESOLUTION_HIGH`（264 tok/帧）；配 `low` 得 `MEDIA_RESOLUTION_LOW`（66 tok/帧） |
 | `input.rule_only_input` | **image** | 感知输入是**图片**（窗口各帧 JPEG），对纯静态规则判定更聚焦；`video` = 整窗 mp4（按帧计费的模型更省 token） |
-| `input.last_frame_only` | **false** | 图片输入时送**多帧**（动作/手势类规则更稳）；`true` = 每窗只送最后一帧（省 token、更快） |
+| `input.last_frame_only` | **true** | `true` = 图片输入时每窗只送**最后一帧**（省 token、更快；场景规则判的多是"此刻状态"）；`false` = 多帧全发（动作过程 / 手势时序类规则更稳） |
+| `verbose` | **false** | 感知模型输出档：`false` = 只回**命中规则的 id 数组**（无 reason、无外层对象包裹，省 token、判定更快）；`true` = 逐条给出 hit 与不限字数的理由（排查漏报 / 误报用） |
+| `output_language` | **auto** | 判定理由的输出语言：`auto` = 跟随界面语言（`MILOCO_APP_LANG` → 系统 locale → 英文；网页切语言会自动同步）；`zh` / `en` = 固定 |
 
 后两项就是网页「设置 → 感知输入」的两个控件（只对 slim 的 `rule_only` 引擎生效）。四个都是
 **热读**：保存后下个感知窗口生效，不需要重启引擎。用户在网页改过的值落在数据目录的
@@ -285,7 +287,7 @@ dmg 文件名）——正式对外发布建议先打 tag，或用 `--version` �
    **`pipereader=ok`** 即后端输出管道在 EOF 上自注销不会空转 CPU），
    再真起服务，验 `/health`、`/api/admin/edition`、身份路由 404、`observability.db` 已生成且
    `/api/actions` 读得到场景触发台账、一键清理清空三处存储、bootstrap 不破坏默认配置、
-   包内感知默认档（768p / `media_resolution=high` / 图片输入 / 多帧）、SIGTERM 优雅退出
+   包内感知默认档（768p / `media_resolution=high` / 图片输入 / 只送末帧 / `verbose=false` / `output_language=auto`）、SIGTERM 优雅退出
 
 ### 依赖裁剪
 

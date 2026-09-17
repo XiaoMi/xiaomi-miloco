@@ -3,7 +3,8 @@
 
 """rule_only（纯场景触发）模式测试。
 
-覆盖：输出 schema 只剩 matched_rules、system prompt 收敛到规则判定、
+覆盖：输出只有命中规则（rule_only 为**顶层裸数组**——紧凑模式 ``["规则id"]``、
+详细模式 ``[{"rule_id","hit","reason"}]``）、system prompt 收敛到规则判定、
 user content 无身份名册 / 无家庭档案、pipeline 跳过 tracker/身份链路并剥离音频、
 资源校验不再要求端侧检测模型。
 """
@@ -217,9 +218,18 @@ def test_rule_only_selected_fields_only_matched_rules():
 
 
 def test_rule_only_render_schema_only_matched_rules():
+    """紧凑（默认 verbose=false）：rule_only 的 schema 是**顶层裸 id 数组**。
+
+    为什么不再有 ``{"matched_rules":(...)}`` 包裹层：rule_only 唯一输出就是命中规则，
+    外层 key 白让模型多写 18 个字符、解析层还要再拆一层；紧凑模式连 reason / hit 都不产出
+    ——每窗最大的一块输出 token 就省在这里。
+    """
     scene = SceneDescriptor(route='video', rule_only=True)
     schema = render_schema(scene)
-    assert 'matched_rules' in schema
+    assert schema == '["规则id"]', f'rule_only 紧凑 schema 应是裸 id 数组: {schema}'
+    # 没有包裹层，也没有详细模式才有的 reason / hit
+    assert 'matched_rules' not in schema
+    assert 'reason' not in schema and 'hit' not in schema
     for field in ('caption', 'speeches', 'env_sounds', 'suggestions', 'identities', 'pet_identities'):
         assert field not in schema, f'rule_only schema 不应含 {field}: {schema}'
 
@@ -237,8 +247,13 @@ def test_rule_only_system_prompt_minimal():
     # 角色 / 任务收敛
     assert '规则判定引擎' in sp
     assert '规则判定' in sp
-    # schema 与字段说明只讲 matched_rules
-    assert 'matched_rules' in sp
+    # 紧凑 schema 是顶层裸 id 数组；字段说明只讲「命中规则」（无 matched_rules 包裹层）
+    assert '["规则id"]' in sp
+    # 紧凑模式不产出 reason / hit——提示词出现它们只会诱导模型多吐字段、白烧 token
+    assert 'reason' not in sp
+    assert 'hit' not in sp
+    # 紧凑模式无自由文本输出 → schema 段不带「输出语言」行（省 token）
+    assert '输出语言' not in sp
     for field in ('## caption', '## speeches', '## suggestions', '## identities', '## env_sounds'):
         assert field not in sp, f'rule_only system prompt 不应含 {field} 字段说明'
     # 不需要的输出结构全部收敛
@@ -247,7 +262,47 @@ def test_rule_only_system_prompt_minimal():
     assert '家庭档案' not in sp
 
 
-def test_rule_only_build_prompt_no_roster_no_home_profile():
+def test_rule_only_compact_prompt_has_no_reason_hit_or_language_line():
+    """默认（verbose=false）提示词：schema 是 ["规则id"]，不提 reason / hit，也不带语言行。
+
+    为什么单独锁这条：紧凑模式模型只回 id 数组，提示词里只要露出 reason / hit 字样，模型
+    就会顺手多吐字段（每窗最大的一块输出 token）；「输出语言」只约束自由文本，这里没有
+    自由文本可约束 → 一并省掉。
+    """
+    scene = SceneDescriptor(route='video', rule_only=True, has_audio=False, has_speech=False)
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(mock_gs, {'rule_only_system_prompt': ''})
+        sp = build_system_prompt(scene)
+    assert '["规则id"]' in sp
+    assert 'matched_rules' not in sp, '紧凑模式是顶层裸数组，不应再出现 matched_rules 包裹层'
+    assert 'reason' not in sp, '紧凑模式不产出 reason，提示词不得提'
+    assert 'hit' not in sp, '紧凑模式不产出 hit，提示词不得提'
+    assert '输出语言' not in sp, '紧凑模式无自由文本输出，不注入语言行（省 token）'
+
+
+def test_rule_only_verbose_schema_lists_all_rules_with_unbounded_reason():
+    """verbose=true（排查档）：schema 变对象数组，要求逐条列出命中与未命中、reason 不限字数。
+
+    为什么这样分档：排查「该命中没命中 / 不该命中却命中」要的是完整证据链，故恢复对象数组
+    + 全量规则结论 + 不限字数的 reason；此时产生了自由文本，schema 段必须带语言行。
+    """
+    scene = SceneDescriptor(
+        route='video', rule_only=True, verbose=True, has_audio=False, has_speech=False
+    )
+    schema = render_schema(scene)
+    assert schema == '[{"rule_id":"规则id","hit":true|false,"reason":"判断依据"}]', schema
+    assert 'matched_rules' not in schema, 'rule_only 详细模式同样是顶层裸数组'
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(
+            mock_gs, {'rule_only_system_prompt': '', 'output_language': 'zh'}
+        )
+        sp = build_system_prompt(scene)
+    assert '每条都输出 hit 与 reason' in sp and '未命中都列' in sp, '详细模式要求全量结论'
+    assert '不限字数' in sp, 'reason 不限字数（完整证据链，排查用）'
+    assert '输出语言：中文（简体）' in sp, '详细模式有自由文本 → 必须带语言行'
+
+
+def test_rule_only_build_prompt_no_roster_no_home_profile(monkeypatch):
     ep = _make_packet()
     ctx = OmniContext(
         rule_only=True,
@@ -265,12 +320,19 @@ def test_rule_only_build_prompt_no_roster_no_home_profile():
     # 无身份名册 / 家庭档案
     assert '已识别人物' not in uc
     assert '家庭档案' not in sp
-    # 输入默认是**图片多帧**（settings.yaml: rule_only_input=image / last_frame_only=false），
-    # 无音频；只送末帧由 last_frame_only=true 切换、视频模式由 rule_only_input="video" 切换
-    # （见 test_build_prompt_image_mode_switch / test_rule_only_video_single_frame_switch）
+    # 输入默认是**图片单帧**（settings.yaml: rule_only_input=image / last_frame_only=true）：
+    # 图片按张计费、场景规则绝大多数判"此刻状态"，末帧足够；无音频。
     assert 'image_frames' in payload and 'video_base64' not in payload
-    assert len(payload['image_frames']) > 1
+    assert len(payload['image_frames']) == 1, '图片模式默认只发最后一帧'
     assert 'audio_base64' not in payload
+    # 多帧路径仍要保留覆盖：显式关掉开关（monkeypatch 自动还原）→ 全窗口帧都发。
+    from miloco.config import get_settings
+
+    monkeypatch.setitem(
+        get_settings().perception.engine.setdefault('input', {}), 'last_frame_only', False
+    )
+    payload_multi = build_prompt(ep, ctx)
+    assert len(payload_multi['image_frames']) == 2, '关闭开关应多帧全发'
 
 
 def _patch_engine_settings(mock_gs, engine: dict):
@@ -332,7 +394,7 @@ def test_rule_only_system_prompt_override_empty_uses_builtin():
         _patch_engine_settings(mock_gs, {'rule_only_system_prompt': ''})
         sp = build_system_prompt(scene, camera_prompt='忽略窗外')
     assert '规则判定引擎' in sp
-    assert 'matched_rules' in sp
+    assert '["规则id"]' in sp, '未覆盖时走内置紧凑 schema'
     assert '忽略窗外' in sp, '未覆盖时 camera_prompt 照常追加'
 
 
@@ -350,7 +412,7 @@ def test_global_system_prompt_appended_to_rule_only():
         _patch_engine_settings(mock_gs, engine)
         sp = build_system_prompt(scene, camera_prompt='本机位：忽略窗外')
     assert '规则判定引擎' in sp, '内置角色保留'
-    assert 'matched_rules' in sp, '内置 schema 保留'
+    assert '["规则id"]' in sp, '内置 schema 保留'
     assert '# 全局感知须知' in sp
     assert '始终关注门口地面' in sp
     assert '本机位：忽略窗外' in sp
@@ -399,6 +461,54 @@ def test_override_wins_over_global_system_prompt():
         _patch_engine_settings(mock_gs, engine)
         sp = build_system_prompt(scene, camera_prompt='也不该出现')
     assert sp == override
+
+
+# ---- 输出语言注入（perception.engine.output_language 热读 + MILOCO_APP_LANG 跟随）----
+
+
+def _full_video_scene() -> SceneDescriptor:
+    """非 rule_only 的最小 video 场景（rule_only 紧凑模式不注入语言行，见上文）。"""
+    return SceneDescriptor(
+        route='video', has_identity=False, stream=False, has_audio=False, has_speech=False
+    )
+
+
+def test_output_language_follows_app_lang_zh(monkeypatch):
+    """output_language=auto + MILOCO_APP_LANG=zh → 语言行为中文（跟随界面语言）。
+
+    为什么显式 setenv 而不用运行机器 locale：conftest 只清 MILOCO_*，LANG / LC_ALL 会漏进来，
+    依赖 locale 的断言在 CI 与开发机会给出不同结果。
+    """
+    monkeypatch.setenv('MILOCO_APP_LANG', 'zh')
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(
+            mock_gs, {'output_language': 'auto', 'global_system_prompt': ''}
+        )
+        sp = build_system_prompt(_full_video_scene(), include_home_profile=False)
+    assert '输出语言：中文（简体）' in sp
+
+
+def test_output_language_follows_app_lang_en(monkeypatch):
+    """output_language=auto + MILOCO_APP_LANG=en → 语言行为 English。"""
+    monkeypatch.setenv('MILOCO_APP_LANG', 'en')
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(
+            mock_gs, {'output_language': 'auto', 'global_system_prompt': ''}
+        )
+        sp = build_system_prompt(_full_video_scene(), include_home_profile=False)
+    assert '输出语言：English' in sp
+
+
+def test_explicit_output_language_overrides_env(monkeypatch):
+    """显式 perception.engine.output_language=zh 优先于 MILOCO_APP_LANG=en。"""
+    monkeypatch.setenv('MILOCO_APP_LANG', 'en')
+    with patch('miloco.config.get_settings') as mock_gs:
+        _patch_engine_settings(
+            mock_gs, {'output_language': 'zh', 'global_system_prompt': ''}
+        )
+        sp = build_system_prompt(_full_video_scene(), include_home_profile=False)
+    assert '输出语言：中文（简体）' in sp
+    assert '输出语言：English' not in sp
 
 
 def test_rule_only_messages_build_image_url_blocks():
@@ -450,7 +560,7 @@ def test_rule_only_resource_validation_skips_models(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_pipeline_rule_only_skips_identity_and_audio():
+async def test_run_pipeline_rule_only_skips_identity_and_audio(monkeypatch):
     from miloco.perception.engine.input.video_splitter import create_input_slice
 
     frames = [_solid(10, 10, 10), _solid(255, 255, 255)] * 3
@@ -469,12 +579,15 @@ async def test_run_pipeline_rule_only_skips_identity_and_audio():
         captured['payload'] = payload
         return MOCK_OMNI_RESPONSE
 
-    with patch(
-        'miloco.perception.engine.omni.omni.call_omni',
-        new_callable=AsyncMock,
-        side_effect=_capture,
-    ):
-        result = await run_pipeline(s, ctx, config)
+    async def _run():
+        with patch(
+            'miloco.perception.engine.omni.omni.call_omni',
+            new_callable=AsyncMock,
+            side_effect=_capture,
+        ):
+            return await run_pipeline(s, ctx, config)
+
+    result = await _run()
 
     assert not result.skipped
     # 身份层直通：无 targets、无音频
@@ -482,10 +595,10 @@ async def test_run_pipeline_rule_only_skips_identity_and_audio():
     assert result.identity_packet.targets == []
     assert result.identity_packet.audio_clip.size == 0
     assert result.gate_packet.trigger.audio_active is False
-    # 发给模型的载荷默认是图片多帧（感知输入默认 image + 多帧），无音频
+    # 发给模型的载荷默认是图片**单帧**（settings 默认 last_frame_only=true），无音频
     payload = captured['payload']
     assert 'image_frames' in payload and 'video_base64' not in payload
-    assert len(payload['image_frames']) > 1
+    assert len(payload['image_frames']) == 1, '默认只送窗口末帧'
     assert 'audio_base64' not in payload
     # 输出只有规则命中
     assert result.omni_output is not None
@@ -494,6 +607,15 @@ async def test_run_pipeline_rule_only_skips_identity_and_audio():
     assert result.omni_output.caption == []
     assert result.omni_output.suggestions == []
     assert result.omni_output.speeches == []
+    # 多帧路径仍保留覆盖：显式关掉开关（monkeypatch 自动还原）→ 重跑一次，全窗口帧都发
+    # （动作过程 / 手势时序类规则更稳）。
+    from miloco.config import get_settings
+
+    monkeypatch.setitem(
+        get_settings().perception.engine.setdefault('input', {}), 'last_frame_only', False
+    )
+    await _run()
+    assert len(captured['payload']['image_frames']) > 1, '关闭开关应多帧全发'
 
 
 @pytest.mark.asyncio

@@ -3,9 +3,11 @@
 import json
 
 from miloco.perception.engine.omni.response_parser import (
+    _parse_matched_rules,
     extract_json,
     parse_omni_response,
     parse_tier_c_verify_response,
+    try_extract_matched_rules,
 )
 
 
@@ -453,6 +455,102 @@ class TestParseOmniResponse:
         result = parse_omni_response(_wrap(content))
         assert len(result.caption) == 1
         assert result.caption[0].description == "正常"
+
+
+class TestRuleOnlyTopLevelArray:
+    """rule_only 顶层裸数组（新格式）：紧凑只回命中 id，详细回对象数组。
+
+    为什么单独覆盖：rule_only 的 schema 不再有 ``matched_rules`` 包裹层（见
+    field_registry.render_schema），解析层必须能把「顶层数组」当成 matched_rules，
+    否则整条"命中即触发"链路直接哑掉；字符串条目没有 reason / hit，只能凭 id 是否
+    在本窗规则映射里对上来判命中（对不上按幻觉丢弃）。
+    """
+
+    FULL = "d7d9e575-5ab9-49c5-ab8a-ffd3928f7593"
+    MAPPING = {"d7d9e5": FULL, FULL: FULL}
+
+    def test_parse_matched_rules_compact_string_ids(self):
+        """紧凑裸数组 ["d7d9e5"] → 1 条命中，reason 为空串（该档不产出理由）。"""
+        rules = _parse_matched_rules(["d7d9e5"], self.MAPPING)
+        assert len(rules) == 1
+        assert rules[0].rule_id == self.FULL
+        assert rules[0].reason == ""
+        assert rules[0].rule_name == ""
+
+    def test_parse_matched_rules_hallucinated_string_id_dropped(self, caplog):
+        """紧凑裸数组里 id 对不上本窗规则 → 幻觉，丢弃并记 error（不得放行触发）。"""
+        import logging
+
+        with caplog.at_level(logging.ERROR):
+            rules = _parse_matched_rules(["ghost"], self.MAPPING)
+        assert rules == []
+        assert any("幻觉" in r.message for r in caplog.records)
+
+    def test_parse_matched_rules_verbose_object_array(self):
+        """详细模式顶层对象数组：hit=false 丢弃、hit=true 保留 reason。"""
+        raw = [
+            {"rule_id": "d7d9e5", "hit": True, "reason": "画面里有人在看书"},
+            {"rule_id": "d7d9e5", "hit": False, "reason": "床上没有人"},
+        ]
+        rules = _parse_matched_rules(raw, self.MAPPING)
+        assert [r.rule_id for r in rules] == [self.FULL]
+        assert rules[0].reason == "画面里有人在看书"
+
+    def test_parse_matched_rules_legacy_nested_dict(self):
+        """兼容模型仍多包一层 {"matched_rules":[...]}（旧格式残留）。"""
+        rules = _parse_matched_rules({"matched_rules": ["d7d9e5"]}, self.MAPPING)
+        assert [r.rule_id for r in rules] == [self.FULL]
+
+    def test_try_extract_matched_rules_top_level_array(self):
+        """流式早期提取：顶层裸数组一闭合就能取出（命中即触发不必等整包收完）。"""
+        rules = try_extract_matched_rules('["d7d9e5"]', self.MAPPING)
+        assert rules is not None
+        assert [r.rule_id for r in rules] == [self.FULL]
+
+    def test_try_extract_matched_rules_think_prefix_and_unclosed(self):
+        """<think> 前缀要跳过；数组未闭合返回 None（继续等后续 chunk）。"""
+        rules = try_extract_matched_rules('<think>想一下</think>["d7d9e5"]', self.MAPPING)
+        assert rules is not None
+        assert [r.rule_id for r in rules] == [self.FULL]
+        assert try_extract_matched_rules('["d7d9e5"', self.MAPPING) is None
+
+    def test_parse_omni_response_accepts_top_level_array(self):
+        """parse_omni_response 直接吃顶层数组（模型按 rule_only 紧凑 schema 回包）。"""
+        result = parse_omni_response(_wrap('["d7d9e5"]'), self.MAPPING)
+        assert [r.rule_id for r in result.matched_rules] == [self.FULL]
+        assert result.matched_rules[0].reason == ""
+
+    def test_parse_omni_response_object_array_with_surrounding_prose(self):
+        """数组是根时，前后夹说明文字也要取**整个数组**（不是最后一个内层对象）。
+
+        回归点：兜底逻辑以最后一个 ``}`` 为根反向取，会只留下最后一个内层对象 → 前面几条
+        规则的 reason 全丢，且没有 matched_rules 键。这里断言两条都在、顺序不变。
+        """
+        content = (
+            "好的，结果如下：\n"
+            '[{"rule_id":"d7d9e5","hit":true,"reason":"人在看书"},'
+            '{"rule_id":"a1b2c3","hit":false,"reason":"灶上没锅"}]\n以上。'
+        )
+        result = parse_omni_response(_wrap(content), {**self.MAPPING, "a1b2c3": "uuid-2"})
+        assert [r.rule_id for r in result.matched_rules] == [self.FULL]
+
+    def test_parse_omni_response_object_root_with_array_field_not_hijacked(self):
+        """``{`` 出现在 ``[`` 之前 = 对象根，数组只是某字段的值 → 不能被"数组根"识别抢走。"""
+        content = '{"caption":"x","matched_rules":[{"rule_id":"d7d9e5","hit":true,"reason":"y"}]}'
+        result = parse_omni_response(_wrap(content), self.MAPPING)
+        assert [c.description for c in result.caption] == ["x"]
+        assert [(r.rule_id, r.reason) for r in result.matched_rules] == [(self.FULL, "y")]
+
+    def test_parse_omni_response_top_level_object_array(self):
+        """详细模式顶层对象数组同样可解析（reason 完整保留）。
+
+        回归点：``extract_json`` 的兜底曾以最后一个 ``}`` 为根反向找 JSON 对象，顶层对象数组
+        会被截成**最后一个内层对象**（没有 matched_rules 键）→ 详细模式恒空、永不触发。
+        现改为先试整体 / 数组根，故这里必须能拿到完整 reason。"""
+        content = json.dumps([{"rule_id": "d7d9e5", "hit": True, "reason": "人在看书"}])
+        result = parse_omni_response(_wrap(content), self.MAPPING)
+        assert [r.rule_id for r in result.matched_rules] == [self.FULL]
+        assert result.matched_rules[0].reason == "人在看书"
 
 
 class TestParseTierCVerifyResponse:

@@ -46,6 +46,15 @@ class FieldSpec:
     # rule_only（纯场景触发）模式专用字段说明变体：该模式剥离了 identities / caption /
     # suggestions，字段说明里不得再引用它们（否则与 schema 自相矛盾、诱导模型脑补）。
     spec_md_rule_only: str | None = None
+    # 紧凑模式（perception.engine.verbose=false，默认）变体：只回命中规则的 id 数组、
+    # 不产出 reason。schema 字面量与字段说明都必须一起换——只换一半会让"格式段要数组、
+    # 字段说明段还在讲 reason/hit"自相矛盾。rule_only 需要单独的紧凑文案，因为该模式的
+    # 输出是**顶层裸数组**（连 matched_rules 这层 key 都没有，见 render_schema）。
+    schema_literal_compact: str | None = None
+    spec_md_compact: str | None = None
+    schema_literal_rule_only_compact: str | None = None
+    schema_literal_rule_only_verbose: str | None = None
+    spec_md_rule_only_compact: str | None = None
 
     def spec_for(self, route: str, rule_only: bool = False) -> str:
         if rule_only and self.spec_md_rule_only is not None:
@@ -53,6 +62,22 @@ class FieldSpec:
         if route == "audio" and self.spec_md_audio is not None:
             return self.spec_md_audio
         return self.spec_md
+
+    def spec_for_mode(
+        self, route: str, rule_only: bool = False, verbose: bool = False
+    ) -> str:
+        """按 ``verbose`` 再叠一层选择：紧凑模式优先用紧凑文案，缺省退回详细版。"""
+        if not verbose:
+            if rule_only and self.spec_md_rule_only_compact is not None:
+                return self.spec_md_rule_only_compact
+            if self.spec_md_compact is not None:
+                return self.spec_md_compact
+        return self.spec_for(route, rule_only)
+
+    def schema_literal_for(self, verbose: bool = False) -> str:
+        if not verbose and self.schema_literal_compact is not None:
+            return self.schema_literal_compact
+        return self.schema_literal
 
 
 IDENTITY = FieldSpec(
@@ -154,23 +179,43 @@ ENV_SOUNDS = FieldSpec(
 
 MATCHED_RULES = FieldSpec(
     name="matched_rules",
-    schema_literal='"matched_rules":[{"rule_id":"规则id","rule_name":"规则名","reason":"判断依据","hit":true|false}]',
+    # 详细模式（verbose=true）：逐条给出 hit 与判定依据，供排查"该命中没命中 / 不该命中却命中"。
+    # reason 在详细模式下**不限字数**（日志排查要的是完整证据链，不是压缩过的摘要）。
+    schema_literal='"matched_rules":[{"rule_id":"规则id","rule_name":"规则名","hit":true|false,"reason":"判断依据"}]',
     spec_md="""## matched_rules
-- 基于本轮观察判断"# 待判断规则"是否满足；与本轮明显无关的可不列（系统只对 hit=true 触发）
-- reason 先写证据、再定 hit：hit=true 必须 reason 给出"规则每个要素都满足"的本轮证据——规则点名的人以本轮 identities 为准（没被 identities 识别在场的人 → 该规则 hit=false，不从 gallery / 家庭档案推断是谁），活动 / 状态只据本轮画面判断（听到的话 / 声音不作规则命中依据，音频不稳；见总原则）且不得与 caption 相矛盾；证据不全、靠推测、或与 caption / identities 抵触 → hit=false
+- 基于本轮观察判断"# 待判断规则"是否满足，**每条规则都要给结论**（命中与未命中都列），便于排查漏报/误报
+- reason 先写证据、再定 hit：hit=true 必须 reason 给出"规则每个要素都满足"的本轮证据——规则点名的人以本轮 identities 为准（没被 identities 识别在场的人 → 该规则 hit=false，不从 gallery / 家庭档案推断是谁），活动 / 状态只据本轮画面判断（听到的话 / 声音不作规则命中依据，音频不稳；见总原则）且不得与 caption 相矛盾；证据不全、靠推测、或与 caption / identities 抵触 → hit=false。**reason 不限字数**：写清楚看到什么、为什么成立/不成立
 - rule_id / rule_name 只能从"# 待判断规则"段原样照抄某一条：**优先照抄该条的 rule_id**（规则短 id，逐条唯一、最抗改写；照抄那几位即可、**不要补全成完整 UUID、不要改大小写**），rule_name 便于人工核对；严禁自创、改写或把多条规则合并。该段为空则 matched_rules 输出 []
 - 规则行里带 scene_notes 字段时（"# 待判断规则"的 JSONL），它是该住户为这条规则配置的场景补充说明 / 注意事项，判定该规则必须遵循它（优先级高于 target_scene 字面；没带的规则不受影响）""",
+    # 紧凑模式（默认，verbose=false）：只回命中的 id，省掉每窗最大的一块输出 token。
+    # **不要 reason**——reason 是排查用的，常态跑图只会拖慢判定、多烧 token。
+    schema_literal_compact='"matched_rules":["规则id"]',
+    spec_md_compact="""## matched_rules
+- 只输出**命中**规则的 rule_id：命中规则必定成立才列出，不成立 / 拿不准的一律不列（本模式下不需要输出未命中的规则）
+- rule_id 只能从"# 待判断规则"段原样照抄该条的 rule_id（规则短 id，逐条唯一、最抗改写；照抄那几位即可、**不要补全成完整 UUID、不要改大小写**）；严禁自创、改写或把多条规则合并
+- 一条都不命中 → 输出空数组；该段为空也输出空数组
+- 不需要 reason / hit / rule_name 等任何附加字段""",
+    # rule_only（纯场景触发）：本模式**唯一**的输出，且没有外层 matched_rules 包裹——
+    # 详细模式给对象数组、紧凑模式给 id 数组（见 render_schema 的裸数组特例）。
+    schema_literal_rule_only_verbose='[{"rule_id":"规则id","hit":true|false,"reason":"判断依据"}]',
+    schema_literal_rule_only_compact='["规则id"]',
+    spec_md_rule_only_compact="""## 命中规则（JSON 数组）
+- 输出一个 JSON 数组，元素是**命中**规则的 rule_id 字符串；没有命中就给 []
+- rule_id（短 id，如 d7d9e5）从「# 待判断规则」原样照抄，不要补全成完整 UUID、不要改大小写；严禁自创或合并
+- 只依据画面里【直接看到】的证据；看不清 / 模糊 / 拿不准 → 不列（不猜测、不凑数）
+- 不要输出任何其它字段、不要解释、不要用对象包裹（数组直接就是全部输出）""",
     # 规则判断本质需视觉证据（现有规则全是"见到人/姿势/在场"这类）；纯音频无画面，
     # 做 matched_rules 只会脑补或恒空、零正当价值——故 audio-only 轮直接剥离本字段
     # （见 selected_fields）。可听见的危险（求救/玻璃碎/报警）改由 audio 版 suggestions 兜底。
     requires_video=True,
-    # rule_only 变体：本模式无 identities / caption / suggestions，规则点名的人无法经身份
-    # 识别确认在场——按画面中可见人物与外观判断，无法确认则宁可不命中。刻意压到最短：
+    # rule_only 变体（verbose=true）：本模式无 identities / caption / suggestions，规则点名的人
+    # 无法经身份识别确认在场——按画面中可见人物与外观判断，无法确认则宁可不命中。刻意压到最短：
     # 该模式 system prompt 只此一个字段，判定原则里已声明"宁缺毋滥 / 别把规则文字当画面事实"。
-    spec_md_rule_only="""## matched_rules
-- 对「# 待判断规则」逐条判断，只输出 hit=true 的 item。
+    spec_md_rule_only="""## 命中规则（JSON 数组）
+- 对「# 待判断规则」**逐条**判断，每条都输出 hit 与 reason（命中与未命中都列，便于排查漏报/误报）。
 - rule_id（短 id，如 d7d9e5）原样照抄，不要补全成完整 UUID、不要改大小写；严禁自创或合并；该段为空则输出 []。
-- hit=true 必须给出小于 10 个字的直接画面证据，证据不全 / 靠推测 / 模糊 → hit=false。""",
+- hit=true 必须在 reason 里给出本轮画面的直接证据，**不限字数**：写清看到什么、为什么成立；证据不全 / 靠推测 / 模糊 → hit=false，并在 reason 里说明卡在哪一条证据。
+- 数组直接就是全部输出，不要用对象包裹、不要加任何其它字段。""",
 )
 
 SUGGESTIONS = FieldSpec(
@@ -242,6 +287,10 @@ class SceneDescriptor:
     # 纯场景触发模式：输出只保留 matched_rules（命中/退出判定），其余字段全剥。
     # 见 PerceptionConfig.rule_only —— 该模式同时剥离了音频与身份链路，此处只管 schema。
     rule_only: bool = False
+    # 详细判定输出（``perception.engine.verbose``，默认 False）：False = 只回命中规则的 id，
+    # 不产出 reason（省掉每窗最大的一块输出 token）；True = 逐条给出 hit + 不限字数的 reason，
+    # 供排查漏报/误报。同一个开关同时切换 schema 字面量与「# 字段说明」文案（单一来源）。
+    verbose: bool = False
 
     def selected_fields(self) -> list[FieldSpec]:
         if self.rule_only:
@@ -265,8 +314,24 @@ class SceneDescriptor:
 
 
 def render_schema(scene: SceneDescriptor) -> str:
-    """按场景拼出「# 输出格式」的 JSON schema 字面量。"""
-    return "{" + ",".join(f.schema_literal for f in scene.selected_fields()) + "}"
+    """按场景拼出「# 输出格式」的 JSON schema 字面量。
+
+    rule_only 特例：该模式**唯一**输出就是命中规则，外层的 ``{"matched_rules": ...}``
+    对象包裹纯属浪费（模型还要多写 18 个字符的 key，解析层还得再拆一层），故直接给
+    **顶层数组**——紧凑模式 ``["规则id"]``，详细模式 ``[{"rule_id","hit","reason"}]``。
+    """
+    if scene.rule_only:
+        literal = (
+            MATCHED_RULES.schema_literal_rule_only_verbose
+            if scene.verbose
+            else MATCHED_RULES.schema_literal_rule_only_compact
+        )
+        return literal or "[]"
+    return (
+        "{"
+        + ",".join(f.schema_literal_for(scene.verbose) for f in scene.selected_fields())
+        + "}"
+    )
 
 
 # 宠物称呼派生规则：不是新输出字段，而是让 caption / suggestions / matched_rules 统一从
@@ -274,7 +339,7 @@ def render_schema(scene: SceneDescriptor) -> str:
 # 一套命名纪律"两套打架（D1）。仅 has_pets 且 video 路由时追加进「# 字段说明」。
 PET_NAMING_SPEC = """## 宠物称呼（据 pet_identities 派生）
 - caption / suggestions / matched_rules 里提及宠物，一律按本轮 pet_identities 的判定称呼：conf=high → 直呼其名（如"小黑在沙发上"）；conf=mid → 用"疑似<名>"；未列入 pet_identities（含空数组）→ 用泛称（"一只黑猫" / "一只卷毛狗"），不从家庭档案给没判出的宠物硬安名字（与对人「不从 gallery / 家庭档案取名安到没识别出的主体」一致）
-- matched_rules：规则点名某只宠物时，须该宠物本轮以 conf=high 列入 pet_identities 才可 hit=true；仅 mid 或未列入 → 该（点名宠物的）规则 hit=false（宁漏不误触发）
+- matched_rules：规则点名某只宠物时，须该宠物本轮以 conf=high 列入 pet_identities 才算命中（紧凑模式=把该规则 id 放进数组，详细模式=hit=true）；仅 mid 或未列入 → 该（点名宠物的）规则不命中（宁漏不误触发）
 - suggestions：event / action 指称宠物同上（high 直呼 / mid 疑似 / 否则泛称）；涉及"某只宠物的约定或禁忌"（家庭档案显式记录）须该宠物以 high 列入 pet_identities 确认在场才成立"""
 
 
@@ -284,7 +349,10 @@ def render_field_spec(scene: SceneDescriptor) -> str:
     ``has_pets`` 且 video 路由时追加「## 宠物命名」纪律（约束 caption / suggestions /
     matched_rules 对宠物的称呼，集中一处维护，见 ``PET_NAMING_SPEC``）。
     """
-    blocks = [f.spec_for(scene.route, rule_only=scene.rule_only) for f in scene.selected_fields()]
+    blocks = [
+        f.spec_for_mode(scene.route, scene.rule_only, scene.verbose)
+        for f in scene.selected_fields()
+    ]
     if scene.has_pets and scene.route == "video" and not scene.rule_only:
         blocks.append(PET_NAMING_SPEC)
     return "\n\n".join(blocks)

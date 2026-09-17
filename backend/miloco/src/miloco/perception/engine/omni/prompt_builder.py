@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -50,11 +51,13 @@ from .constants import (
     _PRINCIPLE,
     _PRINCIPLE_AUDIO,
     _PRINCIPLE_RULE_ONLY,
+    _PRINCIPLE_RULE_ONLY_COMPACT,
     _PRINCIPLE_VIDEO_NO_AUDIO,
     _PRINCIPLE_VIDEO_NO_SPEECH,
     _ROLE,
     _ROLE_AUDIO,
     _ROLE_RULE_ONLY,
+    _ROLE_RULE_ONLY_COMPACT,
     _USER_REF_BOUNDARY,
     _USER_REF_BOUNDARY_AUDIO,
 )
@@ -555,6 +558,7 @@ def _build_payload(
         has_audio=has_audio, has_speech=has_speech,
         has_pets=(False if rule_only else _has_pets_for_scene()),
         rule_only=rule_only,
+        verbose=_perception_verbose(),
     )
     if rule_only:
         include_home_profile = False
@@ -661,12 +665,18 @@ def build_system_prompt(
         override = _rule_only_system_prompt_override()
         if override:
             return override
-        # 纯场景触发：极简装配——只有 matched_rules 一个输出字段，故角色已含任务与输出
+        # 纯场景触发：极简装配——只有命中规则一个输出字段，故角色已含任务与输出
         # 约束、不再单列「# 任务」，也不注入通用常识 / 实例 / 家庭档案 / 输出模式段；
         # 输出格式与字段说明压到最短，把 token 留给真正要判的规则本身。
+        # 角色 / 判定原则 / 字段说明都随 verbose（perception.engine.verbose，默认关）分档：
+        # 关 = 只回命中 id 数组；开 = 全部规则 hit + 不限字数的 reason（排查漏报/误报用）。
+        if scene.verbose:
+            role, principle = _ROLE_RULE_ONLY, _PRINCIPLE_RULE_ONLY
+        else:
+            role, principle = _ROLE_RULE_ONLY_COMPACT, _PRINCIPLE_RULE_ONLY_COMPACT
         parts: list[str] = [
-            _ROLE_RULE_ONLY,
-            _PRINCIPLE_RULE_ONLY,
+            role,
+            principle,
             "# 输出格式\n\n" + _render_schema_section(scene),
             "# 字段说明\n\n" + render_field_spec(scene),
         ]
@@ -720,7 +730,14 @@ def _render_schema_section(scene: SceneDescriptor) -> str:
     if scene.stream:
         order = " → ".join(f.name for f in scene.selected_fields())
         return f"必须严格按字段顺序输出：{order}\n{schema}"
-    return schema.replace('"rule_name":"规则名",','') + "\n输出 reason 语言：English"
+    # rule_name 不进 schema 字面量：模型只需照抄 rule_id（短 id 更抗改写），rule_name 由
+    # 「# 字段说明」说明为可选的人工核对项。
+    schema = schema.replace('"rule_name":"规则名",', "")
+    # 自由文本（reason / caption / event…）的输出语言随界面语言（settings 热读），不再写死英文。
+    # rule_only 紧凑模式没有任何自由文本输出 → 不加这句，省 token。
+    if scene.rule_only and not scene.verbose:
+        return schema
+    return schema + "\n输出语言：" + _output_language_label()
 
 
 def _render_task_list(scene: SceneDescriptor) -> str:
@@ -1548,6 +1565,70 @@ def _global_system_prompt() -> str:
         return val.strip()
     except Exception:
         return ""
+
+
+def _perception_verbose() -> bool:
+    """感知模型详细判定输出（``perception.engine.verbose``，默认 False，热读免重启）。
+
+    False（默认）= 只回**命中规则的 id 数组**（无 reason、无外层对象包裹）——每窗最大的一块
+    输出 token 就省在这里；True = 逐条给出 hit 与**不限字数**的 reason，供排查漏报 / 误报。
+    与字段说明 / schema 字面量同源（field_registry.MATCHED_RULES），此处只决定取哪一档。
+    """
+    try:
+        from miloco.config import get_settings
+
+        return bool(get_settings().perception.engine.get("verbose", False))
+    except Exception:
+        return False
+
+
+# 自由文本输出（reason / caption / event…）的语言标签：写进 system prompt 的 schema 段。
+_LANGUAGE_LABELS = {"zh": "中文（简体）", "en": "English"}
+
+
+def _output_language() -> str:
+    """判定理由的输出语言：``"zh"`` | ``"en"``。
+
+    ``perception.engine.output_language`` 热读：显式 ``zh``/``en`` 直接用；``auto``（默认）
+    跟随界面语言——原生 App 的 ``MILOCO_APP_LANG``（菜单 / 环境变量，网页切语言时会把它同步
+    成本值）→ 系统 locale（``LC_ALL`` / ``LC_MESSAGES`` / ``LANG`` / ``locale.getlocale()``）
+    → 兜底 ``en``（非中文环境一律英文，与 web i18n 的判定口径一致）。
+    """
+    try:
+        from miloco.config import get_settings
+
+        raw = str(
+            get_settings().perception.engine.get("output_language", "auto") or "auto"
+        ).strip().lower()
+    except Exception:
+        raw = "auto"
+    if raw in _LANGUAGE_LABELS:
+        return raw
+    env = (os.environ.get("MILOCO_APP_LANG") or "").strip().lower()
+    if env.startswith("zh"):
+        return "zh"
+    if env.startswith("en"):
+        return "en"
+    for var in ("LC_ALL", "LC_MESSAGES", "LANG"):
+        loc = (os.environ.get(var) or "").strip().lower()
+        if loc.startswith("zh"):
+            return "zh"
+        if loc:
+            # 显式设了非中文 locale（含 CLI 用的 LC_ALL=C）→ 按英文，不再往下探。
+            return "en"
+    try:
+        import locale as _locale
+
+        if (_locale.getlocale()[0] or "").lower().startswith("zh"):
+            return "zh"
+    except Exception:
+        pass
+    return "en"
+
+
+def _output_language_label() -> str:
+    """写进 prompt 的语言标签（如 ``中文（简体）`` / ``English``）。"""
+    return _LANGUAGE_LABELS.get(_output_language(), "English")
 
 
 def _rule_only_last_frame_only() -> bool:

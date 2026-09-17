@@ -12,7 +12,7 @@
 
 本测试 mock service 层，只验证端点把哪个参数分派到哪个入口（含「都不变则都不调」）。
 另有若干用例不涉分派，只验 GET 投影的取值语义（分辨率档 roundtrip、Smart Crop 双闸、
-min_suggestion_urgency 的默认值与 Literal 校验）。
+min_suggestion_urgency 的默认值与 Literal 校验、感知输入/输出开关的默认值与坏值 fail-safe）。
 """
 import json as _json
 from unittest.mock import AsyncMock, MagicMock
@@ -399,12 +399,14 @@ class TestPerceptionInputMode:
     GET 投影默认值、PUT 写进 config.json 并回读、坏值/非法值不 500、不触发重启分派。
     """
 
-    def test_get_defaults_image_input_multi_frame(self, client):
+    def test_get_defaults_image_input_last_frame_only(self, client):
         c, _svc = client
         data = c.get("/api/admin/perception-config").json()["data"]
-        # 产品默认：图片输入 + 多帧全发（settings.yaml 同值）
+        # 产品默认：图片输入 + 只送末帧（settings.yaml / InputConfig 同值）。
+        # 图片按张计费，多帧纯属多花 token，而场景规则判的多是"此刻状态"，末帧足够；
+        # 动作 / 手势这类时序规则才需要显式切成 false 全发。
         assert data["perception_input"] == "image"
-        assert data["image_last_frame_only"] is False
+        assert data["image_last_frame_only"] is True
 
     def test_put_roundtrip_writes_config_json(self, client, tmp_path):
         c, _svc = client
@@ -446,14 +448,19 @@ class TestPerceptionInputMode:
         svc.apply_omni_fps_live.assert_not_called()
 
     def test_bad_existing_values_fall_back_to_defaults(self, client, tmp_path):
-        """config.json 里手写成垃圾（"input": "512" / rule_only_input 非枚举）不许 500。"""
+        """config.json 里手写成垃圾（"input": "512" / rule_only_input 非枚举）不许 500。
+
+        last_frame_only 特意用 falsy 非 bool 的 0：裸 bool(0) 得 False，若投影漏了
+        isinstance 校验就会把坏值当真值"关"，与默认 True 分裂。用 0 才分得清"退默认"与
+        "照单全收"（"false" 这类 truthy 字符串两种走法都得 True，验不出东西）。
+        """
         c, _svc = client
         (tmp_path / "config.json").write_text(
             _json.dumps(
                 {
                     "perception": {
                         "engine": {
-                            "input": {"rule_only_input": 7, "last_frame_only": "false"}
+                            "input": {"rule_only_input": 7, "last_frame_only": 0}
                         }
                     }
                 }
@@ -466,9 +473,9 @@ class TestPerceptionInputMode:
         resp = c.get("/api/admin/perception-config")
         assert resp.status_code == 200, resp.text
         data = resp.json()["data"]
-        # 坏值退默认，而不是 500 或者把 "false" 当真值
+        # 坏值退默认（image / 只送末帧），而不是 500 或者把 0 当"关"、把 7 当输入模式
         assert data["perception_input"] == "image"
-        assert data["image_last_frame_only"] is False
+        assert data["image_last_frame_only"] is True
 
     def test_put_only_input_mode_does_not_touch_last_frame(self, client, tmp_path):
         """只改一个字段时另一个保持原值（前端抽屉多字段一起 PUT，缺省不动）。"""
@@ -479,3 +486,161 @@ class TestPerceptionInputMode:
         inp = written["perception"]["engine"]["input"]
         assert inp["rule_only_input"] == "video"
         assert inp["last_frame_only"] is True
+
+
+class TestPerceptionOutputMode:
+    """感知输出：详细判定输出（verbose）+ 判定理由语言（网页「设置 → 感知输入」）。
+
+    与输入那两个开关同款：都是推理侧热读（prompt_builder 每窗现读 settings
+    ``perception.engine.verbose`` / ``perception.engine.output_language``），所以只验：
+    GET 投影默认值、PUT 写进 config.json 并回读、坏值 / 非法值不 500、不触发重启分派，
+    以及部分 PUT 不互相覆盖。
+    """
+
+    def test_get_defaults(self, client):
+        c, _svc = client
+        data = c.get("/api/admin/perception-config").json()["data"]
+        # 默认只回命中规则 id 数组（不给 reason，省每窗最大的一块输出 token）；
+        # 语言 auto = 跟随界面（MILOCO_APP_LANG → 系统 locale → en）。
+        assert data["perception_verbose"] is False
+        assert data["perception_output_language"] == "auto"
+
+    def test_put_roundtrip_writes_config_json(self, client, tmp_path):
+        c, _svc = client
+        resp = c.put(
+            "/api/admin/perception-config",
+            json={"perception_verbose": True, "perception_output_language": "zh"},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        assert data["perception_verbose"] is True
+        assert data["perception_output_language"] == "zh"
+
+        # 落盘在 engine 直下（不在 input 子块），与热读侧 engine.get("verbose") 同一路径；
+        # 写错位置会让设置看似保存成功、下个感知窗口却读不到。
+        written = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        engine = written["perception"]["engine"]
+        assert engine["verbose"] is True
+        assert engine["output_language"] == "zh"
+
+        # GET 回读同值：证明不是只在 PUT 响应里拼了个好值，配置真落盘了
+        data = c.get("/api/admin/perception-config").json()["data"]
+        assert data["perception_verbose"] is True
+        assert data["perception_output_language"] == "zh"
+
+    @pytest.mark.parametrize("bad", ["AUTO", "ZH", "cn", "english", "", " auto"])
+    def test_rejects_unknown_output_language(self, client, tmp_path, bad):
+        """Literal 类型校验：非 auto/zh/en 应被 pydantic 拒（422），配置不动。"""
+        c, _svc = client
+        resp = c.put("/api/admin/perception-config", json={"perception_output_language": bad})
+        assert resp.status_code == 422, resp.text
+        written = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        assert "output_language" not in written["perception"]["engine"]
+
+    def test_hot_read_does_not_dispatch_restart_or_fps_live(self, client):
+        """两个热读参数都不该走 omni_fps 热更 / window_size 重启这两条入口。"""
+        c, svc = client
+        resp = c.put(
+            "/api/admin/perception-config",
+            json={"perception_verbose": True, "perception_output_language": "en"},
+        )
+        assert resp.status_code == 200, resp.text
+        # 热读参数不进 restart_ok 分派：响应里连这个键都不会出现（只有 omni_fps/window_size
+        # 变更时才带），两条入口也都不该被调用。
+        assert "restart_ok" not in resp.json()["data"]
+        svc.apply_config_restart.assert_not_called()
+        svc.apply_omni_fps_live.assert_not_called()
+
+    def test_bad_existing_values_fall_back_to_defaults(self, client, tmp_path):
+        """config.json 里手写成垃圾（verbose 非 bool / output_language 非枚举）不许 500。"""
+        c, _svc = client
+        (tmp_path / "config.json").write_text(
+            _json.dumps(
+                {
+                    "perception": {
+                        "engine": {
+                            "input": {"omni_fps": 1, "video_short_edge": 512},
+                            "verbose": "yes",
+                            "output_language": 7,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        from miloco.config.settings import reset_settings
+
+        reset_settings()
+        resp = c.get("/api/admin/perception-config")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        # 坏值退默认而不是 500：既不把 "yes" 当"开"，也不把 7 当成某种语言
+        assert data["perception_verbose"] is False
+        assert data["perception_output_language"] == "auto"
+
+    def test_put_only_verbose_does_not_touch_output_language(self, client, tmp_path):
+        """只传 perception_verbose 时不覆盖 perception_output_language（部分 PUT 语义）。"""
+        c, _svc = client
+        c.put("/api/admin/perception-config", json={"perception_output_language": "zh"})
+        c.put("/api/admin/perception-config", json={"perception_verbose": True})
+        written = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        engine = written["perception"]["engine"]
+        assert engine["verbose"] is True
+        assert engine["output_language"] == "zh"
+
+    def test_put_only_output_language_keeps_verbose_on(self, client, tmp_path):
+        """反向：只传 perception_output_language 时不能把住户打开的 verbose 关掉。
+
+        回归点（真实事故）：网页切界面语言时会同步一次 output_language；前端若在那笔请求里
+        顺手带上 `perception_verbose`（哪怕是默认 false），后端局部合并就会把「详细判定输出」
+        静默关掉。这里从后端侧钉死契约：语言更新与 verbose 必须互不影响。
+        """
+        c, _svc = client
+        c.put("/api/admin/perception-config", json={"perception_verbose": True})
+        c.put(
+            "/api/admin/perception-config",
+            json={"perception_output_language": "en"},
+        )
+        written = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        engine = written["perception"]["engine"]
+        assert engine["output_language"] == "en"
+        assert engine["verbose"] is True, "切语言不得重置详细判定输出开关"
+        assert c.get("/api/admin/perception-config").json()["data"][
+            "perception_verbose"
+        ] is True
+
+    def test_put_only_output_language_leaves_every_other_setting_alone(self, client, tmp_path):
+        """语言同步那一笔请求（只含 output_language）不得动任何别的设置项。
+
+        这是上面那条回归的"全面版"：把抽屉里每个旋钮都拨到**非默认值**，然后只发一笔
+        与前端 `syncOutputLanguageToBackend` 完全一致的请求，逐项断言原值未变——因为前端
+        只要往这笔请求里夹带任何一个默认值，住户的设置就会被静默还原（真实事故的发法）。
+        """
+        c, _svc = client
+        c.put(
+            "/api/admin/perception-config",
+            json={
+                "video_short_edge": 512,
+                "omni_fps": 2,
+                "window_size": 5,
+                "perception_input": "video",
+                "image_last_frame_only": False,
+                "perception_verbose": True,
+                "min_suggestion_urgency": "low",
+                "global_system_prompt": "全局：注意门口",
+            },
+        )
+        before = c.get("/api/admin/perception-config").json()["data"]
+        # 与 web/src/lib/perceptionOutput.ts::syncOutputLanguageToBackend 发出的 body 一致
+        c.put("/api/admin/perception-config", json={"perception_output_language": "en"})
+        after = c.get("/api/admin/perception-config").json()["data"]
+        changed = {k for k in before if before[k] != after[k]}
+        assert changed == {"perception_output_language"}, f"被顺带改动的字段: {changed}"
+        assert after["perception_output_language"] == "en"
+        # 写盘侧同样确认（GET 是投影，写盘才是真相）
+        engine = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))[
+            "perception"
+        ]["engine"]
+        assert engine["input"]["video_short_edge"] == 512
+        assert engine["input"]["last_frame_only"] is False
+        assert engine["verbose"] is True

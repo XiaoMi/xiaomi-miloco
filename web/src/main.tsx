@@ -1,5 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import { syncLanguageToBackend } from "./i18n";
 import "./i18n";
 import { App } from "./App";
 import { getEdition } from "./api";
@@ -20,6 +21,11 @@ if (themeParam === "dark" || themeParam === "light") {
 } else if (savedTheme === "dark" || savedTheme === "light") {
   document.documentElement.setAttribute("data-theme", savedTheme);
 }
+
+// 启动即把当前界面语言同步给后端（感知 system prompt 的"输出语言"要跟住户看到的一致）。
+// 放这里而不是 i18n 模块里：那是 import 期副作用，会把每个 import 过 i18n 的单测都带上
+// 一条多余的 PUT（api 契约测试会因此变红）。fire-and-forget，失败只当后端继续用 auto。
+syncLanguageToBackend();
 
 function render() {
   ReactDOM.createRoot(document.getElementById("root")!).render(

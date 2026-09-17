@@ -44,6 +44,8 @@
     "perceptionInputHint": "Images = sample frames from each window (default; more focused for static rules). Video = one mp4 per window (cheaper per-frame tokens for frame-billed models). Takes effect on the next perception window, no restart.",
     "perceptionInputVideoNote": "Video mode sends the whole window; the option below only applies to image mode.",
     "imageLastFrameOnly": "Send only the last frame",
-    "imageLastFrameOnlyHint": "Off (default) = send all frames in the window, steadier for action/gesture rules. On = send only the last frame, fewer tokens and faster, enough for static state rules."
+    "imageLastFrameOnlyHint": "On (default) = send only the last frame of the window — fewer tokens and faster, enough for static state rules. Off = send every frame, steadier for action/gesture rules.",
+    "perceptionVerbose": "Verbose judging output",
+    "perceptionVerboseHint": "When on, the model reports every rule's hit/miss plus an unlimited-length rationale — useful for investigating missed or spurious triggers. When off (default) it returns only the ids of matched rules, which is faster and cheaper."
   }
 }

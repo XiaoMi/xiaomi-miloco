@@ -1571,11 +1571,25 @@ class PerceptionConfigBody(BaseModel):
         description="感知输入是图片还是视频；默认 image（图片）",
     )
     # 图片输入时是否只送窗口最后一帧。写 perception.engine.input.last_frame_only；
-    # 默认 false = 多帧全发（动作/手势类规则更稳），true = 只送末帧（省 token、更快）。
+    # 默认 true = 只送末帧（省 token、更快），false = 多帧全发（动作/手势类规则更稳）。
     # 仅 perception_input=image 时生效（视频模式对应开关是 rule_only_video_single_frame）。
     image_last_frame_only: bool | None = Field(
         default=None,
-        description="图片输入是否每窗只送最后一帧；默认 false（送多帧）",
+        description="图片输入是否每窗只送最后一帧；默认 true（只送末帧）",
+    )
+    # 感知模型详细判定输出。写 perception.engine.verbose（prompt_builder 每窗热读，写盘即生效）：
+    # false（默认）= 只回命中规则的 id 数组（无 reason、无外层对象包裹，省输出 token、更快）；
+    # true = 逐条给出 hit 与不限字数的 reason，供排查漏报 / 误报。
+    perception_verbose: bool | None = Field(
+        default=None,
+        description="感知模型是否输出详细判定依据（默认 false：只回命中规则 id 数组）",
+    )
+    # 判定理由的输出语言。写 perception.engine.output_language（热读）：
+    # auto（默认）= 跟随界面语言（MILOCO_APP_LANG → 系统 locale → 英文）；zh / en = 固定。
+    # 网页切语言时前端会自动把它同步成实际语言。
+    perception_output_language: Literal["auto", "zh", "en"] | None = Field(
+        default=None,
+        description="感知判定理由的输出语言；默认 auto（跟随界面语言）",
     )
     # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
     # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
@@ -1650,13 +1664,30 @@ def _perception_config_payload() -> dict:
             raw_input_mode,
         )
         raw_input_mode = "image"
-    raw_last_frame_only = inp.get("last_frame_only", False)
+    raw_last_frame_only = inp.get("last_frame_only", True)
     if not isinstance(raw_last_frame_only, bool):
         logger.warning(
             "event=perception_config_bad field=last_frame_only reason=not_bool raw=%r 退默认",
             raw_last_frame_only,
         )
-        raw_last_frame_only = False
+        raw_last_frame_only = True
+    # 详细判定输出 / 输出语言：同 video_short_edge 一样热读，坏值 fail-safe 退默认
+    raw_verbose = s.perception.engine.get("verbose", False)
+    if not isinstance(raw_verbose, bool):
+        logger.warning(
+            "event=perception_config_bad field=verbose reason=not_bool raw=%r 退默认",
+            raw_verbose,
+        )
+        raw_verbose = False
+    raw_output_language = str(
+        s.perception.engine.get("output_language", "auto") or "auto"
+    ).strip().lower()
+    if raw_output_language not in ("auto", "zh", "en"):
+        logger.warning(
+            "event=perception_config_bad field=output_language reason=not_in_enum raw=%r 退默认",
+            raw_output_language,
+        )
+        raw_output_language = "auto"
     return {
         "video_short_edge": inp.get("video_short_edge", 768),
         "omni_fps": inp.get("omni_fps", 1),
@@ -1672,6 +1703,9 @@ def _perception_config_payload() -> dict:
         # 感知输入：图片/视频 + 图片是否只送末帧（网页「设置 → 感知输入」）
         "perception_input": raw_input_mode,
         "image_last_frame_only": raw_last_frame_only,
+        # 感知输出：详细判定输出开关（verbose）+ 判定理由语言（网页「设置 → 感知输入」）
+        "perception_verbose": raw_verbose,
+        "perception_output_language": raw_output_language,
         "min_suggestion_urgency": s.perception.min_suggestion_urgency,
         # 全局感知系统提示词(web「设置」页)；热读下个感知窗口生效。
         "global_system_prompt": global_system_prompt,
@@ -1710,6 +1744,16 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})[
             "last_frame_only"
         ] = body.image_last_frame_only
+    if body.perception_verbose is not None:
+        # 热读：prompt_builder 每窗现读 verbose（决定 schema / 字段说明 / 角色取哪一档）。
+        update.setdefault("perception", {}).setdefault("engine", {})[
+            "verbose"
+        ] = body.perception_verbose
+    if body.perception_output_language is not None:
+        # 同上，热读；网页切界面语言时前端会把它同步成 zh/en（auto 仅在没同步过时兜底）。
+        update.setdefault("perception", {}).setdefault("engine", {})[
+            "output_language"
+        ] = body.perception_output_language
     if body.smart_crop_enabled is not None:
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("crop_enhance", {})[
             "user_enabled"

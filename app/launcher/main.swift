@@ -237,6 +237,11 @@ final class BackendProcess {
         var env = ProcessInfo.processInfo.environment
         env["MILOCO_HOME"] = AppPaths.home.path
         env["MILOCO_EDITION"] = "slim"
+        // 把**界面实际语言**传给后端：感知判定理由的输出语言（perception.engine.output_language=auto）
+        // 要跟随住户看到的语言，而后端从 Finder 启动时拿不到 LANG/locale（GUI 进程环境极简），
+        // 只看系统 locale 会退成英文——中文界面却回英文理由。这里显式给一份，与网页切语言时的
+        // 同步互为兜底。
+        env["MILOCO_APP_LANG"] = AppLanguage.code
         env["MILOCO_SERVER__HOST"] = "127.0.0.1"
         env["MILOCO_SERVER__PORT"] = String(port)
         // server.url 一并覆盖：后端启动时会校验 url 与 host/port 是否一致，不一致就

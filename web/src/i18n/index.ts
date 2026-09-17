@@ -87,6 +87,22 @@ function syncHtmlLang(lng: string) {
   }
   reportLangToNative(lng);
 }
+
+/** 把语言同步给**后端**：感知 system prompt 里的"输出语言"要跟随住户看到的界面语言，
+ *  而后端不知道网页选了 zh 还是 en（那是 i18next/localStorage 的事）。写
+ *  perception.engine.output_language（热读，下个感知窗口生效）。
+ *
+ *  刻意**不**挂在 languageChanged 上：那是 import 期就会触发一次的副作用，会让每个
+ *  import 过 i18n 的单测都多打一条 PUT（api 契约测试用 fetch 捕获断言"只发了我这一条"，
+ *  会被这条污染）。改为两个显式时点：① 用户在页面里切语言（setLanguagePreference）；
+ *  ② App 启动（main.tsx 调 syncLanguageToBackend）——覆盖"跟随系统/原生指定"的初始语言。
+ *  fire-and-forget：老后端没这个字段 / 接口一时不可用都只该让后端继续用 auto 推断，
+ *  绝不能影响"切语言"本身，故吞掉异常（动态 import 见 lib/perceptionOutput 的说明）。 */
+export function syncLanguageToBackend(lng: string = i18n.language): void {
+  void import("@/lib/perceptionOutput")
+    .then((m) => m.syncOutputLanguageToBackend(lng))
+    .catch(() => {});
+}
 syncHtmlLang(i18n.language);
 i18n.on("languageChanged", (lng) => syncHtmlLang(lng));
 
@@ -97,6 +113,8 @@ i18n.on("languageChanged", (lng) => syncHtmlLang(lng));
  * 固化成「页面偏好」——之后原生菜单选「跟随系统」就再也跟不动系统了。 */
 export function setLanguagePreference(lng: Lang): Promise<unknown> {
   if (typeof localStorage !== "undefined") localStorage.setItem(LANG_KEY, lng);
+  // 用户主动切语言：把新语言同步给后端（感知判定理由的输出语言随界面走）。
+  syncLanguageToBackend(lng);
   return i18n.changeLanguage(lng);
 }
 

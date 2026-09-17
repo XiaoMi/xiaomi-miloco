@@ -105,6 +105,20 @@ perception:
     # 置空/删除 = 走内置装配版（默认）。经 CLI `config set` 或 config.json 修改 → 下个
     # 感知窗口热生效；直接改本 yaml → 需重启后端。
     rule_only_system_prompt: ""
+    # 感知模型详细输出开关（网页「设置 → 感知输入」可切）：
+    #   false(默认) = 只回**命中规则的 id 数组**，如 ["d7d9e5"]；不给 reason、不带外层
+    #     对象包裹——省掉每窗最大的一块输出 token，判定更快。
+    #   true = 详列所有规则的 hit 与**不受字数限制**的详细判定依据(reason)，用于排查
+    #     "该命中没命中 / 不该命中却命中"。
+    # 同一开关同时切换 system prompt 的输出格式说明与字段说明（单一来源）。
+    # 热读：下个感知窗口生效，网页保存免重启。
+    verbose: false
+    # 判定理由的输出语言（写进感知 system prompt 的字段说明/输出格式段）：
+    #   auto(默认) = 跟随界面语言——MILOCO_APP_LANG（原生 App 菜单/环境变量）→ 系统
+    #     locale → 兜底 en；网页切语言时会自动把实际语言同步进来。
+    #   zh / en = 固定中文 / 英文（不随界面变）。
+    # 热读：下个感知窗口生效。
+    output_language: auto
     input:
       # 帧率旋钮集中在此一处(对应 InputConfig):
       #   fps      —— 下发/pipeline 帧率 = tracker 帧率(下采后 tracker 逐帧消费全部)
@@ -124,10 +138,11 @@ perception:
       #   video       = mp4 视频(Gemini 视频按帧计费 ~66 tok/帧, 同分辨率下 token 约为图片 1/4)。
       # 热读、免重启。
       rule_only_input: image
-      # 图片输入时是否只取窗口**最后一帧**(省 token/更快; 静态状态类规则足够)。
-      # false(默认) = 多帧全发, 动作/手势类规则更稳。热读、免重启。
-      # 注意: 该开关仅在 rule_only_input=image 时生效。
-      last_frame_only: false
+      # 图片输入时是否只取窗口**最后一帧**(省 token/更快)。true(默认) = 只送末帧:
+      # 图片按张计费、多帧纯属多花 token, 而场景规则绝大多数判的是"此刻状态"(人在床上
+      # 看书 / 灶上有锅), 末帧足够; false = 多帧全发, 动作过程 / 手势时序类规则更稳。
+      # 热读、免重启。注意: 该开关仅在 rule_only_input=image 时生效。
+      last_frame_only: true
       # rule_only 视频模式是否只合成窗口最后一帧的单帧 mp4(~66 tok, 最省):
       # false=全窗口帧合成(默认, 信息完整); true=单帧。热读、免重启。
       rule_only_video_single_frame: false

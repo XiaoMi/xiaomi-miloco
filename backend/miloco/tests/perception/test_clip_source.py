@@ -301,8 +301,21 @@ async def test_clip_source_rule_only_pipeline(tmp_path, monkeypatch):
     assert not result.rooms[clip_source.ROOM].omni_outputs[clip_source.DID].skipped
     out = result.rooms[clip_source.ROOM].omni_outputs[clip_source.DID]
     assert [m.rule_id for m in out.matched_rules] == ["r1"]
-    # 感知输入默认已是「图片多帧」（settings.yaml: rule_only_input=image /
-    # last_frame_only=false），不再是整窗 mp4；音频始终不进 rule_only 载荷。
+    # 感知输入默认已是「图片单帧」（settings.yaml: rule_only_input=image /
+    # last_frame_only=true）：图片按张计费、场景规则多判"此刻状态"，末帧足够；
+    # 音频始终不进 rule_only 载荷。
     assert "image_frames" in captured["payload"] and "video_base64" not in captured["payload"]
-    assert len(captured["payload"]["image_frames"]) > 1
+    assert len(captured["payload"]["image_frames"]) == 1
     assert "audio_base64" not in captured["payload"]
+
+    # 多帧路径仍要覆盖：显式关闭 last_frame_only（monkeypatch 自动还原）→ 重跑一次，
+    # 全窗口帧都发（动作过程 / 手势时序类规则更稳）。
+    from miloco.config import get_settings
+
+    monkeypatch.setitem(
+        get_settings().perception.engine.setdefault("input", {}),
+        "last_frame_only",
+        False,
+    )
+    await run_batch_pipeline(snapshots, {clip_source.DID: ctx}, config)
+    assert len(captured["payload"]["image_frames"]) > 1

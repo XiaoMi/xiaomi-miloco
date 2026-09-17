@@ -113,6 +113,13 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "场景联动(rule_only)媒体输入模式：image=窗口各帧图片(默认，静态规则判定更聚焦)；"
         "video=整窗 mp4(按帧计费的模型更省 token)。下一周期生效",
     ),
+    # 图片输入(rule_only_input=image)时是否每窗只送最后一帧：true(默认)=只送末帧，省 token；
+    # false=多帧全发，动作/手势类规则更稳。热读。
+    "perception.engine.input.last_frame_only": (
+        bool,
+        True,
+        "图片输入是否每窗只送最后一帧（默认 true）；仅在 rule_only_input=image 时生效",
+    ),
     "perception.engine.input.rule_only_video_single_frame": (
         bool,
         False,
@@ -137,6 +144,20 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "prompt 发给 omni，完全跳过拼接逻辑（camera_prompt/家庭档案/schema/全局感知提示词"
         "均不注入）；置空=回退代码内置装配版。日常改用 global_system_prompt + 逐规则"
         "「场景补充说明」。下一周期生效",
+    ),
+    # 感知模型详细判定输出（网页「设置 → 感知输入」可切）：
+    #   false(默认) = 只回命中规则的 id 数组；true = 逐条 hit + 不限字数的 reason。
+    "perception.engine.verbose": (
+        bool,
+        False,
+        "感知模型是否输出详细判定依据（默认 false：只回命中规则 id 数组，省 token 更快）",
+    ),
+    # 判定理由输出语言：auto(默认) = 跟随界面语言（MILOCO_APP_LANG → 系统 locale → 英文）；
+    # zh / en = 固定。热读。
+    "perception.engine.output_language": (
+        str,
+        "auto",
+        "感知判定理由的输出语言：auto(跟随界面语言，默认) | zh | en",
     ),
     # Smart Crop 双闸相与，两者都 true 才裁切；默认值同下方注释的对齐约定（yaml 里都是 true）。
     # 写「重启生效」而非「热读」：闸位在**后端进程内**确实是每窗口热读的，但 get_settings() 有

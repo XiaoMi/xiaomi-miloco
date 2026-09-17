@@ -4,8 +4,8 @@
  * 单独成文件是为了能在 node 环境的单测里直接引用：测试引用这里的常量，SettingsDrawer
  * 也引用同一个常量，两边不可能各写一个字面量后悄悄漂移。
  *
- * 默认值必须与后端 settings.yaml 一致（rule_only_input=image / last_frame_only=false，
- * 即"图片输入 + 每窗多帧"）。
+ * 默认值必须与后端 settings.yaml 一致（rule_only_input=image / last_frame_only=true，
+ * 即"图片输入 + 每窗只送末帧"）。
  */
 
 /** 感知输入的两种模式，顺序即 UI 按钮顺序。 */
@@ -14,8 +14,9 @@ export type PerceptionInputMode = (typeof PERCEPTION_INPUT_MODES)[number];
 
 /** 默认：图片输入（不是视频）。 */
 export const DEFAULT_PERCEPTION_INPUT: PerceptionInputMode = "image";
-/** 默认：一窗多帧全发（不是只送末帧；动作/手势类规则更稳）。 */
-export const DEFAULT_IMAGE_LAST_FRAME_ONLY = false;
+/** 默认：只送窗口最后一帧（图片按张计费，多帧纯属多花 token；场景规则判的多是"此刻状态"）。
+ *  关掉 = 一窗多帧全发，动作过程/手势时序类规则更稳。 */
+export const DEFAULT_IMAGE_LAST_FRAME_ONLY = true;
 
 /** 把非法/缺失的远端值收敛成合法模式（老后端不返该字段时回退默认）。 */
 export function normalizePerceptionInput(raw: unknown): PerceptionInputMode {

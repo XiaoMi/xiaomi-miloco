@@ -36,10 +36,24 @@ def parse_omni_response(
     except json.JSONDecodeError:
         return _fallback(f"Failed to parse JSON: {json_str[:200]}")
 
-    if not isinstance(parsed, dict):
+    if not isinstance(parsed, (dict, list)):
         return _fallback("Response is not an object")
 
-    return _build_output(parsed, rule_name_to_id)
+    return _build_output(_as_field_map(parsed), rule_name_to_id)
+
+
+def _as_field_map(parsed: Any) -> dict:
+    """把模型输出规整成「字段名 → 值」的映射。
+
+    rule_only（纯场景触发）模式的输出是**顶层数组**——紧凑模式是命中 id 数组
+    ``["d7d9e5"]``，详细模式是对象数组 ``[{"rule_id","hit","reason"}]``（见
+    field_registry.render_schema 的裸数组特例）。此处统一挂到 ``matched_rules`` 上，
+    下游 ``_build_output`` 无感；模型偶尔仍按旧格式多包一层 ``{"matched_rules": [...]}``
+    也能照常解析（兼容，不做强制）。
+    """
+    if isinstance(parsed, list):
+        return {"matched_rules": parsed}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def parse_identity_assignments(
@@ -213,7 +227,8 @@ def extract_json(content: str) -> str:
       3. Markdown 围栏提取（```json / ``` / ```` 四反引号 / 标签后带空格，见
          ``_FENCE_RE``）——Gemini 系模型输出围栏包裹 JSON 的比例很高（实测 trace
          55% 带围栏），围栏内再走 _find_last_valid_json；
-      4. 全文兜底：从右往左找最长有效 JSON 子串（容忍前缀/后缀说明文本）；
+      4. 全文兜底：先试整体 / 顶层数组，再从右往左找最长有效 JSON 子串
+         （容忍前缀/后缀说明文本）；
       5. ``_loose_loads`` —— 标准解析失败时仅做「去尾随逗号」修复重试
          （``{"a":1,}`` / ``[1,2,]`` 是模型最常见 JSON 语法错误；不做单引号/注释
          修复——字符串内误伤风险高、模型场景罕见）。
@@ -284,7 +299,30 @@ def _loose_loads(text: str) -> str:
 
 
 def _find_last_valid_json(content: str) -> str:
-    """Find the last valid JSON object in content, searching from end to start."""
+    """Find the last valid JSON object in content, searching from end to start.
+
+    先试「整体就是一段 JSON」与「顶层数组」两种形态，再退回按 ``}`` / ``{`` 的反向搜索：
+    反向搜索是为"散文里夹 JSON"设计的，对**顶层对象数组** ``[{...},{...}]`` 会从最后一个
+    ``}`` 往回取，截出单个内层对象（多个元素时只剩最后一个），rule_only 详细模式
+    （``verbose=true``）的 hit/reason 会因此整段丢失。
+    """
+    stripped = content.strip()
+    if stripped[:1] in ("[", "{"):
+        try:
+            return _loose_loads(stripped)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    # 数组在对象之前出现 → 该回复的根是数组（前后可能夹着"好的，结果如下："这类说明文字）：
+    # 取第一个括号平衡的数组（状态机认字符串/转义，见 _scan_array）。`{` 在 `[` 之前则不认——
+    # 那是对象根，数组只是某个字段的值，得留给下面的反向搜索。
+    bracket = stripped.find("[")
+    brace = stripped.find("{")
+    if bracket >= 0 and (brace < 0 or bracket < brace):
+        found = _scan_array(stripped, bracket)
+        if found is not None:
+            return json.dumps(found, ensure_ascii=False)
+
+    content = stripped
     # Find the position of the last }
     last_close = content.rfind("}")
     if last_close < 0:
@@ -439,10 +477,33 @@ def _parse_matched_rules(
     raw: Any,
     rule_name_to_id: "dict[str, str] | None" = None,
 ) -> list[MatchedRule]:
+    """``matched_rules`` → ``list[MatchedRule]``。
+
+    兼容三种模型输出形态（同一 prompt 开关的两个档位 + 旧格式）：
+    - 紧凑/详细新格式（rule_only 顶层裸数组，或普通路径的该字段）：``["d7d9e5"]`` /
+      ``[{"rule_id","hit","reason"}]``；
+    - 旧格式：同上但多包一层 ``{"matched_rules": [...]}``（模型偶发），此处拆掉；
+    - 字符串条目：紧凑模式只回 id，故没有 reason / hit 可供判定，**只要 id 能在本窗规则里
+      对上就视为命中**（对不上仍按幻觉丢弃）。
+    """
+    if isinstance(raw, dict):
+        # 兼容模型把字段再包一层 {"matched_rules": [...]}
+        raw = raw.get("matched_rules", raw)
     if not isinstance(raw, list):
         return []
     result = []
     for item in raw:
+        if isinstance(item, str):
+            # 紧凑模式：元素就是短 id（或旧格式下的完整 UUID / rule_name）
+            rid = _resolve_rule_ref({"rule_id": item}, "", rule_name_to_id)
+            if rid is None:
+                logger.error(
+                    "omni 输出了不在「# 待判断规则」列表中的 rule_id=%r，判定为幻觉，丢弃不触发",
+                    _sanitize_for_log(item),
+                )
+                continue
+            result.append(MatchedRule(rule_id=rid, rule_name="", reason=""))
+            continue
         if not isinstance(item, dict):
             continue
         # B 结构：hit=false = 模型评估为"未命中"（reason 是否定理由），直接丢弃、不触发下游。
@@ -568,22 +629,15 @@ def _fallback(error: str) -> OmniOutput:
 # =============================================================================
 
 
-def _try_extract_array(buffer: str, key: str) -> list | None:
-    """Extract a JSON array value by key from a partial streaming buffer.
-
-    Uses a bracket-depth state machine to detect when "key":[...] is fully
-    closed. Returns the parsed list on success, None if not yet complete.
-    """
+def _strip_think(buffer: str) -> str:
+    """去掉 ``<think>…</think>`` 段（含只有开始标签的截断情形），供流式提取用。"""
     cleaned = re.sub(r"<think>[\s\S]*?</think>", "", buffer)
     cleaned = re.sub(r"^[\s\S]*?</think>", "", cleaned)
-    if not cleaned:
-        cleaned = buffer
+    return cleaned or buffer
 
-    match = re.search(rf'"{key}"\s*:\s*\[', cleaned)
-    if not match:
-        return None
 
-    start = match.end() - 1  # position of the opening [
+def _scan_array(cleaned: str, start: int) -> list | None:
+    """从 ``cleaned[start] == "["`` 起用括号深度状态机扫一个完整数组；未闭合返回 None。"""
     depth = 0
     in_string = False
     escape = False
@@ -615,6 +669,32 @@ def _try_extract_array(buffer: str, key: str) -> list | None:
     return None  # array not yet closed
 
 
+def _try_extract_array(buffer: str, key: str) -> list | None:
+    """Extract a JSON array value by key from a partial streaming buffer.
+
+    Uses a bracket-depth state machine to detect when "key":[...] is fully
+    closed. Returns the parsed list on success, None if not yet complete.
+    """
+    cleaned = _strip_think(buffer)
+    match = re.search(rf'"{key}"\s*:\s*\[', cleaned)
+    if not match:
+        return None
+    return _scan_array(cleaned, match.end() - 1)
+
+
+def _try_extract_top_array(buffer: str) -> list | None:
+    """缓冲区**本身就是顶层数组**时提取它（rule_only 裸数组输出，无 matched_rules 包裹）。
+
+    只认「第一个非空白字符是 ``[``」这一种形态：对象形态的输出里数组都跟在某个 key
+    之后，由 ``_try_extract_array(buffer, "matched_rules")`` 负责，二者互不干扰。
+    """
+    cleaned = _strip_think(buffer)
+    start = len(cleaned) - len(cleaned.lstrip())
+    if cleaned[start : start + 1] != "[":
+        return None
+    return _scan_array(cleaned, start)
+
+
 def try_extract_speeches(buffer: str) -> list[Speech] | None:
     """Try to extract the speeches array from a partial streaming buffer."""
     raw = _try_extract_array(buffer, "speeches")
@@ -627,8 +707,15 @@ def try_extract_matched_rules(
     buffer: str,
     rule_name_to_id: "dict[str, str] | None" = None,
 ) -> list[MatchedRule] | None:
-    """Try to extract the matched_rules array from a partial streaming buffer."""
+    """从流式缓冲区里尽早取出 ``matched_rules``。
+
+    两种形态都认：普通路径的 ``"matched_rules":[…]``，以及 rule_only 的**顶层裸数组**
+    （``["d7d9e5"]`` / ``[{"rule_id",…}]``）。后者早期提取对"命中即触发"的场景很关键——
+    不必等整个 JSON 收完再取规则。
+    """
     raw = _try_extract_array(buffer, "matched_rules")
+    if raw is None:
+        raw = _try_extract_top_array(buffer)
     if raw is None:
         return None
     return _parse_matched_rules(raw, rule_name_to_id)
@@ -657,10 +744,10 @@ def parse_omni_response_from_text(
     except json.JSONDecodeError:
         return _fallback(f"Failed to parse JSON: {json_str[:200]}")
 
-    if not isinstance(parsed, dict):
+    if not isinstance(parsed, (dict, list)):
         return _fallback("Response is not an object")
 
-    return _build_output(parsed, rule_name_to_id)
+    return _build_output(_as_field_map(parsed), rule_name_to_id)
 
 
 def parse_tier_c_verify_response(raw: dict[str, Any]) -> dict[str, Any]:

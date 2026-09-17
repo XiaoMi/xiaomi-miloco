@@ -253,10 +253,12 @@ inp = get_settings().perception.engine['input']
 assert inp['video_short_edge'] == 768, inp
 assert inp['media_resolution'] == 'high', inp
 assert inp['rule_only_input'] == 'image', inp
-assert inp['last_frame_only'] is False, inp
+assert inp['last_frame_only'] is True, inp
+assert get_settings().perception.engine['verbose'] is False, 'verbose 默认应为 false'
+assert get_settings().perception.engine['output_language'] == 'auto', 'output_language 默认应为 auto'
 print('perception defaults ok')
-" "$HOME_DIR" >/dev/null || fail "包内感知默认档不对（video_short_edge=768 / media_resolution=high / rule_only_input=image / last_frame_only=false）"
-pass "感知默认档：768p / media_resolution=high / 图片输入 / 多帧"
+" "$HOME_DIR" >/dev/null || fail "包内感知默认档不对（video_short_edge=768 / media_resolution=high / rule_only_input=image / last_frame_only=true / verbose=false / output_language=auto）"
+pass "感知默认档：768p / media_resolution=high / 图片输入 / 只送末帧 / 紧凑输出"
 
 # 「日志」页的一键清理:三处存储各一个 POST —— meaningful_events / on_demand_log(miloco.db)
 # 与 action_ledger(observability.db,「触发场景」在这本台账里;早期版本漏了它)。

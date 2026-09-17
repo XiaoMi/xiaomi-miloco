@@ -18,6 +18,11 @@ import {
   PERCEPTION_INPUT_MODES,
   type PerceptionInputMode,
 } from "@/lib/perceptionInput";
+import {
+  buildPerceptionVerbosePayload,
+  DEFAULT_PERCEPTION_VERBOSE,
+  normalizePerceptionVerbose,
+} from "@/lib/perceptionOutput";
 import { toast } from "./Toast";
 
 // PerceptionConfig 里 min_suggestion_urgency 声明为可选(老 backend 不返此字段);
@@ -35,11 +40,14 @@ const DEFAULTS: PerceptionConfig = {
   smart_crop_enabled: true,
   min_suggestion_urgency: DEFAULT_MIN_URGENCY,
   global_system_prompt: "",
-  // 感知输入默认「图片 + 多帧」（settings.yaml: rule_only_input=image /
-  // last_frame_only=false）。常量与 payload 组装都在 @/lib/perceptionInput，
+  // 感知输入默认「图片 + 只送末帧」（settings.yaml: rule_only_input=image /
+  // last_frame_only=true）。常量与 payload 组装都在 @/lib/perceptionInput，
   // 单测引用同一份常量，不会各写一个字面量后悄悄漂移。
   perception_input: DEFAULT_PERCEPTION_INPUT,
   image_last_frame_only: DEFAULT_IMAGE_LAST_FRAME_ONLY,
+  // 感知输出默认「只回命中规则 id」（settings.yaml: verbose=false）。判定理由的输出语言
+  // 不在这里配——它跟随界面语言，由 i18n 侧同步给后端（见 lib/perceptionOutput）。
+  perception_verbose: DEFAULT_PERCEPTION_VERBOSE,
 };
 
 // 全局感知系统提示词长度上限：与后端 PerceptionConfigBody 的 max_length 对齐，
@@ -83,6 +91,11 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [imageLastFrameOnly, setImageLastFrameOnly] = useState(
     DEFAULT_IMAGE_LAST_FRAME_ONLY,
   );
+  // 感知模型详细判定输出（verbose）：默认关 = 只回命中规则 id 数组（省 token、更快）；
+  // 开 = 逐条 hit + 不限字数 reason，排查漏报/误报时临时打开。
+  const [perceptionVerbose, setPerceptionVerbose] = useState(
+    DEFAULT_PERCEPTION_VERBOSE,
+  );
   // 全局感知系统提示词：非空时后端追加到感知 system prompt 尾部（内置内容保留）。
   const [globalPrompt, setGlobalPrompt] = useState(
     DEFAULTS.global_system_prompt ?? "",
@@ -122,6 +135,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
         // 老 backend 不返这两个字段 → 回退后端默认（图片 + 多帧），不误导成"远端就是这么配的"。
         setPerceptionInput(normalizePerceptionInput(c.perception_input));
         setImageLastFrameOnly(c.image_last_frame_only === true);
+        // 老 backend 不返 verbose → 回退 false（= 默认只回命中 id）。
+        setPerceptionVerbose(normalizePerceptionVerbose(c.perception_verbose));
       }),
       getSchedulerConfig().then((s) => {
         setSchedulerLoaded(s.enabled);
@@ -154,6 +169,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
       minUrgency !== (config.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY) ||
       perceptionInput !== normalizePerceptionInput(config.perception_input) ||
       imageLastFrameOnly !== (config.image_last_frame_only === true) ||
+      perceptionVerbose !== normalizePerceptionVerbose(config.perception_verbose) ||
       globalPrompt.trim() !== (config.global_system_prompt ?? "").trim());
   // schedulerLoaded === null 表示这次没读到服务端值（接口缺失 / 版本错位）：
   // 此时 schedulerDirty 恒 false，拨动开关不会写盘，故置灰禁用避免呈现「看着能动、
@@ -189,11 +205,16 @@ export function SettingsDrawer({ open, onClose }: Props) {
           min_suggestion_urgency: minUrgency,
           global_system_prompt: globalPrompt.trim(),
           ...buildPerceptionInputPayload(perceptionInput, imageLastFrameOnly),
+          // 只提交抽屉里真正能改的字段。判定理由语言**不在这里改**（它跟随界面语言、由 i18n 侧
+          // 同步）：PUT 是局部合并，硬回传一个读到的旧值反而会在"切过语言之后才点保存"时把语言
+          // 写回旧值 —— 同一个坑的另一个入口，故干脆不传（后端保持原值）。
+          ...buildPerceptionVerbosePayload(perceptionVerbose),
         });
         setConfig(updated);
         setSmartCrop(updated.smart_crop_enabled === true);
         setPerceptionInput(normalizePerceptionInput(updated.perception_input));
         setImageLastFrameOnly(updated.image_last_frame_only === true);
+        setPerceptionVerbose(normalizePerceptionVerbose(updated.perception_verbose));
         // 回填后端规范化后的值（未来若后端做 trim/截断，前端随之收敛）。
         setGlobalPrompt(updated.global_system_prompt ?? "");
         if (updated.restart_ok === false) {
@@ -233,6 +254,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
     setMinUrgency(DEFAULT_MIN_URGENCY);
     setPerceptionInput(DEFAULT_PERCEPTION_INPUT);
     setImageLastFrameOnly(DEFAULT_IMAGE_LAST_FRAME_ONLY);
+    setPerceptionVerbose(DEFAULT_PERCEPTION_VERBOSE);
     setGlobalPrompt(DEFAULTS.global_system_prompt ?? "");
     // 仅在开关可配置时才回默认 ON；不可用（schedulerLoaded===null，置灰）时保持
     // 当前视觉，避免把置灰的开关拨到 ON 且 schedulerDirty 恒 false 无从写盘。
@@ -481,6 +503,36 @@ export function SettingsDrawer({ open, onClose }: Props) {
                     {t("settings.perceptionInputVideoNote")}
                   </p>
                 )}
+
+                {/* 详细判定输出（verbose）：与图片/视频、单帧/多帧都正交，故放在三元之外。
+                    开 = 让模型逐条给出 hit 与不限字数的 reason，排查"该命中没命中 /
+                    不该命中却命中"；关（默认）= 只回命中规则的 id 数组，判定更快。 */}
+                <div className="space-y-2 border-t border-border pt-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-body font-medium text-text-primary">
+                      {t("settings.perceptionVerbose")}
+                    </label>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={perceptionVerbose}
+                      aria-label={t("settings.perceptionVerbose")}
+                      onClick={() => setPerceptionVerbose((v) => !v)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                        perceptionVerbose ? "bg-brand-primary" : "bg-border"
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition-transform ${
+                          perceptionVerbose ? "translate-x-[22px]" : "translate-x-0.5"
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  <p className="text-caption text-text-tertiary leading-relaxed">
+                    {t("settings.perceptionVerboseHint")}
+                  </p>
+                </div>
               </div>
               )}
 

@@ -28,11 +28,11 @@ class InputConfig:
     # mimo/qwen 忽略此字段。取值不认识一律按 high(见 provider._gemini_media_resolution)。
     # 运行时由 GeminiAdapter 实时读 settings,改配置免重启。
     media_resolution: str = "high"
-    # rule_only（纯场景触发）图片输入：True = 只取窗口**最后一帧**作输入图（省 token、更快，
-    # 静态状态类规则足够）；False = 多帧全发（动作/手势类规则更稳）。默认 False（多帧）——
-    # 网页「设置 → 感知输入」可切换。运行时由 prompt_builder 实时读 settings
-    # （同 video_short_edge 模式，改配置免重启）。
-    last_frame_only: bool = False
+    # rule_only（纯场景触发）图片输入：True = 只取窗口**最后一帧**作输入图（省 token、更快）。
+    # **默认 True**——图片按张计费，多帧纯属多花 token，而场景规则绝大多数判的是"此刻状态"；
+    # False = 多帧全发（动作/手势类规则更稳）。网页「设置 → 感知输入」可切换。运行时由
+    # prompt_builder 实时读 settings（同 video_short_edge 模式，改配置免重启）。
+    last_frame_only: bool = True
     # rule_only 媒体输入模式："image"（**默认**，窗口各帧 JPEG，对纯静态规则判定更聚焦）
     # | "video"（mp4 视频——Gemini 视频按帧计费 ~66 tok/帧，同分辨率下 token 约为图片 1/4）。
     # 网页「设置 → 感知输入」可切换；运行时由 prompt_builder 热读 settings，免重启。

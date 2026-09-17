@@ -830,9 +830,15 @@ export interface PerceptionConfig {
    *  热读:写盘后下个感知窗口生效,不重启。老后端不返此字段 → undefined,读取处回退 image。 */
   perception_input?: "image" | "video";
   /** 图片输入时是否每窗只送最后一帧(backend perception.engine.input.last_frame_only):
-   *  默认 false=多帧全发(动作/手势类规则更稳),true=只送末帧(省 token、更快)。
-   *  仅 perception_input === "image" 时生效。老后端不返此字段 → undefined,回退 false。 */
+   *  默认 **true=只送末帧**(省 token、更快),false=多帧全发(动作/手势类规则更稳)。
+   *  仅 perception_input === "image" 时生效。老后端不返此字段 → undefined,回退 true。 */
   image_last_frame_only?: boolean;
+  /** 感知模型详细判定输出(backend perception.engine.verbose):false(默认)=只回命中规则
+   *  id 数组(无 reason)；true=逐条 hit + 不限字数的 reason(排查漏报/误报用)。热读。 */
+  perception_verbose?: boolean;
+  /** 判定理由输出语言(backend perception.engine.output_language):auto(默认,跟随界面语言)/
+   *  zh / en。网页切语言时会自动同步成实际语言。老后端不返此字段 → undefined,回退 auto。 */
+  perception_output_language?: "auto" | "zh" | "en";
 }
 
 export async function getPerceptionConfig(): Promise<PerceptionConfig> {
