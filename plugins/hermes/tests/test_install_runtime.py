@@ -1,4 +1,7 @@
-"""安装器 runtime 平台探测与指针文件测试。"""
+"""安装器 runtime 平台探测与指针文件测试。
+
+这些测试放在 Hermes CI 已覆盖的测试目录中，避免安装器核心回归测试只在本地执行。
+"""
 
 import importlib.util
 import sys
@@ -16,7 +19,7 @@ except ModuleNotFoundError:
 
 @pytest.fixture(scope="module")
 def installer():
-    path = Path(__file__).parents[1] / "install.py"
+    path = Path(__file__).parents[3] / "scripts" / "install.py"
     spec = importlib.util.spec_from_file_location("miloco_install_under_test", path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

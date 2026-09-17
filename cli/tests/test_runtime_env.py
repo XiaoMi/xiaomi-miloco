@@ -49,6 +49,7 @@ def test_bootstrap_prefers_explicit_home_over_pointer(monkeypatch, tmp_path):
 
 def test_read_runtime_env_supports_selected_profile(monkeypatch, tmp_path):
     _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
     profile = tmp_path / "profile.env"
     profile.write_text("MILOCO_HOME='/tmp/profile home'\nMILOCO_TOKEN='a%b'\n")
     monkeypatch.setenv("MILOCO_RUNTIME_ENV", str(profile))
@@ -56,6 +57,26 @@ def test_read_runtime_env_supports_selected_profile(monkeypatch, tmp_path):
     assert config.read_runtime_env() == {
         "MILOCO_HOME": "/tmp/profile home",
         "MILOCO_TOKEN": "a%b",
+    }
+
+
+def test_selected_profile_falls_back_to_default_pointer(monkeypatch, tmp_path):
+    _clear_runtime_env(monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    default = tmp_path / ".config" / "miloco" / "default.env"
+    default.parent.mkdir(parents=True)
+    default.write_text(
+        "MILOCO_HOME='/tmp/default home'\nMILOCO_AGENT_PLATFORM=hermes\n",
+        encoding="utf-8",
+    )
+    profile = tmp_path / "profile.env"
+    profile.write_text("MILOCO_TOKEN=profile-token\n", encoding="utf-8")
+    monkeypatch.setenv("MILOCO_RUNTIME_ENV", str(profile))
+
+    assert config.read_runtime_env() == {
+        "MILOCO_HOME": "/tmp/default home",
+        "MILOCO_AGENT_PLATFORM": "hermes",
+        "MILOCO_TOKEN": "profile-token",
     }
 
 

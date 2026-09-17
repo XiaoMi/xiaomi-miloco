@@ -1871,6 +1871,7 @@ def _runtime_pointer_candidates() -> list[Path]:
 
 
 def _read_runtime_pointer(path: Path) -> dict[str, str]:
+    """Read the pointer format shared with CLI config and Hermes step 1.95."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -2020,7 +2021,7 @@ def _default_miloco_home(agent_platform: str) -> Path:
 
 
 def _write_runtime_pointer(miloco_home: Path, agent_platform: str) -> Path:
-    """Persist the active Miloco runtime for standalone ``miloco-cli`` calls."""
+    """Persist the pointer format shared with CLI config and Hermes step 1.95."""
     runtime_dir = _default_runtime_pointer().parent
     runtime_file = runtime_dir / "default.env"
     runtime_dir.mkdir(parents=True, exist_ok=True)

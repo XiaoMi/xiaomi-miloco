@@ -33,7 +33,12 @@ def _default_runtime_env() -> Path:
 
 
 def _read_env_file(path: Path) -> dict[str, str]:
-    """Read a small, conservative KEY=VALUE env file."""
+    """Read a small, conservative KEY=VALUE env file.
+
+    Keep this parser aligned with ``scripts/install.py::_read_runtime_pointer``;
+    the Hermes installer has an equivalent writer at step 1.95 because the
+    standalone installer cannot import the CLI package.
+    """
     if not path.is_file():
         return {}
     out: dict[str, str] = {}
@@ -61,6 +66,24 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return out
 
 
+def _runtime_env_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    if runtime_env := os.environ.get("MILOCO_RUNTIME_ENV"):
+        candidates.append(Path(runtime_env).expanduser())
+    default = _default_runtime_env()
+    if default not in candidates:
+        candidates.append(default)
+    return candidates
+
+
+def read_runtime_env() -> dict[str, str]:
+    """Read the default pointer with an optional profile layered on top."""
+    merged: dict[str, str] = {}
+    for path in reversed(_runtime_env_candidates()):
+        merged.update(_read_env_file(path))
+    return merged
+
+
 def bootstrap_runtime_env() -> None:
     """Load the installed runtime pointer before any config path is resolved.
 
@@ -72,27 +95,12 @@ def bootstrap_runtime_env() -> None:
     if os.environ.get("MILOCO_HOME"):
         return
 
-    candidates: list[Path] = []
-    if runtime_env := os.environ.get("MILOCO_RUNTIME_ENV"):
-        candidates.append(Path(runtime_env).expanduser())
-    candidates.append(_default_runtime_env())
-
-    for path in candidates:
-        values = _read_env_file(path)
-        home = values.get("MILOCO_HOME")
-        if not home:
-            continue
+    values = read_runtime_env()
+    home = values.get("MILOCO_HOME")
+    if home:
         for key, value in values.items():
             os.environ.setdefault(key, value)
         os.environ["MILOCO_HOME"] = home
-        return
-
-
-def read_runtime_env() -> dict[str, str]:
-    """Read the selected runtime environment file for service configuration."""
-    if runtime_env := os.environ.get("MILOCO_RUNTIME_ENV"):
-        return _read_env_file(Path(runtime_env).expanduser())
-    return _read_env_file(_default_runtime_env())
 
 
 def miloco_home() -> Path:

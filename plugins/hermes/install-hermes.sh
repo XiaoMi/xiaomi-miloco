@@ -438,16 +438,20 @@ SUPERVISORD_CONF="$MILOCO_HOME/supervisord.conf"
   fi
 fi
 
-# --- 1.75 MILOCO_HOME 也写进 ~/.hermes/.env ---
+# --- 1.75 MILOCO_HOME 也写进 $HERMES_HOME/.env ---
 # Hermes gateway 由 launchd plist 直接拉起，不 source shell rc，
 # 但会通过 load_hermes_dotenv 加载 $HERMES_HOME/.env。
-# 消费方：gateway 里的 miloco-plugin/paths.py fallback = ~/.hermes/miloco
-# （见 plugins/hermes/miloco-plugin/paths.py::miloco_home）。只有 MILOCO_HOME 恰好
-# 等于 plugin fallback 时才可省略 .env（gateway 读不到 env 也 fallback 到同一路径）。
+# 消费方：gateway 里的 miloco-plugin/paths.py fallback =
+# $HERMES_HOME/miloco，HERMES_HOME 未设置时才是 ~/.hermes/miloco（见
+# plugins/hermes/miloco-plugin/paths.py::miloco_home）。只有 MILOCO_HOME 同时
+# 等于两个 fallback 时才可省略 .env（gateway 读不到 env 也 fallback 到同一路径）。
 # 注意：跟上面 1.7 的判断不同——两个消费方的 fallback 不同，判断也要各自对齐。
-# plugin fallback 仍是 ~/.hermes/miloco（launchd 防护），所以即使 HERMES_HOME
-# 不是 ~/.hermes，脚本层默认落 HERMES_HOME/miloco 也 != user fallback，.env 必写。
-if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.hermes/miloco" ]; then
+# 只有 MILOCO_HOME 同时等于两个 fallback 时才可省略 .env；HERMES_HOME
+# 非默认值时两个 fallback 不同，因此必须写入，避免 gateway 与 backend 分裂。
+if [ -n "$MILOCO_HOME" ] && {
+  [ "$MILOCO_HOME" != "$HOME/.hermes/miloco" ] ||
+  [ "$MILOCO_HOME" != "$HERMES_HOME/miloco" ]
+}; then
   touch "$HERMES_HOME/.env"
   chmod 600 "$HERMES_HOME/.env"
   if grep -q '^MILOCO_HOME=' "$HERMES_HOME/.env" 2>/dev/null; then
@@ -589,6 +593,7 @@ mark_done 1.9
 # --- 1.95 CLI runtime pointer ---
 # shell rc 只对新 shell 生效；项目 .env 又不能在 MILOCO_HOME 缺失时发现自身。
 # 写一个稳定的用户级 pointer，让独立执行 miloco-cli 时也能 bootstrap 到正确目录。
+# 格式需与 cli/src/miloco_cli/config.py 和 scripts/install.py 保持一致。
 RUNTIME_ENV_DIR="$HOME/.config/miloco"
 RUNTIME_ENV_FILE="$RUNTIME_ENV_DIR/default.env"
 mkdir -p "$RUNTIME_ENV_DIR"

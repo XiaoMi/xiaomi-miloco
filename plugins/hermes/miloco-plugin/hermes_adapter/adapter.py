@@ -120,7 +120,7 @@ def _resolve_trace_dir() -> Path:
         from .paths import miloco_home
         return miloco_home() / "trace" / "agent"
     except Exception:
-        hermes_home = os.environ.get("HERMES_HOME", "~/.hermes")
+        hermes_home = os.environ.get("HERMES_HOME") or "~/.hermes"
         return Path(hermes_home).expanduser() / "miloco" / "trace" / "agent"
 
 

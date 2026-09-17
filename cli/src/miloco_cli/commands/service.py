@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -280,6 +281,9 @@ def _ensure_miloco_home_in_env() -> None:
     os.environ["MILOCO_HOME"] = str(miloco_home())
 
 
+_SUPERVISOR_INLINE_COMMENT_RE = re.compile(r"\s[#;]")
+
+
 def _escape_supervisor_env_value(value: str) -> str:
     """Escape a value for supervisord's quoted ``environment=`` syntax."""
     if "\n" in value or "\r" in value:
@@ -291,17 +295,25 @@ def _escape_supervisor_env_value(value: str) -> str:
             "runtime env 的值不能同时包含单引号和双引号，"
             "请改用 shell 环境变量传递"
         )
-    # supervisord first applies config interpolation (literal '%' is '%%') and
-    # then parses the quoted value with shlex. Keep backslashes literal by using
-    # single quotes when the value contains a double quote; otherwise use the
-    # existing double-quoted form.
+    if _SUPERVISOR_INLINE_COMMENT_RE.search(value):
+        raise click.ClickException(
+            "runtime env 的值不能在空白字符后包含 # 或 ;"
+            "（supervisord 会将其视为内联注释并截断 environment 配置），"
+            "请改用 shell 环境变量传递"
+        )
+    # supervisord 先做配置插值，再用 shlex 解析 environment。字面 '%' 需
+    # 加倍；单引号内的反斜杠不会被 shlex 处理，因此值含反斜杠或双引号时
+    # 优先走单引号路径。无法安全表达的单双引号组合在上面明确拒绝。
     return value.replace("%", "%%")
 
 
 def _supervisor_env_item(key: str, value: str) -> str:
     escaped = _escape_supervisor_env_value(value)
-    quote = "'" if '"' in value else '"'
-    return f"{key}={quote}{escaped}{quote}"
+    if "'" not in value and ("\"" in value or "\\" in value):
+        return f"{key}='{escaped}'"
+    # 双引号路径中 shlex 会解释反斜杠，必须加倍才能保留原值。
+    escaped_backslashes = escaped.replace("\\", "\\\\")
+    return f'{key}="{escaped_backslashes}"'
 
 
 def _generate_supervisor_conf(server_cmd: str) -> None:
