@@ -298,7 +298,7 @@ def test_run_rejected_when_latest_unknown(client):
     assert resp.status_code == 400
 
 
-def test_run_starts_detached_and_singleflight(client):
+def test_run_starts_detached_and_singleflight(client, monkeypatch):
     launched = {"n": 0, "argv": None}
 
     class FakePopen:
@@ -309,6 +309,10 @@ def test_run_starts_detached_and_singleflight(client):
             assert k.get("start_new_session") is True
             assert k.get("stdin") is not None
 
+    monkeypatch.setenv("MILOCO_AGENT__PLATFORM", "hermes")
+    from miloco.config.settings import reset_settings
+
+    reset_settings()
     _seed_cache_newer()
     with (
         patch("miloco.admin.router._pkg_version", return_value="2026.7.2"),  # release
