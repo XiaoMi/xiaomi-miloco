@@ -57,6 +57,8 @@
     "example1": "帮我盯着孩子每天练琴，满 30 分钟提醒我",
     "example2": "提醒家里老人每天量一次血压",
     "example3": "家里没人时如果窗户还开着就通知我",
-    "viewExamples": "如何新增任务"
+    "viewExamples": "如何新增任务",
+    "triggerNotEditable": "该条件由系统按设备属性生成，不能在这里修改。",
+    "rulesManagedHintReadOnly": "触发条件由系统按设备属性生成，不能修改；执行动作与推送由 Agent 创建管理，如需调整可与 Agent 对话。"
   }
 }

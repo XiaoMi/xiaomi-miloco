@@ -218,6 +218,7 @@ class TaskService:
                     rule_id=rule.id,
                     query=rule.condition.query,
                     direction=rule.resolved_direction.value,
+                    source_type=rule.resolved_source_type,
                     actions_desc=self._rule_actions_desc(rule),
                 )
             )

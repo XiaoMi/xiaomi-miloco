@@ -474,7 +474,7 @@ class TaskStateMachine:
 
         两种形态问的不是同一个问题, 不能共用一个判据:
 
-        - **session**: 有没有会话条件还成立。它的"条件成立"就等于"还在会话中"。
+        - **session**: 会话还撑着吗。它的"条件成立"就等于"还在会话中"。
         - **enter + exit**: 出口条件是不是都没成立。它压根没有会话条件, 拿"有没有
           条件撑着"去问答案恒为否 —— 改个防抖参数都会把 task 打成退出、白跑一次
           退出动作。
@@ -483,15 +483,21 @@ class TaskStateMachine:
         出去, 那次退出动作也永远不会发。
 
         ``_is_condition_satisfied`` 是三值: ``True`` 成立, ``False`` 观测到不成立,
-        ``None`` 还没喂过数据(新加进来的 rule 就是这种)。两条分支都只认 ``True``,
-        但导向相反的保守方向: session 全是 ``None`` 时无从确认还撑着, 宁可多发一次
-        退出也不要静默卡在 on; enter + exit 没观测到出口成立就不该退, 那次退出动作
-        是真会对外下指令的。
+        ``None`` 不知道 —— 来源有两个: 还没喂过数据(新加进来的 rule), 以及 iot 源在
+        设备离线时置的未知。两条分支都只认明确的观测, 都不让 ``None`` 导向退出:
+
+        - **session**: 只有观测到会话条件不成立才算会话结束。拿 ``None`` 当"没撑着"
+          会在设备离线期间的任意一次重算上误发一次 on_exit, 而 runner 侧的边沿缓存
+          没被清过, 设备回来时属性没变就只产 STILL_IN, 两层就此分叉且不自愈。
+        - **enter + exit**: 没观测到出口成立就不该退, 那次退出动作是真会对外下指令的。
         """
         # 按"有没有会话规则"分派, 不是按 is_session_type —— 后者的含义是"有出路径",
         # enter + exit 也满足, 走进会话分支就正好踩上面说的那个坑。
         if topology.holding_rule_ids:
-            return self._any_condition_true(topology.holding_rule_ids)
+            return not all(
+                self._is_condition_satisfied(rid) is False
+                for rid in topology.holding_rule_ids
+            )
         if not topology.exit_side_rule_ids:
             return False
         return not self._any_condition_true(topology.exit_side_rule_ids)

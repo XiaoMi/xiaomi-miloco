@@ -99,10 +99,7 @@ def write_prop(
 
 
 def present_prop_iids(store: StateStore, did: str) -> set[str]:
-    """容器里这台设备已有哪些属性叶子。
-
-    补拉两处用它：请求侧算缺口、写入侧防覆盖。两处同一份判据。
-    """
+    """容器里这台设备已有哪些属性叶子。上线补拉用它算缺口。"""
     have = store.get(f"iot/device/{did}/prop", {})
     return set(have) if isinstance(have, dict) else set()
 
@@ -156,15 +153,23 @@ class IotPushWriter:
         else:
             self._count("online_rejected")
 
-    async def write_pulled_props(self, did: str, values: dict[str, Any]) -> int:
+    async def write_pulled_props(
+        self, did: str, values: dict[str, Any], *, keep_reported_since: int = 0
+    ) -> int:
         """把拉来的一批属性写进容器，过与推送同一套闸。返回写进去的条数。
 
-        `values` 的键是 `"<siid>.<piid>"`。补拉走这里而不是自己写，是为了让「逐叶子
-        往 `iot/device/*/prop` 写的都过同一套闸」成为结构保证 —— 两道闸都在写入的那
-        一刻判，所以云端往返期间设备搬出当前家庭也挡得住。
+        `values` 的键是 `"<siid>.<piid>"`。拉来的都走这里而不是自己写，是为了让「逐
+        叶子往 `iot/device/*/prop` 写的都过同一套闸」成为结构保证 —— 两道闸都在写入
+        的那一刻判，所以云端往返期间设备搬出当前家庭也挡得住。
 
-        **缺口在这里重算，紧挨着写、中间没有 await。** 云端给的是缓存里的最后一次上报、
-        推送给的是实时值，容器没有时间戳可仲裁 —— 往返期间被推送填上的那几条不覆盖。
+        **不用旧值盖掉更新的值。** 云端给的是缓存里的最后一次上报、推送给的是实时值，
+        谁新只能靠叶子上的 `last_reported` 判。`keep_reported_since` 是这次拉取开始
+        的时刻：不早于它的叶子说明往返期间有更新的值到达，不覆盖。
+
+        默认 0 = 已经在树上的一律不覆盖 —— 上线补拉走这条：它拉的本来就是缺的叶子，
+        期间被推送填上的那几条一条都不该动。
+
+        **判据在这里现读，紧挨着写、中间没有 await。**
         """
         if not self._scope_is_aligned():
             self._count("pull_not_aligned")
@@ -172,10 +177,10 @@ class IotPushWriter:
         if not await self._in_current_home(did):
             self._count("pull_out_of_home")
             return 0
-        present = present_prop_iids(self._store, did)
         written = 0
         for iid, value in values.items():
-            if iid in present:
+            entry = self._store.get_entry(f"iot/device/{did}/prop/{iid}")
+            if entry is not None and entry.last_reported >= keep_reported_since:
                 self._count("pull_not_overwritten")
                 continue
             if write_prop(self._store, did, iid, value, source=PULL_SOURCE):

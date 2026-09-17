@@ -22,7 +22,7 @@ from miloco.middleware import (
     verify_token,
     verify_websocket_token,
 )
-from miloco.middleware.exceptions import HTTPException
+from miloco.middleware.exceptions import BadRequestException, HTTPException
 from miloco.miot.schema import (
     AuthorizeRequest,
     CameraCropToggleRequest,
@@ -40,7 +40,7 @@ from miloco.miot.ws import (
     miot_video_stream_manager,
 )
 from miloco.schema.common_schema import NormalResponse
-from miloco.utils.common import escape_for_js_string
+from miloco.utils.common import escape_for_js_string, safe_log
 
 logger = logging.getLogger(name=__name__)
 
@@ -360,6 +360,75 @@ async def get_device_spec(did: str, current_user: str = Depends(verify_token)):
     """Get spec for a single device (轻量，不拉全量 home_info)。"""
     logger.info("Get device spec API called, user=%s, did=%s", current_user, did)
     data = await manager.miot_service.get_device_spec(did)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+def build_state_stats(store, push_writer) -> dict:
+    """容器与推送写入器的计数。
+
+    **写入器缺席给空 dict，不抛。** 生产 HTTP 路径打不到这个分支：``_wire_iot_push()``
+    在 ``initialize()`` 里无条件跑，而 uvicorn 是 lifespan 启动段跑完才绑监听端口。留
+    着是为了这个函数能脱离 Manager 单测 —— 别照它给 ``initialize()`` 里赋的其它服务
+    也补一圈判空。
+    """
+    return {
+        "store": store.stats(),
+        "push": push_writer.stats() if push_writer is not None else {},
+    }
+
+
+def build_state_dump(store, pattern: str, limit: int) -> dict:
+    """按 pattern 取容器的文本转储，超长截断。
+
+    **截断而不是拒绝，但 ``total_lines`` 必须是截断前的真实行数、``truncated`` 必须
+    明说** —— 否则调用方会把截断后的 lines 当成整棵树。
+    """
+    lines = store.dump(pattern).splitlines()
+    total_lines = len(lines)
+    return {
+        "pattern": pattern,
+        "total_lines": total_lines,
+        "truncated": total_lines > limit,
+        "lines": lines[:limit],
+    }
+
+
+@router.get(
+    path="/state/stats",
+    summary="State container and push counters",
+    response_model=NormalResponse,
+)
+async def get_state_stats(current_user: str = Depends(verify_token)):
+    """容器与推送的计数。**debug 级日志**：这个端点天然会被轮询（判「推送通没通」就
+    是反复读它），一边 tail 日志排查一边轮询它，自己的轮询会刷进正在读的那份日志。"""
+    logger.debug("State stats API called, user=%s", safe_log(current_user))
+    data = build_state_stats(manager.state_store, manager.iot_push_writer)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.get(
+    path="/state/dump",
+    summary="Dump the state container",
+    response_model=NormalResponse,
+)
+async def get_state_dump(
+    pattern: str = Query("**", description="路径 pattern，例如 iot/device/*/prop/*"),
+    limit: int = Query(500, ge=1, le=5000),
+    current_user: str = Depends(verify_token),
+):
+    """按 pattern 转储容器。比 stats 重、调用少，留一条 info 痕迹是合理的。"""
+    logger.info(
+        "State dump API called, user=%s, pattern=%s, limit=%d",
+        safe_log(current_user),
+        safe_log(pattern),
+        limit,
+    )
+    try:
+        data = build_state_dump(manager.state_store, pattern, limit)
+    except ValueError as e:
+        # 本模块的 HTTPException 是 miloco 自己那个 (message, status_code)，
+        # 不是 FastAPI 的 (status_code, detail) —— 传错会 TypeError 变 500。
+        raise BadRequestException(str(e)) from e
     return NormalResponse(code=0, message="ok", data=data)
 
 

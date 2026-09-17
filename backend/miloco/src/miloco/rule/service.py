@@ -16,6 +16,7 @@ Reference: rule-design.md §6.1
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
@@ -30,8 +31,23 @@ from miloco.middleware.exceptions import (
     ResourceNotFoundException,
     ValidationException,
 )
-from miloco.miot.client import MiotProxy
+from miloco.miot.client import MiotProxy, is_subscribable_did
 from miloco.miot.filter import allowed_home_ids, filter_by_home
+from miloco.rule.condition import (
+    condition_to_dnf,
+    dnf_structure_error,
+    is_server_rendered,
+    render_iot_condition,
+    single_item_of,
+)
+from miloco.rule.iot_source import (
+    BOOL_FAMILY,
+    NUMBER_FAMILY,
+    ORDERING_OPS,
+    STR_FAMILY,
+    SUPPORTED_OPS,
+    value_family,
+)
 from miloco.rule.record_source import (
     milestone_condition_dnf,
     milestone_legacy_condition,
@@ -42,6 +58,8 @@ from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
     _DIRECTION_TO_MODE,
     _MODE_TO_DIRECTION,
+    IOT_SOURCE_TYPE,
+    OMNI_SOURCE_TYPE,
     SCENE_IID,
     Rule,
     RuleCondition,
@@ -83,6 +101,219 @@ _FORBIDDEN_QUERY_PREFIXES = (
 )
 
 
+# MIoT 的 format 取值域里的标量那些。iids / array / struct 不在里面 —— 它们在容器里
+# 是元组或更复杂的形状，比较不出结果。
+_SCALAR_FORMAT_FAMILY = {
+    "bool": BOOL_FAMILY,
+    "string": STR_FAMILY,
+    "float": NUMBER_FAMILY,
+    **{
+        name: NUMBER_FAMILY
+        for name in (
+            "uint8",
+            "uint16",
+            "uint32",
+            "uint64",
+            "int8",
+            "int16",
+            "int32",
+            "int64",
+        )
+    },
+}
+
+
+def _validate_iot_value(entry: dict, op: str, value: Any, iid: str) -> None:
+    """iot 条件项的 format / 取值域校验。
+
+    配错的后果分两种，都看不出来：``eq`` 恒假是永远不触发，``ne`` 恒真是持续误
+    触发 —— 后者比前者更糟。
+    """
+    fmt = str(entry.get("format") or "")
+    family = _SCALAR_FORMAT_FAMILY.get(fmt)
+    if family is None:
+        raise ValidationException(
+            f"属性 prop.{iid} 的 format={fmt!r} 不是标量, 不能当 iot 条件项"
+        )
+    if family != value_family(value):
+        raise ValidationException(
+            f"属性 prop.{iid} 的 format={fmt!r} 与 value={value!r} 类型不兼容"
+        )
+    if family is not NUMBER_FAMILY and op in ORDERING_OPS:
+        kind = "字符串" if family is STR_FAMILY else "开关"
+        raise ValidationException(
+            f"属性 prop.{iid} 是{kind}, 不支持 op={op!r} 这种大小比较"
+        )
+
+    choices = entry.get("value_list") or []
+    if choices:
+        allowed = {c.get("value") for c in choices if isinstance(c, dict)}
+        if op in ("eq", "ne"):
+            if value not in allowed:
+                raise ValidationException(
+                    f"value={value!r} 不在属性 prop.{iid} 的取值列表里: "
+                    f"{sorted(allowed, key=repr)}"
+                )
+            return
+        # 枚举上的大小比较按它实际的取值域判，判据与 value_range 同一条
+        numeric = sorted(v for v in allowed if isinstance(v, (int, float)))
+        if numeric:
+            _validate_satisfiable(numeric[0], numeric[-1], op, value, iid)
+        return
+
+    value_range = entry.get("value_range")
+    if isinstance(value_range, (list, tuple)) and len(value_range) >= 2:
+        _validate_against_range(value_range, op, value, iid)
+
+
+def _validate_satisfiable(low, high, op: str, value: Any, iid: str) -> None:
+    """大小比较必须**既可能成立、也可能不成立**。端点含在内（MIoT 的区间是闭区间）。
+
+    只判一个方向的话另一个方向的配置错误会溜过去：区间 ``[-40,125]`` 上 ``gt -100``
+    恒真，seed 那一刻产生一次凭空的进入边沿、之后再没有边沿；而 ``lt -100`` 恒假，
+    永远不触发。两种都看不出来，规则本身看起来配得完全正常。
+
+    值本身不必可达 —— ``gt 3`` 在步长为 5 的区间上是有意义的（设备报 5 时成立），
+    所以这里不查步长。
+    """
+    can_be_true = {
+        "gt": high > value,
+        "gte": high >= value,
+        "lt": low < value,
+        "lte": low <= value,
+    }[op]
+    if not can_be_true:
+        raise ValidationException(
+            f"属性 prop.{iid} 的取值范围是 [{low}, {high}], "
+            f"没有任何取值满足 {op} {value!r}"
+        )
+    can_be_false = {
+        "gt": low <= value,
+        "gte": low < value,
+        "lt": high >= value,
+        "lte": high > value,
+    }[op]
+    if not can_be_false:
+        raise ValidationException(
+            f"属性 prop.{iid} 的取值范围是 [{low}, {high}], "
+            f"每个取值都满足 {op} {value!r} —— 这个条件恒成立"
+        )
+
+
+def _is_on_step_grid(low, value, step) -> bool:
+    """``value`` 落在从 ``low`` 起、每 ``step`` 一档的格子上吗。
+
+    浮点取模的误差会把合法值判成越界，按 step 的量级取绝对容差。
+    """
+    offset = value - low
+    remainder = offset - round(offset / step) * step
+    return abs(remainder) <= abs(step) * 1e-6
+
+
+def _reachable_high(low, high, step) -> Any:
+    """最大的可达值。上界不一定落在步长格上：``[0,100,3]`` 上设备最多报到 99。
+
+    最小值那侧不用收 —— 偏移恒为 0，永远在格上。
+
+    在格上就原样返回，判据与步长可达校验共用一份 —— 商的浮点误差足以凭空少一档
+    （``0.3 / 0.1`` 算出来是 2.9999…，向下取整会把上界从 0.3 收成 0.2）。
+    """
+    if not step:
+        return high
+    if _is_on_step_grid(low, high, step):
+        return high
+    return low + math.floor((high - low) / step) * step
+
+
+def _validate_against_range(value_range, op: str, value: Any, iid: str) -> None:
+    """校验的是「这个谓词有没有可能成立」，不是「这个值本身可达」。
+
+    ``eq`` / ``ne`` 要求值**可达**（闭区间内且满足步长）：range ``[0,100,5]`` 上
+    ``eq 3`` 恒假、``ne 3`` 恒真，设备永远不上报 3。
+
+    大小比较只要区间里存在可达值满足它就行，值本身不必可达 —— ``gt 3`` 在那个
+    range 上是有意义的（设备报 5 时成立），要求它满足步长会把正常配置拒掉。
+    """
+    low, high = value_range[0], value_range[1]
+    step = value_range[2] if len(value_range) > 2 else None
+    if op in ORDERING_OPS:
+        # 拿声明的上界判会把恒假的 `gt 99` 与恒真的 `lte 99` 一起放行 —— 正是本函数
+        # 要拦的那两种，而设备根本报不出 100。
+        _validate_satisfiable(low, _reachable_high(low, high, step), op, value, iid)
+        return
+
+    if not (low <= value <= high):
+        raise ValidationException(
+            f"value={value!r} 不在属性 prop.{iid} 的取值范围 [{low}, {high}] 内"
+        )
+    if not step:
+        return
+    if not _is_on_step_grid(low, value, step):
+        raise ValidationException(
+            f"value={value!r} 落不到属性 prop.{iid} 的步长上 "
+            f"(从 {low} 起每 {step} 一档)"
+        )
+
+
+def _sync_legacy_condition_from(rule: Rule) -> None:
+    """整项替换 DNF 之后，把旧 ``condition`` 列照 DNF 那一项的 spec 对齐。
+
+    不写死占位: 紧接着那道「condition 与 DNF 要对得上」的校验会拿服务端自己刚清空的
+    值去比, omni 无论怎么传都过不了, 而报错指向一个调用方根本没碰的字段。
+
+    服务端渲染的那些源不必单独分支 —— 它们的 spec 里没有这两个键, 回填出来的正是空
+    占位, 而 ``query`` 随后由渲染覆盖。
+    """
+    item = single_item_of(rule.condition_dnf)
+    spec = (item.spec or {}) if item is not None else {}
+    rule.condition.perceive_device_ids = list(spec.get("perceive_device_ids") or [])
+    rule.condition.query = str(spec.get("query") or "")
+
+
+def _reject_task_move(previous_task_id: str, new_task_id: str) -> None:
+    """改 ``task_id`` 一律拒，PATCH 与 PUT 都拒。
+
+    正确处理跨 task 移动要「旧 task 先退出 → 清运行态 → 新 task 再进入」，那是重排
+    一条既有的收尾链。今天那条链有两处会漏：旧 task 走到「失去全部出路径 → 强制
+    on_exit」时，代表 rule 在 runner 里已经属于新 task、动作槽也清了，**那次退出动作
+    丢掉**；而 ``add_rule`` 的 reset 条件不含 ``task_id``，rule 在旧 task 里已为真、
+    移过去后 ``last_bool`` 仍是真，新拓扑起始 off，喂真时没有跳变 —— **新 task 也进
+    不去**。
+
+    换 task 本来就该算一条新规则：删了重建。
+
+    **调用点之后可以直接假定 task_id 没变**，不要再写「task 变了就……」的分支。
+    """
+    if new_task_id and previous_task_id != new_task_id:
+        raise ValidationException(
+            f"不支持把规则从 task {previous_task_id!r} 移到 {new_task_id!r}: "
+            "旧 task 的退出动作会丢、新 task 也进不去。请删掉重建。"
+        )
+
+
+def _reject_source_change(previous: Rule, updated: Rule) -> None:
+    """跨源改（omni 改成 iot，或反过来）直接拒。
+
+    允许的话旧源的字段会留成脏数据（omni 的 did 列表、iot 的 did）—— 收口后读侧不
+    会读它们，但 ``dump`` 和排障时会误导。换源等于换一条规则。
+    """
+    before, after = previous.resolved_source_type, updated.resolved_source_type
+    if before != after:
+        raise ValidationException(
+            f"不支持把规则的触发源从 {before!r} 改成 {after!r}: 请删掉重建。"
+        )
+
+
+def _validate_query_not_empty(query: str) -> None:
+    """空 query 的规则永远不触发, 而它看起来配得完全正常。
+
+    对 omni 是一句空 prompt; 对服务端渲染的那些源, 空串说明渲染没生效。两种都要拦,
+    所以这条管全部源 —— 与只管 omni 的措辞校验是两个独立判断, 不合成一个函数。
+    """
+    if not query.strip():
+        raise ValidationException("condition.query 不能为空")
+
+
 def _validate_query_phrasing(query: str) -> None:
     q = query.strip()
     for prefix in _FORBIDDEN_QUERY_PREFIXES:
@@ -107,8 +338,21 @@ def _validate_rule_consistency(rule: Rule) -> None:
 
     Raises ValidationException on any violation. See rule-design.md §6.1.
     """
-    # ---- 1. condition.query 措辞 ----
-    _validate_query_phrasing(rule.condition.query)
+    # condition.query 的两条校验 (非空 / 措辞) 不在这里 —— 它们必须排在服务端渲染
+    # 之后, 见 RuleService._prepare_condition 的五步。
+
+    if rule.resolved_source_type == IOT_SOURCE_TYPE and rule.duration_seconds:
+        # _evaluate_duration 的滑窗按墙上时钟分 round、采样断流用 0 补齐, 且窗口未填满
+        # 就早返。事件驱动的喂法填不满窗口 ——「空调开了两小时」这条规则永远不会触发。
+        # 拒绝比静默不触发好: 后者用户看不出来, 而且规则看起来配得完全正确。
+        #
+        # 装在这里而不是条件项那五步里: 那五步只在 PATCH 真的碰了条件时才跑, 而
+        # `rule update --duration-seconds` 一个条件字段都不碰。本函数是三条写入路径
+        # 的必经处。
+        raise ValidationException(
+            "iot 条件项不支持 duration_seconds: 累计滑窗要连续采样, "
+            "而属性是被推来的、填不满窗口, 规则会永远不触发"
+        )
 
     if rule.resolved_direction is RuleDirection.MILESTONE:
         raise ValidationException(
@@ -202,7 +446,9 @@ def _validate_rule_consistency(rule: Rule) -> None:
 # ---- Service factory -------------------------------------------------------
 
 
-async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
+async def init_rule_service(
+    miot_proxy: MiotProxy, state_store=None, pull_props=None
+) -> RuleService:
     from miloco.config import get_settings
     from miloco.task_record.service import TaskRecordService
 
@@ -218,6 +464,9 @@ async def init_rule_service(miot_proxy: MiotProxy) -> RuleService:
         task_record_service=task_record_service,
     )
     attach_task_state_machine(rule_runner, rule_repo)
+    if state_store is not None:
+        # 排在状态机接管之后: 源起来就 seed, 而 seed 会一路走到 task 状态机。
+        rule_runner.attach_iot_source(state_store, pull_props)
 
     return RuleService(
         rule_repo,
@@ -615,7 +864,168 @@ class RuleService:
         physical = {d.rsplit(":ch", 1)[0] for d in valid if ":ch" in d}
         return valid + sorted(physical - set(valid))
 
+    # ---- 条件项：补齐 → 校验 → 渲染 ----
+
+    async def _prepare_condition(self, rule: Rule, *, stored_query: str | None) -> None:
+        """把 ``condition`` / ``condition_dnf`` 两列弄成一致且合法，就地改 ``rule``。
+
+        五步的先后有约束，写错顺序会让其中几步空转 —— 而它们会打出绿灯，让人以为
+        查过了：
+
+        1. 补齐 ``condition_dnf``（没带就从 ``condition`` 反推）
+        2. 校验 DNF 结构 + 源特有校验。**不能排在补齐之前** —— 那样 omni rule 会
+           因为「没带 DNF」被自己的闸挡住
+        3. 校验调用方传上来的**原始** ``condition`` 与 DNF 的关系。**必须排在渲染
+           之前** —— 渲染会覆盖 ``query``，覆盖之后「用户传了非空 query」与「用户
+           传的是空占位」长得一模一样
+        4. 渲染 ``condition.query``（服务端渲染的那些源）
+        5. 校验 ``query``：非空（全部源）+ 措辞（仅 omni）。**必须排在渲染之后** ——
+           排在前面的话 iot 传的空串占位会被非空校验拦掉，而渲染失效反倒查不出来
+
+        第 3 步与第 5 步别合并：前者查的是渲染前的原始值，后者查的是最终要落库的值。
+
+        ``stored_query`` 是这条 rule 库里已存的 query（新建时 None），第 3 步用它 ——
+        见 ``_validate_condition_against_dnf``。
+        """
+        dnf_was_given = rule.condition_dnf is not None
+        if not dnf_was_given:
+            rule.condition_dnf = condition_to_dnf(rule.condition)
+
+        error = dnf_structure_error(rule.condition_dnf)
+        if error:
+            raise ValidationException(error)
+
+        source_type = rule.resolved_source_type
+        iot_context: tuple[str, dict] | None = None
+        if source_type == IOT_SOURCE_TYPE:
+            iot_context = await self._validate_iot_item(rule)
+
+        if dnf_was_given:
+            self._validate_condition_against_dnf(rule, source_type, stored_query)
+
+        if is_server_rendered(source_type):
+            assert iot_context is not None
+            device_name, prop_entry = iot_context
+            item = single_item_of(rule.condition_dnf)
+            rule.condition.query = render_iot_condition(
+                device_name, prop_entry, item.spec["op"], item.spec["value"]
+            )
+
+        _validate_query_not_empty(rule.condition.query)
+        if source_type == OMNI_SOURCE_TYPE:
+            _validate_query_phrasing(rule.condition.query)
+
+    def _validate_condition_against_dnf(
+        self, rule: Rule, source_type: str, stored_query: str | None
+    ) -> None:
+        """调用方同时带了 ``condition`` 和 ``condition_dnf`` 时，两者要对得上。
+
+        同时带是 create / PUT 上的**常态**不是异常：``Rule.condition`` 必填，所以
+        每一次都必然带 ``condition``，iot rule 就是「带占位的 condition + 带真实的
+        condition_dnf」。这里照搬 PATCH 的「两个都给就拒」会把 iot rule 自己挡死。
+
+        非 omni 要求空占位：带了别的非空 ``query`` 会被渲染静默覆盖、用户输入无声
+        丢失；带了真实 did 会留成收口后没人读的脏数据。
+
+        **例外是「这条 rule 库里已存的那句」。** GET 返回的是渲染后的非空 query，
+        客户端原样 PUT 回来是最自然的用法，只认空串的话这条路直接被拒。取库里已存
+        的值而不是「现在渲染出来的那一句」：渲染文本含设备名，而设备名用户随时能
+        改 —— 按现渲染值比的话，改完名这条 rule 就 PUT 不动了。
+        """
+        if source_type == OMNI_SOURCE_TYPE:
+            spec = single_item_of(rule.condition_dnf).spec or {}
+            same = (
+                list(spec.get("perceive_device_ids") or [])
+                == list(rule.condition.perceive_device_ids)
+                and (spec.get("query") or "") == rule.condition.query
+            )
+            if not same:
+                raise ValidationException(
+                    "condition 与 condition_dnf 里的 omni 条件项不一致: "
+                    "无论以哪份为准都是静默覆盖另一份"
+                )
+            return
+
+        if rule.condition.perceive_device_ids:
+            raise ValidationException(
+                f"source_type={source_type} 的规则不看摄像头, "
+                "condition.perceive_device_ids 要留空"
+            )
+        allowed = {""} if stored_query is None else {"", stored_query}
+        if rule.condition.query not in allowed:
+            raise ValidationException(
+                f"source_type={source_type} 的 condition.query 由服务端按谓词渲染, "
+                "创建时传空串占位即可"
+            )
+
+    async def _validate_iot_item(self, rule: Rule) -> tuple[str, dict]:
+        """iot 条件项的静态校验。返回 ``(设备名, 属性 entry)`` 供渲染复用。
+
+        全部可在创建时查完 —— 抄错一位的话规则建得成功、永远不触发，用户和 agent
+        都拿不到反馈。
+        """
+        item = single_item_of(rule.condition_dnf)
+        spec_item = item.spec or {}
+        did = str(spec_item.get("did") or "")
+        iid = str(spec_item.get("iid") or "")
+        op = spec_item.get("op")
+        if not did or not iid:
+            raise ValidationException("iot 条件项要写 did 与 iid")
+        if "value" not in spec_item:
+            raise ValidationException("iot 条件项要写 value")
+        if op not in SUPPORTED_OPS:
+            raise ValidationException(
+                f"iot 条件项不支持 op={op!r}: 可用的是 "
+                f"{', '.join(sorted(SUPPORTED_OPS))}"
+            )
+        if not is_subscribable_did(did):
+            raise ValidationException(
+                f"did {did!r} 含 '/', 拿不到属性推送 —— 桥接子设备不能当 iot 触发源"
+            )
+
+        from miloco.manager import get_manager
+
+        manager = get_manager()
+        # **`get_device_spec` 答不了作用域**: 它走 `get_devices()`, 那是账号全量, 过滤
+        # 由各调用方自己做 (同文件的 control_device 就为此额外查了一次)。而容器的三条
+        # 写入通道都按启用家庭过滤, 所以未启用家庭的设备那条叶子永远不进容器 —— 规则
+        # 建得成功、恒 path_missing、永远不触发。
+        #
+        # 入口能穷举 (create / PUT / PATCH 三条都走 _prepare_condition, 迁移与代建都不
+        # 产 iot 条件项), 所以这道闸放在写入时。
+        if did not in await manager.miot_proxy.devices_in_current_home():
+            raise ValidationException(
+                f"设备 {did!r} 不在当前启用的家庭里, 它的属性不会进状态容器"
+            )
+        device = await manager.miot_service.get_device_spec(did)
+        spec = device.get("spec") or {}
+        if not spec:
+            # 拿不到 spec 与「这台设备真没属性」在调用侧长得一模一样, 不区分 ——
+            # 几种情形对建规则的结论相同（校验做不了）。
+            raise ValidationException(
+                f"拿不到设备 {did!r} 的 spec, 无法校验 iot 条件项"
+            )
+        entry = spec.get(f"prop.{iid}")
+        if not isinstance(entry, dict):
+            raise ValidationException(f"属性 prop.{iid} 不在设备 {did!r} 的 spec 里")
+        if not entry.get("notify"):
+            raise ValidationException(
+                f"属性 prop.{iid} 的 access 不含 notify, 拿不到推送: "
+                "规则只会在启动那一刻算一次, 之后永远没有输入"
+            )
+
+        _validate_iot_value(entry, op, spec_item["value"], iid)
+        return str(device.get("name") or did), entry
+
     async def _validate_perceive_devices_of(self, rule: Rule) -> None:
+        """只有 omni rule 校验感知设备列表。
+
+        非 omni rule 那一列是空占位 (§3.4), 收口之后没人读它。改内层
+        ``_validate_perceive_device_ids`` 不行: 它的入参是 ``list[str]``, 看不到
+        source_type, 在那里加判断要把 rule 再传一遍, 而它有三个调用方。
+        """
+        if rule.resolved_source_type != OMNI_SOURCE_TYPE:
+            return
         await self._validate_perceive_device_ids(rule.condition.perceive_device_ids)
 
     async def _validate_perceive_device_ids(self, dids: list[str]) -> None:
@@ -692,6 +1102,7 @@ class RuleService:
 
         self._fill_default_duration_ratio(rule)
 
+        await self._prepare_condition(rule, stored_query=None)
         _validate_rule_consistency(rule)
         await self._validate_perceive_devices_of(rule)
         self._validate_target_record(rule)
@@ -708,6 +1119,10 @@ class RuleService:
         # 顺序要紧: 先把动作写进 task 列, 再 reconfigure —— 后者刷的是 task 列的快照
         self.sync_rule_actions_to_task(rule)
         self.reconfigure_task(rule.task_id)
+        # seed 必须排在 reconfigure 之后: 挂在 add_rule 里的话, 新建一条「条件已经
+        # 为真」的 iot rule 会立刻产生 ENTERED, 而此刻 task 还没登记新拓扑、动作快照
+        # 也还没同步 —— 动作被跳过, 而且之后属性不再变化就不会补发。
+        self._runner.seed_iot_rule(rule_id)
         logger.info("Rule created: %s", rule_id)
         return rule_id
 
@@ -764,9 +1179,17 @@ class RuleService:
         # IntegrityError, 它不在 repo 那层的 except 里, 一路冒到全局处理器变成
         # 500 —— 而这只是一个参数填错。
         self._require_task_exists(rule.task_id)
+        _reject_task_move(previous.task_id, rule.task_id)
 
         self._fill_default_duration_ratio(rule)
 
+        # PUT 收的是完整 Rule, 输入形态与 create 相同 (pydantic 强制带 condition),
+        # 所以走 create 那套而不是 PATCH 那套 —— 照搬 PATCH 的「不许同时给」会让
+        # 任何 iot rule 都改不了。
+        # 跨源判定排在五步之前: 排在后面的话, 换成 omni 的那次会先撞上「condition 与
+        # DNF 不一致」, 错误文案指的是形状而不是这次真正做错的事。
+        _reject_source_change(previous, rule)
+        await self._prepare_condition(rule, stored_query=previous.condition.query)
         _validate_rule_consistency(rule)
         await self._validate_perceive_devices_of(rule)
         self._validate_target_record(rule)
@@ -782,13 +1205,11 @@ class RuleService:
             # 已经不属于它的 rule。
             if (
                 previous.resolved_direction is not rule.resolved_direction
-                or previous.task_id != rule.task_id
             ):
                 self._clear_task_slots(previous)
             self.sync_rule_actions_to_task(rule)
             self.reconfigure_task(rule.task_id)
-            if previous.task_id != rule.task_id:
-                self.reconfigure_task(previous.task_id)
+            self._runner.seed_iot_rule(rule.id)
         return success
 
     async def patch_rule(self, rule_id: str, update: RuleUpdate) -> bool:
@@ -823,7 +1244,7 @@ class RuleService:
 
         if "task_id" in fields and update.task_id is not None:
             self._require_task_exists(update.task_id)
-            existing.task_id = update.task_id
+            _reject_task_move(existing.task_id, update.task_id)
 
         # mode 与 direction 是同一个语义的两种存储形态, 必须一起定。Rule 没开
         # validate_assignment, 逐字段赋值不会重跑构造期那条一致性校验 —— 只改一个
@@ -849,11 +1270,37 @@ class RuleService:
         if "enabled" in fields and update.enabled is not None:
             existing.enabled = update.enabled
 
+        # condition 与 condition_dnf 是改条件的两条路, 同时给就是两份真相。
+        # 只在本次 PATCH 真的碰了条件时才判 —— 写成「恰好给一个」的话，只改
+        # --name 的请求（两个字段都不给）会被误杀，而那是正常的。
+        if {"condition", "condition_dnf"} <= fields:
+            raise ValidationException(
+                "condition 与 condition_dnf 不能同时给: 改条件只有一条路"
+            )
+
+        if "condition_dnf" in fields:
+            if update.condition_dnf is None:
+                raise ValidationException(
+                    "condition_dnf cannot be cleared (rule must have a condition)"
+                )
+            # 整项替换。合并没有定义 —— 合并到哪一层、any_of 的第几项，都答不上来。
+            existing.condition_dnf = update.condition_dnf
+            _sync_legacy_condition_from(existing)
+
         if "condition" in fields:
             # condition 不允许显式置 null：Rule.condition 必填，整体清空没语义。
             if update.condition is None:
                 raise ValidationException(
                     "condition cannot be cleared (rule must have a condition)"
+                )
+            if existing.resolved_source_type != OMNI_SOURCE_TYPE:
+                # 非 omni rule 的这两列是占位: query 由服务端按谓词渲染、设备列表恒
+                # 空。放行的话用户的输入会被下一次渲染静默覆盖。改条件走
+                # --condition-dnf(CLI 的 --iot-* 四件套)。
+                raise ValidationException(
+                    f"source_type={existing.resolved_source_type} 的规则不能改 "
+                    "condition.query / perceive_device_ids: 它的条件由服务端按谓词"
+                    "渲染。改条件请改 condition_dnf。"
                 )
             # PATCH 语义：只合并 update.condition 里**显式置值**的字段，
             # 缺失字段保留 existing 的值。这样 `--condition "X"` 不带 `--source`
@@ -872,6 +1319,9 @@ class RuleService:
                 )
             if "query" in cond_fields and cond_update.query is not None:
                 existing.condition.query = cond_update.query
+            # 两列要一起走: 只改 condition 会让 DNF 停在旧值, 而 omni 的 prompt 从
+            # DNF 取 —— 界面上改了、判定用的还是旧的那句。
+            existing.condition_dnf = None
 
         # list 字段：CLI 用 [] 表达"清空"；不传 → 不动。
         if "actions" in fields and update.actions is not None:
@@ -913,6 +1363,11 @@ class RuleService:
         if "duration_ratio" in fields and update.duration_ratio is not None:
             existing.duration_ratio = update.duration_ratio
 
+        if {"condition", "condition_dnf"} & fields:
+            _reject_source_change(previous, existing)
+            await self._prepare_condition(
+                existing, stored_query=previous.condition.query
+            )
         _validate_rule_consistency(existing)
         self._validate_task_rule_set(existing, previous)
         # 下面三道都依赖 rule 之外的状态 (task 的动作槽 / record 的阈值 / 场景是否
@@ -937,10 +1392,9 @@ class RuleService:
             self._runner.add_rule(existing)
             moved_home = (
                 previous.resolved_direction is not existing.resolved_direction
-                or previous.task_id != existing.task_id
             )
             if moved_home:
-                # 换方向或改挂 task = 这份动作整体换了个家。旧的那份必须清 ——
+                # 换方向 = 这份动作整体换了个家。旧的那份必须清 ——
                 # 留着就是一份没有 rule 认领、也再没人读得到的动作; 新的那份必须
                 # 写 —— 不写就是"规则照常触发、一个动作都选不到", 读侧只认 task
                 # 列、不看 rule 行。这里不传动过的字段: 动作字段本身没变,
@@ -951,9 +1405,7 @@ class RuleService:
                 # 带上这次动过的字段: 只透传被动过的槽, 别的槽保留 task 侧那份
                 self.sync_rule_actions_to_task(existing, fields)
             self.reconfigure_task(existing.task_id)
-            if previous.task_id != existing.task_id:
-                # 原 task 少了一条 rule, 拓扑得跟着变 —— 与删 rule 同一条路径。
-                self.reconfigure_task(previous.task_id)
+            self._runner.seed_iot_rule(rule_id)
         return success
 
     async def delete_rule(self, rule_id: str) -> bool:
@@ -1007,6 +1459,11 @@ class RuleService:
     def decision_tracker(self):
         """给 task 层读判定摘要用。没接管时为 None。"""
         return self._runner.tracker
+
+    @property
+    def iot_source(self):
+        """iot 源。容器没接上来时是 None（单测和退化启动）。"""
+        return self._runner.iot_source
 
     @property
     def runner_state_machine(self):
@@ -1188,8 +1645,8 @@ class RuleService:
         """这条代建规则的形状还是当前这一版吗。
 
         比的是求值真正读的那几样: 条件项 (``record_ref_of`` 只看 source_type 与
-        spec)、旧 condition 列上的哨兵 did (填别的会让这条 rule 被当成视觉 query
-        塞进摄像头 prompt)、名字 (判重名的键)。阈值不在里面 —— 它本来就不进形状。
+        spec)、旧 condition 列上的设备列表、名字 (判重名的键)。阈值不在里面 ——
+        它本来就不进形状。
         """
         want = self._build_milestone_rule(rule.task_id)
         return (
@@ -1317,6 +1774,11 @@ class RuleService:
             # 失败模式、同一份修法。必须排在 reconfigure 之后: 代建的那条 rule 可能
             # 正是它刚补上的。
             _seed_reached_targets(self._runner, task_id)
+            # iot 同一个失败模式: 停用清掉了条件层状态, 属性持续为真的话没有任何变更
+            # 到达, rule 永远等不到 ENTERED。**不放 reconfigure_task 里 record_source
+            # .arm 那一位** —— 那里被 `runtime_state is ON` 守着, 而 suspend 停用时
+            # 已经把运行态置成 OFF, 重新启用走到那儿时守卫恒假。
+            self._runner.seed_iot_rules_of_task(task_id)
             return
         self._runner.record_source.disarm(task_id)
         # 不派发 on_exit 是对的 (见 suspend), 但计时段的收尾也挂在那个槽上, 得自

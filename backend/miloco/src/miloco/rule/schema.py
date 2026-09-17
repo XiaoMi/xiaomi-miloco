@@ -221,6 +221,15 @@ class RuleCondition(BaseModel):
     query: str = Field(..., description="Natural language condition description")
 
 
+OMNI_SOURCE_TYPE = "omni"
+RECORD_SOURCE_TYPE = "record"
+IOT_SOURCE_TYPE = "iot"
+
+KNOWN_SOURCE_TYPES = frozenset({OMNI_SOURCE_TYPE, RECORD_SOURCE_TYPE, IOT_SOURCE_TYPE})
+"""已经实现了求值的源。不在里面的一律拒, 不静默当 omni ——
+一条 presence 条件项被塞进摄像头 prompt 时, 错误现象离根因很远。"""
+
+
 class ConditionItem(BaseModel):
     """一个触发源上的一个条件。
 
@@ -372,6 +381,25 @@ class Rule(BaseModel):
     updated_at: str | None = Field(None, description="Last update time (ISO 8601)")
 
     @property
+    def resolved_source_type(self) -> str:
+        """这条 rule 归哪个源。判源的代码全部走它, 不许再有第二份。
+
+        与 ``resolved_direction`` 同构, 也同样是普通 ``@property`` —— 不进
+        ``model_dump()``。dump 之后再按键取会拿到 ``None``。
+
+        ``condition_dnf`` 为空时回退 omni。**这条回退只兜迁移前的存量行**: 创建
+        路径第一步会无条件补齐这一列 (``_prepare_condition``), 落库也写它
+        (``rule_repo``), 所以经服务端建出来的 rule 走不到这个分支。
+        """
+        dnf = self.condition_dnf
+        if dnf is None or not dnf.any_of:
+            return OMNI_SOURCE_TYPE
+        for conjunction in dnf.any_of:
+            for item in conjunction:
+                return item.source_type
+        return OMNI_SOURCE_TYPE
+
+    @property
     def resolved_direction(self) -> RuleDirection:
         """读侧唯一入口: 有 direction 用它, 没有按 mode 推。
 
@@ -428,6 +456,9 @@ class RuleUpdate(BaseModel):
     lifecycle: RuleLifecycle | None = Field(None)
     enabled: bool | None = Field(None)
     condition: RuleConditionUpdate | None = Field(None)
+    # 整项替换, 不做部分合并 —— ``condition`` 那个字段能部分合并是因为它是两个独立
+    # 标量, 而 DNF 是一个结构, 「合并到哪一层」答不上来。
+    condition_dnf: RuleConditionDNF | None = Field(None)
     actions: list[RuleAction] | None = Field(None)
     action_descriptions: list[str] | None = Field(None)
     on_enter_actions: list[RuleAction] | None = Field(None)

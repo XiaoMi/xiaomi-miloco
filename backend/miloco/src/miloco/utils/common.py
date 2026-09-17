@@ -24,3 +24,15 @@ def escape_for_js_string(value: str) -> str:
       标签结束。spa_handler / watch_page 共用同款防御，**改一边记得同步**。
     """
     return json.dumps(value)[1:-1].replace("</", "<\\/")
+
+
+def safe_log(value: Any) -> str:
+    """去掉 CR / LF 再进日志。
+
+    用户可控的值里带换行符就能伪造出一整行日志 —— 排障时看到的「上一条」可能是攻击者
+    写的（CodeQL py/log-injection）。凡是把请求里来的值记进日志的地方都走这里，别在
+    各自的 router 里各写一份：漏装的那个入口静默绕过。
+    """
+    if value is None:
+        return "None"
+    return str(value).replace("\r", "").replace("\n", " ")

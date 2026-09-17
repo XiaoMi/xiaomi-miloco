@@ -198,6 +198,7 @@ def _render_device_spec(dev: dict) -> str:
     组内 spec 行与 catalog 同款 pipe 形式，spec_name 可直接复制给 device control。
     """
     from miloco_cli.catalog import (
+        ACCESS_LEGEND,
         _build_spec_line,
         _resolve_keys_for_device,
     )
@@ -222,7 +223,7 @@ def _render_device_spec(dev: dict) -> str:
     out.append("# 按 service 分组")
     out.append("# prop.iid    spec_name|access|format|constraint|unit")
     out.append("# action.iid  spec_name|x|in_params")
-    out.append("# access：wr=读写 / w=只写 / r=只读 / x=动作")
+    out.append(f"# access：{ACCESS_LEGEND}")
 
     iid_to_key = _resolve_keys_for_device(spec)
 
