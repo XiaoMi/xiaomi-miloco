@@ -119,6 +119,9 @@ class OnboardingTriggerService:
         条件判定回调抛异常按「不满足」处理——主动邀请是锦上添花，绝不能
         把启动 / 授权主流程带崩。
         """
+        # 主动邀请目前**有意下线**（产品决定，实现与路由保留待复用）：这里直接短路，
+        # 下方形参判定 / 投递 / 置位全部暂不执行。随之删除的针对性用例见
+        # tests/home_profile/test_onboarding_trigger.py（如需重新上线，从 git 历史恢复该文件）。
         return False
         async with self._lock:
             if self._fired:

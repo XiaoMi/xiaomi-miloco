@@ -12,7 +12,13 @@ from miloco.node_monitor.resource_monitor import (
 )
 
 
-def _make_smaps(ts=1000.0, rss=612000) -> MemSnapshot:
+def _make_mem(ts=1000.0, rss=612000) -> MemSnapshot:
+    """伪造一份平台无关的内存 region 快照。
+
+    本文件统一 patch 模块级 _sample_mem 这个 seam，而不是它内部按平台分发的
+    parse_smaps / parse_vmmap：macOS 上真实走的是 parse_vmmap，patch parse_smaps
+    不生效，代码会去读真实进程内存，断言随真实 RSS 漂移而随机失败。
+    """
     return MemSnapshot(
         ts=ts,
         total_rss_kb=rss,
@@ -125,8 +131,8 @@ class TestMemoryCollect:
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(),
+                "miloco.node_monitor.resource_monitor._sample_mem",
+                return_value=_make_mem(),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",
@@ -146,8 +152,8 @@ class TestMemoryCollect:
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(),
+                "miloco.node_monitor.resource_monitor._sample_mem",
+                return_value=_make_mem(),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",
@@ -210,8 +216,8 @@ class TestMemoryCollect:
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(rss=111),
+                "miloco.node_monitor.resource_monitor._sample_mem",
+                return_value=_make_mem(rss=111),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",
@@ -222,7 +228,7 @@ class TestMemoryCollect:
         first_rss = rm._memory_latest.total_rss_kb
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
+                "miloco.node_monitor.resource_monitor._sample_mem",
                 side_effect=OSError("boom"),
             ),
             patch(
@@ -238,8 +244,8 @@ class TestMemoryCollect:
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(),
+                "miloco.node_monitor.resource_monitor._sample_mem",
+                return_value=_make_mem(),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",
@@ -255,7 +261,7 @@ class TestMemoryCollect:
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
+                "miloco.node_monitor.resource_monitor._sample_mem",
                 side_effect=OSError(),
             ),
             patch(
@@ -271,8 +277,8 @@ class TestMemoryCollect:
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(),
+                "miloco.node_monitor.resource_monitor._sample_mem",
+                return_value=_make_mem(),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",
@@ -327,7 +333,7 @@ class TestProcCollect:
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
+                "miloco.node_monitor.resource_monitor._sample_mem",
                 side_effect=OSError(),
             ),
             patch(
@@ -341,13 +347,13 @@ class TestProcCollect:
         assert len(rm._proc_ring) == 1
 
     def test_proc_ring_caps_at_maxlen(self, tmp_db, tmp_log_dir):
-        # patch 掉内存采集(smaps 全读 + 遍历 Python 堆)，否则跑满环长要几千次真实
+        # patch 掉内存采集(读真实 region 表 + 遍历 Python 堆)，否则跑满环长要几千次真实
         # 采集，慢到超时。CPU 段仍真实调用，本测试只验证 deque maxlen 截断。
         rm = ResourceMonitor(get_monitor(), db_path=tmp_db, log_dir=tmp_log_dir)
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(),
+                "miloco.node_monitor.resource_monitor._sample_mem",
+                return_value=_make_mem(),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",

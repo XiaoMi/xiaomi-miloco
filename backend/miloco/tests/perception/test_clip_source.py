@@ -88,8 +88,12 @@ def test_decode_failure_returns_none(tmp_path):
 # ─── DeviceData 组装 ─────────────────────────────────────────────────────────
 
 
-def test_build_clip_device_data(tmp_path):
+def test_build_clip_device_data(tmp_path, monkeypatch):
     path = _write_clip(tmp_path, n_frames=6)
+    # meta 由 clip_source_device() 按**配置里的** clip 路径生成：没配置时它按约定返回 None
+    # （"没这一路源"），DeviceData.meta 也就是 None。所以这里必须先把它钉成 path ——
+    # 真实调用方（collector 的 clip 分支）也只会在 clip_source_path() 非空时走到这里。
+    _patch_clip_source(monkeypatch, path)
     dd = clip_source.build_clip_device_data(path)
     assert dd is not None
     assert dd.meta.did == clip_source.DID

@@ -18,7 +18,12 @@ from miloco.node_monitor.router import router as monitor_router
 from miloco.node_monitor.router import set_resource_monitor
 
 
-def _make_smaps(ts: float = 12345.0) -> MemSnapshot:
+def _make_mem(ts: float = 12345.0) -> MemSnapshot:
+    """伪造一份平台无关的内存 region 快照（见 test_resource_monitor._make_mem 的说明）。
+
+    这里 patch 模块级 _sample_mem 而非 parse_smaps：后者只在 Linux 分支被调用，
+    macOS 实走 parse_vmmap，patch 不到会让断言拿到真实进程 RSS。
+    """
     return MemSnapshot(
         ts=ts,
         total_rss_kb=600_000,
@@ -101,8 +106,8 @@ class TestMemoryEndpoint:
     def test_200_full_snapshot(self, client, rm):
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(),
+                "miloco.node_monitor.resource_monitor._sample_mem",
+                return_value=_make_mem(),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",
@@ -151,8 +156,8 @@ class TestMemorySeriesEndpoint:
         now = time.time()
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(ts=now),
+                "miloco.node_monitor.resource_monitor._sample_mem",
+                return_value=_make_mem(ts=now),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",
@@ -250,8 +255,8 @@ class TestResourcesEndpointUnaffected:
     def test_resources_endpoint_no_memory_fields(self, client, rm):
         with (
             patch(
-                "miloco.node_monitor.resource_monitor.parse_smaps",
-                return_value=_make_smaps(),
+                "miloco.node_monitor.resource_monitor._sample_mem",
+                return_value=_make_mem(),
             ),
             patch(
                 "miloco.node_monitor.resource_monitor.sample_py_heap",

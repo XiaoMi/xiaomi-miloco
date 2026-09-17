@@ -121,11 +121,16 @@ def test_tier_u_dump_enable_env_override(monkeypatch) -> None:
 
 
 def test_features_default_off() -> None:
-    """pet_recognition 默认关（住户需在 web 显式开）；grounding 子开关默认开。"""
+    """四个实验性开关出厂默认全关（住户需在 web 显式开）。
+
+    三层默认必须一致：``settings.yaml`` / ``FeaturesSettings`` 模型 / CLI schema。
+    子开关（head/body/reid）只在宠物识别开启后才谈得上生效，默认同样关。
+    """
     s = get_settings()
     assert s.features.pet_recognition is False
-    assert s.features.pet_head_grounding is True
-    assert s.features.pet_body_grounding is True
+    assert s.features.pet_head_grounding is False
+    assert s.features.pet_body_grounding is False
+    assert s.features.pet_reid_diverse is False
 
 
 def test_features_env_override(monkeypatch) -> None:

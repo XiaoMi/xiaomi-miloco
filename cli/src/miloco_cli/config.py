@@ -93,8 +93,8 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
     ),
     "perception.engine.input.video_short_edge": (
         int,
-        512,
-        "视频编码短边像素（保持宽高比缩放），重启生效",
+        768,
+        "视频编码短边像素（保持宽高比缩放）；清晰度主要由它决定，下一感知窗口生效",
     ),
     "perception.engine.input.omni_fps": (
         int,
@@ -103,14 +103,15 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
     ),
     "perception.engine.input.media_resolution": (
         str,
-        "",
-        "仅 Gemini：每帧视觉 token 预算档位（\"\"/\"low\"=省，\"high\"=小目标更清但 4× token），下一周期生效",
+        "high",
+        "仅 Gemini：视频请求的分辨率档位（\"high\"=默认，小目标/文字更清；\"low\"=省 token，每帧 token 约 1/4），"
+        "请求体里显式带该档位，下一周期生效",
     ),
     "perception.engine.input.rule_only_input": (
         str,
-        "video",
-        "场景联动(rule_only)媒体输入模式：video=mp4 视频(默认，媒体 token 约为图片 1/4)；"
-        "image=窗口末帧 JPEG(~1064 tok/张)。下一周期生效",
+        "image",
+        "场景联动(rule_only)媒体输入模式：image=窗口各帧图片(默认，静态规则判定更聚焦)；"
+        "video=整窗 mp4(按帧计费的模型更省 token)。下一周期生效",
     ),
     "perception.engine.input.rule_only_video_single_frame": (
         bool,
@@ -163,7 +164,7 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
     ),
     "perception.collect.window_size": (
         int,
-        4,
+        3,
         "感知窗口时长（秒），重启生效",
     ),
     # 实验性功能开关（与 backend FeaturesSettings 对齐；住户在 web 显式开启，也可用本命令）
@@ -175,20 +176,20 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
     ),
     "features.pet_head_grounding": (
         bool,
-        True,
-        "宠物头像头部定位子开关（默认开）：开则注册时由 omni 输出头部坐标作头像裁剪框，"
+        False,
+        "宠物头像头部定位子开关（默认关）：开则注册时由 omni 输出头部坐标作头像裁剪框，"
         "关则用全身 crop。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
     ),
     "features.pet_body_grounding": (
         bool,
-        True,
-        "宠物本体定位子开关（默认开）：仅作用于检测器框不到猫/狗的回退路径，开则裁本体作"
+        False,
+        "宠物本体定位子开关（默认关）：仅作用于检测器框不到猫/狗的回退路径，开则裁本体作"
         "参考图（兼容非猫狗物种），关则回退路径不产参考图。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
     ),
     "features.pet_reid_diverse": (
         bool,
-        True,
-        "宠物参考图多样性选择（默认开）：视频注册时用人体 ReID 特征距离贪心选最不相似的 ≤3 张"
+        False,
+        "宠物参考图多样性选择（默认关）：视频注册时用人体 ReID 特征距离贪心选最不相似的 ≤3 张"
         "多姿态；关或模型不可用时回退感知哈希 dHash。仅在 pet_recognition 开启时有意义；内部调优，一般无需改动",
     ),
     "perception.min_suggestion_urgency": (
