@@ -37,6 +37,13 @@
     "globalPrompt": "Global perception system prompt",
     "globalPromptPlaceholder": "e.g. Always watch the floor by the door; ignore the TV screen; a person must be fully visible to count as present…",
     "globalPromptHint": "Appended to the perception system prompt for every camera (built-in role / principles / output schema are kept). Use it for cross-scene guidance; put scene-specific details and cautions in each rule's scene notes under Scene Rules.",
-    "slimModelHint": "Scene matching is done by a multimodal (omni) cloud model. Configure and activate one first — the perception engine stays idle until then."
+    "slimModelHint": "Scene matching is done by a multimodal (omni) cloud model. Configure and activate one first — the perception engine stays idle until then.",
+    "perceptionInput": "Perception input",
+    "perceptionInputImage": "Images",
+    "perceptionInputVideo": "Video",
+    "perceptionInputHint": "Images = sample frames from each window (default; more focused for static rules). Video = one mp4 per window (cheaper per-frame tokens for frame-billed models). Takes effect on the next perception window, no restart.",
+    "perceptionInputVideoNote": "Video mode sends the whole window; the option below only applies to image mode.",
+    "imageLastFrameOnly": "Send only the last frame",
+    "imageLastFrameOnlyHint": "Off (default) = send all frames in the window, steadier for action/gesture rules. On = send only the last frame, fewer tokens and faster, enough for static state rules."
   }
 }

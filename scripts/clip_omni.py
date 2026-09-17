@@ -145,9 +145,11 @@ def packet_from_snapshot(snap, room: str = "本地测试", fps: float | None = 1
 # =============================================================================
 
 
-def apply_temp_settings(system_prompt: str | None, image_mode: bool):
-    """临时改写感知引擎设置：rule_only system prompt 覆盖 / 图片输入模式。
+def apply_temp_settings(system_prompt: str | None, input_mode: str | None = None):
+    """临时改写感知引擎设置：rule_only system prompt 覆盖 / 感知输入模式。
 
+    ``input_mode``：``"image"`` / ``"video"`` 强制该模式，``None`` 用配置默认
+    （产品默认已是 image，见 settings.yaml）。
     get_settings() 是进程级缓存单例，build_system_prompt 与媒体模式选择都实时读它，
     所以直接改 dict 即可本次生效。返回 ``restore()`` 恢复函数。
     """
@@ -158,10 +160,10 @@ def apply_temp_settings(system_prompt: str | None, image_mode: bool):
     if system_prompt is not None:
         saved["rule_only_system_prompt"] = engine.get("rule_only_system_prompt", "")
         engine["rule_only_system_prompt"] = system_prompt
-    if image_mode:
+    if input_mode is not None:
         inp = engine.setdefault("input", {})
-        saved["_input_rule_only_input"] = inp.get("rule_only_input", "video")
-        inp["rule_only_input"] = "image"
+        saved["_input_rule_only_input"] = inp.get("rule_only_input", "image")
+        inp["rule_only_input"] = input_mode
 
     def restore() -> None:
         if "rule_only_system_prompt" in saved:
@@ -294,11 +296,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="完整感知模式（caption/suggestions/env_sounds 等）；默认只出 matched_rules",
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--image",
-        action="store_true",
-        help="rule_only 输入改为窗口末帧 JPEG（省 token）；默认发 mp4 视频",
+        dest="input_mode",
+        action="store_const",
+        const="image",
+        help="强制图片输入（已是产品默认；保留为显式声明）",
     )
+    mode.add_argument(
+        "--video",
+        dest="input_mode",
+        action="store_const",
+        const="video",
+        help="强制整窗 mp4 视频输入（按帧计费的模型更省 token）",
+    )
+    parser.set_defaults(input_mode=None)
     parser.add_argument(
         "--system-prompt",
         help="临时覆盖 rule_only system prompt（等价于配置 rule_only_system_prompt，仅本次运行）",
@@ -317,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
     from miloco.perception.engine.types import OmniContext
 
     config = PerceptionConfig(rule_only=not args.full)
-    restore = apply_temp_settings(args.system_prompt, args.image)
+    restore = apply_temp_settings(args.system_prompt, args.input_mode)
     try:
         ctx = OmniContext(
             rule_only=not args.full,

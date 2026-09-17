@@ -255,13 +255,10 @@ final class BackendProcess {
         task.standardInput = FileHandle.nullDevice
         pipe = output
         output.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            // 后端 bootstrap() 会把自身 stdio 重定向到自己的日志文件，这里通常收不到东西；
-            // 但启动最早期（bootstrap 之前）的原生库输出会走这里，落 launcher.log 便于排查。
-            if let text = String(data: data, encoding: .utf8) {
-                FileHandle.standardError.write(Data(text.utf8))
-            }
+            // 启动最早期（bootstrap 之前）的原生库输出会走这里，落 launcher.log 便于排查。
+            guard let data = Self.readOutputOnce(handle),
+                  let text = String(data: data, encoding: .utf8) else { return }
+            FileHandle.standardError.write(Data(text.utf8))
         }
 
         task.terminationHandler = { [weak self] proc in
@@ -281,6 +278,45 @@ final class BackendProcess {
         self.port = port
         stopping = false
         Log.line("后端进程已启动：pid=\(task.processIdentifier) port=\(port)")
+    }
+
+    /// 在"写端已关"的管子上跑一遍 readOutputOnce，返回 250ms 内 handler 被调用的次数。
+    /// 正常实现 EOF 后自注销 → 1~2 次；空转实现是上万次（实测 25 万次/250ms）。
+    static func probeOutputReaderEOF() -> Int {
+        let pipe = Pipe()
+        let lock = NSLock()
+        var calls = 0
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            lock.lock()
+            calls += 1
+            lock.unlock()
+            _ = readOutputOnce(handle)  // 走生产同一条读取路径
+        }
+        pipe.fileHandleForWriting.closeFile()  // EOF：与后端重定向 stdio 后的状态一致
+        Thread.sleep(forTimeInterval: 0.25)
+        pipe.fileHandleForReading.readabilityHandler = nil
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+
+    /// 从后端输出管道读一次；**读到 EOF 时顺手注销 readabilityHandler 并返回 nil**。
+    ///
+    /// EOF 必须自注销：readabilityHandler 底层是 level-triggered 的 EVFILT_READ，
+    /// 而写端关闭（EOF）的 fd 永远"可读"，availableData 会立刻返回空 —— 不自注销就是
+    /// 每毫秒空转一轮、吃满一个核。后端 bootstrap 会把自身 stdio 重定向到自己的日志
+    /// 文件，也就是写端必然关闭，所以这条路径每天都会走到。
+    /// （真实事故：App 空转 100% CPU，sample 显示该队列 98.9% CPU，栈为
+    /// availableData → read/fstat → closure #1 in BackendProcess.start。）
+    ///
+    /// 读取逻辑只此一处：生产路径与 `--selftest` 的自检都走它，自检才能真的守住这条不变量。
+    static func readOutputOnce(_ handle: FileHandle) -> Data? {
+        let data = handle.availableData
+        guard !data.isEmpty else {
+            handle.readabilityHandler = nil  // EOF：自注销，别空转
+            return nil
+        }
+        return data
     }
 
     /// 优雅停止：SIGTERM → 等待 → SIGKILL。
@@ -1456,6 +1492,12 @@ if CommandLine.arguments.contains("--selftest") {
     if BackendProcess.pickPort() == nil {
         problems.append("端口 \(kPortRange) 全部被占用")
     }
+    // 输出管道 reader 的 EOF 行为：写端关闭后 handler 必须自注销。
+    // 不自注销时 level-triggered 读事件会让回调空转（250ms 内上千次）→ App 空转 100% CPU。
+    let pipeCalls = BackendProcess.probeOutputReaderEOF()
+    if pipeCalls > 5 {
+        problems.append("输出管道 reader 在 EOF 上空转：250ms 内回调 \(pipeCalls) 次")
+    }
     if problems.isEmpty {
         // 把字段拆成数组再 join：一整条字符串拼接会让 Swift 的类型检查卡住（实测超时）。
         // lang/langquery/menubar 让「界面语言默认英文 + 跟随系统」和「菜单栏是透明模板图」
@@ -1473,6 +1515,7 @@ if CommandLine.arguments.contains("--selftest") {
             "langquery=\(langQuery)",
             "menubar=\(AppDelegate.menuBarIconCheck())",
             "activation=\(AppDelegate.activationPolicy == .accessory ? "accessory" : "regular")",
+            "pipereader=\(pipeCalls <= 5 ? "ok" : "spin")",
         ]
         print(fields.joined(separator: " "))
         exit(0)

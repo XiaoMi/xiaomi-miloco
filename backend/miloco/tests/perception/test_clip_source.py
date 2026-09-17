@@ -297,5 +297,8 @@ async def test_clip_source_rule_only_pipeline(tmp_path, monkeypatch):
     assert not result.rooms[clip_source.ROOM].omni_outputs[clip_source.DID].skipped
     out = result.rooms[clip_source.ROOM].omni_outputs[clip_source.DID]
     assert [m.rule_id for m in out.matched_rules] == ["r1"]
-    assert "video_base64" in captured["payload"]
+    # 感知输入默认已是「图片多帧」（settings.yaml: rule_only_input=image /
+    # last_frame_only=false），不再是整窗 mp4；音频始终不进 rule_only 载荷。
+    assert "image_frames" in captured["payload"] and "video_base64" not in captured["payload"]
+    assert len(captured["payload"]["image_frames"]) > 1
     assert "audio_base64" not in captured["payload"]

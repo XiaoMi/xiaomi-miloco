@@ -315,18 +315,20 @@ def _gemini_usage_to_openai(usage_metadata: dict[str, Any] | None) -> dict[str, 
 
 
 def _gemini_media_resolution() -> str:
-    """读 Gemini media_resolution 档位配置（``""`` / ``"low"`` / ``"high"``）。
+    """读 Gemini 视频请求的分辨率档位（``"low"`` / ``"high"``），**默认 high**。
 
-    与 ``prompt_builder._get_video_short_edge`` 同款：每次调用实时读 settings，CLI 改后
-    下一推理周期生效；读失败回退 ``""``（= Gemini 默认 low / 66 tok 每帧）。
+    与 ``prompt_builder._get_video_short_edge`` 同款：每次调用实时读 settings，改配置后
+    下一推理周期生效。取值不认识（含旧版的 ``""``）或读失败一律回退 ``"high"``——
+    默认档就是 high（264 tok/帧），小目标/文字更清；要省 token 由使用方显式配 low。
     """
     try:
         from miloco.config import get_settings
 
-        val = get_settings().perception.engine.get("input", {}).get("media_resolution", "")
-        return str(val or "")
+        raw = get_settings().perception.engine.get("input", {}).get("media_resolution", "")
+        val = str(raw or "").strip().lower()
     except Exception:
-        return ""
+        return "high"
+    return val if val in ("low", "high") else "high"
 
 
 def _gemini_extract_text(payload: dict[str, Any]) -> str | None:
@@ -472,10 +474,16 @@ class GeminiAdapter(OmniProviderAdapter):
         # 该类模型默认即无思考，跳过不发即可。
         if "lite" not in model.lower():
             gen_cfg["thinkingConfig"] = {"thinkingBudget": 0}
-        # media_resolution 档位：仅 "high" 显式请求高预算(264 tok/帧)；其余(""/"low")不发该
-        # 字段即 Gemini 默认 low(66 tok/帧)。默认 low 最省，identity 等细节场景可经 CLI 切 high。
-        if _gemini_media_resolution().lower() == "high":
-            gen_cfg["mediaResolution"] = "MEDIA_RESOLUTION_HIGH"
+        # 视频请求参数里的分辨率档位：**两档都显式发**（默认 high），请求体里能直接看到这次
+        # 用的哪一档，不再依赖服务端默认 low(66 tok/帧)。要省 token 配 low 即得
+        # MEDIA_RESOLUTION_LOW；旧版只在 high 时才发该字段。
+        # （normalize 放在这里而不是只靠读取端：读取端保证返回小写，但 stubs/测试 override
+        #   进来的可能是任意大小写。）
+        gen_cfg["mediaResolution"] = (
+            "MEDIA_RESOLUTION_LOW"
+            if _gemini_media_resolution().strip().lower() == "low"
+            else "MEDIA_RESOLUTION_HIGH"
+        )
 
         body: dict[str, Any] = {"contents": contents, "generationConfig": gen_cfg}
         if system_texts:

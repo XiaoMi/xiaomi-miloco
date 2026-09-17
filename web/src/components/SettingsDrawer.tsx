@@ -10,23 +10,36 @@ import {
 } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
 import { getEdition } from "@/lib/edition";
+import {
+  buildPerceptionInputPayload,
+  DEFAULT_IMAGE_LAST_FRAME_ONLY,
+  DEFAULT_PERCEPTION_INPUT,
+  normalizePerceptionInput,
+  PERCEPTION_INPUT_MODES,
+  type PerceptionInputMode,
+} from "@/lib/perceptionInput";
 import { toast } from "./Toast";
 
 // PerceptionConfig 里 min_suggestion_urgency 声明为可选(老 backend 不返此字段);
 // 但组件 state 需要确定值,单独拎一个具体类型的默认常量兜住:接口"可能没"、控件"永远有"。
 const DEFAULT_MIN_URGENCY: MinSuggestionUrgency = "low";
 
-// 与 backend 默认值对齐：video_short_edge / omni_fps 见 settings.yaml 的
+// 与 backend 默认值对齐（video_short_edge 默认 768）：video_short_edge / omni_fps 见 settings.yaml 的
 // perception.engine.input，window_size 见 perception.collect，smart_crop_enabled 见
 // perception.engine.crop_enhance.user_enabled。min_suggestion_urgency 例外——它的默认值
 // 不在 yaml 里，只在 settings.py::PerceptionSettings 的 pydantic Field（照 yaml 找会找不到）。
 const DEFAULTS: PerceptionConfig = {
-  video_short_edge: 512,
+  video_short_edge: 768,
   omni_fps: 1,
   window_size: 4,
   smart_crop_enabled: true,
   min_suggestion_urgency: DEFAULT_MIN_URGENCY,
   global_system_prompt: "",
+  // 感知输入默认「图片 + 多帧」（settings.yaml: rule_only_input=image /
+  // last_frame_only=false）。常量与 payload 组装都在 @/lib/perceptionInput，
+  // 单测引用同一份常量，不会各写一个字面量后悄悄漂移。
+  perception_input: DEFAULT_PERCEPTION_INPUT,
+  image_last_frame_only: DEFAULT_IMAGE_LAST_FRAME_ONLY,
 };
 
 // 全局感知系统提示词长度上限：与后端 PerceptionConfigBody 的 max_length 对齐，
@@ -62,6 +75,13 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [smartCrop, setSmartCrop] = useState(DEFAULTS.smart_crop_enabled === true);
   const [minUrgency, setMinUrgency] = useState<MinSuggestionUrgency>(
     DEFAULT_MIN_URGENCY,
+  );
+  // 感知输入：图片（默认）/ 视频；图片模式下是否每窗只送最后一帧（默认否 = 多帧全发）。
+  const [perceptionInput, setPerceptionInput] = useState<PerceptionInputMode>(
+    DEFAULT_PERCEPTION_INPUT,
+  );
+  const [imageLastFrameOnly, setImageLastFrameOnly] = useState(
+    DEFAULT_IMAGE_LAST_FRAME_ONLY,
   );
   // 全局感知系统提示词：非空时后端追加到感知 system prompt 尾部（内置内容保留）。
   const [globalPrompt, setGlobalPrompt] = useState(
@@ -99,6 +119,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
         setMinUrgency(c.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY);
         // 老 backend 不返该字段 → 回退空串（= 不注入），与 backend 读取侧一致。
         setGlobalPrompt(c.global_system_prompt ?? "");
+        // 老 backend 不返这两个字段 → 回退后端默认（图片 + 多帧），不误导成"远端就是这么配的"。
+        setPerceptionInput(normalizePerceptionInput(c.perception_input));
+        setImageLastFrameOnly(c.image_last_frame_only === true);
       }),
       getSchedulerConfig().then((s) => {
         setSchedulerLoaded(s.enabled);
@@ -129,6 +152,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
       // 不可用时恒 false：置灰的开关不该产出待保存改动
       (smartCropAvailable && smartCrop !== (config.smart_crop_enabled === true)) ||
       minUrgency !== (config.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY) ||
+      perceptionInput !== normalizePerceptionInput(config.perception_input) ||
+      imageLastFrameOnly !== (config.image_last_frame_only === true) ||
       globalPrompt.trim() !== (config.global_system_prompt ?? "").trim());
   // schedulerLoaded === null 表示这次没读到服务端值（接口缺失 / 版本错位）：
   // 此时 schedulerDirty 恒 false，拨动开关不会写盘，故置灰禁用避免呈现「看着能动、
@@ -163,9 +188,12 @@ export function SettingsDrawer({ open, onClose }: Props) {
           ...(smartCropAvailable ? { smart_crop_enabled: smartCrop } : {}),
           min_suggestion_urgency: minUrgency,
           global_system_prompt: globalPrompt.trim(),
+          ...buildPerceptionInputPayload(perceptionInput, imageLastFrameOnly),
         });
         setConfig(updated);
         setSmartCrop(updated.smart_crop_enabled === true);
+        setPerceptionInput(normalizePerceptionInput(updated.perception_input));
+        setImageLastFrameOnly(updated.image_last_frame_only === true);
         // 回填后端规范化后的值（未来若后端做 trim/截断，前端随之收敛）。
         setGlobalPrompt(updated.global_system_prompt ?? "");
         if (updated.restart_ok === false) {
@@ -203,6 +231,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
     // 同 scheduler：不可用（发版级开关未放开，置灰）时不动视觉，否则会拨出一个恒不 dirty 的值
     if (smartCropAvailable) setSmartCrop(DEFAULTS.smart_crop_enabled === true);
     setMinUrgency(DEFAULT_MIN_URGENCY);
+    setPerceptionInput(DEFAULT_PERCEPTION_INPUT);
+    setImageLastFrameOnly(DEFAULT_IMAGE_LAST_FRAME_ONLY);
     setGlobalPrompt(DEFAULTS.global_system_prompt ?? "");
     // 仅在开关可配置时才回默认 ON；不可用（schedulerLoaded===null，置灰）时保持
     // 当前视觉，避免把置灰的开关拨到 ON 且 schedulerDirty 恒 false 无从写盘。
@@ -385,6 +415,74 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   <span>{WINDOW_MAX} {t("settings.windowSizeUnit")}</span>
                 </div>
               </div>
+
+              {/* 感知输入：图片/视频 + 图片是否只送末帧。只对 rule_only（slim 走这条）
+                  生效，故非 slim 不呈现，避免"看着能配、实则无效"。两个开关都是热读，
+                  保存后下个感知窗口生效，不需要重启引擎。 */}
+              {slim && (
+              <div className="space-y-2.5">
+                <label className="text-body font-medium text-text-primary block">
+                  {t("settings.perceptionInput")}
+                </label>
+                <div className="flex gap-2">
+                  {PERCEPTION_INPUT_MODES.map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      aria-pressed={perceptionInput === m}
+                      onClick={() => setPerceptionInput(m)}
+                      className={`flex-1 py-2.5 rounded-xl text-body transition-colors ${
+                        perceptionInput === m
+                          ? "bg-brand-primary text-white shadow-sm"
+                          : "bg-bg-primary border border-border text-text-primary hover:border-brand-primary"
+                      }`}
+                    >
+                      {t(
+                        m === "image"
+                          ? "settings.perceptionInputImage"
+                          : "settings.perceptionInputVideo",
+                      )}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-caption text-text-tertiary leading-relaxed">
+                  {t("settings.perceptionInputHint")}
+                </p>
+
+                {perceptionInput === "image" ? (
+                  <div className="space-y-2 pt-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-body font-medium text-text-primary">
+                        {t("settings.imageLastFrameOnly")}
+                      </label>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={imageLastFrameOnly}
+                        aria-label={t("settings.imageLastFrameOnly")}
+                        onClick={() => setImageLastFrameOnly((v) => !v)}
+                        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                          imageLastFrameOnly ? "bg-brand-primary" : "bg-border"
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-5 w-5 transform rounded-full bg-white shadow-sm transition-transform ${
+                            imageLastFrameOnly ? "translate-x-[22px]" : "translate-x-0.5"
+                          }`}
+                        />
+                      </button>
+                    </div>
+                    <p className="text-caption text-text-tertiary leading-relaxed">
+                      {t("settings.imageLastFrameOnlyHint")}
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-caption text-text-tertiary leading-relaxed">
+                    {t("settings.perceptionInputVideoNote")}
+                  </p>
+                )}
+              </div>
+              )}
 
               {/* 事件提醒 —— urgency 过滤(3-stop slider,与感知窗口视觉对齐)；omni 判定阈值，slim 不适用 */}
               {!slim && (

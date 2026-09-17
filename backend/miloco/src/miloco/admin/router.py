@@ -1563,6 +1563,20 @@ class PerceptionConfigBody(BaseModel):
     video_short_edge: int | None = Field(default=None, ge=64, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     window_size: int | None = Field(default=None, ge=1, le=60)
+    # 感知输入媒体：image=窗口各帧图片（默认，纯静态规则判定更聚焦）；video=mp4 视频
+    # （Gemini 视频按帧计费 ~66 tok/帧，同分辨率 token 约为图片 1/4）。写
+    # perception.engine.input.rule_only_input；prompt_builder 每窗热读，写盘即生效。
+    perception_input: Literal["image", "video"] | None = Field(
+        default=None,
+        description="感知输入是图片还是视频；默认 image（图片）",
+    )
+    # 图片输入时是否只送窗口最后一帧。写 perception.engine.input.last_frame_only；
+    # 默认 false = 多帧全发（动作/手势类规则更稳），true = 只送末帧（省 token、更快）。
+    # 仅 perception_input=image 时生效（视频模式对应开关是 rule_only_video_single_frame）。
+    image_last_frame_only: bool | None = Field(
+        default=None,
+        description="图片输入是否每窗只送最后一帧；默认 false（送多帧）",
+    )
     # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
     # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
     smart_crop_enabled: bool | None = None
@@ -1626,8 +1640,25 @@ def _perception_config_payload() -> dict:
             global_system_prompt,
         )
         global_system_prompt = ""
+    # 感知输入模式 / 图片是否只送末帧：与 video_short_edge 同样**热读**（prompt_builder
+    # 每窗现读 settings），坏值 fail-safe 退默认（image / 多帧），别让 GET/PUT 一起 500
+    # ——理由同上面的 input 块（一抛就把「进 UI 改回来」这条自救路堵死）。
+    raw_input_mode = inp.get("rule_only_input", "image")
+    if raw_input_mode not in ("image", "video"):
+        logger.warning(
+            "event=perception_config_bad field=rule_only_input reason=not_in_enum raw=%r 退默认",
+            raw_input_mode,
+        )
+        raw_input_mode = "image"
+    raw_last_frame_only = inp.get("last_frame_only", False)
+    if not isinstance(raw_last_frame_only, bool):
+        logger.warning(
+            "event=perception_config_bad field=last_frame_only reason=not_bool raw=%r 退默认",
+            raw_last_frame_only,
+        )
+        raw_last_frame_only = False
     return {
-        "video_short_edge": inp.get("video_short_edge", 512),
+        "video_short_edge": inp.get("video_short_edge", 768),
         "omni_fps": inp.get("omni_fps", 1),
         "window_size": s.perception.collect.window_size,
         # 双闸分开暴露:smart_crop_enabled = 用户态(开关位置,取 user_enabled)vs
@@ -1638,6 +1669,9 @@ def _perception_config_payload() -> dict:
         # 日志 event=crop_enhance_config_bad 的 reason。
         "smart_crop_enabled": ce.user_enabled,
         "smart_crop_available": ce.enabled,
+        # 感知输入：图片/视频 + 图片是否只送末帧（网页「设置 → 感知输入」）
+        "perception_input": raw_input_mode,
+        "image_last_frame_only": raw_last_frame_only,
         "min_suggestion_urgency": s.perception.min_suggestion_urgency,
         # 全局感知系统提示词(web「设置」页)；热读下个感知窗口生效。
         "global_system_prompt": global_system_prompt,
@@ -1666,6 +1700,16 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    if body.perception_input is not None:
+        # 热读：prompt_builder 每窗现读 rule_only_input（同 video_short_edge），写盘即生效。
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})[
+            "rule_only_input"
+        ] = body.perception_input
+    if body.image_last_frame_only is not None:
+        # 同上，热读；仅在 perception_input == "image" 时被 prompt_builder 采用。
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})[
+            "last_frame_only"
+        ] = body.image_last_frame_only
     if body.smart_crop_enabled is not None:
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("crop_enhance", {})[
             "user_enabled"
@@ -1684,7 +1728,8 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
     payload = _perception_config_payload()
     if update:
         # 各参数生效路径不同，按「新值 != 旧值」判断（前端 drawer 多字段一起 PUT）：
-        #   - video_short_edge：每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
+        #   - video_short_edge / perception_input / image_last_frame_only：均在推理侧每帧或每窗
+        #     实时读 settings，写盘 + reset_settings 后即生效，无需重启、不参与下方的分派。
         #   - smart_crop_enabled：同上，crop_enhance_config_from_settings 每窗口热读，无需重启。
         #   - omni_fps：pipeline 每窗现读引擎内存 config.input.omni_fps（非 settings），但它经
         #     adjust_fps_for_omni 顶起的 tracker fps 有构造期派生缓存——走 apply_omni_fps_live

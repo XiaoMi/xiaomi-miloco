@@ -1489,7 +1489,7 @@ def _resolve_person_face_jpg(
 # Video encoding (frames + audio → mp4)
 # =============================================================================
 
-_VIDEO_SHORT_EDGE = 512  # fallback; runtime value from settings.yaml / config.json via _get_video_short_edge()
+_VIDEO_SHORT_EDGE = 768  # fallback; runtime value from settings.yaml / config.json via _get_video_short_edge()
 
 
 def _audio_only_media_info(sample_rate: int) -> LocalMediaInfo:
@@ -2019,7 +2019,7 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
 #    - ReID tracker/human_reid.py `preprocess` → 人体 crop 缩到 192x96
 #    - 身份 crop 进 omni:本文件 _CROP_SIZE = (512,512)
 # ⑤ omni 推理分辨率 = `video_short_edge`(**本 PR 前后都只有这一个旋钮**):
-#    settings.yaml 默认 512、UI 档位 [360,512,768,1080]、admin API 收 64..2160。
+#    settings.yaml 默认 768、UI 档位 [360,512,768,1080]、admin API 收 64..2160。
 #    _encode_video_mp4 里 `scale = short_edge / min(h0,w0)` **没有钳到 1.0**,所以
 #    「源短边 < 用户档」时**本 PR 之前就已经在放大**了,只是用了为缩小设计的
 #    INTER_AREA(放大退化成近似最近邻);本 PR 只改了放大时用哪个重采样核。target
@@ -2047,7 +2047,7 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
 #    token,而非信息量),所以它**是 provider 相关的**,换模型/adapter 可能蒸发。
 
 def _effective_panorama_short_edge() -> int:
-    """全景视频短边 = 用户设定值;非正值兜回 512 默认。
+    """全景视频短边 = 用户设定值;非正值兜回 768 默认。
 
     Smart Crop 与本值 **正交**(裁不裁看 crop_enhance 的双 key,不再看这里),所以用户选的
     768/1080 在 crop 回退全景时依然生效。非正值兜底纯属防御:admin API 已拒 <64,但历史

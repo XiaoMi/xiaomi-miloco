@@ -825,6 +825,14 @@ export interface PerceptionConfig {
    *  感知 system prompt 尾部,作为对全部机位生效的补充指导;"" = 不注入。老后端不返此
    *  字段 → undefined,读取处回退空串。 */
   global_system_prompt?: string;
+  /** 感知输入媒体(backend perception.engine.input.rule_only_input):"image"=窗口各帧图片
+   *  (默认,纯静态规则判定更聚焦)| "video"=整窗 mp4(Gemini 视频按帧计费 ~66 tok/帧)。
+   *  热读:写盘后下个感知窗口生效,不重启。老后端不返此字段 → undefined,读取处回退 image。 */
+  perception_input?: "image" | "video";
+  /** 图片输入时是否每窗只送最后一帧(backend perception.engine.input.last_frame_only):
+   *  默认 false=多帧全发(动作/手势类规则更稳),true=只送末帧(省 token、更快)。
+   *  仅 perception_input === "image" 时生效。老后端不返此字段 → undefined,回退 false。 */
+  image_last_frame_only?: boolean;
 }
 
 export async function getPerceptionConfig(): Promise<PerceptionConfig> {

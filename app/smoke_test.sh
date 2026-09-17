@@ -81,6 +81,13 @@ grep -q "activation=accessory" <<<"$SELFTEST_OUT" \
     || fail "launcher 激活策略不是 accessory（会显示 Dock 图标）：$SELFTEST_OUT"
 pass "无 Dock 图标（激活策略 accessory，Dock 不驻留、不进 ⌘-Tab）"
 
+# 后端输出管道的 reader 在 EOF 上必须自注销：level-triggered 的 readabilityHandler
+# 会让"写端已关"的 fd 永远可读，不自注销就是每毫秒空转、吃满一个核（真实事故：
+# App 空转 100% CPU）。自检在真管子上跑 250ms 数回调次数，空转实现会上千次。
+grep -q "pipereader=ok" <<<"$SELFTEST_OUT" \
+    || fail "输出管道 reader 在 EOF 上空转（App 会吃满一个核）：$SELFTEST_OUT"
+pass "后端输出管道 reader 在 EOF 上自注销（不空转 CPU）"
+
 # 界面语言：默认英文、中文系统中文、可用 MILOCO_APP_LANG 强制
 LANG_ZH_OUT="$(MILOCO_APP_LANG=zh "$APP/Contents/MacOS/Miloco" --selftest)"
 LANG_EN_OUT="$(MILOCO_APP_LANG=en "$APP/Contents/MacOS/Miloco" --selftest)"
@@ -231,6 +238,25 @@ assert cfg['server']['token'], cfg.get('server')
 assert cfg['server']['port'] == 1812, cfg.get('server')
 " "$HOME_DIR/config.json" || fail "bootstrap 后默认配置被破坏"
 pass "bootstrap 后 config.json 默认项完整保留（仅新增 token）"
+
+# 感知默认档来自**包内 settings.yaml**（用户 config.json 里没有这些键，全靠包兜底），
+# 是打包时最容易漏改的一层：这里直接读引擎实际生效的值，别只看源码里改了没。
+"$PY" -c "
+import json, os, sys
+os.environ.setdefault('MILOCO_EDITION', 'slim')
+os.environ['MILOCO_HOME'] = sys.argv[1]
+_srv = json.load(open(os.path.join(sys.argv[1], 'config.json')))['server']
+# server.url 与 host/port 不一致时 get_settings() 会打一条告警，把冒烟日志刷脏；这里对齐。
+os.environ['MILOCO_SERVER__URL'] = 'http://%s:%s' % (_srv['host'], _srv['port'])
+from miloco.config import get_settings
+inp = get_settings().perception.engine['input']
+assert inp['video_short_edge'] == 768, inp
+assert inp['media_resolution'] == 'high', inp
+assert inp['rule_only_input'] == 'image', inp
+assert inp['last_frame_only'] is False, inp
+print('perception defaults ok')
+" "$HOME_DIR" >/dev/null || fail "包内感知默认档不对（video_short_edge=768 / media_resolution=high / rule_only_input=image / last_frame_only=false）"
+pass "感知默认档：768p / media_resolution=high / 图片输入 / 多帧"
 
 # 「日志」页的一键清理:三处存储各一个 POST —— meaningful_events / on_demand_log(miloco.db)
 # 与 action_ledger(observability.db,「触发场景」在这本台账里;早期版本漏了它)。

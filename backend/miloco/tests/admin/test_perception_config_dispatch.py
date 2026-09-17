@@ -239,7 +239,7 @@ def test_input_block_non_mapping_keeps_endpoint_alive(client, tmp_path):
 
     与上面 crop_enhance 同款坏值、同款连坐:`inp.get(...)` 会抛 AttributeError,而 PUT 先
     投影响应、后 update_shared_config,一抛连写盘都到不了 —— 用户在 UI 里改不回来。
-    推理侧不至于崩(_get_video_short_edge 自带 try 回退 512),所以这里是唯一的 500 来源。
+    推理侧不至于崩(_get_video_short_edge 自带 try 回退 768),所以这里是唯一的 500 来源。
     """
     from miloco.config.settings import reset_settings
 
@@ -255,7 +255,7 @@ def test_input_block_non_mapping_keeps_endpoint_alive(client, tmp_path):
     resp = c.get("/api/admin/perception-config")
     assert resp.status_code == 200
     data = resp.json()["data"]
-    assert data["video_short_edge"] == 512  # 退默认档,不是 500
+    assert data["video_short_edge"] == 768  # 退默认档,不是 500
     assert data["omni_fps"] == 1
 
 
@@ -390,3 +390,92 @@ def test_global_system_prompt_non_str_degrades(client, tmp_path):
     resp = c.get("/api/admin/perception-config")
     assert resp.status_code == 200
     assert resp.json()["data"]["global_system_prompt"] == ""
+
+
+class TestPerceptionInputMode:
+    """感知输入：图片/视频 + 图片是否只送末帧（网页「设置 → 感知输入」）。
+
+    两者都是推理侧热读（prompt_builder 每窗现读 settings），所以只验：
+    GET 投影默认值、PUT 写进 config.json 并回读、坏值/非法值不 500、不触发重启分派。
+    """
+
+    def test_get_defaults_image_input_multi_frame(self, client):
+        c, _svc = client
+        data = c.get("/api/admin/perception-config").json()["data"]
+        # 产品默认：图片输入 + 多帧全发（settings.yaml 同值）
+        assert data["perception_input"] == "image"
+        assert data["image_last_frame_only"] is False
+
+    def test_put_roundtrip_writes_config_json(self, client, tmp_path):
+        c, _svc = client
+        resp = c.put(
+            "/api/admin/perception-config",
+            json={"perception_input": "video", "image_last_frame_only": True},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        assert data["perception_input"] == "video"
+        assert data["image_last_frame_only"] is True
+
+        written = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        inp = written["perception"]["engine"]["input"]
+        assert inp["rule_only_input"] == "video"
+        assert inp["last_frame_only"] is True
+
+    @pytest.mark.parametrize("bad", ["img", "IMAGE", "frames", "", "1"])
+    def test_rejects_unknown_input_mode(self, client, tmp_path, bad):
+        c, _svc = client
+        resp = c.put("/api/admin/perception-config", json={"perception_input": bad})
+        assert resp.status_code == 422, resp.text
+        written = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        # 422 不动配置
+        assert "rule_only_input" not in written["perception"]["engine"]["input"]
+
+    def test_hot_read_does_not_dispatch_restart_or_fps_live(self, client):
+        """两个新参数都不该走 omni_fps 热更 / window_size 重启这两条入口。"""
+        c, svc = client
+        resp = c.put(
+            "/api/admin/perception-config",
+            json={"perception_input": "video", "image_last_frame_only": False},
+        )
+        assert resp.status_code == 200, resp.text
+        # 热读参数不进 restart_ok 分派：响应里连这个键都不会出现（只有 omni_fps/window_size
+        # 变更时才带），两条入口也都不该被调用。
+        assert "restart_ok" not in resp.json()["data"]
+        svc.apply_config_restart.assert_not_called()
+        svc.apply_omni_fps_live.assert_not_called()
+
+    def test_bad_existing_values_fall_back_to_defaults(self, client, tmp_path):
+        """config.json 里手写成垃圾（"input": "512" / rule_only_input 非枚举）不许 500。"""
+        c, _svc = client
+        (tmp_path / "config.json").write_text(
+            _json.dumps(
+                {
+                    "perception": {
+                        "engine": {
+                            "input": {"rule_only_input": 7, "last_frame_only": "false"}
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        from miloco.config.settings import reset_settings
+
+        reset_settings()
+        resp = c.get("/api/admin/perception-config")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()["data"]
+        # 坏值退默认，而不是 500 或者把 "false" 当真值
+        assert data["perception_input"] == "image"
+        assert data["image_last_frame_only"] is False
+
+    def test_put_only_input_mode_does_not_touch_last_frame(self, client, tmp_path):
+        """只改一个字段时另一个保持原值（前端抽屉多字段一起 PUT，缺省不动）。"""
+        c, _svc = client
+        c.put("/api/admin/perception-config", json={"image_last_frame_only": True})
+        c.put("/api/admin/perception-config", json={"perception_input": "video"})
+        written = _json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+        inp = written["perception"]["engine"]["input"]
+        assert inp["rule_only_input"] == "video"
+        assert inp["last_frame_only"] is True

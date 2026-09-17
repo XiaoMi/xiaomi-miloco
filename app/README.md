@@ -94,6 +94,19 @@ Miloco.app/
 App 固定用 **1812**（CLI / supervisor 版是 1810），两条链路可以同时跑、互不抢端口，
 App 也**不会**去接管 1810 上的 CLI 后端。只有 1812 被非 Miloco 程序占用时才顺延到 1813–1822。
 
+### 感知参数的默认档（网页「设置」里可改）
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `input.video_short_edge` | **768** | 送模型画面的短边。清晰度主要由它决定（小目标/文字），调低省 CPU 与 token |
+| `input.media_resolution` | **high** | 仅 Gemini：视频请求里**显式**带 `MEDIA_RESOLUTION_HIGH`（264 tok/帧）；配 `low` 得 `MEDIA_RESOLUTION_LOW`（66 tok/帧） |
+| `input.rule_only_input` | **image** | 感知输入是**图片**（窗口各帧 JPEG），对纯静态规则判定更聚焦；`video` = 整窗 mp4（按帧计费的模型更省 token） |
+| `input.last_frame_only` | **false** | 图片输入时送**多帧**（动作/手势类规则更稳）；`true` = 每窗只送最后一帧（省 token、更快） |
+
+后两项就是网页「设置 → 感知输入」的两个控件（只对 slim 的 `rule_only` 引擎生效）。四个都是
+**热读**：保存后下个感知窗口生效，不需要重启引擎。用户在网页改过的值落在数据目录的
+`config.json`，会覆盖包内 `settings.yaml` 的默认档 —— 所以升级 App 不会把住户自己的选择改掉。
+
 ### 粘贴（⌘V）为什么必须有主菜单
 
 WKWebView 的 ⌘C / ⌘V / ⌘A / ⌘Z 不是 WebKit 自己抓的键，而是「App 主菜单的 key
@@ -268,9 +281,11 @@ dmg 文件名）——正式对外发布建议先打 tag，或用 `--version` �
    `/api/home_profile` 路由**没有**被注册
 6. `swiftc` 编译启动器 → ad-hoc 签名（内嵌 Mach-O → 主程序 → bundle）
 7. `app/smoke_test.sh`：先跑 `Miloco --selftest` 卡住布局与可见行为（固定端口 1812、
-   菜单栏图标是透明模板 SVG、界面语言默认英文/跟随系统、**`activation=accessory` 即无 Dock 图标**），
+   菜单栏图标是透明模板 SVG、界面语言默认英文/跟随系统、**`activation=accessory` 即无 Dock 图标**、
+   **`pipereader=ok`** 即后端输出管道在 EOF 上自注销不会空转 CPU），
    再真起服务，验 `/health`、`/api/admin/edition`、身份路由 404、`observability.db` 已生成且
-   `/api/actions` 读得到场景触发台账、一键清理清空三处存储、bootstrap 不破坏默认配置、SIGTERM 优雅退出
+   `/api/actions` 读得到场景触发台账、一键清理清空三处存储、bootstrap 不破坏默认配置、
+   包内感知默认档（768p / `media_resolution=high` / 图片输入 / 多帧）、SIGTERM 优雅退出
 
 ### 依赖裁剪
 
@@ -294,3 +309,8 @@ dmg 文件名）——正式对外发布建议先打 tag，或用 `--version` �
 - **不设** `MILOCO_SUPERVISED`：后端 bootstrap 才会把 stdout/stderr 落到自己的日志文件
 - 必须 `-m miloco.main` 启动（该模块的 `start_server()` 会先 bootstrap 生成/落盘 token）；
   用 `uvicorn miloco.main:app` 会跳过 bootstrap
+- **后端输出管道的 reader 在 EOF 上必须自注销**（`readOutputOnce`）：bootstrap 会把子进程
+  stdio 重定向到自己的日志文件 → 管道写端关闭 → `readabilityHandler` 底层是 level-triggered
+  的 `EVFILT_READ`，EOF 的 fd 永远"可读"、`availableData` 立刻返回空。不自注销就是每毫秒空转
+  一轮、吃满一个核（实测 25 万次回调/250ms、App 常驻 100% CPU）。`--selftest` 会在"写端已关"
+  的真管子上跑一遍这条读取路径并断言回调次数，构建期就挡住回退

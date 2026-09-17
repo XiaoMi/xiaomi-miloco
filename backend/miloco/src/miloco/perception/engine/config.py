@@ -22,20 +22,21 @@ class InputConfig:
     # 与 fps / omni_fps 不同：运行时真值由 _get_video_short_edge() 每帧读 settings 字典
     # （见 prompt_builder），不从此 dataclass 字段读——故改分辨率免重启。别照 fps 的先例
     # 在构造前设 config.input.video_short_edge 期望生效，那样会被静默忽略。
-    video_short_edge: int = 512
-    # media_resolution: 仅 Gemini 生效的「每帧视觉 token 预算」档位。""/"low" = 66 tok/帧
-    # (默认、最省);"high" = 264 tok/帧(小目标/文字更清但 4× token)。mimo/qwen 忽略此字段。
-    # 实测:小目标清晰度主要由输入像素分辨率(video_short_edge)决定,本档位只控每帧 token 预算,
-    # 故默认 low;identity 等细节敏感场景可经 CLI 切 high。运行时由 GeminiAdapter 实时读 settings。
-    media_resolution: str = ""
+    video_short_edge: int = 768
+    # media_resolution: 仅 Gemini 生效的视频请求分辨率档位("low"=66 tok/帧省 token;
+    # "high"=264 tok/帧,小目标/文字更清但 4× token)。默认 high,且视频请求里显式带该档位。
+    # mimo/qwen 忽略此字段。取值不认识一律按 high(见 provider._gemini_media_resolution)。
+    # 运行时由 GeminiAdapter 实时读 settings,改配置免重启。
+    media_resolution: str = "high"
     # rule_only（纯场景触发）图片输入：True = 只取窗口**最后一帧**作输入图（省 token、更快，
-    # 静态状态类规则足够）；False = 多帧全发（动作/手势类规则更稳）。运行时由 prompt_builder
-    # 实时读 settings（同 video_short_edge 模式，改配置免重启）。默认开启。
-    last_frame_only: bool = True
-    # rule_only 媒体输入模式："video"（默认，mp4 视频——Gemini 视频按帧计费 ~66 tok/帧，
-    # 同分辨率下 token 约为图片 1/4）| "image"（窗口末帧 JPEG，~1064 tok/张，分辨率无关，
-    # 对纯静态规则判定更聚焦）。运行时由 prompt_builder 热读 settings，免重启。
-    rule_only_input: str = "video"
+    # 静态状态类规则足够）；False = 多帧全发（动作/手势类规则更稳）。默认 False（多帧）——
+    # 网页「设置 → 感知输入」可切换。运行时由 prompt_builder 实时读 settings
+    # （同 video_short_edge 模式，改配置免重启）。
+    last_frame_only: bool = False
+    # rule_only 媒体输入模式："image"（**默认**，窗口各帧 JPEG，对纯静态规则判定更聚焦）
+    # | "video"（mp4 视频——Gemini 视频按帧计费 ~66 tok/帧，同分辨率下 token 约为图片 1/4）。
+    # 网页「设置 → 感知输入」可切换；运行时由 prompt_builder 热读 settings，免重启。
+    rule_only_input: str = "image"
     # rule_only 视频模式是否只合成窗口**最后一帧**的单帧 mp4（~66 tok，最省）：
     # False = 全窗口帧合成（默认，信息完整）；True = 单帧。运行时热读 settings，免重启。
     rule_only_video_single_frame: bool = False

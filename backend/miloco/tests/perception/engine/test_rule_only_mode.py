@@ -265,11 +265,12 @@ def test_rule_only_build_prompt_no_roster_no_home_profile():
     # 无身份名册 / 家庭档案
     assert '已识别人物' not in uc
     assert '家庭档案' not in sp
-    # 输入默认是 mp4 视频（媒体 token 约为图片 1/4），无音频；图片模式由
-    # rule_only_input="image" 显式切换（见 test_build_prompt_image_mode_switch）
-    assert 'video_base64' in payload
+    # 输入默认是**图片多帧**（settings.yaml: rule_only_input=image / last_frame_only=false），
+    # 无音频；只送末帧由 last_frame_only=true 切换、视频模式由 rule_only_input="video" 切换
+    # （见 test_build_prompt_image_mode_switch / test_rule_only_video_single_frame_switch）
+    assert 'image_frames' in payload and 'video_base64' not in payload
+    assert len(payload['image_frames']) > 1
     assert 'audio_base64' not in payload
-    assert payload['media_info'].frame_count > 0
 
 
 def _patch_engine_settings(mock_gs, engine: dict):
@@ -481,10 +482,11 @@ async def test_run_pipeline_rule_only_skips_identity_and_audio():
     assert result.identity_packet.targets == []
     assert result.identity_packet.audio_clip.size == 0
     assert result.gate_packet.trigger.audio_active is False
-    # 发给模型的载荷默认是 mp4 视频（媒体 token 约为图片 1/4），无音频
+    # 发给模型的载荷默认是图片多帧（感知输入默认 image + 多帧），无音频
     payload = captured['payload']
-    assert 'video_base64' in payload and 'audio_base64' not in payload
-    assert payload['media_info'].frame_count > 0
+    assert 'image_frames' in payload and 'video_base64' not in payload
+    assert len(payload['image_frames']) > 1
+    assert 'audio_base64' not in payload
     # 输出只有规则命中
     assert result.omni_output is not None
     assert len(result.omni_output.matched_rules) == 1

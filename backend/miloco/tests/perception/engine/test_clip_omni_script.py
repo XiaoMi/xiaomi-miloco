@@ -104,6 +104,14 @@ async def test_rule_only_pipeline_with_local_clip(clip_omni, tmp_path, monkeypat
     config.omni.api_key = "test-key"
     ctx = OmniContext(rule_only=True, rule_conditions=rules)
 
+    # 产品默认已改成「图片多帧」（settings.yaml: rule_only_input=image / last_frame_only=false）；
+    # 本用例专测**视频**链路，故显式切回 video（monkeypatch 自动还原）。
+    from miloco.config import get_settings
+
+    monkeypatch.setitem(
+        get_settings().perception.engine.setdefault("input", {}), "rule_only_input", "video"
+    )
+
     captured: dict = {}
 
     async def _fake_call_omni(payload, config, type="realtime"):
@@ -146,7 +154,7 @@ async def test_rule_only_pipeline_with_local_clip(clip_omni, tmp_path, monkeypat
     assert out.caption == [] and out.suggestions == [] and out.speeches == []
     # 规则段进入 user content
     assert "手扫地" in captured["payload"]["user_content"]
-    # 输入是 mp4 视频、无音频
+    # 输入是 mp4 视频（本用例显式切的 video 模式）、无音频
     assert "video_base64" in captured["payload"]
     assert "audio_base64" not in captured["payload"]
 
@@ -166,7 +174,7 @@ async def test_image_mode_payload(clip_omni, tmp_path, monkeypatch):
     config.omni.api_key = "test-key"
     ctx = OmniContext(rule_only=True, rule_conditions=rules)
 
-    restore = clip_omni.apply_temp_settings(system_prompt=None, image_mode=True)
+    restore = clip_omni.apply_temp_settings(system_prompt=None, input_mode="image")
     captured: dict = {}
 
     async def _fake_call_omni(payload, config, type="realtime"):
@@ -195,7 +203,7 @@ def test_image_mode_setting_restored(clip_omni, monkeypatch):
     engine["rule_only_system_prompt"] = ""
     engine.setdefault("input", {})["rule_only_input"] = "video"
     restore = clip_omni.apply_temp_settings(
-        system_prompt="临时覆盖", image_mode=True
+        system_prompt="临时覆盖", input_mode="image"
     )
     assert engine["rule_only_system_prompt"] == "临时覆盖"
     assert engine["input"]["rule_only_input"] == "image"

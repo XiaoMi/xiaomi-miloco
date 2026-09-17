@@ -37,6 +37,13 @@
     "globalPrompt": "全局感知系统提示词",
     "globalPromptPlaceholder": "例：始终关注门口地面；忽略电视屏幕内容；人物必须全身可见才算在场……",
     "globalPromptHint": "追加到感知 system prompt（内置角色 / 总原则 / 输出格式保留），对全部机位生效，用于跨场景的通用关注点与判定口径；针对单个场景的细节与注意事项请在「场景联动」每条规则的「场景补充说明」里配置。",
-    "slimModelHint": "场景触发判定由多模态（omni）云模型完成，必须先配置并启用一个模型；未配置时感知引擎不会运行。"
+    "slimModelHint": "场景触发判定由多模态（omni）云模型完成，必须先配置并启用一个模型；未配置时感知引擎不会运行。",
+    "perceptionInput": "感知输入",
+    "perceptionInputImage": "图片",
+    "perceptionInputVideo": "视频",
+    "perceptionInputHint": "图片 = 每个感知窗口抽帧成图片送模型（默认，纯静态规则判定更聚焦）；视频 = 整窗合成 mp4（按帧计费的模型更省 token）。改完下个感知窗口生效，不用重启。",
+    "perceptionInputVideoNote": "视频模式整窗送入，下面这项只对图片模式有效。",
+    "imageLastFrameOnly": "每窗只送最后一帧",
+    "imageLastFrameOnlyHint": "关闭（默认）= 一窗多帧全送，动作/手势类规则更稳；打开 = 只送窗口最后一帧，省 token、更快，静态状态类规则足够。"
   }
 }

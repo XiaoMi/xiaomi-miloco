@@ -265,7 +265,7 @@ class TestGeminiAdapter:
         assert block["video_url"]["url"].startswith("data:video/mp4;base64,")
 
     def test_request_body_system_instruction(self, monkeypatch):
-        monkeypatch.setattr(provider, "_gemini_media_resolution", lambda: "")
+        monkeypatch.setattr(provider, "_gemini_media_resolution", lambda: "low")
         messages = [
             {"role": "system", "content": "你是助手"},
             {"role": "user", "content": [{"type": "text", "text": "hi"}]},
@@ -280,21 +280,21 @@ class TestGeminiAdapter:
         assert gc["maxOutputTokens"] == 512
         assert gc["temperature"] == 0.1
         assert gc["topP"] == 0.95
-        # 默认关思考；暂不启用 JSON 模式；default media_resolution 不发字段；stream 不进 body
+        # 默认关思考；暂不启用 JSON 模式；stream 不进 body；分辨率档位恒显式发。
         assert gc["thinkingConfig"] == {"thinkingBudget": 0}
-        assert "mediaResolution" not in gc
+        assert gc["mediaResolution"] == "MEDIA_RESOLUTION_LOW"  # 显式 low 才发 low
         assert "responseMimeType" not in gc
         assert "stream" not in body
 
-    def test_media_resolution_default_omitted(self, monkeypatch):
-        # ""/"low" → 不发 mediaResolution（= Gemini 默认 low）
-        for val in ("", "low", "LOW"):
+    def test_media_resolution_low_explicit(self, monkeypatch):
+        # low（含大小写/空白）→ 显式发 MEDIA_RESOLUTION_LOW（不再"省略字段靠服务端默认"）
+        for val in ("low", "LOW", " low "):
             monkeypatch.setattr(provider, "_gemini_media_resolution", lambda v=val: v)
             body = self.adapter.build_request_body(
                 [{"role": "user", "content": "x"}], model="gemini-3-flash",
                 max_tokens=512, temperature=0.1, top_p=0.95,
             )
-            assert "mediaResolution" not in body["generationConfig"], val
+            assert body["generationConfig"]["mediaResolution"] == "MEDIA_RESOLUTION_LOW", val
 
     def test_media_resolution_high(self, monkeypatch):
         monkeypatch.setattr(provider, "_gemini_media_resolution", lambda: "high")
@@ -303,6 +303,24 @@ class TestGeminiAdapter:
             max_tokens=512, temperature=0.1, top_p=0.95,
         )
         assert body["generationConfig"]["mediaResolution"] == "MEDIA_RESOLUTION_HIGH"
+
+    def test_media_resolution_reader_defaults_to_high(self, monkeypatch):
+        """_gemini_media_resolution 的取值矩阵：默认 high，只有明确 low 才是 low。"""
+        from miloco.config import get_settings
+
+        for raw, expect in (
+            (None, "high"), ("", "high"), ("HIGH", "high"), ("high", "high"),
+            ("low", "low"), ("LOW", "low"), (" low ", "low"),
+            ("medium", "high"),  # 不认识的档位（含 medium/垃圾值）一律 high
+            (512, "high"),
+        ):
+            monkeypatch.setattr(
+                get_settings().perception,
+                "engine",
+                {"input": {} if raw is None else {"media_resolution": raw}},
+                raising=False,
+            )
+            assert provider._gemini_media_resolution() == expect, raw
 
     def test_request_body_lite_skips_thinking_config(self):
         # lite 系列不支持 thinkingConfig 字段，传 thinkingBudget=0 会 400（实测
