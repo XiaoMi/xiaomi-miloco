@@ -1970,9 +1970,17 @@ def _decide_agent_platform(
 
 
 def _default_miloco_home(agent_platform: str) -> Path:
-    """按 agent runtime 决定 MILOCO_HOME 默认路径。hermes → ~/.hermes/miloco，其余 → ~/.openclaw/miloco。"""
-    subdir = ".hermes" if agent_platform == "hermes" else ".openclaw"
-    return Path.home() / subdir / "miloco"
+    """Return the platform default Miloco home.
+
+    Hermes owns its runtime root through ``HERMES_HOME``; OpenClaw retains its
+    historical ``~/.openclaw/miloco`` default for compatibility.
+    """
+    if agent_platform == "hermes":
+        hermes_home = Path(
+            os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")
+        ).expanduser()
+        return hermes_home / "miloco"
+    return Path.home() / ".openclaw" / "miloco"
 
 
 def _write_runtime_pointer(miloco_home: Path, agent_platform: str) -> Path:
