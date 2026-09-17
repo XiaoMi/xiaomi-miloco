@@ -577,7 +577,12 @@ if [ -f "$SUPERVISORD_CONF" ]; then
 import re, sys
 path, new_home = sys.argv[1], sys.argv[2]
 text = open(path, encoding='utf-8').read()
-text = re.sub(r'MILOCO_HOME="[^"]*"', f'MILOCO_HOME="{new_home}"', text)
+escaped = new_home.replace('%', '%%')
+if "'" not in escaped and ('"' in escaped or '\\' in escaped):
+    rendered = f"MILOCO_HOME='{escaped}'"
+else:
+    rendered = 'MILOCO_HOME="' + escaped.replace('\\', '\\\\') + '"'
+text = re.sub(r'''MILOCO_HOME=(?:"[^"]*"|'[^']*')''', lambda _m: rendered, text)
 open(path, 'w', encoding='utf-8').write(text)
 print(f"  supervisord.conf::MILOCO_HOME = {new_home}")
 PY

@@ -15,7 +15,19 @@ set -uo pipefail
 
 HERMES_BIN="$(command -v hermes || true)"
 MILOCO_CLI_BIN="$(command -v miloco-cli || true)"
-HERMES_ADAPTER_PY="/Users/wkea/.local/share/uv/tools/miloco/bin/python"
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+RUNTIME_ENV_FILE="${MILOCO_RUNTIME_ENV:-$HOME/.config/miloco/default.env}"
+if [ -z "${MILOCO_HOME:-}" ] && [ -f "$RUNTIME_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$RUNTIME_ENV_FILE"
+fi
+MILOCO_HOME="${MILOCO_HOME:-${HERMES_HOME}/miloco}"
+MILOCO_PYTHON_BIN="${MILOCO_PYTHON_BIN:-}"
+if [ -z "$MILOCO_PYTHON_BIN" ] && [ -f "$MILOCO_HOME/config.json" ]; then
+  MILOCO_PYTHON_BIN="$(python3 -c "import json; print(json.load(open('$MILOCO_HOME/config.json')).get('server', {}).get('python_bin', ''))" 2>/dev/null || true)"
+fi
+HERMES_ADAPTER_PY="${HERMES_ADAPTER_PY:-${MILOCO_PYTHON_BIN:-python3}}"
+export HERMES_HOME MILOCO_HOME
 PASS=0
 FAIL=0
 SKIP=0
@@ -102,7 +114,7 @@ echo "$CHAT_RESULT" | grep -qiE "pong|在|hi|hello|嗨" && ok "hermes chat 返�
 # ====== 6. trace 路径验证(测试 adapter.read_trace_meta 读盘) ======
 section "6. trace 路径文件存在性"
 
-TRACE_DIR=/Users/wkea/.openclaw/miloco/trace/agent
+TRACE_DIR="$MILOCO_HOME/trace/agent"
 if [ -d "$TRACE_DIR" ]; then
   # 目录存在 → 检查是否有日期子目录
   DATE_DIRS=$(find "$TRACE_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)

@@ -16,6 +16,36 @@ except ModuleNotFoundError:
     # 这些用例只覆盖安装器的标准库 runtime helper；不需要交互式 questionary。
     sys.modules["questionary"] = types.ModuleType("questionary")
 
+try:
+    from rich.console import Console  # noqa: F401
+except ModuleNotFoundError:
+    class _RichStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    rich = types.ModuleType("rich")
+    rich.__path__ = []
+    rich_console = types.ModuleType("rich.console")
+    rich_console.Console = _RichStub
+    rich_progress = types.ModuleType("rich.progress")
+    for _name in (
+        "BarColumn",
+        "DownloadColumn",
+        "Progress",
+        "SpinnerColumn",
+        "TextColumn",
+        "TimeRemainingColumn",
+        "TransferSpeedColumn",
+    ):
+        setattr(rich_progress, _name, _RichStub)
+    sys.modules.update(
+        {
+            "rich": rich,
+            "rich.console": rich_console,
+            "rich.progress": rich_progress,
+        }
+    )
+
 
 @pytest.fixture(scope="module")
 def installer():

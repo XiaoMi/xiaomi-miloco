@@ -11,13 +11,19 @@ warn() { printf "  ${YELLOW}[!]${NC} %s\n" "$1"; WARN=$((WARN+1)); }
 section() { printf "\n── %s ──\n" "$1"; }
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-MILOCO_HOME="${MILOCO_HOME:-$HOME/.hermes/miloco}"
+RUNTIME_ENV_FILE="${MILOCO_RUNTIME_ENV:-$HOME/.config/miloco/default.env}"
+if [ -z "${MILOCO_HOME:-}" ] && [ -f "$RUNTIME_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$RUNTIME_ENV_FILE"
+fi
+MILOCO_HOME="${MILOCO_HOME:-${HERMES_HOME}/miloco}"
+export HERMES_HOME MILOCO_HOME
 HERMES_BIN="$HOME/.local/bin/hermes"
 MILOCO_CLI="$HOME/.local/bin/miloco-cli"
 BACKEND_URL=$(python3 -c "
 import json, os
 mh = os.environ.get('MILOCO_HOME') or os.path.join(
-    os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes')), 'miloco'
+    os.environ.get('HERMES_HOME') or os.path.expanduser('~/.hermes'), 'miloco'
 )
 try:
     cfg = json.load(open(os.path.join(mh, 'config.json')))

@@ -1889,6 +1889,7 @@ def _read_runtime_pointer(path: Path) -> dict[str, str]:
         if len(assignment) != 1 or "=" not in assignment[0]:
             continue
         key, _, value = assignment[0].partition("=")
+        key = key.strip()
         if not key or not (key[0].isalpha() or key[0] == "_"):
             continue
         if not all(char.isalnum() or char == "_" for char in key):
@@ -2067,7 +2068,7 @@ def _resolve_uninstall_home() -> Path:
 
 
 def _warn_legacy_hermes_home(miloco_home: Path, agent_platform: str) -> None:
-    """在忽略 HERMES_HOME 之前警告用户旧版数据目录仍然存在。"""
+    """在改用 HERMES_HOME 派生的新目录、放弃旧版数据前发出告警。"""
     if agent_platform != "hermes":
         return
     legacy_home = Path.home() / ".hermes" / "miloco"
