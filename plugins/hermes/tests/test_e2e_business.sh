@@ -17,9 +17,19 @@ set -uo pipefail
 
 HERMES_BIN="$(command -v hermes 2>/dev/null || true)"
 MILOCO_CLI_BIN="$(command -v miloco-cli 2>/dev/null || true)"
-HERMES_ADAPTER_PY="/Users/wkea/.local/share/uv/tools/miloco/bin/python"
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-MILOCO_HOME="${MILOCO_HOME:-$HOME/.openclaw/miloco}"
+RUNTIME_ENV_FILE="${MILOCO_RUNTIME_ENV:-$HOME/.config/miloco/default.env}"
+if [ -z "${MILOCO_HOME:-}" ] && [ -f "$RUNTIME_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$RUNTIME_ENV_FILE"
+fi
+MILOCO_HOME="${MILOCO_HOME:-${HERMES_HOME}/miloco}"
+MILOCO_PYTHON_BIN="${MILOCO_PYTHON_BIN:-}"
+if [ -z "$MILOCO_PYTHON_BIN" ] && [ -f "$MILOCO_HOME/config.json" ]; then
+  MILOCO_PYTHON_BIN="$(python3 -c "import json; print(json.load(open('$MILOCO_HOME/config.json')).get('server', {}).get('python_bin', ''))" 2>/dev/null || true)"
+fi
+HERMES_ADAPTER_PY="${HERMES_ADAPTER_PY:-${MILOCO_PYTHON_BIN:-python3}}"
+export HERMES_HOME MILOCO_HOME
 PASS=0
 FAIL=0
 SKIP=0
@@ -115,7 +125,7 @@ section "4. backend poller 读盘(看 agent_runs 表有数据)"
 POLLER_CHECK=$("$HERMES_ADAPTER_PY" -c "
 import sqlite3
 import os
-db = os.path.expanduser('~/.openclaw/miloco/observability.db')
+db = os.path.join(os.environ.get('MILOCO_HOME', os.path.join(os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes')), 'miloco')), 'observability.db')
 if not os.path.exists(db):
     print('NO_DB')
 else:

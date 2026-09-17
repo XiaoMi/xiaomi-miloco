@@ -3,6 +3,7 @@
 import json
 from unittest.mock import patch
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -1970,6 +1971,40 @@ def test_generate_supervisor_conf_omits_timezone_when_unset(runner, tmp_path, mo
     assert ',TZ="' not in conf
     assert "MILOCO_TIMEZONE" not in conf
     assert 'MILOCO_SUPERVISED="1"' in conf
+
+
+def test_generate_supervisor_conf_escapes_runtime_env_values(
+    runner, tmp_path, monkeypatch
+):
+    """runtime env 中的百分号、引号和反斜杠不能破坏 supervisor 配置。"""
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setattr(
+        svc_mod,
+        "_read_runtime_env",
+        lambda: {"MILOCO_SECRET": '100%"quoted\\path'},
+    )
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    conf = svc_mod._supervisor_conf().read_text()
+
+    assert "MILOCO_SECRET='100%%\"quoted\\path'" in conf
+
+
+def test_supervisor_env_item_preserves_backslashes_and_rejects_inline_comments():
+    """supervisord 的双引号路径不能折叠反斜杠，内联注释只能明确拒绝。"""
+    from supervisor.datatypes import dict_of_key_value_pairs
+
+    import miloco_cli.commands.service as svc_mod
+
+    value = r"C:\certs\client"
+    item = svc_mod._supervisor_env_item("MILOCO_TOKEN", value)
+    assert item == f"MILOCO_TOKEN='{value}'"
+    assert dict_of_key_value_pairs(item + ",")["MILOCO_TOKEN"] == value
+
+    for invalid in ("abc #1", "abc ;1"):
+        with pytest.raises(click.ClickException, match="内联注释"):
+            svc_mod._supervisor_env_item("MILOCO_TOKEN", invalid)
 
 
 def test_service_logs_dir_not_found(runner, tmp_path, monkeypatch):

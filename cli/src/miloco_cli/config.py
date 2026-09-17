@@ -20,14 +20,93 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 
+def _default_runtime_env() -> Path:
+    """返回当前用户的默认 runtime 指针文件路径。"""
+    return Path.home() / ".config" / "miloco" / "default.env"
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """读取格式受限的 ``KEY=VALUE`` 环境文件。
+
+    解析规则需与 ``scripts/install.py::_read_runtime_pointer`` 保持一致；
+    Hermes 安装脚本中也有等价写入逻辑，因为独立安装脚本不能
+    导入 CLI 包。
+    """
+    if not path.is_file():
+        return {}
+    out: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        try:
+            assignment = shlex.split(line, comments=False, posix=True)
+        except ValueError:
+            continue
+        if len(assignment) != 1 or "=" not in assignment[0]:
+            continue
+        key, _, value = assignment[0].partition("=")
+        key = key.strip()
+        if not key or not (key[0].isalpha() or key[0] == "_"):
+            continue
+        if not all(c.isalnum() or c == "_" for c in key):
+            continue
+        out[key] = value
+    return out
+
+
+def _runtime_env_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    if runtime_env := os.environ.get("MILOCO_RUNTIME_ENV"):
+        candidates.append(Path(runtime_env).expanduser())
+    default = _default_runtime_env()
+    if default not in candidates:
+        candidates.append(default)
+    return candidates
+
+
+def read_runtime_env() -> dict[str, str]:
+    """读取默认指针，并将可选 profile 覆盖到默认值之上。"""
+    merged: dict[str, str] = {}
+    for path in reversed(_runtime_env_candidates()):
+        merged.update(_read_env_file(path))
+    return merged
+
+
+def bootstrap_runtime_env() -> None:
+    """在解析配置路径前加载已安装的 runtime 指针。
+
+    ``MILOCO_HOME`` 未设置时无法通过 ``$MILOCO_HOME/.env`` 找到自身，因此
+    安装器会写入稳定的用户级指针 ``~/.config/miloco/default.env``。
+    ``MILOCO_RUNTIME_ENV`` 可用于服务管理器或多平台 profile 的显式覆盖。
+    """
+    if os.environ.get("MILOCO_HOME"):
+        return
+
+    values = read_runtime_env()
+    home = values.get("MILOCO_HOME")
+    if home:
+        for key, value in values.items():
+            os.environ.setdefault(key, value)
+        os.environ["MILOCO_HOME"] = home
+
+
 def miloco_home() -> Path:
-    """返回 ``$MILOCO_HOME``，未设置则落回 ``~/.openclaw/miloco``。"""
+    """加载 runtime 指针后返回 ``$MILOCO_HOME``。"""
+    if env := os.environ.get("MILOCO_HOME"):
+        return Path(env).expanduser()
+    bootstrap_runtime_env()
     if env := os.environ.get("MILOCO_HOME"):
         return Path(env).expanduser()
     return Path.home() / ".openclaw" / "miloco"
