@@ -132,9 +132,16 @@ class MiMoAdapter(OpenAICompatAdapter):
         }
 
     def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        # OpenAI 规范 input_audio 的 data+format 均必填——本地 mlx-vlm server 严格
+        # 校验,缺 format 直接 422(2026-07-29 感知停摆根因);宽松 provider 忽略
+        # 多余字段无副作用。载荷是 prompt_builder._encode_audio_only_mp4 产出的真 m4a
+        # 容器(ftyp="M4A "),format 报 "m4a",与 data 的 mime 及 QwenOmniAdapter 一致。
         return {
             "type": "input_audio",
-            "input_audio": {"data": f"data:audio/m4a;base64,{audio_base64}"},
+            "input_audio": {
+                "data": f"data:audio/m4a;base64,{audio_base64}",
+                "format": "m4a",
+            },
         }
 
     def build_request_body(
