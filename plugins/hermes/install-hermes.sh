@@ -59,7 +59,15 @@ done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
-MILOCO_HOME="${MILOCO_HOME:-$HOME/.hermes/miloco}"
+# 默认随 HERMES_HOME 走（hermes runtime 决定 home → miloco home 跟随），
+# 不再写死 $HOME/.hermes/miloco；上层显式 export MILOCO_HOME 仍然透传。
+# 插件层 fallback (~/.hermes/miloco) 是另一回事——是 launchd 拉 gateway 读
+# 不到 .env 时的 split-brain 防护，由 miloco-plugin/paths.py 硬编码保留。
+# 必须 export ——install 内部会调用 miloco-cli 子命令（service start/config set 等），
+# 子进程不继承非 export 变量。没 export MILOCO_HOME → miloco-cli fallback 到
+# ~/.openclaw/miloco（symlink 已删会建空目录）→ get_value 读不到 config.json →
+# 报 "server.python_bin 未配置"（即便 config 实际存在）。
+export MILOCO_HOME="${MILOCO_HOME:-$HERMES_HOME/miloco}"
 HERMES_PLUGINS_DIR="$HERMES_HOME/plugins/miloco"
 
 # 从 config.json 动态读取 backend 端口（不写死 1810）
@@ -435,8 +443,10 @@ fi
 # 但会通过 load_hermes_dotenv 加载 $HERMES_HOME/.env。
 # 消费方：gateway 里的 miloco-plugin/paths.py fallback = ~/.hermes/miloco
 # （见 plugins/hermes/miloco-plugin/paths.py::miloco_home）。只有 MILOCO_HOME 恰好
-# 等于 plugin fallback 时才可省略 .env（gateway 读不到 env 也 fallback 到同一路径）。
+# 只有 MILOCO_HOME 恰好等于 plugin fallback 时才可省略 .env（gateway 读不到 env 也 fallback 到同一路径）。
 # 注意：跟上面 1.7 的判断不同——两个消费方的 fallback 不同，判断也要各自对齐。
+# plugin fallback 仍是 ~/.hermes/miloco（paths.py 硬编码,launchd 防护），所以即使 HERMES_HOME
+# 不是 ~/.hermes，脚本层默认落 HERMES_HOME/miloco 也 != user fallback，.env 必写。
 if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.hermes/miloco" ]; then
   touch "$HERMES_HOME/.env"
   chmod 600 "$HERMES_HOME/.env"
@@ -520,8 +530,9 @@ fi
 mark_done 1
 
 # --- 1.9 MILOCO_HOME 显式持久化 ---
-# 架构：agent runtime 决定路径（hermes → ~/.hermes/miloco，openclaw → ~/.openclaw/miloco），
+# 架构：MILOCO_HOME 默认随 HERMES_HOME 走（HERMES_HOME=/data/hermes → /data/hermes/miloco），
 # env override（用户/CI 显式 export MILOCO_HOME）也支持并原样传递，不做 symlink / 数据迁移。
+# 插件层 fallback 仍是 ~/.hermes/miloco（miloco-plugin/paths.py 硬编码保留,launchd 防护）。
 # 三个消费方拿到同一个 MILOCO_HOME 靠：
 #   1. shell rc （~/.zshrc / ~/.bashrc） — 新 shell 里 miloco-cli / hermes 都能读到
 #   2. supervisord.conf::environment — supervisord 拉起 backend 时的 env 兜底
@@ -573,6 +584,49 @@ if command -v supervisorctl >/dev/null 2>&1 && [ -S "$MILOCO_HOME/supervisor.soc
   supervisorctl -c "$SUPERVISORD_CONF" update 2>&1 | head -3 || true
 fi
 mark_done 1.9
+
+# --- 1.95 CLI runtime pointer ---
+# shell rc 只对新 shell 生效；项目 .env 又不能在 MILOCO_HOME 缺失时发现自身。
+# 写一个稳定的用户级 pointer，让独立执行 miloco-cli 时也能 bootstrap 到正确目录。
+RUNTIME_ENV_DIR="$HOME/.config/miloco"
+RUNTIME_ENV_FILE="$RUNTIME_ENV_DIR/default.env"
+mkdir -p "$RUNTIME_ENV_DIR"
+chmod 700 "$RUNTIME_ENV_DIR"
+"$PYTHON" - "$RUNTIME_ENV_FILE" "$MILOCO_HOME" <<'PY'
+import os
+import sys
+
+path, home = sys.argv[1:]
+updates = {
+    "MILOCO_HOME": home,
+    "MILOCO_AGENT_PLATFORM": "hermes",
+}
+try:
+    with open(path, encoding="utf-8") as f:
+        lines = f.readlines()
+except FileNotFoundError:
+    lines = []
+
+seen = set()
+out = []
+for line in lines:
+    stripped = line.strip()
+    key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
+    if key in updates:
+        if key not in seen:
+            out.append(f"{key}={updates[key]}\n")
+            seen.add(key)
+    else:
+        out.append(line)
+for key, value in updates.items():
+    if key not in seen:
+        out.append(f"{key}={value}\n")
+
+with open(path, "w", encoding="utf-8") as f:
+    f.writelines(out)
+os.chmod(path, 0o600)
+PY
+info "CLI runtime pointer 已写入 $RUNTIME_ENV_FILE"
 
 # --- 2. 拿/复用 Bearer ---
 [ "$POST_INSTALL_ONLY" -eq 1 ] || step 2 "拿/复用 adapter Bearer"

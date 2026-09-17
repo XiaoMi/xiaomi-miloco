@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 
 import click
 
-from miloco_cli.config import miloco_home
+from miloco_cli.config import miloco_home, read_runtime_env
 from miloco_cli.output import print_result
 
 _PROGRAM_NAME = "miloco-backend"
@@ -255,6 +255,31 @@ def _resolve_timezone() -> str | None:
     return explicit_timezone_name()
 
 
+def _read_runtime_env() -> dict[str, str]:
+    """Read the selected user-level runtime env for supervisor inheritance."""
+    return read_runtime_env()
+
+
+def _ensure_miloco_home_in_env() -> None:
+    """Ensure os.environ['MILOCO_HOME'] is set from the runtime pointer.
+
+    调用顺序：
+      1. os.environ 已有 MILOCO_HOME → 用
+      2. 否则从 ~/.config/miloco/default.env 写到 os.environ
+      3. 都没有 → 设成 miloco_home() 当前 fallback（保持原行为）
+
+    不修改 miloco_home() / 不修改 .env，只确保 os.environ 这一刻有值。
+    """
+    if os.environ.get("MILOCO_HOME"):
+        return
+    runtime_env = _read_runtime_env()
+    if "MILOCO_HOME" in runtime_env:
+        os.environ["MILOCO_HOME"] = runtime_env["MILOCO_HOME"]
+        return
+    # Last-resort fallback — keep old behavior of writing miloco_home() result.
+    os.environ["MILOCO_HOME"] = str(miloco_home())
+
+
 def _generate_supervisor_conf(server_cmd: str) -> None:
     log_dir = _log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -262,6 +287,17 @@ def _generate_supervisor_conf(server_cmd: str) -> None:
     tz = _resolve_timezone()
     # 解析到时区才追加 TZ + MILOCO_TIMEZONE；否则不塞,交给子进程继承宿主 + backend 兜底。
     tz_env = f',TZ="{tz}",MILOCO_TIMEZONE="{tz}"' if tz else ""
+
+    # 1. 先确保 os.environ['MILOCO_HOME'] 有值（runtime pointer / fallback）
+    _ensure_miloco_home_in_env()
+
+    # 2. 从用户级 runtime env 读所有 env，序列化进 supervisord.conf::environment=
+    #    backend 启动不依赖 user shell rc。
+    runtime_env = _read_runtime_env()
+    # MILOCO_HOME 强制用 os.environ 此刻的值（最权威）
+    runtime_env["MILOCO_HOME"] = os.environ["MILOCO_HOME"]
+    runtime_env_items = ",".join(f'{k}="{v}"' for k, v in runtime_env.items())
+
     conf = f"""\
 [supervisord]
 logfile={_supervisor_log()}
@@ -290,7 +326,7 @@ redirect_stderr=true
 stdout_logfile={log_dir}/miloco-backend.log
 stdout_logfile_maxbytes=10MB
 stdout_logfile_backups=20
-environment=MILOCO_SUPERVISED="1",MILOCO_HOME="{miloco_home()}"{tz_env}
+environment=MILOCO_SUPERVISED="1",{runtime_env_items}{tz_env}
 """
     if sup_conf_path.exists() and sup_conf_path.read_text() == conf:
         return

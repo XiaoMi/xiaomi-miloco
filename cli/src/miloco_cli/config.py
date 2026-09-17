@@ -26,8 +26,74 @@ from pathlib import Path
 from typing import Any
 
 
+_DEFAULT_RUNTIME_ENV = Path.home() / ".config" / "miloco" / "default.env"
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """Read a small, conservative KEY=VALUE env file."""
+    if not path.is_file():
+        return {}
+    out: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not key or not (key[0].isalpha() or key[0] == "_"):
+            continue
+        if not all(c.isalnum() or c == "_" for c in key):
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        out[key] = value
+    return out
+
+
+def bootstrap_runtime_env() -> None:
+    """Load the installed runtime pointer before any config path is resolved.
+
+    ``$MILOCO_HOME/.env`` cannot discover itself when ``MILOCO_HOME`` is absent.
+    The installer therefore writes a stable user-level pointer at
+    ``~/.config/miloco/default.env``. ``MILOCO_RUNTIME_ENV`` is an explicit
+    override for service managers or multiple platform profiles.
+    """
+    if os.environ.get("MILOCO_HOME"):
+        return
+
+    candidates: list[Path] = []
+    if runtime_env := os.environ.get("MILOCO_RUNTIME_ENV"):
+        candidates.append(Path(runtime_env).expanduser())
+    candidates.append(_DEFAULT_RUNTIME_ENV)
+
+    for path in candidates:
+        values = _read_env_file(path)
+        home = values.get("MILOCO_HOME")
+        if not home:
+            continue
+        for key, value in values.items():
+            os.environ.setdefault(key, value)
+        os.environ["MILOCO_HOME"] = home
+        return
+
+
+def read_runtime_env() -> dict[str, str]:
+    """Read the selected runtime environment file for service configuration."""
+    if runtime_env := os.environ.get("MILOCO_RUNTIME_ENV"):
+        return _read_env_file(Path(runtime_env).expanduser())
+    return _read_env_file(_DEFAULT_RUNTIME_ENV)
+
+
 def miloco_home() -> Path:
-    """返回 ``$MILOCO_HOME``，未设置则落回 ``~/.openclaw/miloco``。"""
+    """Return ``$MILOCO_HOME`` after bootstrapping the installed runtime pointer."""
+    if env := os.environ.get("MILOCO_HOME"):
+        return Path(env).expanduser()
+    bootstrap_runtime_env()
     if env := os.environ.get("MILOCO_HOME"):
         return Path(env).expanduser()
     return Path.home() / ".openclaw" / "miloco"
