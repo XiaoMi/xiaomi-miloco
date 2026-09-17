@@ -363,7 +363,7 @@ PY
   fi
 fi
 
-# 1.5 自动拉起 miloco backend（upstream install.py 注册了 atexit._stop_service，
+# 自动拉起 miloco backend（upstream install.py 注册了 atexit._stop_service，
 # 装完会停 backend；fork 集成必须自己再 service start，否则 Step 2 OAuth 会 502 假错误）
 # 用 --no-start-backend flag 可跳过（用户在外部管理 backend 时）。
 # --post-install 场景下 install.py 主流程已经启动了 backend，跳过避免 miloco-cli
@@ -407,7 +407,7 @@ if [ "$NO_START_BACKEND" -eq 0 ] && [ "$POST_INSTALL_ONLY" -eq 0 ]; then
   fi
 fi
 
-# --- 1.6 半装残留检测 + 清理（upstream --agent-prepare 异常退出时可能留下） ---
+# --- 半装残留检测与清理（upstream --agent-prepare 异常退出时可能留下） ---
 # 现象：supervisord 进程在跑但 supervisord.conf 已被删（半装态）。
 # 后果：miloco service status 永远说"在跑"，但实际接不上 / 行为异常。
 # 修法：检测到这种状态就 warn + 提示用户怎么清理，**不**擅自 kill supervisord（它可能管着别的服务）。
@@ -469,7 +469,7 @@ PY
   info "MILOCO_HOME 已持久化到 $HERMES_HOME/.env"
 fi
 
-# --- 1.8 config.json::server.python_bin auto-fix ---
+# --- 修复 config.json::server.python_bin ---
 # 现象：miloco 用 uv 装时 backend 装在 ~/.local/share/uv/tools/miloco/bin/python，
 # 但 miloco service start 用的是 system python3，找不到 miloco 模块 → backend 装包失败。
 # 修法：扫 uv venv + pyenv venv，找到 miloco 包所在 python，patch 进 config.json。
@@ -688,7 +688,7 @@ find "$HERMES_PLUGINS_DIR" -type d -name __pycache__ -prune -exec rm -rf {} + 2>
 fi
 mark_done 4
 
-# --- 4.x 部署 AgentPlatformAdapter 到 MILOCO_HOME ---
+# --- 部署 AgentPlatformAdapter 到 MILOCO_HOME ---
 # backend loader (backend/miloco/src/miloco/agent_platform/loader.py) 按
 # settings.agent.platform 从 $MILOCO_HOME/agent_platform/<name>/ 加载 adapter.py,
 # submodule_search_locations 指向该目录,所以 adapter.py 内 from .xxx import 的
@@ -733,7 +733,7 @@ mkdir -p "$HERMES_HOME/memory"
 
 PLUGIN_STATE="$HERMES_PLUGINS_DIR/miloco-plugin/state.json"
 
-# --- 4.7 同步本地感知模型到 MILOCO_HOME/models/ ---
+# --- 同步本地感知模型到 MILOCO_HOME/models/ ---
 # 对应上游 install.sh --agent-finish 里的"下载感知模型"步骤：fork 走"plugin in fork
 # 仓库"路线，复用不了上游那套下载，但 fork 仓库的
 # backend/miloco/src/miloco/perception/models/ 里带着模型，从那儿同步即可。
@@ -787,7 +787,7 @@ fi
 # 者都放行，而装完感知引擎必然报 models_missing，继续装是交付空壳。
 # 清单的出处是 resource_validator.MODELS 的非 optional 项，两边一致由仓库体检测试守。
 # 安装期一律装到 $MILOCO_HOME/models（install.py 也写死这个目录），所以查的也是它；
-# 用户把 config.json::directories.models 指到别处时 4.7 管不到那个目录，不中止。
+# 用户把 config.json::directories.models 指到别处时，本步骤管不到那个目录，不中止。
 MODELS_ELSEWHERE=$("$PYTHON" -c '
 import json, os, sys
 home = sys.argv[1]
@@ -806,11 +806,11 @@ missing_models=""
 for m in $REQUIRED_MODELS; do
   [ -s "$MILOCO_HOME/models/$m" ] || missing_models="$missing_models $m"
 done
-# 生效目录不是默认目录时，4.7 装到的地方就不是引擎读的地方，不管默认目录里够不够都
+# 生效目录不是默认目录时，本步骤写入的位置就不是引擎读取的位置，不管默认目录里够不够都
 # 得先说一声。放进下面那道闸里面等于只在默认目录也缺模型时才提醒，而从 checkout 跑时
 # 上面的同步必然把默认目录填满，那条路走不到。
 if [ -n "$MODELS_ELSEWHERE" ]; then
-  warn "config.json::directories.models 指向 ${MODELS_ELSEWHERE}，4.7 只往 $MILOCO_HOME/models/ 装，请自行确认那边模型齐全"
+  warn "config.json::directories.models 指向 ${MODELS_ELSEWHERE}，这里只往 $MILOCO_HOME/models/ 装，请自行确认那边模型齐全"
 fi
 
 if [ -n "$missing_models" ]; then
@@ -945,7 +945,7 @@ else
 fi
 mark_done 8
 
-# --- 8.5 兜底清掉 hermes namespace disable 漏写 ---
+# --- 兜底清理 Hermes namespace disable 残留 ---
 # upstream hermes plugins enable 用 manifest.name="miloco" discard disabled 集合，
 # 但 nested plugin key="miloco/miloco-plugin" 不会被清 → install 显示成功但 runtime 仍 disabled。
 # 这里手动从 ~/.hermes/config.yaml 删掉 miloco* 残留（幂等，no-op if 没残留）。
