@@ -47,7 +47,7 @@ def test_guide_has_status_report_with_local_urls():
     """状态报告必须含关键本地链接。"""
     text = GUIDE.read_text(encoding="utf-8")
     assert "127.0.0.1:1810" in text
-    assert ".hermes/miloco/config.json" in text
+    assert "$MILOCO_HOME/config.json" in text
 
 
 def test_guide_has_active_test_suggestion():
