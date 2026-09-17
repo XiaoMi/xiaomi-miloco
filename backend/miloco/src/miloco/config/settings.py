@@ -178,6 +178,15 @@ class ModelSettings(BaseModel):
             "当前生效的那套即 omni（按 label 匹配）。"
         ),
     )
+    omni_fallbacks: list[str] = Field(
+        default_factory=list,
+        description=(
+            "omni 备选 provider 的 label 列表（按优先级排序，label 引用 omni_profiles "
+            "中的档案）。当主 provider 熔断器打开时，按此顺序自动依次尝试 fallback。"
+            "所有 provider 都不可用时感知引擎暂停。"
+            "后台恢复探测通过后自动切回主 provider。"
+        ),
+    )
 
 
 class DatabaseSettings(BaseModel):

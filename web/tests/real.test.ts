@@ -21,6 +21,7 @@ import {
   realUpdateOmniConfig,
   realActivateOmniConfig,
   realDeleteOmniConfig,
+  realUpdateOmniFallbacks,
   realListOmniModels,
   realTestOmniConfig,
   realEventRefUrl,
@@ -856,6 +857,13 @@ describe("omni 配置契约 — 多档案", () => {
     await realDeleteOmniConfig({ label: "配置2" });
     expect(cap.method).toBe("POST");
     expect(cap.body).toEqual({ label: "配置2" });
+  });
+
+  it("PUT fallbacks：请求体 key 为 labels、method=PUT", async () => {
+    const cap = captureFetch();
+    await realUpdateOmniFallbacks(["配置2"]);
+    expect(cap.method).toBe("PUT");
+    expect(cap.body).toEqual({ labels: ["配置2"] });
   });
 
   it("listModels：返回 {ok, models}", async () => {

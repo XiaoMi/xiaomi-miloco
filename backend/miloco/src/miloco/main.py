@@ -463,12 +463,15 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         await cleanup_task
     except asyncio.CancelledError:
+        # 主动 cancel() 后 await 必然抛 CancelledError,这是"取消已生效"的正常收尾
+        # 信号而非故障;这里只需等它停稳,不记日志也不重抛,否则会打断后续关停清理。
         pass
 
     rollover_task.cancel()
     try:
         await rollover_task
     except asyncio.CancelledError:
+        # 同 cleanup_task:吞掉取消信号只为确认 rollover 已退出,非故障。
         pass
 
     # 先取消对齐、再停容器:反了的话对齐还在往一个已停的容器里写,变更事件全被作废。
@@ -502,6 +505,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         )
     except Exception as e:
         logger.error("Failed to stop perception engine: %s", e)
+
+    # 停止 provider pool 后台恢复循环（与 init_perception_module 中的 pool.start() 对称）。
+    # pool 是进程级单例，故只在 lifespan shutdown 时停一次，不在 runner.stop() 中停。
+    from miloco.perception.engine.omni.provider_pool import get_pool
+
+    pool = get_pool()
+    if pool is not None:
+        await pool.stop()
 
     # dispatcher 在 perception(producer)之后、poller(消费 track_agent_run)之前停,
     # 续上"生产者先于消费者"链路:producer → dispatcher → poller → metrics_client。

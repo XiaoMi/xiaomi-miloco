@@ -26,6 +26,29 @@ model:
     base_url: "https://api.xiaomimimo.com/v1"
     api_key: ""
   omni_profiles: []
+  # ── 备选 provider 列表（故障转移池）─────────────────────────────────────
+  # omni_fallbacks 定义了主 provider 不可用时按序尝试的备选 provider label 列表。
+  # 每个 label 必须是 omni_profiles 中已存档的档案名（label 唯一标识）。
+  #
+  # 行为：
+  #   - 主 provider（model.omni）正常工作时不触发 fallback。
+  #   - 当主 provider 熔断器（累计失败 ≥ 阈值）打开时，自动按列表顺序依次尝试备选。
+  #   - 切到 fallback 后，后台每 30s 探测主 provider 是否恢复；恢复后自动切回。
+  #   - 所有 provider（主 + 全部 fallback）都不可用时感知引擎暂停。
+  #
+  # 推荐通过 web「模型」页的 fallback 管理面板配置（支持拖动排序），
+  # 手动编辑请按如下格式（label 必须存在于 omni_profiles 中）：
+  #
+  #   omni_fallbacks:
+  #     - "qwen-backup"      # 第一备选
+  #     - "local-llm"        # 第二备选
+  #
+  # ⚠ 注意：
+  #   - 切换间隔最小 30s（防止频繁抖动）。
+  #   - 修改后无需重启（下一个推理周期自动生效）。
+  #   - 空列表（[]）表示不使用 fallback，与之前行为完全一致。
+  # ────────────────────────────────────────────────────────────────────────
+  omni_fallbacks: []
 
 # miloco 后端服务相关配置
 server:
