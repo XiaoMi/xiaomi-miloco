@@ -75,7 +75,7 @@ echo "$CRON_OUT" | grep -iv "delivery failed\|rate limited" | grep -qi "error\|t
 } || ok "hermes cron list 无异常"
 
 # 检查：deliver 字段不是 None
-DELIVER_VALUES=$(echo "$CRON_OUT" | grep -A10 miloco | grep "Deliver:" | head -5)
+DELIVER_VALUES=$(echo "$CRON_OUT" | grep -A10 miloco | grep "Deliver:" | head -5 || true)
 if echo "$DELIVER_VALUES" | grep -q "null"; then
   no "cron deliver=null 残留 (author bug #6)"
 else
@@ -104,7 +104,7 @@ async def t():
     r = await a.send_turn(ctx)
     print(r.status)
 asyncio.run(t())
-" 2>&1 | tail -1)
+" 2>&1 | tail -1) || SEND_STATUS=""
   [ "$SEND_STATUS" = "ok" ] && break
   sleep 5
 done
@@ -146,7 +146,7 @@ import sys; sys.path.insert(0,'$HERMES_HOME/plugins/miloco/miloco-plugin')
 from tools_notify import _detect_im_platforms_simple
 r = _detect_im_platforms_simple()
 print(','.join(r) if r else 'EMPTY')
-" 2>/dev/null)
+" 2>/dev/null || echo "")
 
 if [ "$IM_RESULT" = "EMPTY" ]; then
   no "IM 探测返回空 (author bug #1: 读 bot_token 假字段)"
@@ -180,7 +180,7 @@ if os.path.exists(p):
     print(t if t else 'NULL')
 else:
     print('NOFILE')
-" 2>/dev/null)
+" 2>/dev/null || echo "")
 
 echo "  state.json::deliver.target = $STATE_NOW"
 # 不清算 FAIL：新环境本来就没有 target，合理
