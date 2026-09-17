@@ -218,9 +218,9 @@ bash plugins/hermes/tests/test_acceptance.sh
 |---|---|
 | 配置文件 | `$MILOCO_HOME/config.json`（默认 `$HERMES_HOME/miloco`，未设置时为 `~/.hermes/miloco`） |
 | ONNX 模型 | `$MILOCO_HOME/models/` |
-| 插件 | `~/.hermes/plugins/miloco/miloco-plugin/` |
+| 插件 | `$HERMES_HOME/plugins/miloco/miloco-plugin/`（未设置时为 `~/.hermes/plugins/miloco/miloco-plugin/`） |
 | Adapter | `$MILOCO_HOME/agent_platform/hermes/adapter.py` |
-| Skills | `~/.hermes/skills/miloco-*` |
+| Skills | `$HERMES_HOME/skills/miloco-*`（未设置时为 `~/.hermes/skills/miloco-*`） |
 | Backend 端口 | `127.0.0.1:1810` |
 
 ## Agent 执行要点
