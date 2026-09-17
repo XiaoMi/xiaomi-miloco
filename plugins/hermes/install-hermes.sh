@@ -294,7 +294,7 @@ fi
 # tarball 里没有的 scripts/sync-skills.py / skills/，必须整段跳）；
 # step 5 (config set) / 6 (.env) / 7 (backend 重启) / 8 (enable plugin) 主体幂等，
 # 会重跑一次以保证 config/enable/backend 状态收敛（step 7 会多一次 stop+sleep 3s+start）。
-# 重点补齐的是 1.6/1.75/1.9 env 持久化 + 4.7 感知模型 + 8.5 disable 残留清理 +
+# 重点补齐环境变量持久化、感知模型配置和 disable 残留清理，以及
 # 9 版本记录 + 10 cron reconcile + 收尾 banner。
 if [ "$POST_INSTALL_ONLY" -eq 1 ]; then
   info "post-install 模式: 跳过 step 3/4 前端部署；step 5-8 幂等重跑；补 env / cron / 收尾"
@@ -438,14 +438,14 @@ SUPERVISORD_CONF="$MILOCO_HOME/supervisord.conf"
   fi
 fi
 
-# --- 1.75 MILOCO_HOME 也写进 $HERMES_HOME/.env ---
+# --- Hermes 环境文件持久化 ---
 # Hermes gateway 由 launchd plist 直接拉起，不 source shell rc，
 # 但会通过 load_hermes_dotenv 加载 $HERMES_HOME/.env。
 # 消费方：gateway 里的 miloco-plugin/paths.py fallback =
 # $HERMES_HOME/miloco，HERMES_HOME 未设置时才是 ~/.hermes/miloco（见
 # plugins/hermes/miloco-plugin/paths.py::miloco_home）。只有 MILOCO_HOME 同时
 # 等于两个 fallback 时才可省略 .env（gateway 读不到 env 也 fallback 到同一路径）。
-# 注意：跟上面 1.7 的判断不同——两个消费方的 fallback 不同，判断也要各自对齐。
+# 注意：这里与前面的环境变量判断不同，两个消费方的 fallback 不同，判断也要分别对齐。
 # 只有 MILOCO_HOME 同时等于两个 fallback 时才可省略 .env；HERMES_HOME
 # 非默认值时两个 fallback 不同，因此必须写入，避免 gateway 与 backend 分裂。
 if [ -n "$MILOCO_HOME" ] && {
@@ -534,7 +534,7 @@ fi
 
 mark_done 1
 
-# --- 1.9 MILOCO_HOME 显式持久化 ---
+# --- supervisor 配置中的 MILOCO_HOME 持久化 ---
 # 架构：MILOCO_HOME 默认随 HERMES_HOME 走（HERMES_HOME=/data/hermes → /data/hermes/miloco），
 # env override（用户/CI 显式 export MILOCO_HOME）也支持并原样传递，不做 symlink / 数据迁移。
 # 插件层 fallback 仍是 ~/.hermes/miloco（miloco-plugin/paths.py 保留,launchd 防护）。
@@ -595,7 +595,7 @@ if command -v supervisorctl >/dev/null 2>&1 && [ -S "$MILOCO_HOME/supervisor.soc
 fi
 mark_done 1.9
 
-# --- 1.95 CLI runtime pointer ---
+# --- CLI runtime 指针 ---
 # shell rc 只对新 shell 生效；项目 .env 又不能在 MILOCO_HOME 缺失时发现自身。
 # 写一个稳定的用户级 pointer，让独立执行 miloco-cli 时也能 bootstrap 到正确目录。
 # 格式需与 cli/src/miloco_cli/config.py 和 scripts/install.py 保持一致。

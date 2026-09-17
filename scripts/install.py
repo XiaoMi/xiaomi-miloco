@@ -1384,7 +1384,7 @@ class Installer:
             scripts/ / skills/，只能整段跳，由 POST_INSTALL_SKIP guard 兜底
           - **幂等重跑**：step 5 (config set) / 6 (.env) / 7 (backend 重启) / 8 (enable)
             —— 都是幂等的，重跑一遍保证状态收敛（代价是 step 7 会多一次 stop+3s+start）
-          - **本模式真正补齐**：1.6/1.75/1.9 env 持久化、4.7 感知模型、8.5 disable 残留
+          - **本模式真正补齐**：环境变量持久化、感知模型配置和 disable 残留清理
             清理、9 版本记录、10 cron reconcile、收尾 banner「hermes gateway restart」提示
 
         install-hermes.sh 由 build.sh::build_hermes 打进 miloco-hermes-plugin tarball，
@@ -1871,7 +1871,7 @@ def _runtime_pointer_candidates() -> list[Path]:
 
 
 def _read_runtime_pointer(path: Path) -> dict[str, str]:
-    """读取与 CLI 配置及 Hermes 1.95 步骤共用的指针格式。"""
+    """读取与 CLI 配置及 Hermes 安装脚本共用的 runtime 指针格式。"""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -2022,7 +2022,7 @@ def _default_miloco_home(agent_platform: str) -> Path:
 
 
 def _write_runtime_pointer(miloco_home: Path, agent_platform: str) -> Path:
-    """写入与 CLI 配置及 Hermes 1.95 步骤共用的指针格式。"""
+    """写入与 CLI 配置及 Hermes 安装脚本共用的 runtime 指针格式。"""
     runtime_dir = _default_runtime_pointer().parent
     runtime_file = runtime_dir / "default.env"
     runtime_dir.mkdir(parents=True, exist_ok=True)

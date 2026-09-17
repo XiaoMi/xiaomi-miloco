@@ -36,7 +36,7 @@ def _read_env_file(path: Path) -> dict[str, str]:
     """读取格式受限的 ``KEY=VALUE`` 环境文件。
 
     解析规则需与 ``scripts/install.py::_read_runtime_pointer`` 保持一致；
-    Hermes 安装脚本在 1.95 步骤中也有等价写入逻辑，因为独立安装脚本不能
+    Hermes 安装脚本中也有等价写入逻辑，因为独立安装脚本不能
     导入 CLI 包。
     """
     if not path.is_file():
