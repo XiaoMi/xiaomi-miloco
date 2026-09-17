@@ -76,14 +76,18 @@ class MultiTrackSyncBuffer:
         on_window_ready: Callable[[], None] | None = None,
         window_settle_ms: int = 500,
         buffer_full_action: str = "keep",
+        phase_offset_ms: int = 0,
     ):
         if not track_names:
             raise ValueError("track_names must not be empty")
         if window_ms <= 0:
             raise ValueError("window_ms must be positive")
+        if phase_offset_ms < 0 or phase_offset_ms >= window_ms:
+            raise ValueError("phase_offset_ms must be in [0, window_ms)")
 
         self._track_names: frozenset[str] = frozenset(track_names)
         self._window_ms = window_ms
+        self._phase_offset_ms = phase_offset_ms
         self._window_settle_ms = window_settle_ms
         self._max_windows = max_windows
         self._on_window_ready = on_window_ready
@@ -118,7 +122,8 @@ class MultiTrackSyncBuffer:
 
     def _window_key(self, stream_ts: int) -> int:
         """Compute the window window_start_ms for a given stream timestamp."""
-        return (stream_ts // self._window_ms) * self._window_ms
+        shifted = stream_ts - self._phase_offset_ms
+        return (shifted // self._window_ms) * self._window_ms + self._phase_offset_ms
 
     def _get_or_create_window(self, key: int) -> _TimeWindow:
         """Get or create a time window (caller holds lock)."""
@@ -408,6 +413,37 @@ class MultiTrackSyncBuffer:
         """Total number of active windows (ready + incomplete)."""
         with self._lock:
             return len(self._windows)
+
+    @property
+    def phase_offset_ms(self) -> int:
+        """Current fixed offset of window boundaries within one period."""
+        with self._lock:
+            return self._phase_offset_ms
+
+    def set_phase_offset_ms(self, phase_offset_ms: int) -> bool:
+        """Apply a new boundary phase and reset windows from the old alignment.
+
+        Returns ``True`` only when the phase changed. Re-applying the same
+        value is a strict no-op so periodic device sync does not discard data.
+        """
+        if phase_offset_ms < 0 or phase_offset_ms >= self._window_ms:
+            raise ValueError("phase_offset_ms must be in [0, window_ms)")
+
+        with self._lock:
+            if phase_offset_ms == self._phase_offset_ms:
+                return False
+            self._phase_offset_ms = phase_offset_ms
+            discarded = len(self._windows)
+            self._windows.clear()
+            self._ready_queue.clear()
+            self._ready_keys.clear()
+            self._drained.clear()
+            self._first_window_keys = {t: None for t in self._track_names}
+            self._tracks_initialized.clear()
+            if discarded:
+                self._dropped_since_drain += discarded
+                self._last_overflow_action = "phase_realign"
+            return True
 
     def clear(self) -> None:
         """Remove all windows and reset state."""

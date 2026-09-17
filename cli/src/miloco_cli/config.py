@@ -91,6 +91,11 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "是否由 miloco 自动管理内置定时任务（感知摘要 / 家庭巡检 / Dreaming / 习惯洞察）；"
         "关闭后 agent 网关启动时会清除这些自动任务且不再重建",
     ),
+    "camera.decoded_frame_interval": (
+        int,
+        0,
+        "无人直播/录像时的感知 BGR 回调间隔（毫秒，0-10000）；实时订阅自动全速；0=不限流，重启生效",
+    ),
     "perception.engine.input.video_short_edge": (
         int,
         512,
@@ -138,6 +143,11 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         int,
         4,
         "感知窗口时长（秒），重启生效",
+    ),
+    "perception.collect.stagger_devices": (
+        bool,
+        False,
+        "多摄像头按 1/N 周期均匀错开感知窗口，减少同时进入 Omni/LLM 的峰值；重启生效",
     ),
     # 实验性功能开关（与 backend FeaturesSettings 对齐；住户在 web 显式开启，也可用本命令）
     "features.pet_recognition": (

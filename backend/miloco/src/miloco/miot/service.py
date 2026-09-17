@@ -987,7 +987,7 @@ class MiotService:
                 )
                 return -1
             return await self._miot_proxy.start_camera_decode_video_stream(
-                camera_id, channel, callback
+                camera_id, channel, callback, full_rate=True
             )
         except Exception as e:
             logger.error("Failed to start video stream: %s", e)
