@@ -441,6 +441,7 @@ function MainApp() {
         return (
           <TasksPage
             tasks={tasks.data}
+            cameras={scopeCameras.data ?? []}
             loading={tasks.loading}
             onChanged={() => tasks.reload()}
           />

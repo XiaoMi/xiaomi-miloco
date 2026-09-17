@@ -2,9 +2,8 @@
  * 任务页——独立「任务」Tab 的主视图。
  *
  * 展示 miloco 为家庭创建的持续任务（GET /api/tasks/summary?window=day）：
- *  - 列表标题旁一个「?」帮助入口：Web 端不直接建任务（真正驱动任务的感知规则由装有
- *    miloco 插件的 Agent（如 OpenClaw）接线），点开弹窗引导用户与 Agent 对话创建，
- *    并给示例话术一键复制。
+ *  - 列表标题旁提供直接新建入口：一次创建 task 与 camera perception rule；另保留
+ *    「?」帮助入口，供复杂任务继续通过装有 miloco 插件的 Agent 接线。
  *  - 任务行：描述 + 进度摘要 + 启停开关；整行点击打开详情抽屉。
  *  - 详情抽屉：复用列表已加载的 summary 数据（含驱动规则 / 关联 / 进度），无需再拉
  *    单条全量视图。驱动规则在前（触发条件 / 执行动作结构化展示），进度可视化（进度条 /
@@ -33,12 +32,15 @@ import type {
   TaskRecordSummary,
   TaskRuleBrief,
   TaskRuleDirection,
+  ScopeCamera,
 } from "@/lib/types";
 import { AgentPromptDialog } from "./AgentPromptDialog";
+import { TaskCreateDialog } from "./TaskCreateDialog";
 import { toast } from "./Toast";
 
 interface Props {
   tasks: Task[] | undefined;
+  cameras: ScopeCamera[];
   loading: boolean;
   // 返回 Promise 时（App 传的 tasks.reload()）抽屉会 await 到列表真落地再退出编辑态，
   // 避免"保存成功但卡片还显示旧文案"的一拍闪回。
@@ -717,13 +719,14 @@ function TaskDetailSheet({
   );
 }
 
-export function TasksPage({ tasks, loading, onChanged }: Props) {
+export function TasksPage({ tasks, cameras, loading, onChanged }: Props) {
   const { t } = useTranslation();
   const [busyId, setBusyId] = useState<string | null>(null);
   // 只记 id、渲染时回列表取最新一条：抽屉里改完描述 / 触发条件后 onChanged 重拉，
   // 抽屉能直接看到新值（存 Task 快照会定死在打开那一刻）。任务被删/消失 → 派生成
   // null，抽屉自然收起。useAsync 重拉期间保留旧 data，故加载中不会闪空。
   const [detailId, setDetailId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
 
   const run = async (taskId: string, fn: () => Promise<void>, okMsg: string) => {
@@ -766,16 +769,24 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
               {t("tasks.hint")}
             </p>
           </div>
-          {/* Web 端不直接建任务（感知规则由 Agent 接线），故按钮带「?」暗示这是引导 */}
-          <button
-            type="button"
-            onClick={() => setHelpOpen(true)}
-            title={t("tasks.howToTitle")}
-            className="shrink-0 inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-caption font-semibold border border-border bg-bg-primary text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
-          >
-            {t("tasks.addTask")}
-            <IconHelp width={14} height={14} className="text-text-tertiary" />
-          </button>
+          <div className="shrink-0 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setHelpOpen(true)}
+              title={t("tasks.howToTitle")}
+              aria-label={t("tasks.howToTitle")}
+              className="inline-flex items-center justify-center h-9 w-9 rounded-lg border border-border bg-bg-primary text-text-tertiary hover:text-text-primary hover:border-border-strong transition-colors"
+            >
+              <IconHelp width={15} height={15} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setCreateOpen(true)}
+              className="inline-flex items-center h-9 px-3 rounded-lg text-caption font-semibold bg-brand-primary text-white hover:opacity-90 transition-opacity"
+            >
+              {t("tasks.addTask")}
+            </button>
+          </div>
         </div>
 
         {loading && !tasks ? (
@@ -793,11 +804,10 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
             </div>
             <button
               type="button"
-              onClick={() => setHelpOpen(true)}
-              className="mt-4 inline-flex items-center gap-1.5 text-caption px-3 py-1.5 rounded-md border border-border bg-bg-primary text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
+              onClick={() => setCreateOpen(true)}
+              className="mt-4 inline-flex items-center text-caption font-semibold px-3 py-1.5 rounded-md bg-brand-primary text-white hover:opacity-90 transition-opacity"
             >
-              <IconHelp width={15} height={15} />
-              {t("tasks.viewExamples")}
+              {t("tasks.addTask")}
             </button>
           </div>
         ) : (
@@ -859,6 +869,14 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
           task={detail}
           onClose={() => setDetailId(null)}
           onChanged={onChanged}
+        />
+      )}
+
+      {createOpen && (
+        <TaskCreateDialog
+          cameras={cameras}
+          onClose={() => setCreateOpen(false)}
+          onCreated={onChanged}
         />
       )}
 

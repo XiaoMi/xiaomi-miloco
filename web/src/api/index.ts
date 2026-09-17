@@ -280,6 +280,20 @@ export async function commitHomeProfile(): Promise<void> {
 }
 
 // ── 任务（miloco 任务管理）──────────────────────────────────
+export async function createCameraTask(payload: {
+  description: string;
+  query: string;
+  perceiveDeviceIds: string[];
+  actionDescription: string;
+}): Promise<void> {
+  const time = Date.now().toString(36);
+  const random = Math.random().toString(36).slice(2, 8).padEnd(6, "0");
+  await impl.realCreateCameraTask({
+    ...payload,
+    taskId: `web_${time}_${random}`.slice(0, 32),
+  });
+}
+
 export async function listTasks(homeId?: HomeId): Promise<Task[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListTasks();
