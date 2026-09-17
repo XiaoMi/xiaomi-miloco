@@ -10,12 +10,15 @@
 #   --install-only       不 rsync 不构建, 仅在远端触发安装 (复用远端已有 dist/)
 #
 # 构建包 (传给 build.sh, 不指定则全量):
-#   --packages <list>    miloco-miot,miloco,miloco-cli,openclaw 任意子集
+#   --packages <list>    miloco-miot,miloco,miloco-cli,openclaw,web,hermes,launcher 任意子集
+#                        launcher = macOS 签名启动器（部署到 darwin 时必需；
+#                        子集里含 miloco 时 build.sh 会隐式一并打包，无需显式写）
 #
 # 安装组件 (远端, 逗号分隔):
-#   --install <list>     miloco | miloco-cli | openclaw | supervisor
+#   --install <list>     miloco | miloco-cli | openclaw | supervisor | launcher
 #                        all (默认) | none
 #                        miloco 自动带 miloco-miot wheel
+#                        launcher = macOS 签名启动器 miloco.app（仅 darwin 生效）
 #
 # 其他:
 #   -h, --help
@@ -25,7 +28,9 @@
 
 set -euo pipefail
 
-usage() { sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; }
+# 上界须覆盖到头部注释块最后一行(当前第 27 行"注：backend 重启…")——加说明时记得同步,
+# 否则新增那几行在 -h 里被静默吞掉。
+usage() { sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \?//'; }
 
 # ─── 参数解析 ──────────────────────────────────────────────────────────────
 
@@ -59,7 +64,7 @@ REMOTE_PATH="${REMOTE_PATH:-~/miloco-plugin}"
 LOCAL_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 case "$INSTALL_LIST" in
-    all)  INSTALL_LIST="miloco,miloco-cli,openclaw,supervisor" ;;
+    all)  INSTALL_LIST="miloco,miloco-cli,openclaw,supervisor,launcher" ;;
     none) INSTALL_LIST="" ;;
 esac
 
@@ -118,9 +123,21 @@ fi
 
 echo "[sync] 远端: build=$BUILD_MODE install=[${INSTALL_LIST:-none}]"
 
+# 远端 MILOCO_HOME 必须解析到位：ssh 跑的是非交互 shell，不读远端 .zshrc/.bashrc，
+# 而 MILOCO_HOME 恰恰是写在那里的（hermes 默认 ~/.hermes/miloco，见 install.py）。
+# 不解析到位的话远端块会落到硬编码默认值 ~/.openclaw/miloco → miloco.app 装到
+# 错误的 home，而 CLI 的 _launcher_bin() 按运行时 miloco_home() 去找 → macOS 上
+# service start 硬失败「签名启动器缺失」，且那条错误的 hint 又指回本脚本。
+#
+# 解析放在远端做（登录 shell `$SHELL -lc` 读一次 rc），而不是在本地展开
+# ${MILOCO_HOME:-} 传过去：本机通常是构建机、不一定装过 miloco，本机没设时传
+# 空串并不能解决"远端读不到 rc"这个问题，会原样复现本段要修的故障；若本机设成
+# 了自己的绝对路径，远端又会照字面 mkdir -p 到该路径，用户不同名时在远端很可能
+# 无权限。故这里传的 MILOCO_HOME_OVERRIDE 只作显式覆盖，未设时远端自己兜底。
 ssh "$HOST" \
     "REMOTE_PATH='$REMOTE_PATH' BUILD_MODE='$BUILD_MODE' \
      PACKAGES='$PACKAGES' INSTALL_LIST='$INSTALL_LIST' \
+     MILOCO_HOME_OVERRIDE='${MILOCO_HOME:-}' \
      bash -s" <<'REMOTE'
 set -euo pipefail
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
@@ -166,6 +183,21 @@ detect_wheel_tag() {
 if [[ -n "$INSTALL_LIST" ]]; then
     [[ -d "$DIST" ]] || { echo "[remote] dist/ 不存在: $DIST" >&2; exit 1; }
 
+    # 前置校验：先把本轮要装的产物查齐再动手。启动器的检查尤其不能留在下面的落地块里
+    # ——那时 wheel 已经 uv tool install 过了，缺产物退出会留下「新 backend + 旧启动器」
+    # 的半装状态（既不是旧版也不是新版），而 set -euo pipefail 又会把后面的
+    # supervisor/openclaw 等步骤一并跳过，重跑时不清楚哪些步骤已经生效。
+    LAUNCHER_TGZ=""
+    if [[ "$(uname -s)" == Darwin ]] && { want miloco || want launcher; }; then
+        LAUNCHER_TGZ=$(ls "$DIST"/miloco-launcher-darwin*.tar.gz 2>/dev/null | head -1)
+        if [[ -z "$LAUNCHER_TGZ" ]]; then
+            echo "[remote] 缺 miloco-launcher-darwin tar" >&2
+            echo "         build.sh 每次都清空 dist/；装 miloco 时它会隐式一起打包，" >&2
+            echo "         若用了 --packages 且不含 miloco，请显式带上 launcher。" >&2
+            exit 1
+        fi
+    fi
+
     if want miloco; then
         TAG=$(detect_wheel_tag)
         [[ -n "$TAG" ]] || { echo "[remote] 不支持的平台: $(uname -s)/$(uname -m)" >&2; exit 1; }
@@ -185,7 +217,32 @@ if [[ -n "$INSTALL_LIST" ]]; then
         uv tool install "$CLI_WHEEL" --force
     fi
 
-    if want supervisor; then
+    # macOS: 落地签名启动器（miloco.app）到 miloco_home，让 backend 作为其子进程
+    # 绕过 Local Network Privacy（见 cli service.py 的 launchd 分支）。启动器是 miloco
+    # 在 mac 运行的硬依赖，故装 miloco 即隐式带上（也支持显式 --install launcher）。
+    # 存在性已在上面的前置校验里查过，这里只负责落地。
+    if [[ -n "$LAUNCHER_TGZ" ]]; then
+        # 远端 MILOCO_HOME 写在登录 shell 的 rc 里，ssh 的非交互 shell 读不到，
+        # 这里显式过一次 login shell 取；本地显式传下来的覆盖值优先级最高。
+        if [[ -n "${MILOCO_HOME_OVERRIDE:-}" ]]; then
+            MH="$MILOCO_HOME_OVERRIDE"
+        else
+            MH="$($SHELL -lc 'printf %s "${MILOCO_HOME:-}"' 2>/dev/null || true)"
+            MH="${MH:-$HOME/.openclaw/miloco}"
+        fi
+        echo "[remote] 安装 macOS 签名启动器 → $MH/miloco.app"
+        mkdir -p "$MH"
+        rm -rf "$MH/miloco.app"
+        tar -C "$MH" -xzf "$LAUNCHER_TGZ"          # 保留签名字节（cdhash 稳定）
+        chmod +x "$MH/miloco.app/Contents/MacOS/miloco"
+        codesign -v "$MH/miloco.app" 2>/dev/null \
+            && echo "[remote]   签名校验 OK" \
+            || echo "[remote]   WARN: 签名校验失败，LNP 授权可能需重新打勾"
+    fi
+
+    # macOS 用 launchd、不用 supervisord（见 cli service.py），darwin 跳过安装
+    # （与 install.py 的 darwin 分支一致，避免装个用不上的 supervisor）。
+    if want supervisor && [[ "$(uname -s)" != Darwin ]]; then
         echo "[remote] uv tool install supervisor --force"
         uv tool install supervisor --force
     fi

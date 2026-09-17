@@ -29,13 +29,12 @@ import threading
 from typing import Any, Awaitable, Callable, Optional, Union
 
 from paho.mqtt.client import (
-    CallbackAPIVersion,
     Client,
     MQTTMessage,
     MQTTv5,
     topic_matches_sub,
 )
-from paho.mqtt.enums import MQTTErrorCode
+from paho.mqtt.enums import CallbackAPIVersion, MQTTErrorCode
 
 from .const import (
     MIHOME_MQTT_BROKER_HOST_SUFFIX,
