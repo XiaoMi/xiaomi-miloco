@@ -158,6 +158,18 @@ Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -D
 
 ---
 
+## 推理 EP 与加速排障
+
+| 现象 | 排查 / 解决 |
+| --- | --- |
+| Linux x86_64 上感知推理慢、CPU 占用高 | 看 `$MILOCO_HOME/log/miloco-backend.log` 里 `ORT session providers=` 行:应有 `OpenVINOExecutionProvider` 在前;若是纯 `CPUExecutionProvider`,且日志含 `OpenVINOExecutionProvider not in [...]` 的 WARNING,通常是 Python 3.14(无 onnxruntime-openvino cp314 wheel)或手动装了标准 onnxruntime。改用 Python 3.13/3.12/3.11 重装即恢复加速。 |
+| OpenVINO EP 在某模型/驱动上行为异常 | 设环境变量 `MILOCO_DISABLE_OPENVINO=1`(或 `true`/`yes`)强制回退 CPU EP,排障无需改代码或改配置文件;排障完清掉变量重启服务即恢复 OpenVINO 加速。 |
+| AMD x86_64 上 OpenVINO 加速效果不明显或更慢 | OpenVINO CPU 插件在 AMD 上走通用 oneDNN 路径,未做基准。若实测更慢,同上设 `MILOCO_DISABLE_OPENVINO=1` 退回标准 CPU EP。 |
+| 重启后首次推理有秒级阻塞 | 正常——OpenVINO EP 首次加载模型需编译计算图(N100 低功耗核上 det+reid 合计秒级);编译产物持久化到 `$MILOCO_HOME/openvino_cache/`,后续启动直接复用,不再阻塞。若 cache 目录被误删会重新编译一次,不影响正确性。 |
+| `intel_gpu_top` 全 0 | 预期行为——OpenVINO EP 走 CPU 插件(AVX2/VNNI 微内核加速),不使用 Intel 集成显卡;加速效果体现在 CPU 占用与推理延迟上,不在 GPU。看 `top` 中 miloco-backend 进程的 CPU 占用、或 Web 面板 Perf 页的检测耗时。 |
+
+---
+
 ## 日志位置
 
 | 日志          | 路径                                                                        |
