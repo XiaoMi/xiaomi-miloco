@@ -30,7 +30,6 @@ import uuid
 from pathlib import Path
 from typing import Any, Optional
 
-
 # ---- 异常类 -------------------------------------------------------------
 # 对齐 backend AgentPlatformAdapter 契约：dispatcher 专 catch 此异常做特殊处理。
 # adapter 在 backend 同进程加载，可以 import base 模块。
@@ -115,13 +114,14 @@ def _new_run_id() -> str:
 def _resolve_trace_dir() -> Path:
     """``$MILOCO_HOME/trace/agent/`` —— plugin trace.py 写盘位置。
 
-    默认 settings.directories.miloco_home 解析失败时回退 ``~/.openclaw/miloco``。
+    默认 settings.directories.miloco_home 解析失败时回退 Hermes 的数据目录。
     """
     try:
         from .paths import miloco_home
         return miloco_home() / "trace" / "agent"
     except Exception:
-        return Path("~/.openclaw/miloco/trace/agent").expanduser()
+        hermes_home = os.environ.get("HERMES_HOME", "~/.hermes")
+        return Path(hermes_home).expanduser() / "miloco" / "trace" / "agent"
 
 
 # ---------------------------------------------------------------------------

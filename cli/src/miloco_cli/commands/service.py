@@ -280,13 +280,42 @@ def _ensure_miloco_home_in_env() -> None:
     os.environ["MILOCO_HOME"] = str(miloco_home())
 
 
+def _escape_supervisor_env_value(value: str) -> str:
+    """Escape a value for supervisord's quoted ``environment=`` syntax."""
+    if "\n" in value or "\r" in value:
+        raise click.ClickException(
+            "runtime env 的值不能包含换行符，请修正 ~/.config/miloco/default.env"
+        )
+    if "'" in value and '"' in value:
+        raise click.ClickException(
+            "runtime env 的值不能同时包含单引号和双引号，"
+            "请改用 shell 环境变量传递"
+        )
+    # supervisord first applies config interpolation (literal '%' is '%%') and
+    # then parses the quoted value with shlex. Keep backslashes literal by using
+    # single quotes when the value contains a double quote; otherwise use the
+    # existing double-quoted form.
+    return value.replace("%", "%%")
+
+
+def _supervisor_env_item(key: str, value: str) -> str:
+    escaped = _escape_supervisor_env_value(value)
+    quote = "'" if '"' in value else '"'
+    return f"{key}={quote}{escaped}{quote}"
+
+
 def _generate_supervisor_conf(server_cmd: str) -> None:
     log_dir = _log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     sup_conf_path = _supervisor_conf()
     tz = _resolve_timezone()
     # 解析到时区才追加 TZ + MILOCO_TIMEZONE；否则不塞,交给子进程继承宿主 + backend 兜底。
-    tz_env = f',TZ="{tz}",MILOCO_TIMEZONE="{tz}"' if tz else ""
+    tz_env = (
+        f",{_supervisor_env_item('TZ', tz)},"
+        f'{_supervisor_env_item("MILOCO_TIMEZONE", tz)}'
+        if tz
+        else ""
+    )
 
     # 1. 先确保 os.environ['MILOCO_HOME'] 有值（runtime pointer / fallback）
     _ensure_miloco_home_in_env()
@@ -296,7 +325,9 @@ def _generate_supervisor_conf(server_cmd: str) -> None:
     runtime_env = _read_runtime_env()
     # MILOCO_HOME 强制用 os.environ 此刻的值（最权威）
     runtime_env["MILOCO_HOME"] = os.environ["MILOCO_HOME"]
-    runtime_env_items = ",".join(f'{k}="{v}"' for k, v in runtime_env.items())
+    runtime_env_items = ",".join(
+        _supervisor_env_item(key, value) for key, value in runtime_env.items()
+    )
 
     conf = f"""\
 [supervisord]

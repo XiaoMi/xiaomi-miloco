@@ -115,7 +115,7 @@ section "4. backend poller 读盘(看 agent_runs 表有数据)"
 POLLER_CHECK=$("$HERMES_ADAPTER_PY" -c "
 import sqlite3
 import os
-db = os.path.expanduser('~/.openclaw/miloco/observability.db')
+db = os.path.join(os.environ.get('MILOCO_HOME', os.path.join(os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes')), 'miloco')), 'observability.db')
 if not os.path.exists(db):
     print('NO_DB')
 else:

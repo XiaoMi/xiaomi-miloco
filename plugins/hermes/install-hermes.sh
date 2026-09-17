@@ -62,7 +62,7 @@ HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 # 默认随 HERMES_HOME 走（hermes runtime 决定 home → miloco home 跟随），
 # 不再写死 $HOME/.hermes/miloco；上层显式 export MILOCO_HOME 仍然透传。
 # 插件层 fallback (~/.hermes/miloco) 是另一回事——是 launchd 拉 gateway 读
-# 不到 .env 时的 split-brain 防护，由 miloco-plugin/paths.py 硬编码保留。
+# 不到环境变量时的 split-brain 防护，由 miloco-plugin/paths.py 保留。
 # 必须 export ——install 内部会调用 miloco-cli 子命令（service start/config set 等），
 # 子进程不继承非 export 变量。没 export MILOCO_HOME → miloco-cli fallback 到
 # ~/.openclaw/miloco（symlink 已删会建空目录）→ get_value 读不到 config.json →
@@ -443,23 +443,24 @@ fi
 # 但会通过 load_hermes_dotenv 加载 $HERMES_HOME/.env。
 # 消费方：gateway 里的 miloco-plugin/paths.py fallback = ~/.hermes/miloco
 # （见 plugins/hermes/miloco-plugin/paths.py::miloco_home）。只有 MILOCO_HOME 恰好
-# 只有 MILOCO_HOME 恰好等于 plugin fallback 时才可省略 .env（gateway 读不到 env 也 fallback 到同一路径）。
+# 等于 plugin fallback 时才可省略 .env（gateway 读不到 env 也 fallback 到同一路径）。
 # 注意：跟上面 1.7 的判断不同——两个消费方的 fallback 不同，判断也要各自对齐。
-# plugin fallback 仍是 ~/.hermes/miloco（paths.py 硬编码,launchd 防护），所以即使 HERMES_HOME
+# plugin fallback 仍是 ~/.hermes/miloco（launchd 防护），所以即使 HERMES_HOME
 # 不是 ~/.hermes，脚本层默认落 HERMES_HOME/miloco 也 != user fallback，.env 必写。
 if [ -n "$MILOCO_HOME" ] && [ "$MILOCO_HOME" != "$HOME/.hermes/miloco" ]; then
   touch "$HERMES_HOME/.env"
   chmod 600 "$HERMES_HOME/.env"
   if grep -q '^MILOCO_HOME=' "$HERMES_HOME/.env" 2>/dev/null; then
     "$PYTHON" - "$HERMES_HOME/.env" "$MILOCO_HOME" <<'PY'
+import shlex
 import sys
 lines = open(sys.argv[1]).readlines()
 with open(sys.argv[1], 'w') as f:
     for ln in lines:
-        f.write(f'MILOCO_HOME={sys.argv[2]}\n' if ln.startswith('MILOCO_HOME=') else ln)
+        f.write(f'MILOCO_HOME={shlex.quote(sys.argv[2])}\n' if ln.startswith('MILOCO_HOME=') else ln)
 PY
   else
-    echo "MILOCO_HOME=$MILOCO_HOME" >> "$HERMES_HOME/.env"
+    printf 'MILOCO_HOME=%s\n' "$("$PYTHON" -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$MILOCO_HOME")" >> "$HERMES_HOME/.env"
   fi
   info "MILOCO_HOME 已持久化到 $HERMES_HOME/.env"
 fi
@@ -532,7 +533,7 @@ mark_done 1
 # --- 1.9 MILOCO_HOME 显式持久化 ---
 # 架构：MILOCO_HOME 默认随 HERMES_HOME 走（HERMES_HOME=/data/hermes → /data/hermes/miloco），
 # env override（用户/CI 显式 export MILOCO_HOME）也支持并原样传递，不做 symlink / 数据迁移。
-# 插件层 fallback 仍是 ~/.hermes/miloco（miloco-plugin/paths.py 硬编码保留,launchd 防护）。
+# 插件层 fallback 仍是 ~/.hermes/miloco（miloco-plugin/paths.py 保留,launchd 防护）。
 # 三个消费方拿到同一个 MILOCO_HOME 靠：
 #   1. shell rc （~/.zshrc / ~/.bashrc） — 新 shell 里 miloco-cli / hermes 都能读到
 #   2. supervisord.conf::environment — supervisord 拉起 backend 时的 env 兜底
@@ -594,6 +595,7 @@ mkdir -p "$RUNTIME_ENV_DIR"
 chmod 700 "$RUNTIME_ENV_DIR"
 "$PYTHON" - "$RUNTIME_ENV_FILE" "$MILOCO_HOME" <<'PY'
 import os
+import shlex
 import sys
 
 path, home = sys.argv[1:]
@@ -614,13 +616,13 @@ for line in lines:
     key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
     if key in updates:
         if key not in seen:
-            out.append(f"{key}={updates[key]}\n")
+            out.append(f"{key}={shlex.quote(updates[key])}\n")
             seen.add(key)
     else:
         out.append(line)
 for key, value in updates.items():
     if key not in seen:
-        out.append(f"{key}={value}\n")
+        out.append(f"{key}={shlex.quote(value)}\n")
 
 with open(path, "w", encoding="utf-8") as f:
     f.writelines(out)

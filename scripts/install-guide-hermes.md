@@ -216,10 +216,10 @@ bash plugins/hermes/tests/test_acceptance.sh
 
 | 内容 | 路径 |
 |---|---|
-| 配置文件 | `~/.hermes/miloco/config.json` |
-| ONNX 模型 | `~/.hermes/miloco/models/` |
+| 配置文件 | `$MILOCO_HOME/config.json`（默认 `$HERMES_HOME/miloco`，未设置时为 `~/.hermes/miloco`） |
+| ONNX 模型 | `$MILOCO_HOME/models/` |
 | 插件 | `~/.hermes/plugins/miloco/miloco-plugin/` |
-| Adapter | `~/.hermes/miloco/agent_platform/hermes/adapter.py` |
+| Adapter | `$MILOCO_HOME/agent_platform/hermes/adapter.py` |
 | Skills | `~/.hermes/skills/miloco-*` |
 | Backend 端口 | `127.0.0.1:1810` |
 
@@ -237,8 +237,8 @@ bash plugins/hermes/tests/test_acceptance.sh
 | 现象 | 修法 |
 |---|---|
 | `miloco-cli: command not found` | 跑 Step 1.2 的 install.sh |
-| backend 启动失败 | 看 `~/.hermes/miloco/log/miloco-backend.log` |
+| backend 启动失败 | 看 `$MILOCO_HOME/log/miloco-backend.log` |
 | 感知引擎 `no_omni_api_key` | 配 `miloco-cli config set model.omni.api_key <key>` |
 | `hermes cron list` 崩溃 | 重跑 install-hermes.sh（cron deliver 修复） |
-| trace 找不到 | gateway 进程需设 `MILOCO_HOME=~/.hermes/miloco` 到 launchd plist |
+| trace 找不到 | gateway 进程需把安装器写入的 `MILOCO_HOME` 传给 launchd plist |
 | im_push 报 needsBind | 在 Hermes 配 IM 后跑 `hermes gateway restart`，install-hermes.sh 会自动探测 |

@@ -70,7 +70,7 @@ Environment variables (read by the plugin, all auto-set by `install-hermes.sh`):
 
 | Variable              | Default                 | Notes                                                    |
 | --------------------- | ----------------------- | -------------------------------------------------------- |
-| `MILOCO_HOME`         | `~/.openclaw/miloco`    | miloco 后端数据目录                                      |
+| `MILOCO_HOME`         | `$HERMES_HOME/miloco`（未设置时为 `~/.hermes/miloco`） | miloco 后端数据目录 |
 
 ### Notification delivery (proactive push)
 

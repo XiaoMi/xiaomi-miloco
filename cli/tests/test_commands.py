@@ -1972,6 +1972,24 @@ def test_generate_supervisor_conf_omits_timezone_when_unset(runner, tmp_path, mo
     assert 'MILOCO_SUPERVISED="1"' in conf
 
 
+def test_generate_supervisor_conf_escapes_runtime_env_values(
+    runner, tmp_path, monkeypatch
+):
+    """runtime env 中的百分号、引号和反斜杠不能破坏 supervisor 配置。"""
+    import miloco_cli.commands.service as svc_mod
+
+    monkeypatch.setattr(
+        svc_mod,
+        "_read_runtime_env",
+        lambda: {"MILOCO_SECRET": '100%"quoted\\path'},
+    )
+
+    svc_mod._generate_supervisor_conf("/x/python -m miloco")
+    conf = svc_mod._supervisor_conf().read_text()
+
+    assert "MILOCO_SECRET='100%%\"quoted\\path'" in conf
+
+
 def test_service_logs_dir_not_found(runner, tmp_path, monkeypatch):
     """日志目录不存在时，logs 以非零退出。"""
     # 切换 MILOCO_HOME 到一个不存在 log/ 子目录的临时目录

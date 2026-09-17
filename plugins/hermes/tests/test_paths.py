@@ -6,7 +6,7 @@ openclaw 路径——否则 launchd 拉 gateway 时 .env 加载失败会 split-b
 openclaw 目录。
 
 测试是守护主流程正确性的，不是反向约束主流程的：主流程对齐 install-hermes.sh
-第 62 行的 HERMES_HOME→MILOCO_HOME 推导，测试断言随之演化。
+安装脚本中的 HERMES_HOME→MILOCO_HOME 推导，测试断言随之演化。
 """
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def test_miloco_home_expands_tilde(monkeypatch):
 
 
 def test_miloco_home_follows_hermes_home_when_miloco_home_unset(monkeypatch, tmp_path):
-    """MILOCO_HOME 未设时跟随 HERMES_HOME（与 install-hermes.sh 第 62 行镜像）。"""
+    """MILOCO_HOME 未设时跟随 HERMES_HOME（与安装脚本中的推导镜像）。"""
     monkeypatch.delenv("MILOCO_HOME", raising=False)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     from miloco_plugin_pkg import paths

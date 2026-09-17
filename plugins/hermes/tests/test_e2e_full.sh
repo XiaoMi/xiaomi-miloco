@@ -16,7 +16,9 @@ HERMES_BIN="$HOME/.local/bin/hermes"
 MILOCO_CLI="$HOME/.local/bin/miloco-cli"
 BACKEND_URL=$(python3 -c "
 import json, os
-mh = os.environ.get('MILOCO_HOME', os.path.expanduser('~/.openclaw/miloco'))
+mh = os.environ.get('MILOCO_HOME') or os.path.join(
+    os.environ.get('HERMES_HOME', os.path.expanduser('~/.hermes')), 'miloco'
+)
 try:
     cfg = json.load(open(os.path.join(mh, 'config.json')))
     print(cfg.get('server', {}).get('url', 'http://127.0.0.1:1810'))

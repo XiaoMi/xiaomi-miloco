@@ -7,7 +7,7 @@
 
 优先读 ``$MILOCO_HOME``（install-hermes.sh 会写进 shell rc 和 $HERMES_HOME/.env），
 未设置则跟随 ``$HERMES_HOME``，再未设置才落回 ``~/.hermes/miloco`` 作为最终
-默认值——与 install-hermes.sh 第 62 行 ``MILOCO_HOME=${MILOCO_HOME:-$HERMES_HOME/miloco}``
+默认值——与 install-hermes.sh 中的 ``MILOCO_HOME=${MILOCO_HOME:-$HERMES_HOME/miloco}``
 逻辑镜像。后端 Python 侧 ``miloco.utils.paths`` 与 CLI 侧 ``miloco_cli.config``
 是两个 runtime 共享代码，仍默认 openclaw 兼容历史契约。
 """
