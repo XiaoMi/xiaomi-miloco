@@ -22,6 +22,8 @@ from miloco.perception.utils import snapshot_from_arrays
 
 logger = logging.getLogger(__name__)
 
+VisualArtifactKind = Literal["video", "images", "audio", "none"]
+
 # ---- Internal pipeline data models (dataclass) ----
 
 
@@ -497,6 +499,18 @@ class OnDemandLogEntry(BaseModel):
         default=False,
         description="omni_trace.json.gz on disk (list API overrides DB column with live stat)",
     )
+    visual_artifact_kind: VisualArtifactKind = Field(
+        default="none",
+        description="Persisted visual artifact kind: video, images, audio, or none",
+    )
+    image_frame_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Per-device image sequence frame count when visual_artifact_kind=images",
+    )
+    has_audio_artifact: bool = Field(
+        default=False,
+        description="Whether an independently persisted audio artifact is available",
+    )
 
 
 class MeaningfulEvent(BaseModel):
@@ -563,6 +577,18 @@ class MeaningfulEvent(BaseModel):
             "该事件是否落有全景参考帧 ref.jpg(仅 Smart Crop 模式:crop 视频同附的整帧上下文)."
             "前端据此在 crop 视频旁展示参考缩略图;经 GET /events/{id}/ref/{device_id} 拉取."
         ),
+    )
+    visual_artifact_kind: VisualArtifactKind = Field(
+        default="none",
+        description="Persisted visual artifact kind: video, images, audio, or none",
+    )
+    image_frame_counts: dict[str, int] = Field(
+        default_factory=dict,
+        description="Per-device image sequence frame count when visual_artifact_kind=images",
+    )
+    has_audio_artifact: bool = Field(
+        default=False,
+        description="Whether an independently persisted audio artifact is available",
     )
 
 

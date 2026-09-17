@@ -6,6 +6,7 @@ import {
   updatePerceptionConfig,
   updateSchedulerConfig,
   type MinSuggestionUrgency,
+  type OmniVisualInputMode,
   type PerceptionConfig,
 } from "@/api";
 import { useEscClose } from "@/hooks/useEscClose";
@@ -22,6 +23,7 @@ const DEFAULT_MIN_URGENCY: MinSuggestionUrgency = "low";
 const DEFAULTS: PerceptionConfig = {
   video_short_edge: 512,
   omni_fps: 1,
+  omni_visual_input_mode: "video",
   window_size: 4,
   smart_crop_enabled: true,
   min_suggestion_urgency: DEFAULT_MIN_URGENCY,
@@ -47,6 +49,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
 
   const [videoShortEdge, setVideoShortEdge] = useState(DEFAULTS.video_short_edge);
   const [omniFps, setOmniFps] = useState(DEFAULTS.omni_fps);
+  const [visualInputMode, setVisualInputMode] = useState<OmniVisualInputMode>(
+    DEFAULTS.omni_visual_input_mode,
+  );
   const [windowSize, setWindowSize] = useState(DEFAULTS.window_size);
   // Smart Crop 用户开关。与分辨率档正交（各自独立 dirty / 各自独立生效），
   // 不是第五个分辨率档 —— crop 视频的短边本身也按所选档等比跟随。
@@ -79,6 +84,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
         setConfig(c);
         setVideoShortEdge(c.video_short_edge);
         setOmniFps(c.omni_fps);
+        setVisualInputMode(c.omni_visual_input_mode ?? "video");
         setWindowSize(c.window_size);
         setSmartCrop(c.smart_crop_enabled === true);
         // 老 backend 若不返 min_suggestion_urgency 时回退到"不过滤"默认,与 backend 的
@@ -125,6 +131,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
     config != null &&
     (videoShortEdge !== config.video_short_edge ||
       omniFps !== config.omni_fps ||
+      visualInputMode !== (config.omni_visual_input_mode ?? "video") ||
       windowSize !== config.window_size ||
       // 不可用时恒 false：置灰的开关不该产出待保存改动
       (smartCropAvailable && smartCrop !== (config.smart_crop_enabled === true)) ||
@@ -157,6 +164,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
         const updated = await updatePerceptionConfig({
           video_short_edge: videoShortEdge,
           omni_fps: omniFps,
+          omni_visual_input_mode: visualInputMode,
           window_size: windowSize,
           // 只在发版级开关放开时才提交,不可用时不往后端写一个用户按不动的值
           ...(smartCropAvailable ? { smart_crop_enabled: smartCrop } : {}),
@@ -195,6 +203,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
   function handleReset() {
     setVideoShortEdge(DEFAULTS.video_short_edge);
     setOmniFps(DEFAULTS.omni_fps);
+    setVisualInputMode(DEFAULTS.omni_visual_input_mode);
     setWindowSize(DEFAULTS.window_size);
     // 同 scheduler：不可用（发版级开关未放开，置灰）时不动视觉，否则会拨出一个恒不 dirty 的值
     if (smartCropAvailable) setSmartCrop(DEFAULTS.smart_crop_enabled === true);
@@ -322,6 +331,32 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   {smartCropAvailable
                     ? t("settings.smartCropHint")
                     : t("settings.smartCropUnavailable")}
+                </p>
+              </div>
+
+              {/* Omni 视觉输入模式 */}
+              <div className="space-y-2.5">
+                <label className="text-body font-medium text-text-primary block">
+                  {t("settings.visualInputMode")}
+                </label>
+                <div className="flex gap-2">
+                  {(["video", "image"] as const).map((mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setVisualInputMode(mode)}
+                      className={`flex-1 py-2.5 rounded-xl text-body transition-colors ${
+                        visualInputMode === mode
+                          ? "bg-brand-primary text-white shadow-sm"
+                          : "bg-bg-primary border border-border text-text-primary hover:border-brand-primary"
+                      }`}
+                    >
+                      {t(`settings.visualInputMode${mode === "video" ? "Video" : "Image"}`)}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-caption text-text-tertiary">
+                  {t("settings.visualInputModeHint")}
                 </p>
               </div>
 

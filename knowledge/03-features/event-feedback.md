@@ -47,7 +47,8 @@
       → asyncio.to_thread 调 build_feedback_pack（打包是同步 IO,不阻塞 event loop）
   → build_feedback_pack（admin/feedback_pack.py）
       meaningful_events_dao.get_by_id 取事件（不存在 → EventNotFoundError → 404）
-      读事件目录 snapshots/{event_id}/：omni_trace.json.gz、{device_slug}/clip.*、gallery/
+      读事件目录 snapshots/{event_id}/：omni_trace.json.gz、{device_slug}/ 下的 clip.*、
+        audio.m4a 与 frames/*.jpg（图片模式的音频与逐帧输入）、ref.jpg（Smart Crop）、gallery/
       → PII 脱敏（trace 文本 + 事件 text + 用户补充）
       → 写 metadata.json + omni_trace + clips(+可选 gallery) 到
         $MILOCO_HOME/packs/{时间戳子目录}/feedback-{uid}-{event_id(完整 UUID)}-{时间戳}.tar.gz

@@ -1583,6 +1583,7 @@ async def omni_health_stream():
 class PerceptionConfigBody(BaseModel):
     video_short_edge: int | None = Field(default=None, ge=64, le=2160)
     omni_fps: int | None = Field(default=None, ge=1, le=30)
+    omni_visual_input_mode: Literal["video", "image"] | None = None
     window_size: int | None = Field(default=None, ge=1, le=60)
     # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
     # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
@@ -1634,6 +1635,7 @@ def _perception_config_payload() -> dict:
     return {
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
+        "omni_visual_input_mode": inp.get("omni_visual_input_mode", "video"),
         "window_size": s.perception.collect.window_size,
         # 双闸分开暴露:smart_crop_enabled = 用户态(开关位置,取 user_enabled)vs
         # smart_crop_available = 决定开关能不能点(取发版级开关 enabled)。
@@ -1671,6 +1673,10 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["video_short_edge"] = body.video_short_edge
     if body.omni_fps is not None:
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
+    if body.omni_visual_input_mode is not None:
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})[
+            "omni_visual_input_mode"
+        ] = body.omni_visual_input_mode
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
     if body.smart_crop_enabled is not None:

@@ -1088,7 +1088,7 @@ async def _persist_meaningful_event(
     from miloco.manager import get_manager
     from miloco.perception.event_classifier import classify
     from miloco.perception.event_text_builder import build_agent_text
-    from miloco.perception.events_service import probe_has_ref
+    from miloco.perception.events_service import probe_has_ref, probe_visual_artifacts
     from miloco.perception.snapshot_writer import (
         check_disk_space,
         get_snapshot_root,
@@ -1149,19 +1149,30 @@ async def _persist_meaningful_event(
         )
 
         # relevant 为空(如老测试数据未标 source_device_ids)时保持原有全量列表不收窄;
-        # 否则 device_ids、artifacts.clips 与 artifacts.ref_frames 必须同步收窄——都是
-        # 按 device 归属的产物:device_ids 驱动"日志展示哪些摄像头",clips 驱动"落盘哪些
-        # 摄像头的 clip",ref_frames 驱动"落盘哪些摄像头的全景参考帧"。不同步会导致不相关
-        # 摄像头的 clip / ref.jpg 被落盘,而其 device_id 已不在 device_ids 内 → ref 经
-        # locate_ref 的 device_ids 校验取不到(404)、也不进 feedback pack,纯占
-        # snapshot_max_disk_mb 配额;snapshot_count 亦与 device_ids 长度对不上
-        # (save_event_artifacts 返回的 clip_dids 必是 artifacts.clips 的子集)。
+        # 否则 device_ids、artifacts.clips / image_frames / image_audio 与
+        # artifacts.ref_frames 必须同步收窄——都是按 device 归属的产物:device_ids 驱动
+        # "日志展示哪些摄像头",clips 驱动"落盘哪些摄像头的 clip",image_frames /
+        # image_audio 驱动"落盘哪些摄像头的图片序列与独立音频",ref_frames 驱动"落盘哪些
+        # 摄像头的全景参考帧"。不同步会导致不相关摄像头的 clip / frames/*.jpg / audio.m4a /
+        # ref.jpg 被落盘,而其 device_id 已不在 device_ids 内 → ref 经 locate_ref 的
+        # device_ids 校验取不到(404)、也不进 feedback pack,纯占 snapshot_max_disk_mb
+        # 配额;snapshot_count 亦与 device_ids 长度对不上(save_event_artifacts 返回的是
+        # 落盘产物的 did 并集,即 clips ∪ image_frames ∪ image_audio,必是收窄后各
+        # artifacts dict 的子集)。
         # trace / gallery / crop_meta 不是按事件相关性归属的产物,不参与收窄。
         relevant_device_ids = _collect_relevant_device_ids(result)
         if relevant_device_ids:
             device_ids = [did for did in device_ids if did in relevant_device_ids]
             artifacts.clips = {
                 did: payload for did, payload in artifacts.clips.items()
+                if did in relevant_device_ids
+            }
+            artifacts.image_frames = {
+                did: frames for did, frames in artifacts.image_frames.items()
+                if did in relevant_device_ids
+            }
+            artifacts.image_audio = {
+                did: audio for did, audio in artifacts.image_audio.items()
                 if did in relevant_device_ids
             }
             artifacts.ref_frames = {
@@ -1191,6 +1202,8 @@ async def _persist_meaningful_event(
         count = 0
         if (
             artifacts.clips
+            or artifacts.image_frames
+            or artifacts.image_audio
             or artifacts.trace is not None
             or artifacts.gallery
             or artifacts.ref_frames
@@ -1228,6 +1241,9 @@ async def _persist_meaningful_event(
         # 口径一致 —— 否则实时插入的 Smart Crop 事件在刷新前 has_ref 恒 false.
         has_trace = (get_snapshot_root() / event_id / "omni_trace.json.gz").exists()
         has_ref = probe_has_ref(get_snapshot_root(), event_id, device_ids)
+        visual_kind, has_audio_artifact, image_frame_counts = probe_visual_artifacts(
+            get_snapshot_root(), event_id, device_ids
+        )
 
         try:
             _publish_meaningful_event(
@@ -1243,6 +1259,9 @@ async def _persist_meaningful_event(
                 clip_kind=clip_kind,
                 has_trace=has_trace,
                 has_ref=has_ref,
+                visual_artifact_kind=visual_kind,
+                image_frame_counts=image_frame_counts,
+                has_audio_artifact=has_audio_artifact,
             )
         except Exception as e:  # noqa: BLE001
             logger.error("SSE publish failed for event %s: %s", event_id, e)
@@ -1265,6 +1284,9 @@ def _publish_meaningful_event(
     clip_kind: str | None = None,
     has_trace: bool = False,
     has_ref: bool = False,
+    visual_artifact_kind: str = "none",
+    image_frame_counts: dict[str, int] | None = None,
+    has_audio_artifact: bool = False,
 ) -> None:
     """通过 processor._publish 推送 meaningful_event SSE 帧.
 
@@ -1293,5 +1315,8 @@ def _publish_meaningful_event(
         "clip_kind": clip_kind,
         "has_trace": has_trace,
         "has_ref": has_ref,
+        "visual_artifact_kind": visual_artifact_kind,
+        "image_frame_counts": image_frame_counts or {},
+        "has_audio_artifact": has_audio_artifact,
     }
     processor._publish("meaningful_event", payload)

@@ -596,6 +596,117 @@ class TestNoMediaBlockWarning:
         assert "room=study-room" in msg
 
 
+class TestAudioSizeGate:
+    """音频尺寸闸收口在 ``_encode_audio_m4a`` 出口（见 ``_MIN_AUDIO_B64_LEN``）。
+
+    图片模式新增的三个音频附加点与 audio route 共用这一个编码函数, 闸只写在某个
+    调用点上会漏掉其余调用点 —— 漏掉的表现是把"非空但损坏的极短 m4a"发给 omni,
+    换回 400 Multimodal data is corrupted、整轮失败。
+    """
+
+    def test_too_short_audio_is_dropped_and_not_archived(self, monkeypatch, caplog):
+        """产物尺寸不达标 → 既不入 payload 也不落盘。"""
+        from miloco.observability.context import (
+            DeviceContext,
+            reset_device_context,
+            set_device_context,
+        )
+        from miloco.perception.engine.omni import prompt_builder as pb
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.snapshot_context import (
+            OmniEventArtifacts,
+            event_artifacts_scope,
+        )
+
+        # 把阈值拉到不可能达到, 模拟"PyAV 产出非空但损坏的极短 m4a"。
+        # 真实编码产物恒远大于 500（单个 AAC 帧实测 b64 已 1680+）, 正常路径不受影响。
+        monkeypatch.setattr(pb, "_MIN_AUDIO_B64_LEN", 10**9)
+
+        ep = _video_route_packet()
+        # _mock_edge_packet 的 audio_clip 只有 100 采样, 不足一个 AAC 帧会走"编不出来"
+        # 那条早退路径, 到不了尺寸闸 —— 这里给足采样, 让闸成为唯一拦截点。
+        ep.audio_clip = np.zeros(16000, dtype=np.int16)
+
+        artifacts = OmniEventArtifacts()
+        token = set_device_context(
+            DeviceContext(device_trace_id="t", device_id="cam_a", room_name="r")
+        )
+        try:
+            with event_artifacts_scope(artifacts), caplog.at_level("WARNING"):
+                fused = build_fused_payload(
+                    packets=[ep],
+                    context=OmniContext(room_name="厨房"),
+                    candidates=[],
+                    gallery_snapshot={},
+                    visual_input_mode="image",
+                )
+        finally:
+            reset_device_context(token)
+
+        types = [b["type"] for b in _multimodal_user_content(fused["messages"])]
+        assert "input_audio" not in types
+        # 落盘产物 = 实际请求: 没发出去的音频不留回放数据
+        assert artifacts.image_audio == {}
+        assert any(
+            "audio_m4a_too_short" in r.getMessage() for r in caplog.records
+        ), "尺寸闸拦下音频时要留痕（带 size）, 否则线上只能看到 omni 400"
+
+    def test_audio_route_too_short_falls_back_to_text_only(self, monkeypatch, caplog):
+        """audio route 同样被这一个闸收口 —— 尺寸不达标退化成 text-only, 不是报错。"""
+        from miloco.perception.engine.omni import prompt_builder as pb
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        monkeypatch.setattr(pb, "_MIN_AUDIO_B64_LEN", 10**9)
+
+        with caplog.at_level("WARNING"):
+            fused = build_fused_payload(
+                packets=[_audio_only_packet()],  # audio_clip 16000 采样, 过得了早退
+                context=OmniContext(room_name="厨房"),
+                candidates=[],
+                gallery_snapshot={},
+            )
+
+        blocks = _multimodal_user_content(fused["messages"])
+        assert not [b for b in blocks if b.get("type") == "input_audio"]
+        assert any("fused_no_media_block" in r.getMessage() for r in caplog.records)
+
+
+class TestAudioRouteVersusVisualMode:
+    """纯音频路由不随视觉模式开关变语义。
+
+    ``_build_messages`` 对"image 模式 + 无帧且无音频"抛 ValueError; 而音频编不出来
+    (采样不足一个 AAC 帧)在 audio route 上是**既有降级路径**——退化成纯文本问模型。
+    模式开关是给视觉表达做 A/B 的, 不该把一个与视觉无关的窗口从降级变成整轮失败。
+    """
+
+    def test_audio_route_keeps_video_semantics_in_image_mode(self):
+        from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.prompt_builder import build_prompt
+        from miloco.perception.engine.omni.provider import MiMoAdapter
+
+        ep = _audio_only_packet()
+        ep.audio_clip = np.zeros(512, dtype=np.int16)  # < 一个 AAC 帧 → 编不出音频
+
+        payload = build_prompt(ep, OmniContext(), visual_input_mode="image")
+        assert payload["visual_input_mode"] == "video"
+        # 不抛 ValueError: 退化成纯文本, 与 video 模式下的同一窗口行为一致
+        messages = _build_messages(payload, MiMoAdapter())
+        assert [b["type"] for b in messages[1]["content"]] == ["text"]
+
+    def test_audio_route_still_sends_audio_in_image_mode(self):
+        """音频编码正常时 audio route 照常发 input_audio —— 覆盖 mode 不该误伤它。"""
+        from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.prompt_builder import build_prompt
+        from miloco.perception.engine.omni.provider import MiMoAdapter
+
+        ep = _audio_only_packet()  # audio_clip 16000 采样, 编得出
+        payload = build_prompt(ep, OmniContext(), visual_input_mode="image")
+        messages = _build_messages(payload, MiMoAdapter())
+        types = [b["type"] for b in messages[1]["content"]]
+        assert "input_audio" in types
+        assert "image_url" not in types
+
+
 class TestBuildMessagesContentBlocks:
     """omni_client._build_messages 块组装（audio vs video route）。"""
 
@@ -664,6 +775,328 @@ class TestFusedAudioRoute:
         types = [b["type"] for b in user_blocks]
         assert "video_url" in types
         assert "input_audio" not in types
+
+    def test_fused_image_route_emits_image_blocks(self):
+        """image route 必须能完成 fused 装配并输出图片块。"""
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        fused = build_fused_payload(
+            packets=[_video_route_packet()],
+            context=OmniContext(),
+            candidates=[],
+            gallery_snapshot={},
+            visual_input_mode="image",
+        )
+        user_blocks = _multimodal_user_content(fused["messages"])
+        types = [b["type"] for b in user_blocks]
+        assert "image_url" in types
+        assert "video_url" not in types
+
+
+class TestImagePromptAdaptation:
+    """图片模式的措辞改写(``_adapt_visual_prompt`` + 替换表)。"""
+
+    # 逐字取自 prompt 正文的那两句: 注意"最后一帧"是 **markdown 加粗**的
+    _BBOX_BOLD = (
+        "上方已识别人物、陌生人及待识别 track 中的 bbox=(x1, y1, x2, y2) 均为"
+        "视频**最后一帧**中归一化到 [0, 1000] 区间的位置"
+    )
+
+    def test_bolded_last_frame_anchor_is_adapted(self):
+        """加粗的「视频**最后一帧**」要改成「**最后一张主画面图片**」。
+
+        替换表按序 str.replace, 最后一条单字"视频"垫底会把漏网的都吃掉 —— 键少写两个
+        星号就成了死条目, 该处会被垫底那条改出"按时间排列的画面图片**最后一帧**",
+        图片序列里并没有"帧"。所以这里对着**带加粗的原文**断言, 而不是自己拼一句。
+        """
+        from miloco.perception.engine.omni.prompt_builder import _adapt_visual_prompt
+
+        out = _adapt_visual_prompt(self._BBOX_BOLD, "image")
+        assert "**最后一张主画面图片**" in out
+        assert "视频" not in out
+        assert "最后一帧" not in out
+
+    def test_video_mode_text_is_untouched(self):
+        """video 模式逐字节原样返回 —— 存量视频用户看到的 prompt 不能变。"""
+        from miloco.perception.engine.omni.prompt_builder import _adapt_visual_prompt
+
+        assert _adapt_visual_prompt(self._BBOX_BOLD, "video") == self._BBOX_BOLD
+
+    # query 路径逐字节钉住: 拼接方式从 "\n".join(parts + tail)" 展开成"改写前半段 +
+    # 原样后半段", 段落间空行的数量属于这条 prompt 的一部分, 不能漂。
+    _QUERY_BODY = (
+        "检测结果：\nwangshihao\n场景状态：static\n音频：silence（能量: 0.000）"
+        "\n\n当前场景参考：视频中一名男子起身\n\n用户问题：视频里那个人是谁"
+    )
+
+    def test_query_video_mode_body_is_byte_identical(self):
+        """video 模式 query 文本逐字节不变。"""
+        from miloco.perception.engine.omni.prompt_builder import build_query_prompt
+
+        payload = build_query_prompt(
+            [_mock_edge_packet()], "视频里那个人是谁", "视频中一名男子起身",
+        )
+        assert payload["user_content"] == self._QUERY_BODY
+
+    def test_query_image_mode_keeps_user_words_and_caption_verbatim(self):
+        """图片模式只改模板段, 用户原话与上一窗 caption 原样进 prompt。
+
+        改写整串会把用户问的"视频里那个人是谁"改成"按时间排列的画面图片里那个人
+        是谁"再送模型 —— 用户原文被静默改动, 而 fused 实时路径对用户话语
+        (pending_speech)是原样放进独立 user 消息的, 两条路要对齐。
+        """
+        from miloco.perception.engine.omni.prompt_builder import build_query_prompt
+
+        payload = build_query_prompt(
+            [_mock_edge_packet()], "视频里那个人是谁", "视频中一名男子起身",
+            visual_input_mode="image",
+        )
+        content = payload["user_content"]
+        assert content.startswith(self._QUERY_BODY), "图片模式不该动用户问题/上一窗 caption"
+        assert content != self._QUERY_BODY, "图片模式仍要在末尾追加主画面序列说明"
+
+    def test_query_image_mode_drops_caption_when_absent(self):
+        """没有 last_caption 时段落拼接不变形(少一个空行就会改变 prompt 结构)。"""
+        from miloco.perception.engine.omni.prompt_builder import build_query_prompt
+
+        payload = build_query_prompt([_mock_edge_packet()], "现在怎么样")
+        assert payload["user_content"].endswith(
+            "音频：silence（能量: 0.000）\n\n\n用户问题：现在怎么样"
+        )
+
+    def _non_fused_context(self) -> OmniContext:
+        """非 fused 内联路径的上下文: 用户规则原文 + 上一窗半句话。"""
+        return OmniContext(
+            room_name="study-room",
+            pending_speech=[{"speaker": "小明", "content": "帮我放个视频"}],
+            rule_conditions=[
+                RuleCondition(rule_id="r1", rule_name="[r1] 看视频超时", query="看视频超过一小时提醒我"),
+            ],
+        )
+
+    @staticmethod
+    def _packet_with_bbox() -> IdentityPacket:
+        """名册带 bbox 的 packet —— 只有名册含位置时才会附坐标系说明供改写。"""
+        ep = _mock_edge_packet()
+        ep.targets = [
+            IdentityTarget(
+                type=ObjectType.HUMAN_WITH_FACE,
+                person_id="pid-uuid",
+                track_id=1,
+                needs_omni_verify=False,
+                box_info=[],
+                bbox_xyxy_norm=(120, 200, 480, 900),
+            ),
+        ]
+        return ep
+
+    def test_non_fused_image_mode_keeps_user_text_verbatim(self):
+        """非 fused 内联路径: 改写只落模板段, 用户规则原文与 last_speech 引文原样。
+
+        fused 靠"用户话语放独立只读消息"隔离改写; 非 fused 把规则/pending_speech 内联
+        进同一条 user 文本, 整串改写会把用户说的"帮我放个视频"改成"帮我放个按时间排列
+        的画面图片"——转写被静默篡改, 并顺着 speeches 流进 agent 与设备控制派发, 且无
+        日志痕迹。模板段(名册 bbox 说明、末尾锚点)仍必须改写, 否则图片模式下这两处还
+        在说"视频**最后一帧**"。
+        """
+        payload = build_prompt(
+            self._packet_with_bbox(), self._non_fused_context(), visual_input_mode="image",
+        )
+        content = payload["user_content"]
+        assert "看视频超过一小时提醒我" in content, "用户规则原文不得被改写"
+        assert "帮我放个视频" in content, "last_speech 引文不得被改写"
+        assert "**最后一张主画面图片**" in content, "名册 bbox 说明属模板, 必须改写"
+        assert "视频**最后一帧**" not in content
+        assert "只描述/判断本轮按时间排列的画面图片与音频" in content, "末尾锚点必须改写"
+
+    def test_non_fused_video_mode_leaves_templates_untouched(self):
+        """video 模式逐字节不变: 模板段仍是原措辞, 恒等改写不引入任何差异。"""
+        payload = build_prompt(self._packet_with_bbox(), self._non_fused_context())
+        content = payload["user_content"]
+        assert "视频**最后一帧**" in content
+        assert "只描述/判断本轮视频与音频的直接观察" in content
+        assert "按时间排列的画面图片" not in content
+        assert "看视频超过一小时提醒我" in content
+
+    def test_system_prompt_user_written_sections_are_never_adapted(self):
+        """机位说明与家庭档案是用户手写原文, 图片模式下也不得被机械替换。"""
+        ep = _mock_edge_packet()
+        camera_prompt = "忽略视频左上角的时间戳水印"
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="# 家庭档案\n客厅的电视平时放动画片, 别让孩子连看视频太久",
+        ):
+            payload = build_prompt(
+                ep, OmniContext(camera_prompt=camera_prompt), visual_input_mode="image",
+            )
+        system = payload["system_prompt"]
+        assert camera_prompt in system, "机位说明正文是用户手写, 不得改写"
+        assert "别让孩子连看视频太久" in system, "家庭档案是用户手写, 不得改写"
+        assert "本摄像头须知" in system
+        # 模板段仍要改写(图片模式下 system 里不能再出现"视频"口径的角色/原则)
+        assert "综合一个或多个设备的画面图片和音频" in system
+        assert "综合一个或多个设备的视频和音频" not in system
+
+    def test_query_system_prompt_home_profile_is_never_adapted(self):
+        """query 的 system prompt 也内联家庭档案 —— 同款漏网, 用户手写段同样不得改写。
+
+        与 ``build_system_prompt`` 的区别只是模板段少（_ROLE / _OUTPUT_MODE_FREE /
+        _COMMONSENSE 三段）, 同样是"模板改写、用户手写原样"。
+        """
+        from miloco.perception.engine.omni.prompt_builder import build_query_prompt
+
+        with patch(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            return_value="# 家庭档案\n客厅的电视平时放动画片, 别让孩子连看视频太久",
+        ):
+            payload = build_query_prompt(
+                [_mock_edge_packet()], "现在怎么样", visual_input_mode="image",
+            )
+        system = payload["system_prompt"]
+        assert "别让孩子连看视频太久" in system, "家庭档案不得被改写"
+        assert "综合一个或多个设备的画面图片和音频" in system, "模板段仍要改写"
+
+    def test_no_replacement_key_is_dead(self):
+        """替换表的每个键都得在 prompt 正文里命中。
+
+        死条目不报错, 只会静默漏改一处措辞, 灰度期从日志看不出来。语料取真正会被改写
+        的那几个模块: system prompt 的模板常量在 constants.py / field_registry.py, user
+        段在 prompt_builder.py(``build_system_prompt`` 与 ``_build_fused_user_content``
+        两处都会过改写函数)。
+
+        按 AST 取字面量, 再排掉注释与 docstring —— 注释本就不在 AST 里; docstring 在,
+        但它是"描述 prompt 的散文", 在里面命中等于没命中(替换表最初那条 ``视频末帧``
+        就是这么看着像活的)。替换表自身也排除, 免得自证。
+        """
+        import ast
+        import pathlib
+
+        import miloco.perception.engine.omni.prompt_builder as pb
+
+        omni_dir = pathlib.Path(pb.__file__).parent
+        keys = [k for k, _ in pb._IMAGE_PROMPT_REPLACEMENTS]
+        table_strings = set(keys) | {v for _, v in pb._IMAGE_PROMPT_REPLACEMENTS}
+
+        def _docstring_nodes(tree: ast.AST) -> set[int]:
+            ids: set[int] = set()
+            for node in ast.walk(tree):
+                if not isinstance(
+                    node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    continue
+                body = getattr(node, "body", [])
+                first = body[0] if body else None
+                if (
+                    isinstance(first, ast.Expr)
+                    and isinstance(first.value, ast.Constant)
+                    and isinstance(first.value.value, str)
+                ):
+                    ids.add(id(first.value))
+            return ids
+
+        literals: list[str] = []
+        for name in ("constants.py", "field_registry.py", "prompt_builder.py"):
+            tree = ast.parse((omni_dir / name).read_text())
+            skip = _docstring_nodes(tree)
+            literals.extend(
+                node.value
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and id(node) not in skip
+                and node.value not in table_strings
+            )
+
+        dead = sorted(k for k in keys if not any(k in lit for lit in literals))
+        assert dead == [], f"替换表里这些键在 prompt 正文里不存在: {dead}"
+
+
+class TestImageSequenceNote:
+    """图片序列说明里的时间口径: 给"窗口时长 + 采样率", 不给"相邻间隔"。"""
+
+    def _prepared(self, n: int, *, fps: int, duration_s: float):
+        from miloco.perception.engine.omni.prompt_builder import PreparedVisualFrames
+
+        frame = np.zeros((8, 8, 3), dtype=np.uint8)
+        return PreparedVisualFrames(
+            frames=tuple(frame for _ in range(n)),
+            width=8, height=8, fps=fps, duration_s=duration_s,
+        )
+
+    def test_note_states_duration_and_sampling_rate(self):
+        """正常窗口: 4 帧 / 4 秒 → 时长 4 秒、采样率 1 fps。"""
+        from miloco.perception.engine.omni.prompt_builder import _image_sequence_note
+
+        note = _image_sequence_note(self._prepared(4, fps=1, duration_s=4.0))
+        assert "4 张主画面" in note
+        assert "窗口时长约 4 秒" in note
+        assert "采样率约 1 fps" in note
+        assert "间隔" not in note, "相邻间隔是反推出来的, 不再写进 prompt"
+
+    def test_sampling_rate_comes_from_actual_frames_not_config_fps(self):
+        """采样率按"实际帧数 / 窗口时长"算, 不按配置帧率。
+
+        构造的是线上真实出现过的一类窗口: 相机按 ~18fps 投递、配置写 fps=3, 下采那一步
+        用 config 的 3 当除数, 一个 4 秒窗口于是抽出 27 帧、``frame_info.fps`` 被写成
+        round(3/3)=1。此时配置帧率说 1fps(即"相邻 1 秒"), 而送到模型的 27 帧其实挤在
+        0.15 秒的间隔上 —— 按帧数算出来的 6.75fps 才是真的。
+        """
+        from miloco.perception.engine.omni.prompt_builder import _image_sequence_note
+
+        note = _image_sequence_note(self._prepared(27, fps=1, duration_s=4.0))
+        assert "窗口时长约 4 秒" in note
+        assert "采样率约 6.75 fps" in note
+        assert "采样率约 1 fps" not in note
+
+    def test_single_frame_and_unknown_duration(self):
+        """单帧只说明"仅一张图片"; 时长缺失时退回配置帧率。"""
+        from miloco.perception.engine.omni.prompt_builder import _image_sequence_note
+
+        assert "仅一张图片" in _image_sequence_note(
+            self._prepared(1, fps=1, duration_s=4.0)
+        )
+        note = _image_sequence_note(self._prepared(4, fps=2, duration_s=0.0))
+        assert "采样率约 2 fps" in note
+        assert "窗口时长" not in note
+
+    def test_fused_image_route_wires_window_duration(self):
+        """集成: 时长要真的从 packet.frame_info 走到 prompt 里。
+
+        单测直接构造 PreparedVisualFrames, 抓不住"调用点忘了传 duration_s"——
+        那样 note 会静默退回配置帧率, 时间口径又变成反推值。
+        """
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        ep = _video_route_packet()
+        ep.all_frames = [np.zeros((100, 100, 3), dtype=np.uint8) for _ in range(4)]
+        ep.frame_info = FrameInfo(start_timestamp=0, end_timestamp=4000, fps=1)
+        fused = build_fused_payload(
+            packets=[ep], context=OmniContext(), candidates=[],
+            gallery_snapshot={}, visual_input_mode="image",
+        )
+        texts = [
+            b["text"] for b in _multimodal_user_content(fused["messages"])
+            if b["type"] == "text"
+        ]
+        note = next(t for t in texts if "主画面图片序列" in t)
+        assert "4 张主画面" in note
+        assert "窗口时长约 4 秒" in note
+        assert "采样率约 1 fps" in note
+
+    def test_window_duration_from_frame_info(self):
+        """窗口时长由 packet.frame_info 的起止时刻(ms)换算; 倒挂/坏值一律当未知。"""
+        from types import SimpleNamespace
+
+        from miloco.perception.engine.omni.prompt_builder import _window_duration_s
+
+        assert _window_duration_s(
+            SimpleNamespace(start_timestamp=0, end_timestamp=4000)
+        ) == 4.0
+        assert _window_duration_s(
+            SimpleNamespace(start_timestamp=5000, end_timestamp=4000)
+        ) == 0.0
+        assert _window_duration_s(SimpleNamespace()) == 0.0
+        assert _window_duration_s(None) == 0.0
 
 
 class TestFusedPetRefs:
@@ -2257,23 +2690,38 @@ class TestAdaptiveResolution:
 
         断言一律对着「编出的网格」而不是 se/短边 反算的浮点值 —— 送模型的就是这张网格,
         //2*2 取偶也只体现在它上面。
+
+        捕的是 ``_prepare_omni_visual_frames``(canonical 帧准备)而不是编码函数:图片/视频
+        两路共用这一步, 视频的 mp4 编码只是它下游的一层, crop 已不再调 ``_encode_video_mp4``
+        (那会把缩放跑第二遍)。网格直接读它的返回值, 不再拿公式反算一遍自证。
         """
         from types import SimpleNamespace
         from unittest.mock import patch as _patch
 
         import miloco.perception.engine.omni.prompt_builder as pb
 
+        prepared_calls: list = []
+        real_prepare = pb._prepare_omni_visual_frames
+
+        def _capture(*args, **kwargs):
+            result = real_prepare(*args, **kwargs)
+            prepared_calls.append((args, kwargs, result))
+            return result
+
         p1, p2 = self._patches(short_edge=short_edge)
-        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+        with p1, p2, _patch.object(
+            pb, "_prepare_omni_visual_frames", side_effect=_capture
+        ):
             content = self._content(packet=packet, candidates=[])
         assert self._has_ref(content)  # 确认确实走了 crop 分支
-        call = spy.call_args_list[-1]
-        ch, cw = call.args[0][0].shape[:2]
+        # 裁切命中时全景不再预编, 全程只该有这一处准备帧 —— 多出来说明捕错了那一次
+        assert len(prepared_calls) == 1, [c[1] for c in prepared_calls]
+        args, kwargs, prepared = prepared_calls[-1]
+        ch, cw = args[0][0].shape[:2]
         fh, fw = packet.all_frames[0].shape[:2]
-        se = call.kwargs["short_edge"]
         return SimpleNamespace(
-            region=(cw, ch), se=se,
-            out=pb._encode_target_wh(cw, ch, se),
+            region=(cw, ch), se=kwargs["short_edge"],
+            out=(prepared.width, prepared.height),
             pano=pb._encode_target_wh(fw, fh, short_edge),
         )
 
@@ -2388,9 +2836,11 @@ class TestAdaptiveResolution:
 
         pkt = _adaptive_packet(fps=2)
         p1, p2 = self._patches()
-        with p1, p2, _patch.object(pb, "_encode_video_mp4", wraps=pb._encode_video_mp4) as spy:
+        with p1, p2, _patch.object(
+            pb, "_prepare_omni_visual_frames", wraps=pb._prepare_omni_visual_frames
+        ) as spy:
             self._content(packet=pkt, candidates=[])
-        # reorder 后裁切命中则只编 crop 一次(全景不再预编);该次必须用 frame_info.fps=2
+        # reorder 后裁切命中则只准备一次帧(全景不再预编);该次必须用 frame_info.fps=2
         assert spy.call_count >= 1
         assert all(c.kwargs.get("fps") == 2 for c in spy.call_args_list)
 
@@ -2403,3 +2853,63 @@ class TestAdaptiveResolution:
             payload = build_batch_prompt([_adaptive_packet()], OmniContext())
         assert payload["crops"] == []
         assert payload.get("video_base64")
+
+
+def _request_text(messages: list[dict]) -> str:
+    """把 messages 里的文本段按顺序摊平(媒体块丢弃)。
+
+    fused 的 user content 是多模态 list: 文本段 + gallery image_url + 主 video_url。
+    本函数只取文本, 视频字节不进指纹(编码器产物会随 PyAV 版本变, 不该混进 prompt 的
+    逐字节断言)。
+    """
+    out: list[str] = []
+    for m in messages:
+        content = m["content"]
+        if isinstance(content, str):
+            out.append(content)
+        else:
+            out.extend(b["text"] for b in content if b.get("type") == "text")
+    return "\n".join(out)
+
+
+class TestVideoModeGoldenPrompt:
+    """video 模式(默认、存量路径)的 fused request 文本逐字节冻结。
+
+    本 PR 的零回归承诺是"视频模式的请求与 prompt 逐字符不变", 而新加的
+    ``visual_input_mode`` 渗透到三处: system prompt 装配(SceneDescriptor 多一维)、
+    user content 改写(``_adapt_visual_prompt``)、媒体块拼装。任何一处漏判都会静默改变
+    存量视频用户的请求 —— 断言零散字面量钉不住整串(4k+ 字符), 故用 golden 文件比对。
+
+    golden 的来历: 在 PR 基线的 worktree 上跑**同一 fixture** 生成文本, 与本文件逐字节
+    一致后才落库。即它证明的是"与改造前逐字节相同", 不只是"与今天的实现相同"。更新方式:
+    确认 prompt 改动确属有意, 核对过基线差异后再重新生成该文件。
+
+    环境无关性(不控住这两项, 换台机器 golden 就飘): 文本与 adapter 无关 —— mimo / qwen /
+    gemini 三种 adapter 产出同一串(媒体块才分 provider); 但 ``_has_pets_for_scene`` 为真
+    会多出宠物段, 故在测试里钉成 False。
+    """
+
+    def test_fused_video_mode_request_text_is_byte_identical(self, monkeypatch):
+        from pathlib import Path
+
+        from miloco.perception.engine.omni import prompt_builder as pb
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        monkeypatch.setattr(pb, "_has_pets_for_scene", lambda: False)
+        fused = build_fused_payload(
+            packets=[_mock_edge_packet()],
+            context=OmniContext(room_name="study-room"),
+            candidates=[],
+            gallery_snapshot={},
+            visual_input_mode="video",
+        )
+        # 落库的 golden 以换行收尾(文件惯例), 比对时补上这一个字节而不是 rstrip ——
+        # rstrip 会把"末尾空行被吃掉"这种改动一起放过。
+        golden = (
+            Path(__file__).resolve().parents[3]
+            / "fixtures"
+            / "omni_prompt_video_mode.txt"
+        ).read_text(encoding="utf-8")
+        assert _request_text(fused["messages"]) + "\n" == golden, (
+            "video 模式(存量默认路径)的 request 文本变了 —— 本 PR 不该改到它"
+        )

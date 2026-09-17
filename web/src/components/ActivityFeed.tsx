@@ -14,10 +14,12 @@ import { useTranslation } from "react-i18next";
 import {
   eventClipUrl,
   eventCropMeta,
+  eventImageUrl,
   eventRefUrl,
   listActivity,
   listOnDemandLogs,
   onDemandClipUrl,
+  onDemandImageUrl,
   revealDir,
   submitEventFeedback,
   submitOnDemandFeedback,
@@ -369,6 +371,9 @@ export function ActivityFeed({
               clip_kind: e.clip_kind ?? prev[idx].clip_kind,
               has_trace: e.has_trace ?? prev[idx].has_trace,
               has_ref: e.has_ref ?? prev[idx].has_ref,
+              visual_artifact_kind: e.visual_artifact_kind ?? prev[idx].visual_artifact_kind,
+              image_frame_counts: e.image_frame_counts ?? prev[idx].image_frame_counts,
+              has_audio_artifact: e.has_audio_artifact ?? prev[idx].has_audio_artifact,
               has_feedback: e.has_feedback ?? prev[idx].has_feedback,
               feedback_pack_path: e.feedback_pack_path ?? prev[idx].feedback_pack_path,
               feedback_pack_size: e.feedback_pack_size ?? prev[idx].feedback_pack_size,
@@ -630,7 +635,15 @@ function Lightbox({
       role="dialog"
       // 必须跟着 kind 走:label 写在 kind 分叉之前,读屏会把参考帧对话框念成"事件回放"
       // ——与屏上内容不符,而读屏用户没有画面可以纠正这句描述。
-      aria-label={kind === "image" ? t("activity.refFrame") : t("activity.playback")}
+      // image 还要再分一层:带 crop 的才是 Smart Crop 全景参考帧,图片序列的主画面帧
+      // 走同一个 kind 但没有 crop,念成"全景参考"同样是错描述。
+      aria-label={
+        kind === "image"
+          ? crop
+            ? t("activity.refFrame")
+            : t("activity.imagePlayback")
+          : t("activity.playback")
+      }
     >
       <button
         type="button"
@@ -655,7 +668,11 @@ function Lightbox({
         <div className="relative w-full h-full">
           <img
             src={src}
-            alt={t("activity.refFrame")}
+            // 跟对话框 aria 同一判据: 带 crop 的才是 Smart Crop 全景参考帧, 图片序列的
+            // 主画面帧走同一个 kind 但没有 crop. 这里若恒念"全景参考帧", 读屏用户从序列卡
+            // 打开放大就会听见对话框报"图片序列"、紧接着图片本体报"全景参考帧"——同一个
+            // 弹层里两句话互相矛盾(上轮修的是 dialog 层, 错描述从 img 层漏了下来).
+            alt={crop ? t("activity.refFrame") : t("activity.imagePlayback")}
             className="w-full h-full object-contain"
           />
           {crop && <CropBoxOverlay crop={crop} />}
@@ -832,6 +849,11 @@ function ActivityRow({
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
   const hasClips = event.snapshot_count > 0;
+  const isImageMode = event.visual_artifact_kind === "images";
+  const imageDids = event.device_ids.filter(
+    (did) => (event.image_frame_counts?.[did] ?? 0) > 0,
+  );
+  const hasImages = isImageMode && imageDids.length > 0;
   // 区分音频事件 vs 视频事件 — backend stat 落盘文件后缀计算 clip_kind:
   //   "mp4" → 视频路径 (H264+AAC),UI 🎬
   //   "m4a" → audio-only 路径(纯 AAC,画面静止),UI 🎤 音频
@@ -855,7 +877,9 @@ function ActivityRow({
   // 展开状态显"收起".audio-only 跟"无 clip"用同一图标 — 都"没视频"语义一致.
   const trailing = expanded
     ? t("activity.collapse")
-    : hasClips && !isAudioOnly
+    : hasImages
+      ? "🖼️"
+      : hasClips && !isAudioOnly
       ? "🎬"
       : "🎤";
 
@@ -898,7 +922,32 @@ function ActivityRow({
         </span>
       </div>
 
-      {expanded && hasClips && !isAudioOnly && (
+      {expanded && hasImages && (
+        <div
+          className="mt-3 flex gap-2 overflow-x-auto pb-2 sm:ml-[82px]"
+          aria-label={t("activity.imagePlayback", "图片序列")}
+        >
+          {imageDids.map((did) => (
+            <Fragment key={did}>
+              <ImageSequenceCard
+                deviceId={did}
+                frameCount={event.image_frame_counts?.[did] ?? 0}
+                getImageUrl={(frameIndex) => eventImageUrl(event.id, did, frameIndex)}
+                onOpenLightbox={onOpenLightbox}
+              />
+              {event.has_ref && (
+                <RefFrameCard
+                  event_id={event.id}
+                  device_id={did}
+                  onOpenLightbox={onOpenLightbox}
+                />
+              )}
+            </Fragment>
+          ))}
+        </div>
+      )}
+
+      {expanded && !isImageMode && hasClips && !isAudioOnly && (
         <div
           className="mt-3 flex gap-2 overflow-x-auto pb-2 sm:ml-[82px]"
           aria-label={t("activity.videoPlayback")}
@@ -1191,6 +1240,113 @@ function ClipPlayer({
   );
 }
 
+function ImageSequenceCard({
+  deviceId,
+  frameCount,
+  getImageUrl,
+  onOpenLightbox,
+}: {
+  deviceId: string;
+  frameCount: number;
+  getImageUrl: (frameIndex: number) => string;
+  onOpenLightbox: (src: string, kind: LightboxKind, crop?: EventCropMeta | null) => void;
+}) {
+  const { t } = useTranslation();
+  const [frameIndex, setFrameIndex] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const safeFrameCount = Math.max(0, frameCount);
+  const src = getImageUrl(Math.min(frameIndex, Math.max(0, safeFrameCount - 1)));
+
+  useEffect(() => {
+    setFrameIndex(0);
+    setFailed(false);
+  }, [deviceId, frameCount]);
+
+  if (!safeFrameCount) return null;
+
+  // 失败态不整卡早退: 序列卡有 N 帧, 一帧加载失败(瞬时网络抖动/后端偶发 500)不该把整卡
+  // 钉死成"已过期" —— 其余帧在盘上完好; 而且翻页正是从坏帧翻走的唯一入口, 早退会让两个
+  // handler 里的 setFailed(false) 变成死代码(它们本意就是"翻页即重试"). 占位块只顶掉
+  // <img> 的位置, 计数角标与翻页按钮照常渲染; 放大按钮在失败态不渲染, 免得灯箱打开坏 src.
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      className="flex-shrink-0 relative group"
+    >
+      {failed ? (
+        // 占位块本身可点重试。N≥2 时翻页就是重试入口, 但 frameCount===1 的短窗口下
+        // frameIndex 恒 0 —— prev 的 `frameIndex === 0`、next 的 `0 >= 0` 双双成立,
+        // 两个按钮都 disabled, 两处 setFailed(false) 对这个形状依旧不可达(短窗口/掉帧时
+        // image_frame_counts 可以为 1)。真过期时点按 → <img> 重新挂载 → 再次 onError
+        // → 回到占位, 无副作用。
+        // 用真 <button> 而不是可点 div: 可点 div 不可聚焦、键盘不可达, 且 aria 仍念
+        // "图片已过期" —— 交互元素只报状态、不报动作, 读屏用户不知道它能点。
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setFailed(false);
+          }}
+          className="w-48 h-48 rounded bg-bg-primary border border-border flex items-center justify-center text-caption-mono text-text-tertiary cursor-pointer"
+          aria-label={t("activity.imageExpiredRetry", "图片已过期，点按重新加载")}
+        >
+          {t("activity.imageExpired", "图片已过期")}
+        </button>
+      ) : (
+        <img
+          src={src}
+          alt={`${deviceId} ${t("activity.imageFrame", "图片帧")} ${frameIndex + 1}`}
+          onError={() => setFailed(true)}
+          onClick={(e) => e.stopPropagation()}
+          className="w-48 h-48 rounded bg-black border border-border object-contain"
+        />
+      )}
+      <span className="absolute bottom-1 left-1 px-1.5 py-0.5 rounded bg-black/60 text-white text-caption-mono pointer-events-none">
+        {frameIndex + 1} / {safeFrameCount}
+      </span>
+      <button
+        type="button"
+        disabled={frameIndex === 0}
+        onClick={(e) => {
+          e.stopPropagation();
+          setFailed(false);
+          setFrameIndex((index) => Math.max(0, index - 1));
+        }}
+        aria-label={t("activity.previousFrame", "上一张")}
+        className="absolute bottom-1 left-1/2 -translate-x-[calc(100%+2px)] w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center disabled:opacity-30"
+      >
+        ‹
+      </button>
+      <button
+        type="button"
+        disabled={frameIndex >= safeFrameCount - 1}
+        onClick={(e) => {
+          e.stopPropagation();
+          setFailed(false);
+          setFrameIndex((index) => Math.min(safeFrameCount - 1, index + 1));
+        }}
+        aria-label={t("activity.nextFrame", "下一张")}
+        className="absolute bottom-1 left-1/2 translate-x-0 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center disabled:opacity-30"
+      >
+        ›
+      </button>
+      {!failed && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenLightbox(src, "image");
+          }}
+          aria-label={t("activity.zoomImage", "放大图片")}
+          className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+        >
+          ⛶
+        </button>
+      )}
+    </div>
+  );
+}
+
 /** Smart Crop 全景参考帧卡:与 crop clip 并排的静态 <img>,叠一层 crop 框.
  *
  *  为什么要这张卡:crop 模式下送 LLM 的视频只是画面里的一小块,单看它无从判断"模型
@@ -1440,7 +1596,7 @@ function OnDemandLogList({ initial, initialLoading, initialError, onRetryInitial
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [hasMore, setHasMore] = useState(initial.length === OD_PAGE_SIZE);
-  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [lightbox, setLightbox] = useState<{ src: string; kind: LightboxKind } | null>(null);
 
   useEffect(() => {
     setLogs(initial);
@@ -1530,11 +1686,20 @@ function OnDemandLogList({ initial, initialLoading, initialError, onRetryInitial
       </div>
       <ul className="divide-y divide-border">
         {logs.map((log) => (
-          <OnDemandRow key={log.id} log={log} onOpenLightbox={setLightboxSrc} deviceNames={deviceNames} />
+          <OnDemandRow
+            key={log.id}
+            log={log}
+            onOpenLightbox={(src, kind) => setLightbox({ src, kind })}
+            deviceNames={deviceNames}
+          />
         ))}
       </ul>
-      {lightboxSrc && (
-        <Lightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />
+      {lightbox && (
+        <Lightbox
+          src={lightbox.src}
+          kind={lightbox.kind}
+          onClose={() => setLightbox(null)}
+        />
       )}
       {hasMore && (
         <div className="px-5 py-3 border-t border-border flex justify-center">
@@ -1554,7 +1719,7 @@ function OnDemandLogList({ initial, initialLoading, initialError, onRetryInitial
 
 function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
   log: OnDemandLogEntry;
-  onOpenLightbox: (src: string) => void;
+  onOpenLightbox: (src: string, kind: LightboxKind) => void;
   deviceNames: Record<string, string>;
 }) {
   const { t } = useTranslation();
@@ -1566,11 +1731,18 @@ function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
   const packSize = feedbackPack?.size ?? log.feedback_pack_size ?? null;
   const hasClips = log.snapshot_count > 0;
   const clipDids = log.clip_dids ?? [];
+  const isImageMode = log.visual_artifact_kind === "images";
+  const imageDids = log.sources.filter(
+    (did) => (log.image_frame_counts?.[did] ?? 0) > 0,
+  );
+  const hasImages = isImageMode && imageDids.length > 0;
   const allAudioOnly = hasClips && clipDids.every((did) => (log.clip_kinds?.[did] ?? "mp4") === "m4a");
 
   const trailing = expanded
     ? t("activity.collapse")
-    : hasClips && !allAudioOnly
+    : hasImages
+      ? "🖼️"
+      : hasClips && !allAudioOnly
       ? "🎬"
       : "💬";
 
@@ -1594,7 +1766,24 @@ function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
         </span>
       </div>
 
-      {expanded && hasClips && (
+      {expanded && hasImages && (
+        <div
+          className="mt-3 flex gap-2 overflow-x-auto pb-2 sm:ml-[82px]"
+          aria-label={t("activity.imagePlayback", "图片序列")}
+        >
+          {imageDids.map((did) => (
+            <ImageSequenceCard
+              key={did}
+              deviceId={did}
+              frameCount={log.image_frame_counts?.[did] ?? 0}
+              getImageUrl={(frameIndex) => onDemandImageUrl(log.id, did, frameIndex)}
+              onOpenLightbox={onOpenLightbox}
+            />
+          ))}
+        </div>
+      )}
+
+      {expanded && !isImageMode && hasClips && (
         <div className="mt-3 flex gap-2 overflow-x-auto pb-2 sm:ml-[82px]">
           {clipDids.map((did) =>
             (log.clip_kinds?.[did] ?? "mp4") === "m4a"
@@ -1619,7 +1808,7 @@ function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
 }
 
 function OnDemandClipPlayer({ logId, deviceId, onOpenLightbox }: {
-  logId: string; deviceId: string; onOpenLightbox: (src: string) => void;
+  logId: string; deviceId: string; onOpenLightbox: (src: string, kind: LightboxKind) => void;
 }) {
   const { t } = useTranslation();
   const [failed, setFailed] = useState(false);
@@ -1636,7 +1825,7 @@ function OnDemandClipPlayer({ logId, deviceId, onOpenLightbox }: {
     <div onClick={(e) => e.stopPropagation()} className="flex-shrink-0 relative group">
       <video src={src} controls preload="metadata" onError={() => setFailed(true)} onClick={(e) => e.stopPropagation()} className="w-48 h-48 rounded bg-black border border-border object-contain"
         aria-label={`${deviceId} clip`} />
-      <button type="button" onClick={(e) => { e.stopPropagation(); onOpenLightbox(src); }} aria-label={t("activity.zoomPlay")}
+      <button type="button" onClick={(e) => { e.stopPropagation(); onOpenLightbox(src, "video"); }} aria-label={t("activity.zoomPlay")}
         className="absolute top-1 right-1 w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-white text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
         ⛶
       </button>

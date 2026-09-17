@@ -244,6 +244,82 @@ class TestSaveEventArtifacts:
         assert not (self.root / "event-ref-empty" / "cam_a" / "ref.jpg").exists()
 
 
+# ─── 图片模式产物(frames/ + audio.m4a) ─────────────────────────────────────
+
+
+class TestSaveImageFrames:
+    """``_save_image_frames`` 写 frames/NNN.jpg, 整目录原子替换。
+
+    读回端(image_frame_files / 事件逐帧 HTTP 端点 / feedback pack)全靠
+    "文件名下标 = 序列下标"这一条, 顺序错了模型看到的时间顺序就反了。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_root(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(snapshot_writer, "get_snapshot_root", lambda: tmp_path)
+        self.root = tmp_path
+
+    def test_roundtrip_preserves_order(self, tmp_path):
+        """写入 → image_frame_files 读回同序同字节。"""
+        from miloco.perception.snapshot_writer import image_frame_files
+
+        frames = [f"frame-{i}".encode() for i in range(12)]
+        dids = save_event_artifacts(
+            "event-img", OmniEventArtifacts(image_frames={"cam_a": frames})
+        )
+        assert dids == ["cam_a"]
+
+        device_dir = self.root / "event-img" / "cam_a"
+        files = image_frame_files(device_dir)
+        assert [p.name for p in files] == [f"{i:03d}.jpg" for i in range(12)]
+        assert [p.read_bytes() for p in files] == frames
+
+    def test_rebuild_replaces_whole_dir(self):
+        """重写时整目录替换 —— 上一轮的残留帧不会混进新的序列(帧数变少时尤其)。"""
+        from miloco.perception.snapshot_writer import image_frame_files
+
+        save_event_artifacts(
+            "event-img2",
+            OmniEventArtifacts(image_frames={"cam_a": [b"a", b"b", b"c"]}),
+        )
+        save_event_artifacts(
+            "event-img2", OmniEventArtifacts(image_frames={"cam_a": [b"only"]})
+        )
+
+        device_dir = self.root / "event-img2" / "cam_a"
+        assert [p.read_bytes() for p in image_frame_files(device_dir)] == [b"only"]
+        # 临时目录也不该留下
+        assert not [p for p in device_dir.iterdir() if p.name.startswith(".frames-")]
+
+    def test_any_empty_frame_skips_whole_device(self):
+        """序列里有空帧 → 整个 device 不落盘(宁可没有, 也不留一段有洞的序列)。"""
+        from miloco.perception.snapshot_writer import image_frame_files
+
+        dids = save_event_artifacts(
+            "event-img3", OmniEventArtifacts(image_frames={"cam_a": [b"a", b""]})
+        )
+        assert dids == []
+        assert image_frame_files(self.root / "event-img3" / "cam_a") == []
+
+    def test_image_audio_lands_as_clip_candidate(self):
+        """独立音频落 audio.m4a, 且能被 locate_clip_file 找到(clip 端点复用它)。"""
+        from miloco.perception.snapshot_writer import locate_clip_file
+
+        dids = save_event_artifacts(
+            "event-img4",
+            OmniEventArtifacts(
+                image_frames={"cam_a": [b"a"]}, image_audio={"cam_a": b"m4a-bytes"}
+            ),
+        )
+        assert dids == ["cam_a"]
+        device_dir = self.root / "event-img4" / "cam_a"
+        assert (device_dir / "audio.m4a").read_bytes() == b"m4a-bytes"
+        located = locate_clip_file(device_dir)
+        assert located is not None
+        assert located[0].name == "audio.m4a"
+        assert located[1] == "audio/mp4"
+
+
 # ─── _save_gallery ─────────────────────────────────────────────────────────
 
 

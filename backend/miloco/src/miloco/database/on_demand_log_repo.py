@@ -48,6 +48,11 @@ class OnDemandLogRepo:
             "clip_dids": clip_dids,
             "clip_kinds": clip_kinds,
             "has_trace": bool(row.get("has_trace", 0)),
+            "visual_artifact_kind": row.get("visual_artifact_kind", "none"),
+            "image_frame_counts": json.loads(row.get("image_frame_counts", "{}"))
+            if isinstance(row.get("image_frame_counts", "{}"), str)
+            else row.get("image_frame_counts", {}),
+            "has_audio_artifact": bool(row.get("has_audio_artifact", 0)),
         }
 
     def append(self, entry: OnDemandLogEntry) -> bool:
@@ -60,8 +65,10 @@ class OnDemandLogRepo:
             sql = """
                 INSERT INTO on_demand_log
                 (id, timestamp, query, answer, sources, latency_ms,
-                 snapshot_count, clip_dids, clip_kinds, has_trace, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 snapshot_count, clip_dids, clip_kinds, has_trace,
+                 visual_artifact_kind, image_frame_counts, has_audio_artifact,
+                 created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
             params = (
                 entry.id,
@@ -74,6 +81,9 @@ class OnDemandLogRepo:
                 json.dumps(entry.clip_dids, ensure_ascii=False),
                 json.dumps(entry.clip_kinds, ensure_ascii=False),
                 1 if entry.has_trace else 0,
+                entry.visual_artifact_kind,
+                json.dumps(entry.image_frame_counts, ensure_ascii=False),
+                1 if entry.has_audio_artifact else 0,
                 now_ms(),
             )
             with self.db_connector.get_connection() as conn:
@@ -116,7 +126,8 @@ class OnDemandLogRepo:
             limit_clause = "LIMIT ?" if limit is not None else ""
             sql = f"""
                 SELECT id, timestamp, query, answer, sources, latency_ms,
-                       snapshot_count, clip_dids, clip_kinds, has_trace
+                       snapshot_count, clip_dids, clip_kinds, has_trace,
+                       visual_artifact_kind, image_frame_counts, has_audio_artifact
                 FROM on_demand_log
                 {where}
                 ORDER BY timestamp DESC, id DESC
@@ -138,7 +149,8 @@ class OnDemandLogRepo:
         try:
             sql = """
                 SELECT id, timestamp, query, answer, sources, latency_ms,
-                       snapshot_count, clip_dids, clip_kinds, has_trace
+                       snapshot_count, clip_dids, clip_kinds, has_trace,
+                       visual_artifact_kind, image_frame_counts, has_audio_artifact
                 FROM on_demand_log WHERE id = ?
             """
             results = self.db_connector.execute_query(sql, (log_id,))
