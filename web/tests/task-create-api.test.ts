@@ -52,7 +52,7 @@ describe("direct camera task creation", () => {
     expect(ruleUrl).toBe("/api/rules");
     expect(ruleInit.method).toBe("POST");
     expect(JSON.parse(String(ruleInit.body))).toMatchObject({
-      name: "阳台如厕异常监控",
+      name: "阳台如厕异常监控 (web_task_1)",
       task_id: "web_task_1",
       mode: "event",
       direction: "enter",

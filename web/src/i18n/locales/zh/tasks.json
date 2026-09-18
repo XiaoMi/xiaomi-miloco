@@ -58,6 +58,8 @@
     "cameraRequired": "至少选择一个正在使用的摄像头",
     "cameraChannel": "镜头 {{channel}}",
     "noActiveCameras": "当前没有正在使用的摄像头，请先在首页启用摄像头感知。",
+    "camerasLoading": "正在加载摄像头…",
+    "camerasLoadFail": "摄像头列表加载失败：{{msg}}",
     "actionDescriptionLabel": "命中后执行",
     "actionDescriptionPlaceholder": "例如：通知我并简要说明观察到的异常行为",
     "createActionDefault": "通知我并简要说明观察到的情况",
@@ -68,7 +70,6 @@
     "howToBody": "涉及设备联动、定时、累计目标或复杂退出条件时，可以继续与装有 miloco 插件的 Agent（如 OpenClaw）对话创建，例如：",
     "example1": "帮我盯着孩子每天练琴，满 30 分钟提醒我",
     "example2": "提醒家里老人每天量一次血压",
-    "example3": "家里没人时如果窗户还开着就通知我",
-    "viewExamples": "如何新增任务"
+    "example3": "家里没人时如果窗户还开着就通知我"
   }
 }

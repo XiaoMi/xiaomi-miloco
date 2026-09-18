@@ -58,6 +58,8 @@
     "cameraRequired": "Select at least one active camera",
     "cameraChannel": "Lens {{channel}}",
     "noActiveCameras": "No cameras are currently active. Enable camera perception on the Home page first.",
+    "camerasLoading": "Loading cameras…",
+    "camerasLoadFail": "Failed to load cameras: {{msg}}",
     "actionDescriptionLabel": "When matched",
     "actionDescriptionPlaceholder": "For example: notify me and briefly describe the unusual behavior",
     "createActionDefault": "Notify me and briefly describe what was observed",
@@ -68,7 +70,6 @@
     "howToBody": "For device actions, schedules, cumulative targets, or complex exit conditions, continue to chat with an Agent that has the miloco plugin (e.g. OpenClaw), for example:",
     "example1": "Help me watch that my kid practices piano 30 minutes a day and remind me when done",
     "example2": "Remind the elder at home to measure blood pressure once a day",
-    "example3": "Let me know if a window is left open when nobody's home",
-    "viewExamples": "How to add a task"
+    "example3": "Let me know if a window is left open when nobody's home"
   }
 }

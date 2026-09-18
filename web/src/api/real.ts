@@ -2262,7 +2262,7 @@ export async function realCreateCameraTask(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        name: input.description,
+        name: `${input.description} (${input.taskId})`,
         task_id: input.taskId,
         mode: "event",
         direction: "enter",

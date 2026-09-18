@@ -8,8 +8,15 @@ import { IconX } from "@/lib/icons";
 import type { ScopeCamera } from "@/lib/types";
 import { toast } from "./Toast";
 
+export type CameraLoadState =
+  | { kind: "loading" }
+  | { kind: "error"; message: string }
+  | { kind: "ready" };
+
 interface Props {
   cameras: ScopeCamera[];
+  camerasState: CameraLoadState;
+  onCamerasRetry: () => void | Promise<void>;
   onClose: () => void;
   onCreated: () => void | Promise<void>;
 }
@@ -18,7 +25,13 @@ function cameraKey(camera: ScopeCamera): string {
   return `${camera.did}:${camera.channel}`;
 }
 
-export function TaskCreateDialog({ cameras, onClose, onCreated }: Props) {
+export function TaskCreateDialog({
+  cameras,
+  camerasState,
+  onCamerasRetry,
+  onClose,
+  onCreated,
+}: Props) {
   const { t } = useTranslation();
   const selectableCameras = useMemo(
     () => cameras.filter((camera) => camera.inUse),
@@ -169,7 +182,22 @@ export function TaskCreateDialog({ cameras, onClose, onCreated }: Props) {
             <legend className="text-caption font-semibold text-text-secondary mb-1.5">
               {t("tasks.cameraLabel")}
             </legend>
-            {selectableCameras.length === 0 ? (
+            {camerasState.kind === "loading" ? (
+              <div className="rounded-lg border border-border bg-bg-primary px-3 py-3 text-caption text-text-tertiary">
+                {t("tasks.camerasLoading")}
+              </div>
+            ) : camerasState.kind === "error" ? (
+              <div className="rounded-lg border border-border bg-bg-primary px-3 py-3 text-caption text-text-tertiary">
+                <p>{t("tasks.camerasLoadFail", { msg: camerasState.message })}</p>
+                <button
+                  type="button"
+                  onClick={() => void onCamerasRetry()}
+                  className="mt-2 text-brand-primary hover:underline"
+                >
+                  {t("common.retry")}
+                </button>
+              </div>
+            ) : selectableCameras.length === 0 ? (
               <div className="rounded-lg border border-border bg-bg-primary px-3 py-3 text-caption text-text-tertiary">
                 {t("tasks.noActiveCameras")}
               </div>

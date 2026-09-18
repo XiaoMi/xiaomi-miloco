@@ -442,6 +442,14 @@ function MainApp() {
           <TasksPage
             tasks={tasks.data}
             cameras={scopeCameras.data ?? []}
+            camerasState={
+              scopeCameras.error
+                ? { kind: "error", message: scopeCameras.error.message }
+                : scopeCameras.data
+                  ? { kind: "ready" }
+                  : { kind: "loading" }
+            }
+            onCamerasRetry={() => scopeCameras.reload()}
             loading={tasks.loading}
             onChanged={() => tasks.reload()}
           />

@@ -35,12 +35,17 @@ import type {
   ScopeCamera,
 } from "@/lib/types";
 import { AgentPromptDialog } from "./AgentPromptDialog";
-import { TaskCreateDialog } from "./TaskCreateDialog";
+import {
+  TaskCreateDialog,
+  type CameraLoadState,
+} from "./TaskCreateDialog";
 import { toast } from "./Toast";
 
 interface Props {
   tasks: Task[] | undefined;
   cameras: ScopeCamera[];
+  camerasState: CameraLoadState;
+  onCamerasRetry: () => void | Promise<void>;
   loading: boolean;
   // 返回 Promise 时（App 传的 tasks.reload()）抽屉会 await 到列表真落地再退出编辑态，
   // 避免"保存成功但卡片还显示旧文案"的一拍闪回。
@@ -719,7 +724,14 @@ function TaskDetailSheet({
   );
 }
 
-export function TasksPage({ tasks, cameras, loading, onChanged }: Props) {
+export function TasksPage({
+  tasks,
+  cameras,
+  camerasState,
+  onCamerasRetry,
+  loading,
+  onChanged,
+}: Props) {
   const { t } = useTranslation();
   const [busyId, setBusyId] = useState<string | null>(null);
   // 只记 id、渲染时回列表取最新一条：抽屉里改完描述 / 触发条件后 onChanged 重拉，
@@ -875,6 +887,8 @@ export function TasksPage({ tasks, cameras, loading, onChanged }: Props) {
       {createOpen && (
         <TaskCreateDialog
           cameras={cameras}
+          camerasState={camerasState}
+          onCamerasRetry={onCamerasRetry}
           onClose={() => setCreateOpen(false)}
           onCreated={onChanged}
         />
