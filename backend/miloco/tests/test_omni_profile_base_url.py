@@ -25,8 +25,13 @@ def client(tmp_path, monkeypatch):
     from miloco.config import reset_settings
 
     reset_settings()
+
     from miloco.admin.router import router
     from miloco.middleware import verify_token
+
+    from tests.conftest import inject_test_kv_repo
+
+    inject_test_kv_repo(monkeypatch)
 
     app = FastAPI()
     app.include_router(router, prefix="/api")

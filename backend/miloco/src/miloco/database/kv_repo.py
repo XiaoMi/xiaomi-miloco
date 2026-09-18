@@ -212,6 +212,14 @@ class DeviceInfoKeys:
     USER_INFO_KEY = "USER_INFO_KEY"
 
 
+class OmniConfigKeys:
+    """omni 模型配置的连通性验证结果。"""
+
+    # 值为 JSON object，按档案 label 索引验证记录（{label: {at_ms, ok, code, message,
+    # latency_ms, fingerprint}}）；fingerprint 用于判断记录是否仍对应当前配置。
+    LAST_VERIFIED_KEY = "OMNI_LAST_VERIFIED_KEY"
+
+
 class ScopeConfigKeys:
     """miloco 接入范围限定（家庭启用集 / 摄像头停用集）。
 
