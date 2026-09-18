@@ -30,6 +30,25 @@ requires_models = pytest.mark.skipif(
 )
 
 
+def test_human_reid_uses_session_input_shape(monkeypatch):
+    from miloco.perception.engine.identity.tracker.human_reid import HumanReID
+
+    class FakeSession:
+        def get_inputs(self):
+            return [type("Input", (), {"name": "images", "shape": [1, 3, 256, 128]})()]
+
+    monkeypatch.setattr(
+        "miloco.perception.inference.ort_utils.make_session",
+        lambda *_args, **_kwargs: FakeSession(),
+    )
+
+    reid = HumanReID(model_path="fake.onnx")
+
+    assert reid.net_w == 128
+    assert reid.net_h == 256
+    assert reid.preprocess(np.zeros((32, 16, 3), dtype=np.uint8)).shape == (1, 3, 256, 128)
+
+
 # =============================================================================
 # v2 ReID 模型 schema / 性能 / L2-norm 验证
 # =============================================================================

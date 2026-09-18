@@ -42,8 +42,8 @@ class HumanReID:
             model_path: ONNX模型路径
             use_gpu: 是否使用GPU推理
         """
-        self.net_h = 192
-        self.net_w = 96
+        self.net_h = 0
+        self.net_w = 0
         self.feat_dim = 128
         self.output_node = "head/out_emb:0"
 
@@ -69,7 +69,15 @@ class HumanReID:
             from miloco.perception.inference.ort_utils import make_session
 
             self.session = make_session(model_path, use_gpu=use_gpu)
-            self.input_name = self.session.get_inputs()[0].name
+            model_input = self.session.get_inputs()[0]
+            self.input_name = model_input.name
+            input_height, input_width = model_input.shape[-2:]
+            if not isinstance(input_width, int) or input_width <= 0:
+                raise ValueError(f"无效的 ReID 模型输入宽度: {input_width}")
+            if not isinstance(input_height, int) or input_height <= 0:
+                raise ValueError(f"无效的 ReID 模型输入高度: {input_height}")
+            self.net_w = input_width
+            self.net_h = input_height
             self.output_name = self.output_node
             self.model_path = model_path
 

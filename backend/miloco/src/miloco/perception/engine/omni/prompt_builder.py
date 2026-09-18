@@ -526,6 +526,7 @@ def _build_payload(
         video_b64, media_info = _encode_batch_video(
             packets, short_edge=_effective_panorama_short_edge()
         )
+        _record_panorama_mode(smart_crop_enabled=False)
         base["video_base64"] = video_b64
         base["media_info"] = media_info
     return base
@@ -1390,6 +1391,16 @@ def _audio_only_media_info(sample_rate: int) -> LocalMediaInfo:
     )
 
 
+def _record_panorama_mode(*, smart_crop_enabled: bool) -> None:
+    from miloco.perception.flow_context import record_smart_crop
+
+    record_smart_crop(
+        region=None,
+        applied=False,
+        enabled=smart_crop_enabled,
+    )
+
+
 def _get_video_short_edge() -> int:
     try:
         from miloco.config import get_settings
@@ -1488,6 +1499,30 @@ def _encode_target_wh(w0: int, h0: int, short_edge: int) -> tuple[int, int]:
     return int(w0 * scale) // 2 * 2, int(h0 * scale) // 2 * 2
 
 
+def _resize_video_frames(
+    frames: list[NDArray[np.uint8]],
+    target_w: int,
+    target_h: int,
+    interpolation: int,
+) -> list[NDArray[np.uint8]]:
+    resized_frames = [
+        cv2.resize(
+            frame,
+            (target_w, target_h),
+            interpolation=interpolation,
+        )
+        for frame in frames
+    ]
+    from miloco.perception.flow_context import record_media_transform
+
+    record_media_transform(
+        width=target_w,
+        height=target_h,
+        frame_count=len(resized_frames),
+    )
+    return resized_frames
+
+
 def _encode_video_mp4(
     frames: list[NDArray[np.uint8]],
     audio_clip: NDArray[np.int16],
@@ -1535,6 +1570,12 @@ def _encode_video_mp4(
         # 用的是退化成最近邻的 INTER_AREA;换核后画质更好但**编码字节会变**,落盘 clip.mp4
         # 随之变化。即:双闸全关的用户走的也是被本行改过的路径,不是零回归。
         interp = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
+        resized_frames = _resize_video_frames(
+            frames,
+            target_w,
+            target_h,
+            interp,
+        )
         v_stream = container.add_stream("h264", rate=fps)
         v_stream.width = target_w
         v_stream.height = target_h
@@ -1555,10 +1596,7 @@ def _encode_video_mp4(
             a_stream = container.add_stream("aac", rate=sample_rate)
             a_stream.layout = "mono"
 
-        for frame_data in frames:
-            resized = cv2.resize(
-                frame_data, (target_w, target_h), interpolation=interp,
-            )
+        for resized in resized_frames:
             frame = av.VideoFrame.from_ndarray(resized, format="bgr24")
             for packet in v_stream.encode(frame):
                 container.mux(packet)
@@ -1594,6 +1632,9 @@ def _encode_video_mp4(
             has_audio=has_audio,
             audio_sample_rate=sample_rate if has_audio else 0,
         )
+        from miloco.perception.flow_context import record_encoded_media
+
+        record_encoded_media(media_info)
         return base64.b64encode(mp4_bytes).decode(), media_info
     finally:
         if os.path.exists(tmp_path):
@@ -1670,7 +1711,10 @@ def _encode_audio_only_mp4(
     import os
     import tempfile
 
+    from miloco.perception.flow_context import record_audio_only_start
     from miloco.perception.snapshot_context import push_clip_bytes
+
+    record_audio_only_start()
 
     _AAC_FRAME_SIZE = 1024
     if audio_clip is None or audio_clip.size < _AAC_FRAME_SIZE:
@@ -1706,6 +1750,12 @@ def _encode_audio_only_mp4(
             m4a_bytes = f.read()
         # 旁路把 audio-only 的 m4a 字节 push 给 meaningful_events 复用(零重编)
         push_clip_bytes(m4a_bytes, "m4a")
+        from miloco.perception.flow_context import record_encoded_media
+
+        record_encoded_media(
+            _audio_only_media_info(sample_rate),
+            audio_only=True,
+        )
         return base64.b64encode(m4a_bytes).decode()
     finally:
         if os.path.exists(tmp_path):
@@ -1892,6 +1942,10 @@ def _maybe_encode_adaptive(
     # (调用方 build_fused_payload 没有 try,抛上去会被 omni.py 折成整相机 skipped)。
     try:
         cfg = crop_enhance_config_from_settings()
+        smart_crop_enabled = bool(
+            cfg.enabled and cfg.user_enabled and per_camera_enabled
+        )
+        _record_panorama_mode(smart_crop_enabled=smart_crop_enabled)
         # 三闸相与:发版级开关 AND 单机用户开关(下面这个 if) AND per-camera 开关(再下一个 if,
         # 单独判是为了打日志)。任一为 false → 回退全景路径(不裁切)。注意这不等于字节回到接本
         # 特性前 —— 全景走的 _encode_video_mp4 放大分支已换重采样核,见该函数注释。
@@ -2036,6 +2090,9 @@ def _maybe_encode_adaptive(
         # short_edge 记的是**目标**短边;实际编码值会被 _encode_video_mp4 的 //2*2 取偶
         # (以及浮点截断)下调 1-2px,按它反算送模型的像素网格会有这点误差。
         push_crop_meta(region=region, frame_size=(fw, fh), short_edge=cse)
+        from miloco.perception.flow_context import record_smart_crop
+
+        record_smart_crop(region=region, applied=True)
         return _AdaptiveResult(video_b64, media_info, ref_jpeg, region, (fw, fh))
     except Exception:  # noqa: BLE001 —— 任何失败都回退全景,不让 crop 打断推理
         # 统一 event 名(adaptive_crop_fallback),灰度期按单一 event grep 不漏异常回退

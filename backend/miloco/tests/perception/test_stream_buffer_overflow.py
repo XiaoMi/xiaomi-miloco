@@ -95,6 +95,9 @@ def test_drain_ready_returns_only_newest_window():
 
     ready = buf.drain_ready()
     assert ready is not None
+    assert ready.last_drain_observed_at > 0
+    assert ready.last_drain_ready_depth_before == 5
+    assert ready.last_drain_ready_depth_after == 0
     datas = [f.data for f in ready.tracks["video"]]
     assert datas == [b"v5"], f"应只返回最新窗口 v5,实际 {datas}"
 

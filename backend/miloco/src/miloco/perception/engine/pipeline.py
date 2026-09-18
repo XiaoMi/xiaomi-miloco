@@ -17,6 +17,11 @@ from miloco.observability.context import (
     set_device_context,
 )
 from miloco.observability.metrics_client import get_metrics_client
+from miloco.observability.perception_flow import (
+    GraphStatus,
+    PerceptionFlowCycleDiagnostics,
+    PerDeviceFlowDiagnostics,
+)
 from miloco.perception.engine.config import PerceptionConfig
 from miloco.perception.engine.gate.gate import run_gate
 from miloco.perception.engine.identity.identity import run_identity
@@ -63,6 +68,33 @@ from miloco.perception.types import (
 )
 from miloco.utils.time_utils import deploy_timezone
 
+
+def _model_input_size(model: object | None) -> tuple[int | None, int | None]:
+    session = getattr(model, "session", None)
+    if session is None:
+        return None, None
+    inputs = session.get_inputs()
+    if not inputs:
+        return None, None
+    shape = inputs[0].shape
+    if len(shape) < 2:
+        return None, None
+    height, width = shape[-2:]
+    valid_width = width if isinstance(width, int) and width > 0 else None
+    valid_height = height if isinstance(height, int) and height > 0 else None
+    return valid_width, valid_height
+
+
+def _tracking_models(
+    tracking_service: object | None,
+) -> tuple[object | None, object | None]:
+    if tracking_service is None:
+        return None, None
+    detector = getattr(tracking_service, "_detector", None)
+    tracker = getattr(tracking_service, "_tracker", None)
+    reid = getattr(tracker, "human_reid", None)
+    return detector, reid
+
 logger = logging.getLogger(__name__)
 
 
@@ -107,6 +139,28 @@ def _publish_gate_event(event_type: str, device_id: str, payload: dict) -> None:
 
 def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
+
+
+def _mark_omni_stages_skipped(diagnostics: PerDeviceFlowDiagnostics) -> None:
+    diagnostics.omni_sample_status = GraphStatus.SKIPPED
+    diagnostics.media_transform_status = GraphStatus.SKIPPED
+    diagnostics.media_encode_status = GraphStatus.SKIPPED
+    diagnostics.omni_request_status = GraphStatus.SKIPPED
+
+
+def _mark_failed_omni_stage(diagnostics: PerDeviceFlowDiagnostics) -> None:
+    if diagnostics.media_encode_status is GraphStatus.OK:
+        diagnostics.omni_request_status = GraphStatus.ERROR
+    elif diagnostics.audio_only:
+        diagnostics.media_encode_status = GraphStatus.ERROR
+        diagnostics.omni_request_status = GraphStatus.SKIPPED
+    elif diagnostics.media_transform_status is GraphStatus.OK:
+        diagnostics.media_encode_status = GraphStatus.ERROR
+        diagnostics.omni_request_status = GraphStatus.SKIPPED
+    else:
+        diagnostics.media_transform_status = GraphStatus.ERROR
+        diagnostics.media_encode_status = GraphStatus.SKIPPED
+        diagnostics.omni_request_status = GraphStatus.SKIPPED
 
 
 def _reraise_first(results: list[Any]) -> None:
@@ -395,6 +449,9 @@ async def run_batch_pipeline(
     gate_last_audio_pass_ts: "dict[str, float] | None" = None,
     gate_hold_active: "dict[str, bool] | None" = None,
     gate_hold_started_at: "dict[str, float] | None" = None,
+    trace_id: str | None = None,
+    device_trace_ids: dict[str, str] | None = None,
+    collect_flow_diagnostics: bool = False,
 ) -> BatchPipelineResult:
     """Run perception pipeline for a batch of devices, grouped by room.
 
@@ -449,16 +506,59 @@ async def run_batch_pipeline(
         跨设备串号(否则 trace 全记到最后一个 device 名下)。reset 在 per-Task
         下已非必需(副本随 Task 丢弃)，但成对保留无害。
         """
+        did = snapshot.device.did
+        source_frames = snapshot.frames
+        source_height, source_width = (
+            source_frames[0].shape[:2] if source_frames else (None, None)
+        )
+        duration_ms = max(0.0, snapshot.end_timestamp - snapshot.start_timestamp)
+        device_trace_id = (
+            device_trace_ids[did]
+            if device_trace_ids is not None and did in device_trace_ids
+            else str(uuid.uuid4())
+        )
+        diagnostics = (
+            PerDeviceFlowDiagnostics(
+                device_id=did,
+                room_name=room_name,
+                trace_id=trace_id or "",
+                device_trace_id=device_trace_id,
+                observed_at=int(time.time() * 1000),
+                status=GraphStatus.OK,
+                source_width=source_width,
+                source_height=source_height,
+                source_frame_count=len(source_frames),
+                source_window_duration_ms=duration_ms,
+                pipeline_input_frame_count=len(source_frames),
+            )
+            if collect_flow_diagnostics
+            else None
+        )
+
         # Downsample to target fps at pipeline entry
         snapshot = downsample_snapshot(snapshot, config.input.fps)
+        if diagnostics is not None:
+            diagnostics.pipeline_output_frame_count = len(snapshot.frames)
+            diagnostics.pipeline_fps = (
+                len(snapshot.frames) * 1000 / duration_ms if duration_ms > 0 else None
+            )
 
-        did = snapshot.device.did
         device_name = snapshot.device.name
         time_window = _fmt_time_window(snapshot.start_timestamp, snapshot.end_timestamp)
         context = contexts.get(did, OmniContext())
         tracking_service = (
             get_tracking_service(did, room_name) if get_tracking_service else None
         )
+        if diagnostics is not None:
+            detector, reid = _tracking_models(tracking_service)
+            (
+                diagnostics.detector_input_width,
+                diagnostics.detector_input_height,
+            ) = _model_input_size(detector)
+            (
+                diagnostics.reid_input_width,
+                diagnostics.reid_input_height,
+            ) = _model_input_size(reid)
         identity_engine = (
             get_identity_engine(did, room_name) if get_identity_engine else None
         )
@@ -467,7 +567,6 @@ async def run_batch_pipeline(
         if identity_engine is not None:
             identity_engine.device_name = snapshot.device.name
 
-        device_trace_id = str(uuid.uuid4())
         # 同一 cycle 同一 device 在 traces_device(SQLite)行用这把 UUID,
         # processor._publish_trace 从 timing 读出复用,避免双钥匙。
         room_timing[f"_device_trace_id_{did}"] = device_trace_id
@@ -481,12 +580,49 @@ async def run_batch_pipeline(
             gate_last_audio_pass_ts.get(did)
             if gate_last_audio_pass_ts is not None else None
         )
-        gate_packet, gate_timing, last_checked, new_last_v, new_last_a = await run_gate(
-            snapshot, config.gate, config.input.fps,
-            prev_frame=prev_frame,
-            last_visual_pass_ts=last_v,
-            last_audio_pass_ts=last_a,
-        )
+        try:
+            gate_packet, gate_timing, last_checked, new_last_v, new_last_a = await run_gate(
+                snapshot, config.gate, config.input.fps,
+                prev_frame=prev_frame,
+                last_visual_pass_ts=last_v,
+                last_audio_pass_ts=last_a,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if diagnostics is None:
+                raise
+            diagnostics.status = GraphStatus.ERROR
+            diagnostics.gate_status = GraphStatus.ERROR
+            diagnostics.identity_status = GraphStatus.SKIPPED
+            diagnostics.omni_status = GraphStatus.SKIPPED
+            _mark_omni_stages_skipped(diagnostics)
+            diagnostics.error_stage = "gate"
+            diagnostics.error_code = type(exc).__name__
+            logger.error(
+                "[device](room=%s device=%s) gate failed",
+                room_name,
+                did,
+                exc_info=True,
+            )
+            return DevicePipelineResult(
+                device_id=did,
+                input_slice=snapshot,
+                skipped=True,
+                flow_diagnostics=diagnostics,
+            )
+        if diagnostics is not None:
+            interval = max(1, round(config.input.fps / config.gate.check_fps))
+            checked = len(range(0, len(snapshot.frames), interval))
+            if checked < 2 and len(snapshot.frames) >= 2:
+                checked += 1
+            diagnostics.gate_checked_frame_count = checked
+            if last_checked is not None and last_checked.ndim >= 2:
+                diagnostics.gate_output_height = int(last_checked.shape[0])
+                diagnostics.gate_output_width = int(last_checked.shape[1])
+            diagnostics.gate_status = (
+                GraphStatus.OK if gate_packet is not None else GraphStatus.SKIPPED
+            )
         # 跨窗 gate 状态各 device 用 per-did key、读写均在同步段、键不相交 → 并发 gather 下安全(同 room_timing)。
         # 无论 gate 是否通过都更新基准——始终是"最近实际比较过的画面"。
         if gate_prev_frames is not None and last_checked is not None:
@@ -567,19 +703,54 @@ async def run_batch_pipeline(
         room_timing[f"gate_video_cross_score_{did}"] = gate_timing.video_cross_score
 
         if gate_packet is None:
+            if diagnostics is not None:
+                diagnostics.status = GraphStatus.SKIPPED
+                diagnostics.identity_status = GraphStatus.SKIPPED
+                diagnostics.omni_status = GraphStatus.SKIPPED
+                _mark_omni_stages_skipped(diagnostics)
             return DevicePipelineResult(
                 device_id=did,
                 input_slice=snapshot,
                 skipped=True,
+                flow_diagnostics=diagnostics,
             )
 
         t = time.monotonic()
-        identity_packet = await run_identity(
-            gate_packet, config.identity, tracking_service,
-            identity_engine=identity_engine,
-            frame_index_offset=frame_index_offset,
-        )
+        try:
+            identity_packet = await run_identity(
+                gate_packet, config.identity, tracking_service,
+                identity_engine=identity_engine,
+                frame_index_offset=frame_index_offset,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if diagnostics is None:
+                raise
+            room_timing[f"identity_{did}_ms"] = _ms_since(t)
+            diagnostics.status = GraphStatus.ERROR
+            diagnostics.identity_status = GraphStatus.ERROR
+            diagnostics.omni_status = GraphStatus.SKIPPED
+            _mark_omni_stages_skipped(diagnostics)
+            diagnostics.error_stage = "identity"
+            diagnostics.error_code = type(exc).__name__
+            logger.error(
+                "[device](room=%s device=%s) identity failed",
+                room_name,
+                did,
+                exc_info=True,
+            )
+            return DevicePipelineResult(
+                device_id=did,
+                input_slice=snapshot,
+                gate_packet=gate_packet,
+                skipped=True,
+                flow_diagnostics=diagnostics,
+            )
         room_timing[f"identity_{did}_ms"] = _ms_since(t)
+        if diagnostics is not None:
+            diagnostics.identity_frame_count = len(gate_packet.frames)
+            diagnostics.identity_status = GraphStatus.OK
 
         # omni 阶段:把 per-device 元数据塞进 ContextVar,供 traces_device 等观测路径读取。
         device_ctx_token = set_device_context(DeviceContext(
@@ -587,6 +758,11 @@ async def run_batch_pipeline(
             device_id=did,
             room_name=room_name,
         ))
+        flow_token = None
+        if diagnostics is not None:
+            from miloco.perception.flow_context import set_flow_diagnostics
+
+            flow_token = set_flow_diagnostics(diagnostics)
         t = time.monotonic()
         try:
             # Omni per device —— 按 omni_call_mode 分流
@@ -599,6 +775,10 @@ async def run_batch_pipeline(
             omni_packet = _downsample_for_omni(
                 identity_packet, config.input.fps, config.input.omni_fps
             )
+            if diagnostics is not None:
+                diagnostics.omni_frame_count = len(omni_packet.all_frames)
+                diagnostics.omni_fps = float(omni_packet.frame_info.fps)
+                diagnostics.omni_sample_status = GraphStatus.OK
             # omni 配置热更新:每周期从当前 settings 刷新,web 改完下个周期生效。
             omni_cfg = resolve_live_omni_config(config.omni)
             if use_fused:
@@ -629,6 +809,9 @@ async def run_batch_pipeline(
                     [omni_packet], context, omni_cfg,
                 )
             room_timing[f"omni_{did}_ms"] = _ms_since(t)
+            if diagnostics is not None:
+                diagnostics.omni_status = GraphStatus.OK
+                diagnostics.omni_request_status = GraphStatus.OK
         except OmniError as omni_err:
             # partial 结果:单设备 omni 失败(超时/429/模型错)→ 记 omni_ms + 失败标记 + log,
             # **不连累整窗**——返回 skipped(omni_output=None;_merge_results line855 会跳过该设备),
@@ -641,6 +824,12 @@ async def run_batch_pipeline(
             # "HTTPStatusError:429" / "ReadTimeout")让 dashboard 错误分类 SQL 能精确
             # 命中,错误详情留给下一行的 logger.warning。
             room_timing[f"_omni_error_{did}"] = omni_err.code
+            if diagnostics is not None:
+                diagnostics.status = GraphStatus.ERROR
+                diagnostics.omni_status = GraphStatus.ERROR
+                _mark_failed_omni_stage(diagnostics)
+                diagnostics.error_stage = "omni"
+                diagnostics.error_code = omni_err.code
             logger.warning(
                 "[omni](room=%s device=%s) 感知API调用失败，错误码=%s(skipped) | %s",
                 room_name, f"{device_name}({did})", omni_err.code, omni_err,
@@ -649,10 +838,17 @@ async def run_batch_pipeline(
                 device_id=did, input_slice=snapshot,
                 gate_packet=gate_packet, identity_packet=identity_packet,
                 omni_output=None, skipped=True,
+                flow_diagnostics=diagnostics,
             )
         except Exception as e:  # noqa: BLE001 —— 非 omni 的意外错也不连累整窗(同 partial 处理)
             room_timing[f"omni_{did}_ms"] = _ms_since(t)
             room_timing[f"_omni_error_{did}"] = f"{type(e).__name__}: {e}"
+            if diagnostics is not None:
+                diagnostics.status = GraphStatus.ERROR
+                diagnostics.omni_status = GraphStatus.ERROR
+                _mark_failed_omni_stage(diagnostics)
+                diagnostics.error_stage = "omni"
+                diagnostics.error_code = type(e).__name__
             logger.error(
                 "[device](room=%s device=%s) 单相机处理异常(skipped) | %s",
                 room_name, f"{device_name}({did})", e, exc_info=True,
@@ -661,8 +857,13 @@ async def run_batch_pipeline(
                 device_id=did, input_slice=snapshot,
                 gate_packet=gate_packet, identity_packet=identity_packet,
                 omni_output=None, skipped=True,
+                flow_diagnostics=diagnostics,
             )
         finally:
+            if flow_token is not None:
+                from miloco.perception.flow_context import reset_flow_diagnostics
+
+                reset_flow_diagnostics(flow_token)
             reset_device_context(device_ctx_token)
         _inject_source_meta(omni_output, room_name, [did], device_name, time_window)
 
@@ -699,6 +900,7 @@ async def run_batch_pipeline(
             gate_packet=gate_packet,
             identity_packet=identity_packet,
             omni_output=omni_output,
+            flow_diagnostics=diagnostics,
         )
 
     async def _run_room(
@@ -765,7 +967,23 @@ async def run_batch_pipeline(
 
     batch_timing["total_ms"] = _ms_since(t_total)
 
-    return BatchPipelineResult(rooms=rooms, timing=batch_timing)
+    flow_diagnostics = None
+    if collect_flow_diagnostics:
+        flow_diagnostics = PerceptionFlowCycleDiagnostics(
+            cycle_id=trace_id or "",
+            observed_at=int(time.time() * 1000),
+            devices={
+                did: device_result.flow_diagnostics
+                for room in rooms.values()
+                for did, device_result in room.device_results.items()
+                if device_result.flow_diagnostics is not None
+            },
+        )
+    return BatchPipelineResult(
+        rooms=rooms,
+        timing=batch_timing,
+        flow_diagnostics=flow_diagnostics,
+    )
 
 
 # =============================================================================

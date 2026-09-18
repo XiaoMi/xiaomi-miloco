@@ -24,6 +24,13 @@ from miloco.observability.context import (
     set_trace_id,
 )
 from miloco.observability.metrics_client import get_metrics_client
+from miloco.observability.perception_flow import (
+    GraphStatus,
+    PerceptionFlowCycleDiagnostics,
+    PerceptionFlowSnapshotStore,
+    PerDeviceFlowDiagnostics,
+    bind_perception_flow_store,
+)
 from miloco.observability.types import (
     DecodeTrace,
     DeviceTraceRecord,
@@ -212,6 +219,12 @@ class PipelineProcessor:
 
         settings = get_settings()
         self._perf_enabled: bool = settings.perf.enabled
+        self._flow_store = PerceptionFlowSnapshotStore() if self._perf_enabled else None
+        if self._flow_store is not None:
+            bind_perception_flow_store(
+                self._flow_store,
+                process_started_at=int(time.time() * 1000),
+            )
 
     def try_reinit_engine(self, *, include_failed: bool = False) -> None:
         """补完前置条件后热重建引擎;非可恢复态幂等 no-op。
@@ -223,9 +236,24 @@ class PipelineProcessor:
         set_tierc_frame_provider 是 no-op,不重挂则 gate 关停时的 live 检测取帧会丢。
         """
         if self._perception_engine_proxy.try_reinit(include_failed=include_failed):
+            self.clear_flow_snapshots()
             self._perception_engine_proxy.set_tierc_frame_provider(
                 self._collector.peek_latest_frame
             )
+
+    @property
+    def perception_flow_store(self) -> PerceptionFlowSnapshotStore | None:
+        return getattr(self, "_flow_store", None)
+
+    def retain_flow_devices(self, device_ids: set[str]) -> None:
+        store = getattr(self, "_flow_store", None)
+        if store is not None:
+            store.retain_devices(device_ids)
+
+    def clear_flow_snapshots(self) -> None:
+        store = getattr(self, "_flow_store", None)
+        if store is not None:
+            store.clear()
 
     def drive_omni_probe(self) -> None:
         """tick 入口驱动 omni 熔断器自动探测。
@@ -336,10 +364,12 @@ class PipelineProcessor:
         (runner.shutdown 已有 try/except logger.error 包装)。
         """
         get_monitor().set_lifecycle(NodeName.PROCESSOR, Lifecycle.STOPPED)
+        self.clear_flow_snapshots()
         await self._perception_engine_proxy.close()
 
     async def stop_to_unconfigured(self) -> None:
         """软停底层引擎(删当前生效模型→回未配态),保留 tick 自愈循环。透传 proxy。"""
+        self.clear_flow_snapshots()
         await self._perception_engine_proxy.stop_to_unconfigured()
 
     async def apply_omni_fps(self, omni_fps: int) -> None:
@@ -435,6 +465,9 @@ class PipelineProcessor:
 
         # 给整个 cycle 绑定 trace_id,cycle 内所有 publish_event / push_omni_trace 自动关联
         trace_id = str(uuid.uuid4())
+        device_trace_ids = {
+            device_id: str(uuid.uuid4()) for device_id in batch.devices
+        }
         cycle_start_unix_ms = int(time.time() * 1000)
         trace_token = set_trace_id(trace_id)
 
@@ -461,7 +494,11 @@ class PipelineProcessor:
             artifacts = OmniEventArtifacts()
             try:
                 result, early_sent_contents, early_sent_rule_ids, early_sent_sugg_ids = await self._perception_engine_proxy.realtime_perceive(
-                    batch, artifacts=artifacts
+                    batch,
+                    artifacts=artifacts,
+                    trace_id=trace_id,
+                    device_trace_ids=device_trace_ids,
+                    collect_flow_diagnostics=self._flow_store is not None,
                 )
             except Exception as e:
                 logger.error("[processor] 实时感知失败 | %s", e, exc_info=True)
@@ -476,11 +513,21 @@ class PipelineProcessor:
                         collect_ms=collect_ms,
                         t_cycle=t_cycle,
                         exc=e,
+                        device_trace_ids=device_trace_ids,
+                    )
+                    self._merge_failed_flow_snapshot(
+                        trace_id,
+                        cycle_start_unix_ms,
+                        batch,
+                        device_trace_ids,
+                        e,
                     )
                 return False  # data consumed but failed — caller should continue
 
             if not result:
                 return False  # data consumed but skipped — caller should continue
+
+            self._merge_flow_snapshot(result.flow_diagnostics, batch)
 
             # 3. Build log entry and store (skip if all rooms were gated)
             log_ms = 0.0
@@ -608,6 +655,7 @@ class PipelineProcessor:
                     timing=timing,
                     stream_lag_ms=stream_lag_ms,
                     error_code=result.error_code,
+                    device_trace_ids=device_trace_ids,
                 )
 
             # Report window duration for node monitor RTF calculation
@@ -635,6 +683,7 @@ class PipelineProcessor:
         stream_lag_ms: float,
         error_code: str | None = None,
         cycle_error_msg: str | None = None,
+        device_trace_ids: dict[str, str] | None = None,
     ) -> None:
         """从 timing dict 还原 per-device records,聚合后入异步队列。
 
@@ -670,8 +719,14 @@ class PipelineProcessor:
             # 复用 pipeline 在 set_device_context 之前生成的同一把 UUID,
             # 让 traces_device 行有稳定 device_trace_id。gate 全失败导致 timing
             # 整体缺失时 fallback 新 UUID 保证 PRIMARY KEY 非空。
-            dt_raw = timing.get(f"_device_trace_id_{did}")
-            dt_id = dt_raw if isinstance(dt_raw, str) and dt_raw else str(uuid.uuid4())
+            dt_raw = (
+                device_trace_ids.get(did)
+                if device_trace_ids is not None
+                else timing.get(f"_device_trace_id_{did}")
+            )
+            if not isinstance(dt_raw, str) or not dt_raw:
+                dt_raw = str(uuid.uuid4())
+            dt_id = dt_raw
 
             # gate 真实评估的打分。pipeline 正常路径下两个 key 都有值;
             # on-demand bypass / 系统异常 fallback 路径 timing 缺这两个 key,
@@ -749,6 +804,7 @@ class PipelineProcessor:
         collect_ms: float,
         t_cycle: float,
         exc: BaseException,
+        device_trace_ids: dict[str, str],
     ) -> None:
         """非 OmniError 异常路径下的最小 trace,只填能算出的字段。
 
@@ -783,10 +839,95 @@ class PipelineProcessor:
             cycle_start_unix_ms=cycle_start_unix_ms,
             batch=batch,
             latency=latency,
-            timing={},
+            timing={
+                f"_device_trace_id_{did}": device_trace_ids[did]
+                for did in batch.devices
+            },
             stream_lag_ms=stream_lag_ms,
             cycle_error_msg=error_msg,
+            device_trace_ids=device_trace_ids,
         )
+
+    def _merge_flow_snapshot(
+        self,
+        cycle: PerceptionFlowCycleDiagnostics | None,
+        batch: PerceptionBatch,
+    ) -> None:
+        if self._flow_store is None or cycle is None:
+            return
+        active_ids = set(self._collector.get_all_active_sources())
+        self._flow_store.retain_devices(active_ids)
+        active_diagnostics = {
+            did: diagnostics
+            for did, diagnostics in cycle.devices.items()
+            if did in active_ids
+        }
+        for did, diagnostics in active_diagnostics.items():
+            data = batch.devices.get(did)
+            if data is None:
+                continue
+            diagnostics.last_drain_observed_at = data.last_drain_observed_at
+            diagnostics.last_drain_ready_depth_before = (
+                data.last_drain_ready_depth_before
+            )
+            diagnostics.last_drain_ready_depth_after = data.last_drain_ready_depth_after
+            diagnostics.dropped_windows_count = data.dropped_windows
+            diagnostics.overflow_count = data.overflow_count
+            diagnostics.max_buffer_depth = data.max_buffer_depth
+            diagnostics.last_overflow_action = data.last_overflow_action
+            if data.dropped_windows and diagnostics.status is GraphStatus.OK:
+                diagnostics.status = GraphStatus.BACKPRESSURE
+        self._flow_store.merge_cycle(
+            cycle.cycle_id,
+            cycle.observed_at,
+            active_diagnostics,
+        )
+
+    def _merge_failed_flow_snapshot(
+        self,
+        trace_id: str,
+        observed_at: int,
+        batch: PerceptionBatch,
+        device_trace_ids: dict[str, str],
+        exc: BaseException,
+    ) -> None:
+        if self._flow_store is None:
+            return
+        active_ids = set(self._collector.get_all_active_sources())
+        self._flow_store.retain_devices(active_ids)
+        devices: dict[str, PerDeviceFlowDiagnostics] = {}
+        for did, data in batch.devices.items():
+            if did not in active_ids:
+                continue
+            frames = data.get_bgr_frames()
+            height, width = frames[0].shape[:2] if frames else (None, None)
+            devices[did] = PerDeviceFlowDiagnostics(
+                device_id=did,
+                room_name=data.meta.room_name,
+                trace_id=trace_id,
+                device_trace_id=device_trace_ids[did],
+                observed_at=observed_at,
+                status=GraphStatus.ERROR,
+                source_width=width,
+                source_height=height,
+                source_frame_count=len(data.video),
+                source_window_duration_ms=float(
+                    data.window_end_unix_ms - data.window_start_unix_ms
+                ),
+                last_drain_observed_at=data.last_drain_observed_at,
+                last_drain_ready_depth_before=data.last_drain_ready_depth_before,
+                last_drain_ready_depth_after=data.last_drain_ready_depth_after,
+                dropped_windows_count=data.dropped_windows,
+                overflow_count=data.overflow_count,
+                max_buffer_depth=data.max_buffer_depth,
+                last_overflow_action=data.last_overflow_action,
+                gate_status=GraphStatus.UNKNOWN,
+                identity_status=GraphStatus.UNKNOWN,
+                omni_status=GraphStatus.UNKNOWN,
+                error_stage="pipeline",
+                error_code=type(exc).__name__,
+            )
+        self._flow_store.merge_cycle(trace_id, observed_at, devices)
 
     async def process_on_demand(
         self, dids: list[str] | None, query: str

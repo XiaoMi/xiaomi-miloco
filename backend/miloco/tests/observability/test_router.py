@@ -1,9 +1,17 @@
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
+from miloco.middleware import verify_token
 from miloco.observability.aggregate import aggregate_cycle
 from miloco.observability.metrics_client import MetricsClient
 from miloco.observability.metrics_db import connect, init_schema
+from miloco.observability.perception_flow import (
+    GraphStatus,
+    PerceptionFlowSnapshotStore,
+    PerDeviceFlowDiagnostics,
+    bind_perception_flow_store,
+)
 from miloco.observability.router import router
 from miloco.observability.types import (
     DecodeTrace,
@@ -56,6 +64,65 @@ async def test_get_trace_returns_cycle_and_devices(app_with_db):
         assert data["devices"][0]["device_id"] == "d2"
     finally:
         await client.stop()
+
+
+async def test_get_perception_flow_returns_graph_json_with_from_alias(app_with_db):
+    app, _db, _client = app_with_db
+    async def allow_request():
+        return None
+
+    app.dependency_overrides[verify_token] = allow_request
+    store = PerceptionFlowSnapshotStore()
+    store.retain_devices({"camera-1"})
+    store.merge_cycle(
+        "trace-1",
+        1_000,
+        {
+            "camera-1": PerDeviceFlowDiagnostics(
+                device_id="camera-1",
+                room_name="Living Room",
+                trace_id="trace-1",
+                device_trace_id="device-trace-1",
+                observed_at=1_000,
+                status=GraphStatus.OK,
+            )
+        },
+    )
+    bind_perception_flow_store(store, process_started_at=500)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(
+                "/api/perf/perception-flow?device_id=camera-1"
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["scope"]["device_id"] == "camera-1"
+        assert data["process_started_at"] == 500
+        assert "from" in data["graph"]["edges"][0]
+        assert "from_" not in data["graph"]["edges"][0]
+    finally:
+        bind_perception_flow_store(None)
+
+
+async def test_get_perception_flow_returns_service_unavailable_without_store(app_with_db):
+    app, _db, _client = app_with_db
+    async def allow_request():
+        return None
+
+    app.dependency_overrides[verify_token] = allow_request
+    bind_perception_flow_store(None)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/perf/perception-flow")
+
+    assert response.status_code == 503
 
 
 async def test_list_traces_filters(app_with_db):

@@ -2396,10 +2396,56 @@ class TestAdaptiveResolution:
 
     def test_non_fused_never_crops(self):
         # 非 fused/legacy 路径不接 crop:即便 adaptive 全开,也恒走全景、crops 为空(零回归)。
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
         from miloco.perception.engine.omni.prompt_builder import build_batch_prompt
+        from miloco.perception.flow_context import flow_diagnostics_scope
 
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
         p1, p2 = self._patches()
-        with p1, p2:
+        with p1, p2, flow_diagnostics_scope(diagnostics):
             payload = build_batch_prompt([_adaptive_packet()], OmniContext())
         assert payload["crops"] == []
         assert payload.get("video_base64")
+        assert diagnostics.smart_crop_enabled is False
+        assert diagnostics.smart_crop_applied is False
+        assert diagnostics.crop_region is None
+
+
+def test_video_transform_status_requires_every_frame_to_resize():
+    import miloco.perception.engine.omni.prompt_builder as pb
+    from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+    from miloco.perception.flow_context import flow_diagnostics_scope
+
+    diagnostics = PerDeviceFlowDiagnostics(
+        device_id="camera-1",
+        room_name="Living Room",
+        trace_id="trace-1",
+        device_trace_id="device-trace-1",
+        observed_at=1,
+    )
+    frames = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(2)]
+
+    with (
+        flow_diagnostics_scope(diagnostics),
+        patch.object(
+            pb.cv2,
+            "resize",
+            side_effect=[frames[0], RuntimeError("resize failed")],
+        ),
+        pytest.raises(RuntimeError, match="resize failed"),
+    ):
+        pb._resize_video_frames(frames, 4, 4, pb.cv2.INTER_AREA)
+
+    assert diagnostics.media_transform_status.value == "unknown"
+
+    with flow_diagnostics_scope(diagnostics):
+        resized = pb._resize_video_frames(frames, 4, 4, pb.cv2.INTER_AREA)
+
+    assert len(resized) == 2
+    assert diagnostics.media_transform_status.value == "ok"

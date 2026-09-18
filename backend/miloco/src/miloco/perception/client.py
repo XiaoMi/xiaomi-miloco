@@ -487,6 +487,9 @@ class PerceptionEngineProxy:
         convert_ms: float,
         main_loop: asyncio.AbstractEventLoop,
         skipped_task_ids: list[str],
+        trace_id: str | None = None,
+        device_trace_ids: dict[str, str] | None = None,
+        collect_flow_diagnostics: bool = False,
     ) -> tuple[
         RealtimePerceptionResult | None,
         set[str],
@@ -620,6 +623,9 @@ class PerceptionEngineProxy:
                 on_early_speeches=_on_early_speeches,
                 on_early_matched_rules=_on_early_matched_rules,
                 on_early_suggestions=_on_early_suggestions,
+                trace_id=trace_id,
+                device_trace_ids=device_trace_ids,
+                collect_flow_diagnostics=collect_flow_diagnostics,
             )
         except OmniError as e:
             # 兜底分支:主路径 run_batch_pipeline 已在 _run_device 内逐相机吞掉 OmniError
@@ -690,6 +696,9 @@ class PerceptionEngineProxy:
     async def realtime_perceive(
         self, batch: PerceptionBatch,
         artifacts: OmniEventArtifacts | None = None,
+        trace_id: str | None = None,
+        device_trace_ids: dict[str, str] | None = None,
+        collect_flow_diagnostics: bool = False,
     ) -> tuple[
         RealtimePerceptionResult | None,
         set[str],
@@ -743,7 +752,7 @@ class PerceptionEngineProxy:
             # 协程在主线程创建（closure 捕获主线程 trace_id / artifacts 值），通过
             # InferenceWorker.submit() 调度到 worker 线程的持久 loop 上执行。
             # 持久 loop 只创建一次 default executor，消除反复建/拆线程的开销和泄漏。
-            trace_id = get_trace_id()
+            trace_id = trace_id or get_trace_id()
             if self._inference_worker is not None:
                 return await self._inference_worker.submit(
                     _run_with_trace_id(
@@ -755,6 +764,9 @@ class PerceptionEngineProxy:
                             convert_ms,
                             main_loop,
                             skipped_task_ids,
+                            trace_id,
+                            device_trace_ids,
+                            collect_flow_diagnostics,
                         ),
                         artifacts=artifacts,
                     )
@@ -771,6 +783,9 @@ class PerceptionEngineProxy:
                         convert_ms,
                         main_loop,
                         skipped_task_ids,
+                        trace_id,
+                        device_trace_ids,
+                        collect_flow_diagnostics,
                     )
             return await self._realtime_perceive_impl(
                 batched_snapshot,
@@ -779,6 +794,9 @@ class PerceptionEngineProxy:
                 convert_ms,
                 main_loop,
                 skipped_task_ids,
+                trace_id,
+                device_trace_ids,
+                collect_flow_diagnostics,
             )
 
     async def on_demand_perceive(
