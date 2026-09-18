@@ -163,7 +163,7 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 
 **Suggestion 去重**：`PerceptionEngine` 对建议做去重抑制，同类建议短期内只报一次，避免 Agent 被重复触发。去重用句向量语义相似度（`EventEmbedder`，`engine/omni/dedup_embedder.py`，bge-small-zh）而非精确文本匹配——措辞略有差异的同类建议也能识别为重复；embedder 初始化失败时降级为精确文本匹配。
 
-**Prompt 人名护栏**：VLM 只能给本轮 Identity 真正识别出的成员安姓名；对未识别（`unknown`）的人、或名册中本轮画面未真正出现的陌生人，一律不从 gallery / 家庭档案取成员名安到画面人物上，防止"注入了家庭档案就凭空点名"的幻觉。约束集中在各字段的 `FieldSpec`（`field_registry.py`）。
+**Prompt 人名护栏**：VLM 只能给本轮 Identity 真正识别出的成员安姓名；对未识别（`unknown`）的人、或名册中本轮画面未确认在场的成员 / 陌生人，一律不得仅凭姓名 / bbox 写入 caption，也不从 gallery / 家庭档案取成员名安到画面人物上，防止"注入了家庭档案就凭空点名"的幻觉。名册姓名与 bbox 仅供定位，不代表当前有人。约束集中在各字段的 `FieldSpec`（`field_registry.py`）。
 
 **omni prompt「当前时间」锚定部署时区**：注入 omni prompt 的当前时刻走 `deploy_timezone()`（`perception/engine/api.py` 的时钟格式化）而非裸主机时钟——VLM 会据此把画面标注成「凌晨 / 早上…」，宿主时区 ≠ 部署（家庭真实所在）时区时裸时钟会让模型编造出错误的时段。部署时区的定义、解析优先级与配置方式见 [开发指南 · 时区](../06-dev-guide/dev-guide.md#时区)。
 

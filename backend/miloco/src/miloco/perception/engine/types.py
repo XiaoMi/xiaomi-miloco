@@ -188,9 +188,9 @@ class IdentityTarget:
     needs_omni_verify: bool
     box_info: list[TrackingBoxInfo]
     # 末帧归一化 [0,1000] bbox (x1,y1,x2,y2)，与 IdentityQueryItem 同源同坐标系；
-    # 供 prompt 在"已识别人物/陌生人"名册里注入位置，多人时让 omni 把姓名挂到
-    # 视频里的人。None = 本帧未被真实检测（coasting，框是上一次真匹配时的检测框），
-    # 名册退化为纯名。
+    # 供 prompt 在"已识别人物/陌生人"名册里注入位置，定位名册项对应的目标
+    # （名册是定位线索，不断言当前画面有人）。None = 本帧未被真实检测（coasting，
+    # 框是上一次真匹配时的检测框），名册退化为纯名。
     bbox_xyxy_norm: tuple[int, int, int, int] | None = None
     # 翻身份黏旧名期(reverted_from_confirmed)的 track：显示仍黏旧成员名，但**不可作先验**进
     # 名册锚定 omni 重审（与 candidate_tids 同类去先验）。coasting（本窗未派发）时不在

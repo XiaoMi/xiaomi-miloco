@@ -257,7 +257,7 @@ def build_fused_payload(
 
     # audio route：无视觉信息，候选作废。与 video 同款 message 隔离（待判断规则/只读历史
     # 各自独立 user 消息）；本轮事实只放"当前时间 + 音频"——audio 无视频，不渲染名册/gallery/
-    # 待识别 track（名册的 bbox 是为"把姓名对应到视频里的人"，audio 场景无意义）。
+    # 待识别 track（名册的 bbox 是为"定位名册项对应的目标"，audio 场景无意义）。
     if _resolve_route(packets) == "audio":
         scene = SceneDescriptor(route="audio", has_identity=False, stream=False)
         system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
@@ -879,7 +879,9 @@ def _build_fused_user_content(
         content.append({"type": "text", "text": (
             "上方已识别人物、陌生人及待识别 track 中的 bbox=(x1, y1, x2, y2) 均为视频**最后一帧**中"
             "归一化到 [0, 1000] 区间的位置（左上 0,0；右下 1000,1000），"
-            "用于把姓名 / track_id 对应到视频里的人；画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+            "用于定位名册项 / track 对应的目标；它不替代本轮画面对‘是否有人’的判断。"
+            "框内若是非人体，不得沿用姓名，也不算有人。"
+            "画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
         )})
 
     # 参考帧图块:引导语与图块同进同退,避免只留文字不留图。
@@ -1065,15 +1067,22 @@ def _build_device_header(
                 lines.append(f"  陌生人：{', '.join(strangers)}")
             lines.append("")
 
-    # 名册含位置时附一句坐标系说明（非 fused 路径用）；fused 路径传 emit_bbox_note=False，
+    # 名册含位置时附说明（非 fused 路径用）；fused 路径传 emit_bbox_note=False，
     # 由 _build_fused_user_content 统一出一句覆盖名册 + 待识别 track，避免两处重复。
     # 「最后一帧」与 fused 侧同口径:bbox 只标末帧位置(engine._normalize_bbox_to_1000 按
     # all_frames[-1] 归一化),视频却跨整个窗口,不写明会让模型拿它去读中间帧。
     # 此路(非 fused/legacy)恒走全景、不接 Smart Crop,故无需坐标换算。
+    #
+    # 两句同门:第二句(空椅坏例的关键防护)若自己判"名册里有没有 bbox",fused 路径就会在名册
+    # 处多出它一份,而 fused 侧的说明句已含同款否证条件 —— 同一判据存两份,改一处忘一处即漂移。
     if emit_bbox_note and any("[bbox=" in ln for ln in lines):
         lines.append(
             "上方已识别人物、陌生人中 [bbox=(x1, y1, x2, y2)] 为该人在视频**最后一帧**中归一化到 [0, 1000] 区间的位置"
-            "（左上 0,0；右下 1000,1000），用于把姓名对应到视频里的人；画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+            "（左上 0,0；右下 1000,1000），用于定位名册项对应的目标，不替代本轮画面对‘是否有人’的判断；"
+            "画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+        )
+        lines.append(
+            "名册仅供定位；bbox 若对应非人体，不得沿用姓名，也不算有人。"
         )
     return lines
 
