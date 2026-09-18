@@ -1,7 +1,11 @@
 {
   "activity": {
     "title": "家里发生了什么",
-    "loadedCount": "已加载 {{n}} 条{{more}}",
+    "loaded": "已加载 {{detail}}",
+    "countEvents": "事件 {{n}}{{more}}",
+    "countActions": "动作 {{n}}{{more}}",
+    "horizonHint": "更早的事件与动作尚未加载",
+    "horizonHintEventsOnly": "更早的事件尚未加载",
     "loading": "加载中…",
     "eventsBannerLoading": "事件加载中…（动作流不受影响）",
     "eventsBannerFailed": "加载事件失败：{{msg}}（动作流不受影响）",
@@ -9,6 +13,7 @@
     "emptyFiltered": "该时间段内没事 · 试试调整范围",
     "emptyDefault": "今天还没什么事 · 它在替你看着",
     "loadMore": "查看更早",
+    "loadMoreFailed": "加载更早的事件失败，请重试",
     "collapse": "收起",
     "triggerFired": "已触发",
     "triggerStillIn": "持续中",

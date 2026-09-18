@@ -1,7 +1,11 @@
 {
   "activity": {
     "title": "What's happening at home",
-    "loadedCount": "{{n}} loaded{{more}}",
+    "loaded": "Loaded {{detail}}",
+    "countEvents": "{{n}}{{more}} events",
+    "countActions": "{{n}}{{more}} actions",
+    "horizonHint": "Earlier events and actions aren't loaded yet",
+    "horizonHintEventsOnly": "Earlier events aren't loaded yet",
     "loading": "Loading…",
     "eventsBannerLoading": "Loading events… (action feed unaffected)",
     "eventsBannerFailed": "Failed to load events: {{msg}} (action feed unaffected)",
@@ -9,6 +13,7 @@
     "emptyFiltered": "Nothing in this time range · Try adjusting it",
     "emptyDefault": "Nothing yet today · It's watching over things for you",
     "loadMore": "View earlier",
+    "loadMoreFailed": "Failed to load earlier events — please retry",
     "collapse": "Collapse",
     "triggerFired": "Fired",
     "triggerStillIn": "Ongoing",
