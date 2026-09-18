@@ -2229,6 +2229,67 @@ interface BackendTaskSummary {
   } | null;
 }
 
+export interface CreateCameraTaskInput {
+  taskId: string;
+  description: string;
+  query: string;
+  perceiveDeviceIds: string[];
+  actionDescription: string;
+}
+
+/**
+ * 一次 Web 操作创建可运行的 camera task + rule。
+ *
+ * backend 的 task / rule 仍是两个独立 endpoint，因此第二步失败时主动删除刚建的
+ * task，避免列表里留下永远不会触发的孤儿占位任务。回滚失败只记录诊断，向调用方
+ * 保留最初的 rule 创建错误。
+ */
+export async function realCreateCameraTask(
+  input: CreateCameraTaskInput,
+): Promise<void> {
+  await apiFetch<Normal<unknown>>("/api/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      task_id: input.taskId,
+      description: input.description,
+      lifecycle: "permanent",
+    }),
+  });
+
+  try {
+    await apiFetch<Normal<unknown>>("/api/rules", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: `${input.description} (${input.taskId})`,
+        task_id: input.taskId,
+        mode: "event",
+        direction: "enter",
+        lifecycle: "permanent",
+        condition: {
+          perceive_device_ids: input.perceiveDeviceIds,
+          query: input.query,
+        },
+        action_descriptions: [input.actionDescription],
+      }),
+    });
+  } catch (error) {
+    try {
+      await apiFetch<Normal<unknown>>(
+        `/api/tasks/${encodeURIComponent(input.taskId)}?reason=abandoned`,
+        { method: "DELETE" },
+      );
+    } catch (rollbackError) {
+      console.error("Failed to roll back task after rule creation failed", {
+        taskId: input.taskId,
+        rollbackError,
+      });
+    }
+    throw error;
+  }
+}
+
 export async function realListTasks(): Promise<Task[]> {
   const r = await apiFetch<Normal<BackendTaskSummary[]>>(
     "/api/tasks/summary?window=day",
