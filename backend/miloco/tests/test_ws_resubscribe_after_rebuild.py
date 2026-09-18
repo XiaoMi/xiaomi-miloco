@@ -17,11 +17,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import miloco.miot.ws as ws_mod
-from miloco.miot.ws import MIoTVideoStreamManager
+from fastapi.websockets import WebSocketState
+from miloco.miot.ws import (
+    MIoTAudioStreamManager,
+    MIoTVideoStreamManager,
+    _SubscriberSender,
+)
 
 
 def _patch_sdk(monkeypatch, start: AsyncMock) -> None:
@@ -271,14 +278,12 @@ async def test_audio_failure_keeps_going_and_keeps_init_flag(monkeypatch):
     assert "dual.1" not in mgr._camera_init_done
 
 
-async def test_audio_frame_callback_snapshots_connections(monkeypatch):
-    """帧回调对连接表**取快照**后再发，发送让出事件循环期间并发改表也不炸。
+async def test_audio_frame_callback_offers_to_all_snapshotted(monkeypatch):
+    """帧回调对连接表**取快照**后同步 offer，发送由各订阅者的发送协程异步完成。
 
-    close_connection 拿 per-camera 锁，但回调不申请这把锁（否则每帧都要等起停流
-    的 await）——互斥靠不了，只能靠快照。旧实现遍历实时字典：在 send 的 await
-    窗口里 close_connection 并发改表会抛 RuntimeError(dict changed size) /
-    KeyError，且此时 _camera_init_done 已置位 ⇒ 幸存订阅方永远拿不到 init
-    （采样率/编码都在里面），表现为拾音永久静音、只能刷新页面。
+    回调从快照到全部 offer 之间没有任何 await，判死/断开的并发改表影响不到
+    本轮投递；已进队列的数据由发送协程送达，即使订阅方随后被逐出（ eviction
+    只停未来的 offer，不撤已投递的帧）。快照里两个订阅者都拿到 init + 数据帧。
     """
     monkeypatch.setattr(
         ws_mod,
@@ -291,27 +296,73 @@ async def test_audio_frame_callback_snapshots_connections(monkeypatch):
             )
         ),
     )
-    mgr = ws_mod.MIoTAudioStreamManager()
+    mgr = MIoTAudioStreamManager()
     tag = "cam1.0"
-    ws_keep = AsyncMock()
-    ws_gone = AsyncMock()
 
-    async def evict_during_send(*a, **k):
-        # 模拟 close_connection 在回调 send 的 await 窗口里并发改表：
-        # 先摘一条连接，再摘掉整个 tag（最后一个订阅方断开的形态）
-        mgr._camera_connect_map.get(tag, {}).pop("v", None)
+    class _RecordingWS:
+        client_state = WebSocketState.CONNECTED
+
+        def __init__(self):
+            self.sent: list[bytes] = []
+            self.texts: list[str] = []
+
+        async def send_bytes(self, payload):
+            self.sent.append(payload)
+
+        async def send_text(self, text):
+            self.texts.append(text)
+
+        async def close(self, code=1000, reason=None):
+            pass
+
+    def _attach(ws, user):
+        sender = _SubscriberSender(
+            ws,
+            camera_id="cam1",
+            channel=0,
+            camera_tag=tag,
+            user_name=user,
+            token_hash="tok",
+            cid=user,
+            on_dead=mgr._evict_stale_audio_connection,
+            maxsize=25,
+        )
+        mgr._camera_connect_map.setdefault(tag, {}).setdefault(f"{user}.tok", {})[
+            user
+        ] = sender
+        return sender
+
+    ws_keep, ws_gone = _RecordingWS(), _RecordingWS()
+    a = _attach(ws_keep, "u")
+    b = _attach(ws_gone, "v")
+
+    # 模拟发送协程的 await 窗口里并发改表：keep 的首笔 send 摘掉另一订阅方
+    # 并清空整个 tag（最后一个订阅方断开的形态）
+    orig_send_text = ws_keep.send_text
+
+    async def evict_during_send(text):
+        mgr._camera_connect_map.get(tag, {}).pop("v.tok", None)
         mgr._camera_connect_map.pop(tag, None)
+        await orig_send_text(text)
 
-    ws_keep.send_text.side_effect = evict_during_send
-    mgr._camera_connect_map[tag] = {"u": {"c0": ws_keep}, "v": {"c0": ws_gone}}
+    ws_keep.send_text = evict_during_send
 
     callback = mgr._MIoTAudioStreamManager__audio_stream_callback
     await callback("cam1", b"\x00", 0, 0, 0)  # 不抛即通过
 
-    # 快照在改表之前取好：甲乙都拿到 init，而不是循环中途炸掉
-    ws_keep.send_text.assert_awaited_once()
-    ws_gone.send_text.assert_awaited_once()
+    async def _wait(ws, n):
+        while len(ws.sent) + len(ws.texts) < n:
+            await asyncio.sleep(0.002)
+
+    # 快照在改表之前取好：两个订阅者都拿到 init + 数据帧，而不是循环中途炸掉
+    await asyncio.wait_for(_wait(ws_keep, 2), 2)
+    await asyncio.wait_for(_wait(ws_gone, 2), 2)
+    assert json.loads(ws_keep.texts[0])["codec"] == "opus"
+    assert ws_keep.sent == [b"\x00"] and ws_gone.sent == [b"\x00"]
     assert tag in mgr._camera_init_done
+    for s in (a, b):
+        s.cancel()
+    await asyncio.gather(*(s._task for s in (a, b)), return_exceptions=True)
 
 
 async def test_audio_log_records_render_without_format_error(monkeypatch, caplog):

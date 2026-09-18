@@ -5,9 +5,9 @@ import io
 import json
 import logging
 import struct
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import av
 from fastapi import WebSocket
@@ -216,6 +216,166 @@ class NalClipRecorder:
 
 manager = get_manager()
 
+# 订阅者队列里的消息种类:文本信令(init 等)/ 二进制数据帧。
+_MSG_TEXT = "text"
+_MSG_BYTES = "bytes"
+
+
+async def _close_ws(ws: WebSocket, code: int = 1000) -> None:
+    """限时 1s 关闭;legacy websockets 实现下零窗口对端的 close 会挂在 drain。"""
+    if ws.client_state != WebSocketState.CONNECTED:
+        return
+    try:
+        await asyncio.wait_for(ws.close(code), timeout=1.0)
+    except Exception as err:
+        logger.debug("WebSocket close error: %s", err)
+
+
+class _SubscriberSender:
+    """单个 WS 订阅者的发送通道:有界队列 + 独立发送协程。
+
+    「卡顿」与「失联」两个时间尺度分离——卡顿只丢数据:队列满丢最旧数据帧
+    (init 等控制消息不淘汰,见 offer),网络恢复后自动续发最新帧,连接保留;
+    send 连续挂起超 _LIVENESS_S 才判死,经
+    on_dead 逐出并按需停流,此后 offer 被 closed 挡掉(生产端不再往队列塞
+    数据)。判死必须应用层做:uvicorn keepalive 的 disconnect 要等 TCP 重传
+    耗尽(~1h)才到应用层,即 v2026.8.6 事故根因。队列容量:视频 8(容纳
+    单帧多 NAL)、音频 25(约 0.5s 连续窗)。
+    """
+
+    # 单次 send 判死阈值:对齐前端 15s wsQuiet 看门狗 + 余量。
+    _LIVENESS_S: float = 20.0
+
+    def __init__(
+        self,
+        ws: WebSocket,
+        *,
+        camera_id: str,
+        channel: int,
+        camera_tag: str,
+        user_name: str,
+        token_hash: str,
+        cid: str,
+        on_dead: Callable[["_SubscriberSender"], Awaitable[None]],
+        maxsize: int,
+    ):
+        self.ws = ws
+        self.camera_id = camera_id
+        self.channel = channel
+        self.camera_tag = camera_tag
+        self.user_name = user_name
+        self.token_hash = token_hash
+        self.user_tag = f"{user_name}.{token_hash}"
+        self.cid = cid
+        self._on_dead = on_dead
+        self._queue: "deque[tuple[str, Any]]" = deque(maxlen=maxsize)
+        self._event = asyncio.Event()
+        self.closed = False
+        self._drop_logged = False
+        self._crash_evict_task: "asyncio.Task[None] | None" = None
+        self._task = asyncio.create_task(
+            self._run(), name=f"ws-send:{camera_tag}:{cid}"
+        )
+        self._task.add_done_callback(self._task_done)
+
+    def _task_done(self, task: "asyncio.Task[None]") -> None:
+        """发送协程意外崩溃也判死,绝不留僵尸订阅者(否则停不了流)。"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "Sender task crashed, %s, %s, %s: %s",
+                _safe_log(self.camera_tag),
+                _safe_log(self.user_tag),
+                _safe_log(self.cid),
+                _safe_log(exc),
+            )
+            self._crash_evict_task = asyncio.create_task(
+                self._die(f"sender crashed: {exc}")
+            )
+
+    def offer(self, kind: str, data: Any) -> None:
+        """生产端投递:永不阻塞,队列满丢最旧数据帧(控制消息不淘汰)。
+
+        init 是「首条消息是 init」协议的载体且只投递一次、无补发路径——
+        被数据挤出后客户端永远拿不到解码参数(watch.html 会丢弃全部二进制
+        帧)。所以淘汰只落在数据帧上;队列被控制消息填满才轮到最旧的控制
+        消息(一条连接至多一两条,实际到不了)。
+        """
+        if self.closed:
+            return
+        if len(self._queue) == self._queue.maxlen:
+            if not self._drop_logged:
+                logger.warning(
+                    "WebSocket send stalled, drop stale data, %s, %s, %s",
+                    _safe_log(self.camera_tag),
+                    _safe_log(self.user_tag),
+                    _safe_log(self.cid),
+                )
+                self._drop_logged = True
+            # 跳过控制消息,只淘汰最旧的数据帧
+            for i, (k, _) in enumerate(self._queue):
+                if k != _MSG_TEXT:
+                    del self._queue[i]
+                    break
+            else:
+                self._queue.popleft()
+        self._queue.append((kind, data))
+        self._event.set()
+
+    def cancel(self) -> None:
+        """管理者移除该连接时调用:拒后续投递 + 停发送协程(防泄漏)。
+
+        判死回调自身跑在本协程里并会经 close_connection 回到此处,此时不能
+        cancel 自己(会炸断尚未完成的 teardown),协程随 _run 正常返回。"""
+        self.closed = True
+        if self._task is not asyncio.current_task():
+            self._task.cancel()
+
+    async def _die(self, reason: str) -> None:
+        """判死并逐出。closed 守卫保证幂等(与 cancel 竞争时只走一边)。"""
+        if self.closed:
+            return
+        self.closed = True
+        logger.warning(
+            "WebSocket subscriber dead (%s), evict, %s, %s, %s",
+            reason,
+            _safe_log(self.camera_tag),
+            _safe_log(self.user_tag),
+            _safe_log(self.cid),
+        )
+        try:
+            await self._on_dead(self)
+        except Exception:
+            logger.exception(
+            "Evict dead subscriber failed, %s", _safe_log(self.camera_tag)
+        )
+
+    async def _run(self) -> None:
+        """逐条发送;send 挂起超 _LIVENESS_S 或报错 → 判死。"""
+        try:
+            while True:
+                if not self._queue:
+                    await self._event.wait()
+                    self._event.clear()
+                    continue
+                kind, data = self._queue.popleft()
+                try:
+                    send = (
+                        self.ws.send_text if kind == _MSG_TEXT else self.ws.send_bytes
+                    )
+                    await asyncio.wait_for(send(data), self._LIVENESS_S)
+                    self._drop_logged = False  # 卡顿 episode 结束
+                except asyncio.TimeoutError:
+                    await self._die("send liveness timeout")
+                    return
+                except Exception as err:
+                    await self._die(f"send error: {err}")
+                    return
+        except asyncio.CancelledError:
+            raise
+
 
 class MIoTVideoStreamManager:
     """MIoT Video WS Manager.
@@ -252,7 +412,8 @@ class MIoTVideoStreamManager:
     # bandwidth (~1.5 Mbps for 1080p) against late-joiner first-frame wait.
     _TRANSCODE_GOP: int = 30
 
-    _camera_connect_map: dict[str, dict[str, OrderedDict[str, WebSocket]]]
+    # 值为 _SubscriberSender(有界队列+发送协程),非裸 WebSocket,语义见其 docstring。
+    _camera_connect_map: dict[str, dict[str, OrderedDict[str, "_SubscriberSender"]]]
     _camera_connect_id: int
     # camera_tag → MIoTCameraCodec we're currently emitting (always VIDEO_H264
     # in transcode mode, but kept as cache for late-joiner init handshake).
@@ -286,6 +447,8 @@ class MIoTVideoStreamManager:
         self._camera_reg_id = {}
         self._camera_recorders = {}
         self._camera_locks = {}
+        # 正在 encode+fanout 的 camera_tag 集合(单飞门,见 __video_stream_callback)。
+        self._broadcast_inflight: set[str] = set()
         logger.info("Init MIoT Video WS Manager (transcode mode, gop=%d)",
                     self._TRANSCODE_GOP)
 
@@ -438,6 +601,8 @@ class MIoTVideoStreamManager:
         encoder = self._camera_encoder.pop(camera_tag, None)
         if encoder is not None:
             await encoder.close()
+        # 走到这里连接表必空,发送协程已由各移除点「pop 即 cancel」回收;
+        # 新增移除路径时记得带上 cancel。
         self._camera_connect_map.pop(camera_tag, None)
         self._camera_codec.pop(camera_tag, None)
         self._camera_seen_keyframe.discard(camera_tag)
@@ -490,7 +655,18 @@ class MIoTVideoStreamManager:
             self._camera_connect_map[camera_tag].setdefault(user_tag, OrderedDict())
             connection_id = str(self._camera_connect_id)
             self._camera_connect_id += 1
-            self._camera_connect_map[camera_tag][user_tag][connection_id] = websocket
+            sender = _SubscriberSender(
+                websocket,
+                camera_id=camera_id,
+                channel=channel,
+                camera_tag=camera_tag,
+                user_name=user_name,
+                token_hash=token_hash,
+                cid=connection_id,
+                on_dead=self._evict_stale_connection,
+                maxsize=8,
+            )
+            self._camera_connect_map[camera_tag][user_tag][connection_id] = sender
             logger.info(
                 "New video stream connection, %s, %s, %s",
                 camera_tag,
@@ -507,14 +683,11 @@ class MIoTVideoStreamManager:
                     channel,
                     user_tag,
                 )
-                _, ws = self._camera_connect_map[camera_tag][user_tag].popitem(
+                _, stale = self._camera_connect_map[camera_tag][user_tag].popitem(
                     last=False
                 )
-                try:
-                    if ws.client_state == WebSocketState.CONNECTED:
-                        await ws.close()
-                except Exception as err:
-                    logger.error("WebSocket close error: %s", err)
+                stale.cancel()
+                await _close_ws(stale.ws)
 
             # Late joiners: if codec is already known (a frame has been
             # observed since the stream started), send init handshake to
@@ -523,21 +696,21 @@ class MIoTVideoStreamManager:
             # camera_tag fully tears down).
             cached_codec = self._camera_codec.get(camera_tag)
             if cached_codec is not None and not sdk_just_started:
-                try:
-                    await websocket.send_text(self._build_init_msg(cached_codec))
-                except Exception as err:
-                    logger.error("WebSocket send init error: %s", err)
+                # init 走队列与数据帧同序;统一 offer,消灭所有裸 send 路径。
+                sender.offer(_MSG_TEXT, self._build_init_msg(cached_codec))
 
         return connection_id
 
     async def close_connection(
-        self, user_name: str, token_hash: str, camera_id: str, channel: int, cid: str
+        self, user_name: str, token_hash: str, camera_id: str, channel: int,
+        cid: str, code: int = 1000,
     ):
         """Close video stream connection.
 
         Held under the same per-camera_tag lock as new_connection so a
         concurrent peer's new_connection cannot read the connect_map mid
-        teardown.
+        teardown. route 断开与判死逐出(code=1001)都收敛到这里,存在性守卫保证
+        幂等;另一处移除点是 new_connection 的超限踢出(popitem),同样 pop 即 cancel。
         """
         camera_tag = f"{camera_id}.{channel}"
         user_tag = f"{user_name}.{token_hash}"
@@ -553,12 +726,9 @@ class MIoTVideoStreamManager:
                 camera_tag, user_tag, cid,
             )
 
-            try:
-                ws = self._camera_connect_map[camera_tag][user_tag].pop(cid)
-                if ws.client_state == WebSocketState.CONNECTED:
-                    await ws.close()
-            except Exception as err:
-                logger.error("WebSocket close error: %s", err)
+            sender = self._camera_connect_map[camera_tag][user_tag].pop(cid)
+            sender.cancel()
+            await _close_ws(sender.ws, code)
             if len(self._camera_connect_map[camera_tag][user_tag]) == 0:
                 self._camera_connect_map[camera_tag].pop(user_tag, None)
             # Teardown only when *both* WS clients and recorders are gone;
@@ -611,34 +781,38 @@ class MIoTVideoStreamManager:
                     self._camera_recorders.pop(camera_tag, None)
             await self._teardown_if_idle(camera_id, channel, camera_tag)
 
-    def _all_websockets(self, camera_tag: str) -> list[WebSocket]:
-        out: list[WebSocket] = []
+    def _all_senders(self, camera_tag: str) -> list["_SubscriberSender"]:
+        """该相机的全部订阅者发送通道快照。"""
+        out: list[_SubscriberSender] = []
         for conn in self._camera_connect_map.get(camera_tag, {}).values():
             out.extend(conn.values())
         return out
 
+    def _all_websockets(self, camera_tag: str) -> list[WebSocket]:
+        return [sender.ws for sender in self._all_senders(camera_tag)]
+
     async def _broadcast(self, camera_tag: str, *, text: str | None = None,
                          payload: bytes | None = None) -> None:
-        """Fan out to every subscriber of camera_tag concurrently.
+        """投递即返回,永不阻塞;卡顿丢旧/失联判死都在发送协程内处理。"""
+        if text is not None:
+            kind, data = _MSG_TEXT, text
+        else:
+            assert payload is not None  # 调用约定:text/payload 二选一
+            kind, data = _MSG_BYTES, payload
+        for sender in self._all_senders(camera_tag):
+            sender.offer(kind, data)
 
-        Failed websockets are logged; their cleanup happens on close_connection
-        when the WSDisconnect handler runs in the route, so we don't mutate the
-        connection map here.
-        """
-        targets = self._all_websockets(camera_tag)
-        if not targets:
-            return
-
-        async def _send(ws: WebSocket) -> None:
-            try:
-                if text is not None:
-                    await ws.send_text(text)
-                else:
-                    await ws.send_bytes(payload)  # type: ignore[arg-type]
-            except Exception as err:
-                logger.error("WebSocket send error: %s", err)
-
-        await asyncio.gather(*(_send(ws) for ws in targets), return_exceptions=False)
+    async def _evict_stale_connection(self, sender: "_SubscriberSender") -> None:
+        """发送协程判死回调:复用 route 断开的同一条移除+停流路径。cid 全局
+        单调不复用,close_connection 的存在性守卫即保证幂等。"""
+        await self.close_connection(
+            sender.user_name,
+            sender.token_hash,
+            sender.camera_id,
+            sender.channel,
+            sender.cid,
+            code=1001,
+        )
 
     async def __video_stream_callback(
         self,
@@ -676,70 +850,81 @@ class MIoTVideoStreamManager:
             except Exception as e:
                 logger.error("recorder feed_bgr error %s: %s", camera_tag, e)
 
-        # Announce the h264 init handshake once per camera_tag, BEFORE the
-        # encode path and independent of it. Keeping _camera_codec populated
-        # even during a recorder-only window means a WS client joining later
-        # still gets its init via new_connection()'s cached-codec replay. The
-        # codec is statically H.264 from our own encoder, so no packet is
-        # needed to confirm it (SPS/PPS rides inline with the first IDR NAL).
-        if camera_tag not in self._camera_codec:
-            self._camera_codec[camera_tag] = MIoTCameraCodec.VIDEO_H264
-            await self._broadcast(
-                camera_tag,
-                text=self._build_init_msg(MIoTCameraCodec.VIDEO_H264),
-            )
-
-        # Recorder-only fast path: with no WS client attached, the H.264
-        # encode + broadcast below fans out to zero subscribers — libx264
-        # would burn ~3-8ms/frame for nobody, competing for CPU with the
-        # recorder's own encoder. Recorders already got their BGR above, so
-        # bail before the wasted transcode.
-        if not self._all_websockets(camera_tag):
+        # 单飞门:上一帧周期未完则丢本帧。fanout 已是非阻塞 offer,这里兜的是
+        # encoder.encode 被拖慢时的回调堆积(每个挂起回调持一帧 BGR≈1.2MB,
+        # 即 v2026.8.6 事故的堆积源)。感知不经此门,不受影响。门不含上面的
+        # recorder 喂帧段:feed_bgr await 单线程 clip-enc,CPU 饥饿时录制窗口
+        # 内同样可能堆积持帧 task(上界 ~450 帧/15s,有界且先于本 PR 存在)。
+        if camera_tag in self._broadcast_inflight:
             return
-
-        encoder = self._camera_encoder.get(camera_tag)
-        if encoder is None:
-            # Race: subscriber teardown happened between scheduling this
-            # callback and now. Drop silently.
-            return
-
-        # Encode in dedicated thread (libx264 is sync C). PTS in ms.
+        self._broadcast_inflight.add(camera_tag)
         try:
-            packets = await encoder.encode(bgr, pts_ms=ts)
-        except Exception as e:
-            logger.error("transcode encode error %s: %s", camera_tag, e)
-            return
+            # Announce the h264 init handshake once per camera_tag, BEFORE the
+            # encode path and independent of it. Keeping _camera_codec populated
+            # even during a recorder-only window means a WS client joining later
+            # still gets its init via new_connection()'s cached-codec replay. The
+            # codec is statically H.264 from our own encoder, so no packet is
+            # needed to confirm it (SPS/PPS rides inline with the first IDR NAL).
+            if camera_tag not in self._camera_codec:
+                self._camera_codec[camera_tag] = MIoTCameraCodec.VIDEO_H264
+                await self._broadcast(
+                    camera_tag,
+                    text=self._build_init_msg(MIoTCameraCodec.VIDEO_H264),
+                )
 
-        # 净化要打进 wire 帧头的 ts。摄像头 PTS 未知时发哨兵 0xFFFFFFFFFFFFFFFF(同
-        # transcoder __init__ 注释,典型在 PPCS 重连后头几帧)。编码器侧已改走本地计数器
-        # 不再 OverflowError——但这恰好"打开"了这条新路:哨兵帧现在能正常编码并广播,ts
-        # 第一次原样流到前端。前端 WebCodecs 走 `new EncodedVideoChunk({timestamp: ts*1000})`,
-        # timestamp 是 WebIDL [EnforceRange] long long(±2^63),哨兵 ×1000 ≈ 1.8e22 远超 →
-        # 抛 TypeError → watch.html 弹红"解码失败",且那批帧全丢,直到 ts 恢复正常。
-        # 服务端单点兜:ts 超出安全区时,用服务端解码 wall-clock(decoded_unix_ms,host
-        # unix ms)替代——它永远合法、量级正常(~1.7e12)。一处覆盖所有客户端(WebCodecs + MSE)。
-        # 安全上界取 9e15:① 严格小于 2^63/1000 ≈ 9.22e15(保证前端 ts*1000 不溢出 int64);
-        # ② 跟前端 watch.html 的净化阈值用同一个字面值,前后端口径完全一致;③ 正常相机 ts
-        # (uptime/unix ms ~1e7–1e12)远在其下,真实流不受影响。
-        _TS_SAFE_MAX = 9_000_000_000_000_000  # 9e15,与 watch.html 的前端兜底阈值一致
-        wire_ts = ts if 0 <= ts < _TS_SAFE_MAX else decoded_unix_ms
+            # Recorder-only fast path: with no WS client attached, the H.264
+            # encode + broadcast below fans out to zero subscribers — libx264
+            # would burn ~3-8ms/frame for nobody, competing for CPU with the
+            # recorder's own encoder. Recorders already got their BGR above, so
+            # bail before the wasted transcode.
+            if not self._all_websockets(camera_tag):
+                return
 
-        for nal_bytes, is_keyframe in packets:
-            # Until we've seen the first IDR in the encoded stream, drop
-            # frames so subscribers don't try to decode garbage. After that,
-            # forward everything; new browser tabs joining mid-GOP wait for
-            # the next IDR (≤ ~1.2s at GOP=30) to start their own decoder.
-            if camera_tag not in self._camera_seen_keyframe:
-                if not is_keyframe:
-                    continue
-                self._camera_seen_keyframe.add(camera_tag)
+            encoder = self._camera_encoder.get(camera_tag)
+            if encoder is None:
+                # Race: subscriber teardown happened between scheduling this
+                # callback and now. Drop silently.
+                return
 
-            header = struct.pack(
-                ">B7xQ",
-                1 if is_keyframe else 0,
-                wire_ts & 0xFFFFFFFFFFFFFFFF,
-            )
-            await self._broadcast(camera_tag, payload=header + nal_bytes)
+            # Encode in dedicated thread (libx264 is sync C). PTS in ms.
+            try:
+                packets = await encoder.encode(bgr, pts_ms=ts)
+            except Exception as e:
+                logger.error("transcode encode error %s: %s", camera_tag, e)
+                return
+
+            # 净化要打进 wire 帧头的 ts。摄像头 PTS 未知时发哨兵 0xFFFFFFFFFFFFFFFF(同
+            # transcoder __init__ 注释,典型在 PPCS 重连后头几帧)。编码器侧已改走本地计数器
+            # 不再 OverflowError——但这恰好"打开"了这条新路:哨兵帧现在能正常编码并广播,ts
+            # 第一次原样流到前端。前端 WebCodecs 走 `new EncodedVideoChunk({timestamp: ts*1000})`,
+            # timestamp 是 WebIDL [EnforceRange] long long(±2^63),哨兵 ×1000 ≈ 1.8e22 远超 →
+            # 抛 TypeError → watch.html 弹红"解码失败",且那批帧全丢,直到 ts 恢复正常。
+            # 服务端单点兜:ts 超出安全区时,用服务端解码 wall-clock(decoded_unix_ms,host
+            # unix ms)替代——它永远合法、量级正常(~1.7e12)。一处覆盖所有客户端(WebCodecs + MSE)。
+            # 安全上界取 9e15:① 严格小于 2^63/1000 ≈ 9.22e15(保证前端 ts*1000 不溢出 int64);
+            # ② 跟前端 watch.html 的净化阈值用同一个字面值,前后端口径完全一致;③ 正常相机 ts
+            # (uptime/unix ms ~1e7–1e12)远在其下,真实流不受影响。
+            _TS_SAFE_MAX = 9_000_000_000_000_000  # 9e15,与 watch.html 的前端兜底阈值一致
+            wire_ts = ts if 0 <= ts < _TS_SAFE_MAX else decoded_unix_ms
+
+            for nal_bytes, is_keyframe in packets:
+                # Until we've seen the first IDR in the encoded stream, drop
+                # frames so subscribers don't try to decode garbage. After that,
+                # forward everything; new browser tabs joining mid-GOP wait for
+                # the next IDR (≤ ~1.2s at GOP=30) to start their own decoder.
+                if camera_tag not in self._camera_seen_keyframe:
+                    if not is_keyframe:
+                        continue
+                    self._camera_seen_keyframe.add(camera_tag)
+
+                header = struct.pack(
+                    ">B7xQ",
+                    1 if is_keyframe else 0,
+                    wire_ts & 0xFFFFFFFFFFFFFFFF,
+                )
+                await self._broadcast(camera_tag, payload=header + nal_bytes)
+        finally:
+            self._broadcast_inflight.discard(camera_tag)
 
 
 miot_video_stream_manager = MIoTVideoStreamManager()
@@ -750,7 +935,8 @@ class MIoTAudioStreamManager:
 
     _CAMERA_CONNECT_COUNT_MAX: int = 4
     _SAMPLERATE_MAP: dict[str, int] = {"opus": 48000, "g711a": 8000, "g711u": 8000}
-    _camera_connect_map: dict[str, dict[str, OrderedDict[str, WebSocket]]]
+    # 值为 _SubscriberSender:生产端 offer 即返回,不再被慢客户端串行堵死。
+    _camera_connect_map: dict[str, dict[str, OrderedDict[str, "_SubscriberSender"]]]
     _camera_connect_id: int
     _camera_init_done: set
     _camera_locks: dict[str, asyncio.Lock]
@@ -773,18 +959,6 @@ class MIoTAudioStreamManager:
         回调自愈不触发，会一直占相机的并发流名额）。
         """
         return self._camera_locks.setdefault(camera_tag, asyncio.Lock())
-
-    def _all_websockets(self, camera_tag: str) -> list[WebSocket]:
-        """快照当前订阅方，避免遍历实时字典时被 close_connection 并发改表。
-
-        与视频侧同款：帧回调不申请 per-camera 锁（否则每帧都要等起停流的
-        await），改用快照免疫并发改表。快照后已断开的 ws 发送失败由调用方的
-        try 吞掉，清理由 close_connection 负责。
-        """
-        out: list[WebSocket] = []
-        for conn in self._camera_connect_map.get(camera_tag, {}).values():
-            out.extend(conn.values())
-        return out
 
     async def new_connection(
         self,
@@ -816,7 +990,18 @@ class MIoTAudioStreamManager:
             self._camera_connect_map[camera_tag].setdefault(user_tag, OrderedDict())
             connection_id = str(self._camera_connect_id)
             self._camera_connect_id += 1
-            self._camera_connect_map[camera_tag][user_tag][connection_id] = websocket
+            sender = _SubscriberSender(
+                websocket,
+                camera_id=camera_id,
+                channel=channel,
+                camera_tag=camera_tag,
+                user_name=user_name,
+                token_hash=token_hash,
+                cid=connection_id,
+                on_dead=self._evict_stale_audio_connection,
+                maxsize=25,
+            )
+            self._camera_connect_map[camera_tag][user_tag][connection_id] = sender
             if (
                 len(self._camera_connect_map[camera_tag][user_tag])
                 > self._CAMERA_CONNECT_COUNT_MAX
@@ -827,18 +1012,16 @@ class MIoTAudioStreamManager:
                     _safe_log(channel),
                     _safe_log(user_tag),
                 )
-                _, ws = self._camera_connect_map[camera_tag][user_tag].popitem(
+                _, stale = self._camera_connect_map[camera_tag][user_tag].popitem(
                     last=False
                 )
-                try:
-                    if ws.client_state == WebSocketState.CONNECTED:
-                        await ws.close()
-                except Exception as err:
-                    logger.error("WebSocket close error: %s", err)
+                stale.cancel()
+                await _close_ws(stale.ws)
             # Send init only if codec is already known (first frame already arrived)
             if camera_tag in self._camera_init_done:
                 codec = manager.miot_service.get_audio_codec(camera_id, channel)
-                await websocket.send_text(
+                sender.offer(
+                    _MSG_TEXT,
                     json.dumps(
                         {
                             "type": "init",
@@ -846,7 +1029,7 @@ class MIoTAudioStreamManager:
                             "sampleRate": self._SAMPLERATE_MAP.get(codec, 48000),
                             "numberOfChannels": 1,
                         }
-                    )
+                    ),
                 )
             logger.info(
                 "New audio stream connection, %s, %s, %s",
@@ -913,9 +1096,11 @@ class MIoTAudioStreamManager:
                 )
 
     async def close_connection(
-        self, user_name: str, token_hash: str, camera_id: str, channel: int, cid: str
+        self, user_name: str, token_hash: str, camera_id: str, channel: int,
+        cid: str, code: int = 1000,
     ):
-        """Close audio stream connection."""
+        """Close audio stream connection. 判死逐出也走这里(code=1001),幂等口径
+        同视频侧;另一处移除点是 new_connection 的超限踢出(popitem)。"""
         camera_tag = f"{camera_id}.{channel}"
         user_tag = f"{user_name}.{token_hash}"
         async with self._lock_for(camera_tag):
@@ -931,16 +1116,17 @@ class MIoTAudioStreamManager:
                 _safe_log(user_tag),
                 _safe_log(cid),
             )
-            try:
-                ws = self._camera_connect_map[camera_tag][user_tag].pop(cid)
-                if ws.client_state == WebSocketState.CONNECTED:
-                    await ws.close()
-            except Exception as err:
-                logger.error("WebSocket close error: %s", err)
+            sender = self._camera_connect_map[camera_tag][user_tag].pop(cid)
+            sender.cancel()
+            await _close_ws(sender.ws, code)
             if len(self._camera_connect_map[camera_tag][user_tag]) == 0:
                 self._camera_connect_map[camera_tag].pop(user_tag, None)
             if len(self._camera_connect_map[camera_tag]) == 0:
-                await manager.miot_service.stop_audio_stream(camera_id, channel)
+                try:
+                    await manager.miot_service.stop_audio_stream(camera_id, channel)
+                except Exception as err:
+                    # 与并发断开/判死竞争可能二次停流,状态已被先到者清干净。
+                    logger.debug("Audio stream already stopped: %s", err)
                 self._camera_connect_map.pop(camera_tag)
                 self._camera_init_done.discard(camera_tag)
                 logger.info(
@@ -952,7 +1138,7 @@ class MIoTAudioStreamManager:
     async def __audio_stream_callback(
         self, did: str, data: bytes, ts: int, seq: int, channel: int
     ) -> None:
-        """Audio stream callback."""
+        """Audio stream callback — offer 即返回,永不因客户端状态阻塞。"""
 
         camera_tag = f"{did}.{channel}"
         if camera_tag not in self._camera_connect_map:
@@ -970,6 +1156,13 @@ class MIoTAudioStreamManager:
                     await manager.miot_service.stop_audio_stream(did, channel)
                     return
             # 锁内复核发现表又非空（new_connection 刚开好流）→ 落到下面正常发送
+        # 快照:判死逐出会并发改 map,直接迭代嵌套 values() 会炸;offer 不改 map。
+        senders = [
+            sender
+            for conn in self._camera_connect_map[camera_tag].values()
+            for sender in conn.values()
+        ]
+
         # On first frame: codec is now known, send init to all connected websockets
         if camera_tag not in self._camera_init_done:
             codec = manager.miot_service.get_audio_codec(did, channel)
@@ -989,18 +1182,21 @@ class MIoTAudioStreamManager:
                     codec,
                 )
                 # 置位保持在发送前：检查与置位之间无 await，不会被并发帧回调重入
-                # ⇒ 不会重复发 init；而下面的发送走快照、不会抛改表类异常，置位
-                # 提前也不会再造成「幸存订阅方拿不到 init」。
-                for ws in self._all_websockets(camera_tag):
-                    try:
-                        await ws.send_text(init_msg)
-                    except Exception as err:
-                        logger.error("Audio init send error: %s", err)
-        for ws in self._all_websockets(camera_tag):
-            try:
-                await ws.send_bytes(data)
-            except Exception as err:
-                logger.error("Audio WebSocket send error: %s", err)
+                # ⇒ 不会重复发 init；发送走快照、不会抛改表类异常。
+                for sender in senders:
+                    sender.offer(_MSG_TEXT, init_msg)
+        for sender in senders:
+            sender.offer(_MSG_BYTES, data)
 
+    async def _evict_stale_audio_connection(self, sender: "_SubscriberSender") -> None:
+        """发送协程判死回调:复用 route 断开的同一条移除+停流路径。"""
+        await self.close_connection(
+            sender.user_name,
+            sender.token_hash,
+            sender.camera_id,
+            sender.channel,
+            sender.cid,
+            code=1001,
+        )
 
 miot_audio_stream_manager = MIoTAudioStreamManager()
