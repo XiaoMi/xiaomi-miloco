@@ -105,7 +105,7 @@ Tracking 后的 `IdentityPacket.all_frames` 先在 `omni.sample` 下采到 `omni
 
 `omni.request → result.complete` 传递的是推理结果，不是视频媒体，因此该边不携带 `GraphMedia`。
 
-音频-only 路径不执行视频 Transform：`Media Transform` 为 `inactive`，`Omni Sampling → Media Encoding` 增加 `Audio bypass` 旁路边。此时 Encoding 展示实际音频容器、采样率和音频存在性；视频尺寸、FPS 和帧数保持未知。
+音频-only 路径不执行视频 Transform：`Media Transform` 为 `inactive`，`Omni Sampling → Media Encoding` 增加 `Audio bypass` 旁路边。此时 Encoding 展示实际音频容器与采样率；音频存在性进协议、不上卡片；视频尺寸、FPS 和帧数保持未知。
 
 前端对同一行内跨越其它节点的旁路边使用卡片下方的正交路径，避免连线穿过 `Media Transform` 等中间节点。
 

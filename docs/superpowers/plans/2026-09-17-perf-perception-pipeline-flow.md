@@ -70,7 +70,6 @@
 - Modify: `backend/miloco/src/miloco/perception/engine/api.py`
 - Modify: `backend/miloco/src/miloco/perception/runner.py`
 - Modify: `backend/miloco/src/miloco/observability/router.py`
-- Modify: `backend/miloco/src/miloco/main.py`
 - Modify: `backend/miloco/tests/observability/test_router.py`
 - Create: `backend/miloco/tests/observability/test_perception_flow_lifecycle.py`
 

@@ -7,6 +7,7 @@ from miloco.perception.flow_context import (
     record_encoded_media,
     record_media_transform,
     record_smart_crop,
+    record_video_block_skipped,
 )
 
 
@@ -86,6 +87,30 @@ def test_audio_encode_failure_marks_error_and_keeps_request_skipped():
 
     # 无 scope 时 recorder 是 noop,不崩
     record_audio_encode_failure()
+
+
+def test_video_block_skipped_marks_error_and_keeps_request_skipped():
+    # 视频块在 payload 组装期被丢弃(过短/为空),同样不能出现 encode OK + request OK。
+    # 先走一次编码成功路径,再标记丢弃:request 必须保持 skipped 不被回标。
+    diagnostics = _diagnostics()
+    media = LocalMediaInfo(
+        video_width=1920,
+        video_height=1080,
+        fps=25,
+        frame_count=25,
+        has_audio=True,
+        audio_sample_rate=48000,
+    )
+
+    with flow_diagnostics_scope(diagnostics):
+        record_encoded_media(media)
+        record_video_block_skipped()
+
+    assert diagnostics.media_encode_status.value == "error"
+    assert diagnostics.omni_request_status.value == "skipped"
+
+    # 无 scope 时 recorder 是 noop,不崩
+    record_video_block_skipped()
 
 
 def test_panorama_records_disabled_smart_crop_without_region():

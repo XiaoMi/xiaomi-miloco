@@ -1444,6 +1444,7 @@ def _global_node(
             GraphStatus.ERROR,
             GraphStatus.BACKPRESSURE,
             GraphStatus.SKIPPED,
+            GraphStatus.INACTIVE,
         )
     )
     return GraphNode(
@@ -1495,6 +1496,7 @@ def _aggregate_status(statuses: list[GraphStatus]) -> GraphStatus:
         GraphStatus.WARNING,
         GraphStatus.SKIPPED,
         GraphStatus.OK,
+        GraphStatus.INACTIVE,
     )
     return next(
         (status for status in priority if status in statuses),

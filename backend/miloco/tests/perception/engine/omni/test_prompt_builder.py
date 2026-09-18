@@ -718,6 +718,85 @@ class TestFusedAudioRoute:
         assert "input_audio" not in types
 
 
+class TestFusedVideoBlockSkipped:
+    """fused video route 拼出不可用 video 块(过短/为空)时必须留痕——与音频侧
+    ``record_audio_encode_failure`` 同口径,图中不能出现 encode OK + request OK。"""
+
+    def test_fused_video_b64_too_short_marks_block_skipped(self, monkeypatch, caplog):
+        """编码产出过短 b64 → video 块被跳过、text-only。
+
+        PyAV 编码异常可能返回非空但损坏的极短 base64 串(< _MIN_VIDEO_B64_LEN),
+        入 payload 会让 omni 服务端 400,故走 skip。模型本窗没收到画面,排查
+        「描述与实际画面不符」时图必须指向 encode ERROR 而非假全绿。
+        """
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+        from miloco.perception.engine.omni import prompt_builder
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.flow_context import flow_diagnostics_scope
+
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
+        monkeypatch.setattr(
+            prompt_builder,
+            "_encode_batch_video",
+            lambda packets, short_edge=0: (b"c2hvcnQ=", None),  # 7 字符 < 1000
+        )
+
+        with flow_diagnostics_scope(diagnostics), caplog.at_level("WARNING"):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()],
+                context=OmniContext(room_name="厨房"),
+                candidates=[],
+                gallery_snapshot={},
+            )
+
+        assert diagnostics.media_encode_status.value == "error"
+        assert diagnostics.omni_request_status.value == "skipped"
+        types = [b["type"] for b in _multimodal_user_content(fused["messages"])]
+        assert "video_url" not in types
+        assert any(
+            "fused_video_b64_too_short" in r.getMessage() for r in caplog.records
+        )
+
+    def test_fused_video_empty_marks_block_skipped(self, monkeypatch):
+        """编码产出为空 → video 块整个消失,同样标记 encode ERROR + request SKIPPED。"""
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+        from miloco.perception.engine.omni import prompt_builder
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.flow_context import flow_diagnostics_scope
+
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
+        monkeypatch.setattr(
+            prompt_builder,
+            "_encode_batch_video",
+            lambda packets, short_edge=0: (None, None),
+        )
+
+        with flow_diagnostics_scope(diagnostics):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()],
+                context=OmniContext(room_name="厨房"),
+                candidates=[],
+                gallery_snapshot={},
+            )
+
+        assert diagnostics.media_encode_status.value == "error"
+        assert diagnostics.omni_request_status.value == "skipped"
+        types = [b["type"] for b in _multimodal_user_content(fused["messages"])]
+        assert "video_url" not in types
+
+
 class TestFusedPetRefs:
     """P2：has_pets 时 fused 主 user content 注入已登记宠物参考图块。"""
 

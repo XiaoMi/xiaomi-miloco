@@ -239,6 +239,53 @@ def test_global_graph_does_not_count_snapshots_as_active_devices():
     assert active.value == 0
 
 
+def test_global_graph_aggregates_inactive_devices_honestly():
+    # 全体设备 audio-only 时 media.transform 人人 INACTIVE:全局节点必须显示
+    # INACTIVE 而不是 UNKNOWN,计数 metric 之和必须等于 fresh 设备数——
+    # 否则操作员会误读成"transform 数据缺失"。
+    store = PerceptionFlowSnapshotStore()
+
+    def audio_only_diagnostic(device_id: str) -> PerDeviceFlowDiagnostics:
+        diagnostic = _diagnostic(device_id, observed_at=1_000)
+        diagnostic.audio_only = True
+        return diagnostic
+
+    store.merge_cycle(
+        "trace-1",
+        1_000,
+        {
+            "camera-1": audio_only_diagnostic("camera-1"),
+            "camera-2": audio_only_diagnostic("camera-2"),
+        },
+    )
+
+    response = build_perception_flow_graph(
+        store,
+        device_id=None,
+        generated_at=2_000,
+        stale_after_sec=30,
+    )
+    nodes = {node.id: node for node in response.graph.nodes}
+
+    transform = nodes["media.transform"]
+    assert transform.status == GraphStatus.INACTIVE
+
+    transform_metrics = {m.key: m.value for m in transform.metrics}
+    assert transform_metrics["inactive_device_count"] == 2
+
+    summed = {
+        key: value
+        for key, value in transform_metrics.items()
+        if key.endswith("_device_count") and key not in {
+            "active_device_count",
+            "snapshot_device_count",
+            "fresh_device_count",
+            "stale_device_count",
+        }
+    }
+    assert sum(summed.values()) == transform_metrics["fresh_device_count"]
+
+
 def test_audio_only_graph_does_not_emit_zero_video_dimensions():
     store = PerceptionFlowSnapshotStore()
     diagnostic = _diagnostic()

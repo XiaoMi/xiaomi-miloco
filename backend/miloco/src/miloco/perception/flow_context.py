@@ -47,14 +47,23 @@ def record_audio_only_start() -> None:
     diagnostics.media_transform_status = GraphStatus.SKIPPED
 
 
-def record_audio_encode_failure() -> None:
-    """音频编码没产出可用媒体块(过短/失败),text-only 请求仍照发;encode 标 ERROR、
-    request 标 SKIPPED,避免图中出现 encode 未知 + request OK 的矛盾组合。"""
+def _mark_unusable_media() -> None:
+    """编码产物不合用(过短/为空),text-only 请求仍照发;encode 标 ERROR、request 标
+    SKIPPED,避免图中出现 encode OK + request OK 的假全绿。"""
     diagnostics = _current_diagnostics.get()
     if diagnostics is None:
         return
     diagnostics.media_encode_status = GraphStatus.ERROR
     diagnostics.omni_request_status = GraphStatus.SKIPPED
+
+
+def record_audio_encode_failure() -> None:
+    _mark_unusable_media()
+
+
+def record_video_block_skipped() -> None:
+    """视频块在 payload 组装期被丢弃(过短/为空),请求退化为 text-only。"""
+    _mark_unusable_media()
 
 
 def record_encoded_media(media: LocalMediaInfo, *, audio_only: bool = False) -> None:

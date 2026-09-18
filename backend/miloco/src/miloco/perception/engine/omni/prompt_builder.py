@@ -932,6 +932,9 @@ def _build_fused_user_content(
     if video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
         content.append(adapter.build_video_block(video_b64, media_info))
     elif video_b64:
+        from miloco.perception.flow_context import record_video_block_skipped
+
+        record_video_block_skipped()
         logger.warning(
             "event=fused_video_b64_too_short size=%d (< %d), 跳过 video_url 块, "
             "本窗口走 text-only 识别",
@@ -950,6 +953,9 @@ def _build_fused_user_content(
             1 for b in content
             if isinstance(b, dict) and b.get("type") in ("image_url", "input_audio")
         )
+        from miloco.perception.flow_context import record_video_block_skipped
+
+        record_video_block_skipped()
         logger.warning(
             "event=fused_no_media_block route=video reason=empty_video room=%s "
             "other_media_blocks=%d, 本窗口未拼出 video 块、走 text-only"
@@ -1818,7 +1824,7 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
 #      height(1280/720)是**死配置**:传进 RealTrackingService 存成 _input_width/
 #      _input_height 后再没人读,真正决定输入尺寸的是模型的 416x416;engine/api.py
 #      还把它当调试信息暴露出去,容易被读成"感知输入分辨率"。
-#    - ReID tracker/human_reid.py `preprocess` → 人体 crop 缩到 192x96
+#    - ReID tracker/human_reid.py `preprocess` → 人体 crop 缩到 ONNX 输入 shape
 #    - 身份 crop 进 omni:本文件 _CROP_SIZE = (512,512)
 # ⑤ omni 推理分辨率 = `video_short_edge`(**本 PR 前后都只有这一个旋钮**):
 #    settings.yaml 默认 512、UI 档位 [360,512,768,1080]、admin API 收 64..2160。

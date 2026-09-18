@@ -33,8 +33,6 @@ export interface PositionedGraphNode extends GraphNode {
 
 export interface PositionedGraphEdge extends GraphEdge {
   path: string;
-  labelX: number;
-  labelY: number;
 }
 
 export interface PositionedGraphGroup extends GraphGroup {
@@ -262,15 +260,11 @@ export function layoutGraph(graph: GraphDefinition): GraphLayoutResult {
         return {
           ...edge,
           path: `M ${startX} ${startY} H ${startOuterX} V ${routeY} H ${endOuterX} V ${endY} H ${endX}`,
-          labelX: (startOuterX + endOuterX) / 2,
-          labelY: routeY - 8,
         };
       }
       return {
         ...edge,
         path: `M ${startX} ${startY} C ${middleX} ${startY}, ${middleX} ${endY}, ${endX} ${endY}`,
-        labelX: middleX,
-        labelY: (startY + endY) / 2 - 18,
       };
     }
     const flowsDown = target.y > source.y;
@@ -284,8 +278,6 @@ export function layoutGraph(graph: GraphDefinition): GraphLayoutResult {
     return {
       ...edge,
       path: `M ${startX} ${startY} V ${routeY} H ${endX} V ${endY}`,
-      labelX: (startX + endX) / 2,
-      labelY: routeY - 8,
     };
   });
 
@@ -422,11 +414,6 @@ function metricValue(metric: GraphMetric): string {
   return `${String(metric.value)}${metric.unit ? ` ${metric.unit}` : ""}`;
 }
 
-function edgeLabelLines(edge: GraphEdge): string[] {
-  if (!edge.label || edge.label.toLowerCase() === "frames") return [];
-  return wrapGraphText(edge.label, 16, 2, false);
-}
-
 function nodeMediaLines(node: GraphNode): string[] {
   const inputSummary = mediaSummary(node.input);
   const outputSummary = mediaSummary(node.output);
@@ -537,7 +524,6 @@ export function GenericGraphViewer({ graph }: { graph: GraphResponse }) {
           {layout.edges.map((edge) => {
             const appearance = effectiveGraphAppearance(edge.status, edge.freshness);
             const palette = APPEARANCE[appearance];
-            const labelLines = edgeLabelLines(edge);
             return (
               <g
                 key={edge.id}
@@ -550,15 +536,6 @@ export function GenericGraphViewer({ graph }: { graph: GraphResponse }) {
                   strokeWidth={2}
                   strokeDasharray={!edge.active || edge.status === "inactive" || edge.freshness === "stale" ? "7 5" : undefined}
                   markerEnd="url(#graph-arrow)"
-                />
-                <SvgTextLines
-                  lines={labelLines}
-                  x={edge.labelX}
-                  y={edge.labelY}
-                  lineHeight={14}
-                  textAnchor="middle"
-                  fontSize={12}
-                  fill={palette.text}
                 />
               </g>
             );

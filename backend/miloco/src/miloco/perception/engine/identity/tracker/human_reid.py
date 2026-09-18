@@ -113,7 +113,7 @@ class HumanReID:
         if image is None or image.size == 0:
             raise ValueError("输入图像为空")
 
-        # 调整图像大小 (人体通常是竖向的，192x96)
+        # 调整图像大小到 ReID 模型输入尺寸（读 ONNX session 输入 shape，非硬编码）
         resized = cv2.resize(
             image, (self.net_w, self.net_h), interpolation=cv2.INTER_LINEAR
         )

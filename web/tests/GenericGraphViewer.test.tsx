@@ -31,6 +31,17 @@ describe("GenericGraphViewer", () => {
     expect(layout.height).toBeGreaterThan(0);
   });
 
+  it("never renders edge label text on connection lines", () => {
+    // 连接线不带文字:即使协议带 label(供屏幕阅读器的 aria-label),SVG 画布上
+    // 也不能出现 <text> 文本。fixture 的边本就带 label="frames",再显式注入
+    // 一个真实 label 值钉住行为。
+    const graph = decodedGraph();
+    graph.graph.edges[0].label = "Audio bypass";
+    const html = renderToStaticMarkup(<GenericGraphViewer graph={graph} />);
+    expect(html).not.toContain(">Audio bypass<");
+    expect(html).not.toContain(">frames<");
+  });
+
   it("renders each complete group on its own left-to-right row", () => {
     const graph = decodedGraph();
     const groupSizes = [2, 2, 4, 5];
@@ -121,7 +132,7 @@ describe("GenericGraphViewer", () => {
     expect(html).toContain('fill="context-stroke"');
   });
 
-  it("keeps edge media in the protocol without crowding connection labels", () => {
+  it("renders edge media text exactly once on the canvas", () => {
     const html = renderToStaticMarkup(<GenericGraphViewer graph={decodedGraph()} />);
     expect(decodedGraph().graph.edges[0].media?.width?.value).toBe(1920);
     expect(html.match(/1920×1080/g)).toHaveLength(1);
