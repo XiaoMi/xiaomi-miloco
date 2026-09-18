@@ -2,6 +2,7 @@ from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
 from miloco.perception.engine.omni.provider import LocalMediaInfo
 from miloco.perception.flow_context import (
     flow_diagnostics_scope,
+    record_audio_encode_failure,
     record_audio_only_start,
     record_encoded_media,
     record_media_transform,
@@ -69,6 +70,22 @@ def test_audio_only_start_marks_transform_skipped_before_encoding():
     assert diagnostics.audio_only is True
     assert diagnostics.media_transform_status.value == "skipped"
     assert diagnostics.media_encode_status.value == "unknown"
+
+
+def test_audio_encode_failure_marks_error_and_keeps_request_skipped():
+    # 编码失败后 text-only 请求照发,request 不会被回标 OK,图中不出现
+    # "encode 未知/失败 + request OK" 的矛盾组合。
+    diagnostics = _diagnostics()
+
+    with flow_diagnostics_scope(diagnostics):
+        record_audio_only_start()
+        record_audio_encode_failure()
+
+    assert diagnostics.media_encode_status.value == "error"
+    assert diagnostics.omni_request_status.value == "skipped"
+
+    # 无 scope 时 recorder 是 noop,不崩
+    record_audio_encode_failure()
 
 
 def test_panorama_records_disabled_smart_crop_without_region():

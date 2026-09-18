@@ -68,14 +68,17 @@ class HumanReID:
         try:
             from miloco.perception.inference.ort_utils import make_session
 
-            self.session = make_session(model_path, use_gpu=use_gpu)
-            model_input = self.session.get_inputs()[0]
+            session = make_session(model_path, use_gpu=use_gpu)
+            model_input = session.get_inputs()[0]
             self.input_name = model_input.name
             input_height, input_width = model_input.shape[-2:]
             if not isinstance(input_width, int) or input_width <= 0:
                 raise ValueError(f"无效的 ReID 模型输入宽度: {input_width}")
             if not isinstance(input_height, int) or input_height <= 0:
                 raise ValueError(f"无效的 ReID 模型输入高度: {input_height}")
+            # 尺寸校验通过才落 session,失败时保持未初始化态
+            # (extract_feature 的 session is None 守卫才能兜住)。
+            self.session = session
             self.net_w = input_width
             self.net_h = input_height
             self.output_name = self.output_node
@@ -84,6 +87,9 @@ class HumanReID:
             return True
 
         except Exception as e:
+            self.session = None
+            self.net_w = 0
+            self.net_h = 0
             _LOGGER.error(f"模型初始化失败: {e}")
             return False
 

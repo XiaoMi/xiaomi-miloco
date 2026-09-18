@@ -263,6 +263,10 @@ def build_fused_payload(
         system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
         ep = packets[0]
         audio_b64 = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
+        if not (audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN):
+            from miloco.perception.flow_context import record_audio_encode_failure
+
+            record_audio_encode_failure()
         user_content: list[dict] = []
         if context.current_time:
             user_content.append({"type": "text", "text": f"当前时间: {context.current_time}"})
@@ -517,6 +521,10 @@ def _build_payload(
     if route == "audio":
         ep = packets[0]
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
+        if not base["audio_base64"]:
+            from miloco.perception.flow_context import record_audio_encode_failure
+
+            record_audio_encode_failure()
         base["media_info"] = _audio_only_media_info(ep.sample_rate)
     else:
         # 自适应分辨率(Smart Crop)只接 fused 生产路径。此路(非 fused/legacy)不裁切:

@@ -340,7 +340,6 @@ def test_device_graph_includes_configured_pipeline_targets():
         gate_check_fps=1,
         omni_fps=1,
         video_short_edge=512,
-        stream_profile="LOW",
     )
 
     response = build_perception_flow_graph(
@@ -355,8 +354,6 @@ def test_device_graph_includes_configured_pipeline_targets():
         node.id: {metric.key: metric for metric in node.metrics}
         for node in response.graph.nodes
     }
-    assert metrics["media.decoded"]["stream_profile"].value == "LOW"
-    assert metrics["media.decoded"]["stream_profile"].source == "configured"
     assert metrics["buffer.sync_window"]["configured_window_size"].value == 4
     assert metrics["buffer.sync_window"]["configured_window_size"].label == "Config Window Size"
     assert metrics["buffer.ready_queue"]["configured_max_windows"].value == 3

@@ -228,7 +228,9 @@ class MultiTrackSyncBuffer:
                 self._overflow_count_since_drain += 1
 
                 if self._buffer_full_action == "clear":
-                    dropped = ready_before + active_before
+                    # ready 窗口同时在 _windows 与 _ready_queue 里,直接相加会把
+                    # ready 窗口数两遍;clear 销毁的窗口恰等于 _windows 的全集。
+                    dropped = active_before
                     self._windows.clear()
                     self._ready_queue.clear()
                     self._ready_keys.clear()

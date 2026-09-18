@@ -47,6 +47,16 @@ def record_audio_only_start() -> None:
     diagnostics.media_transform_status = GraphStatus.SKIPPED
 
 
+def record_audio_encode_failure() -> None:
+    """音频编码没产出可用媒体块(过短/失败),text-only 请求仍照发;encode 标 ERROR、
+    request 标 SKIPPED,避免图中出现 encode 未知 + request OK 的矛盾组合。"""
+    diagnostics = _current_diagnostics.get()
+    if diagnostics is None:
+        return
+    diagnostics.media_encode_status = GraphStatus.ERROR
+    diagnostics.omni_request_status = GraphStatus.SKIPPED
+
+
 def record_encoded_media(media: LocalMediaInfo, *, audio_only: bool = False) -> None:
     diagnostics = _current_diagnostics.get()
     if diagnostics is None:

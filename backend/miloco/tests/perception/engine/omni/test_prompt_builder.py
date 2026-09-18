@@ -573,6 +573,58 @@ class TestNoMediaBlockWarning:
         assert "route=audio" in msg
         assert "room=厨房" in msg
 
+    def test_fused_audio_unencodable_marks_encode_failure_diagnostics(self):
+        """fused audio route 编不出媒体块 → 图中不会出现 encode 未知 + request OK。"""
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.flow_context import flow_diagnostics_scope
+
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
+        ep = _audio_only_packet()
+        ep.audio_clip = np.zeros(512, dtype=np.int16)  # < 一个 AAC 帧 → 编不出
+
+        with flow_diagnostics_scope(diagnostics):
+            build_fused_payload(
+                packets=[ep],
+                context=OmniContext(room_name="厨房"),
+                candidates=[],
+                gallery_snapshot={},
+            )
+
+        assert diagnostics.media_encode_status.value == "error"
+        assert diagnostics.omni_request_status.value == "skipped"
+
+    def test_batch_audio_unencodable_marks_encode_failure_diagnostics(self):
+        """batch audio route 编不出媒体块 → 同样标记 encode ERROR + request SKIPPED。"""
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+        from miloco.perception.engine.omni.prompt_builder import build_batch_prompt
+        from miloco.perception.flow_context import flow_diagnostics_scope
+
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
+        ep = _audio_only_packet()
+        ep.audio_clip = np.zeros(512, dtype=np.int16)
+
+        with flow_diagnostics_scope(diagnostics):
+            build_batch_prompt(
+                identity_packets=[ep],
+                context=OmniContext(room_name="厨房"),
+            )
+
+        assert diagnostics.media_encode_status.value == "error"
+        assert diagnostics.omni_request_status.value == "skipped"
+
     def test_query_route_warns_when_video_unencodable(self, caplog):
         """query 路径拼不出 video 块 → 打 warning。
 

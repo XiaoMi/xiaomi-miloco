@@ -49,6 +49,29 @@ def test_human_reid_uses_session_input_shape(monkeypatch):
     assert reid.preprocess(np.zeros((32, 16, 3), dtype=np.uint8)).shape == (1, 3, 256, 128)
 
 
+def test_human_reid_failed_shape_validation_stays_uninitialized(monkeypatch):
+    from miloco.perception.engine.identity.tracker.human_reid import HumanReID
+
+    class FakeSession:
+        def get_inputs(self):
+            return [type("Input", (), {"name": "images", "shape": [1, 3, 256, "unk__994"]})()]
+
+    monkeypatch.setattr(
+        "miloco.perception.inference.ort_utils.make_session",
+        lambda *_args, **_kwargs: FakeSession(),
+    )
+
+    reid = HumanReID(model_path="fake.onnx")
+
+    # 动态维度(非 int)判无效后必须回到未初始化态,不能留下 session 置位、
+    # net 尺寸为 0 的半初始化组合。
+    assert reid.session is None
+    assert reid.net_w == 0
+    assert reid.net_h == 0
+    with pytest.raises(RuntimeError):
+        reid.extract_feature(np.zeros((32, 16, 3), dtype=np.uint8))
+
+
 # =============================================================================
 # v2 ReID 模型 schema / 性能 / L2-norm 验证
 # =============================================================================

@@ -811,7 +811,10 @@ async def run_batch_pipeline(
             room_timing[f"omni_{did}_ms"] = _ms_since(t)
             if diagnostics is not None:
                 diagnostics.omni_status = GraphStatus.OK
-                diagnostics.omni_request_status = GraphStatus.OK
+                # 音频编码失败时请求退化为 text-only:encode 已标 ERROR,request
+                # 保持 SKIPPED,不在这里覆盖成 OK。
+                if diagnostics.media_encode_status is GraphStatus.OK:
+                    diagnostics.omni_request_status = GraphStatus.OK
         except OmniError as omni_err:
             # partial 结果:单设备 omni 失败(超时/429/模型错)→ 记 omni_ms + 失败标记 + log,
             # **不连累整窗**——返回 skipped(omni_output=None;_merge_results line855 会跳过该设备),

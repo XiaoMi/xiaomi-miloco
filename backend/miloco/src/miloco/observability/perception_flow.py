@@ -433,7 +433,6 @@ class PerceptionFlowConfigSnapshot:
     gate_check_fps: int | None = None
     omni_fps: int | None = None
     video_short_edge: int | None = None
-    stream_profile: str | None = None
 
 
 @dataclass
@@ -856,16 +855,6 @@ def _device_node(
         )
         if template.id == "media.decoded":
             input_media = output_media
-    if template.id == "media.decoded":
-        metrics.append(
-            _metric(
-                "stream_profile",
-                "Stream Profile",
-                config.stream_profile,
-                source=GraphSource.CONFIGURED,
-                role=GraphRole.CONFIG,
-            )
-        )
     if template.id == "buffer.sync_window":
         metrics.append(
             _metric(
@@ -1126,15 +1115,15 @@ def _device_node(
                 [
                     _metric("container", "Container", "m4a"),
                     _metric(
-                        "has_audio",
-                        "Has Audio",
-                        diagnostic.encoded_has_audio,
-                    ),
-                    _metric(
                         "audio_sample_rate",
                         "Audio Sample Rate",
                         diagnostic.audio_sample_rate,
                         unit="hz",
+                    ),
+                    _metric(
+                        "has_audio",
+                        "Has Audio",
+                        diagnostic.encoded_has_audio,
                     ),
                 ]
             )
@@ -1212,6 +1201,24 @@ def _device_node(
     )
 
 
+def _is_inactive_edge(
+    source: str,
+    target: str,
+    source_status: GraphStatus,
+    diagnostic: PerDeviceFlowDiagnostics,
+) -> bool:
+    return (
+        (diagnostic.audio_only and target == "media.transform")
+        or source_status
+        in {
+            GraphStatus.SKIPPED,
+            GraphStatus.ERROR,
+            GraphStatus.INACTIVE,
+            GraphStatus.UNKNOWN,
+        }
+    )
+
+
 def _device_edge(
     edge_id: str,
     source: str,
@@ -1222,27 +1229,24 @@ def _device_edge(
 ) -> GraphEdge:
     source_status = _status_for_node(source, diagnostic)
     target_status = _status_for_node(target, diagnostic)
-    active = not (
-        (diagnostic.audio_only and target == "media.transform")
-        or source_status in {
-            GraphStatus.SKIPPED,
-            GraphStatus.ERROR,
-            GraphStatus.INACTIVE,
-            GraphStatus.UNKNOWN,
-        }
-    )
-    status = target_status if active else GraphStatus.INACTIVE
-    if not active:
+    if _is_inactive_edge(source, target, source_status, diagnostic):
+        active = False
         label = (
             "Gate blocked"
             if source == "gate.visual" and target == "identity.track"
             else "Inactive video path"
         )
-    elif source == "omni.sample" and target == "media.encode":
-        label = "Audio bypass"
+        status = GraphStatus.INACTIVE
+        media = None
     else:
-        label = "Frames"
-    media = _edge_media(source, target, diagnostic) if active else None
+        active = True
+        label = (
+            "Audio bypass"
+            if source == "omni.sample" and target == "media.encode"
+            else "Frames"
+        )
+        status = target_status
+        media = _edge_media(source, target, diagnostic)
     return GraphEdge(
         id=edge_id,
         **{"from": source, "to": target},
@@ -1520,7 +1524,6 @@ def _current_config_snapshot() -> PerceptionFlowConfigSnapshot:
             gate_check_fps=gate_config.get("check_fps", 1),
             omni_fps=input_config.get("omni_fps", 1),
             video_short_edge=input_config.get("video_short_edge"),
-            stream_profile="LOW",
         )
     except Exception:
         return PerceptionFlowConfigSnapshot()

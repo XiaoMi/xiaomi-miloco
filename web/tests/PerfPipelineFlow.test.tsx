@@ -6,6 +6,7 @@ import {
   firstPerceptionFlowDeviceId,
   perceptionFlowRefreshDelayMs,
   perceptionFlowRequestDeps,
+  scopeMatchesSelection,
 } from "@/components/PerfPipelineFlow";
 import { decodeGraphResponse } from "@/lib/graphDecode";
 import i18n from "@/i18n";
@@ -76,6 +77,16 @@ describe("PerfPipelineFlow", () => {
   it("selects the first runtime device by default", () => {
     expect(firstPerceptionFlowDeviceId(decodedGraph().summary.devices)).toBe("camera-1");
     expect(firstPerceptionFlowDeviceId([])).toBeUndefined();
+  });
+
+  it("matches global scope (null) against the unselected state (undefined)", () => {
+    // 无设备时后端返回全局图 scope.device_id=null、选中态保持 undefined,
+    // 两者必须视为匹配,否则全局图永不显示。
+    expect(scopeMatchesSelection(null, undefined)).toBe(true);
+    expect(scopeMatchesSelection(undefined, undefined)).toBe(true);
+    expect(scopeMatchesSelection(null, "camera-1")).toBe(false);
+    expect(scopeMatchesSelection("camera-1", undefined)).toBe(false);
+    expect(scopeMatchesSelection("camera-1", "camera-1")).toBe(true);
   });
 
   it("keeps runtime flow refresh independent from the historical window", () => {

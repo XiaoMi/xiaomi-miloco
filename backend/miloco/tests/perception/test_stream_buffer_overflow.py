@@ -56,6 +56,30 @@ def test_clear_action_resets_and_counts():
     assert last_action == "clear"
 
 
+def test_clear_action_counts_each_destroyed_window_once():
+    """clear 分支 dropped 只数实际被销毁的窗口：ready 窗口同时挂在 _windows 与
+    _ready_queue 下，不能两集合相加（否则 ready 窗口被数两遍）。"""
+    buf = MultiTrackSyncBuffer(
+        ["video", "audio"], window_ms=100,
+        max_windows=2, window_settle_ms=50,
+        buffer_full_action="clear",
+    )
+    # 4 个完整窗口:首个(partial)被跳过,至第 4 个 put 时 3 个 ready → 触发 clear。
+    # 触发 put 自身正在写的窗口也在 _windows 里,一并被销毁重开。
+    for i in range(4):
+        wall = (i + 1) * 100
+        buf.put("video", b"v", wall, wall)
+        buf.put("audio", b"a", wall, wall)
+    wall = 1400
+    buf.put("video", b"v", wall, wall)
+    buf.put("audio", b"a", wall, wall)
+
+    dropped, ovf_cnt, max_depth, last_action = buf.consume_drop_stats()
+    assert dropped == 4  # 3 个 ready + 1 个正在写入的窗口,各计一次
+    assert ovf_cnt == 1
+    assert last_action == "clear"
+
+
 def test_keep_action_no_drop_no_stats():
     """keep 模式不触发 full_action,stats 全 0。"""
     buf = MultiTrackSyncBuffer(

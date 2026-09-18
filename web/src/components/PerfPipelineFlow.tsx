@@ -29,6 +29,15 @@ export function firstPerceptionFlowDeviceId(
   return devices[0]?.device_id;
 }
 
+// 无设备时全局图 scope.device_id 为 null,而选中态是 undefined —— 两种"未选设备"
+// 必须视为同一回事,否则空设备场景全局图永不显示。
+export function scopeMatchesSelection(
+  scopeDeviceId: string | null | undefined,
+  selectedDeviceId: string | undefined,
+): boolean {
+  return (scopeDeviceId ?? null) === (selectedDeviceId ?? null);
+}
+
 interface PerfPipelineFlowViewProps {
   graph: GraphResponse | undefined;
   devices: readonly GraphDeviceSummary[];
@@ -205,10 +214,12 @@ export function PerfPipelineFlow({
     };
   }, [refreshSec]);
 
-  const displayedResult =
-    request.data?.graph.scope.device_id === selectedDeviceId
-      ? request.data
-      : undefined;
+  const displayedResult = scopeMatchesSelection(
+    request.data?.graph.scope.device_id,
+    selectedDeviceId,
+  )
+    ? request.data
+    : undefined;
 
   return (
     <PerfPipelineFlowView
