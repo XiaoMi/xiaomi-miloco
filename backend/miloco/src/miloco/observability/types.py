@@ -148,6 +148,8 @@ class ActionLedgerRecord:
     source: str | None = None    # v3: cli | rule
     source_id: str | None = None  # v3: rule 写 rule_id,cli 留空
     home_id: str | None = None   # v4: 设备所属家庭,写入时从 device cache 解析,失败留 NULL
+    phase: str | None = None     # v5: enter | exit | legacy(链路记录之前写入的老行)
+    trigger_event_id: str | None = None  # v5: 触发它的事件 id,无链路留 NULL
 
     def to_row(self) -> dict[str, Any]:
         return {
@@ -167,6 +169,8 @@ class ActionLedgerRecord:
             "source": self.source,
             "source_id": self.source_id,
             "home_id": self.home_id,
+            "phase": self.phase,
+            "trigger_event_id": self.trigger_event_id,
         }
 
 
