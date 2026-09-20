@@ -269,6 +269,9 @@ class RuleRuntimeState:
     duration_window: "deque[int] | None" = None
     last_duration_round: int | None = None
     state_duration_fired: bool = False
+    # 本轮进入边沿那条事件行的 id：进的时候定下, 退出的时候透传(见 _debounced_exit)。
+    # 正常退出的那个感知周期不写事件, 父指针不能在退出那一刻现找, 只能这时存着。
+    round_trigger_event_id: str | None = None
     action_cooldown: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
@@ -804,6 +807,7 @@ class RuleRunner:
         cycle_source_states: Mapping[str, bool] | None = None,
         skip_flicker: bool = False,
         extra_metadata: dict | None = None,
+        trigger_event_id: str | None = None,
     ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
@@ -815,6 +819,13 @@ class RuleRunner:
         matched frame (room name + device ids of the camera that saw it). They
         ride along to the Agent callback on ENTERED and never participate in
         state aggregation; EXITED fires with them empty.
+
+        ``trigger_event_id`` is the id of this cycle's event row (minted on the
+        perception side so that both the early-send and the main loop share
+        one). It rides down to the action ledger's ``trigger_event_id`` column:
+        the ENTERED branch parks it on the rule state so the debounced EXITED
+        can hand the same value to the exit actions. Callers with no event row
+        behind them (record-source ticks) leave it None.
         """
         async with get_monitor().track_async(NodeName.RULE, "update") as h:
             h.add_input(1)
@@ -850,7 +861,8 @@ class RuleRunner:
                     if did not in observed_states
                 )
                 dur_outcome = await self._evaluate_duration(
-                    rule, effective_state, source_did, context, caption, device_name
+                    rule, effective_state, source_did, context, caption, device_name,
+                    trigger_event_id=trigger_event_id,
                 )
                 # out() 对 duration 规则一律取 dur_outcome，其非空由本块位置维持——静态类型
                 # 推不出来，失效后又会被 aggregate_outcomes 的 .get(o, -1) 兜底静默吞掉。
@@ -930,6 +942,7 @@ class RuleRunner:
                 rule, event, source_did, context, trigger_room, trigger_dids,
                 caption=caption, device_name=device_name,
                 extra_metadata=extra_metadata,
+                trigger_event_id=trigger_event_id,
             )
             h.add_output(1)
             if event == RuleEvent.EXITED:
@@ -1033,6 +1046,7 @@ class RuleRunner:
         context: str,
         caption: str = "",
         device_name: str = "",
+        trigger_event_id: str | None = None,
     ) -> TriggerOutcome:
         """每个采样周期采样一次 OR 聚合状态；窗口 True 比例达阈值即 fire。
 
@@ -1150,7 +1164,9 @@ class RuleRunner:
                     **_edge_timestamp(slot, edge_at),
                 },
                 caption=caption, device_name=device_name,
+                trigger_event_id=trigger_event_id,
             )
+            state.round_trigger_event_id = trigger_event_id
             self._sync_record_source(rule, slot)
             return TriggerOutcome.FIRED
 
@@ -1169,6 +1185,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         extra_metadata: dict | None = None,
+        trigger_event_id: str | None = None,
     ) -> TriggerOutcome:
         """Translate a diff event into an action-layer fire (with state-mode
         debounce on EXITED).
@@ -1247,6 +1264,7 @@ class RuleRunner:
                     trigger_room, trigger_dids,
                     extra_metadata=dict(extra_metadata or {}),
                     caption=caption, device_name=device_name,
+                    trigger_event_id=trigger_event_id,
                 )
                 return TriggerOutcome.FIRED
 
@@ -1257,7 +1275,11 @@ class RuleRunner:
                     **(extra_metadata or {}),
                 },
                 caption=caption, device_name=device_name,
+                trigger_event_id=trigger_event_id,
             )
+            # 本轮的事件 id 在这里定下：退出边沿在 debounce 之后才发生, 那一刻的感知
+            # 周期不写事件, 退出支要挂回同一个父只能靠这份记下来的值。
+            state.round_trigger_event_id = trigger_event_id
             self._sync_record_source(rule, slot)
             return TriggerOutcome.FIRED
 
@@ -1375,6 +1397,9 @@ class RuleRunner:
                 rule, RuleEvent.EXITED, sources, context, str(uuid.uuid4()),
                 actual_exited_at=actual_exited_at,
                 extra_metadata=exit_metadata,
+                # 退出支挂回本轮进入时的那条事件: 确认离开的那个感知周期不写事件,
+                # 这里现找只会找到别人的行或空。
+                trigger_event_id=rs.round_trigger_event_id,
             )
         except Exception:
             logger.exception(
@@ -1498,6 +1523,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        trigger_event_id: str | None = None,
     ) -> None:
         """Schedule a fire as a background task; record handle to prevent GC."""
         task = asyncio.create_task(
@@ -1506,6 +1532,7 @@ class RuleRunner:
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
                 action_slot=action_slot,
+                trigger_event_id=trigger_event_id,
             )
         )
         self._fire_tasks.add(task)
@@ -1524,6 +1551,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        trigger_event_id: str | None = None,
     ) -> None:
         try:
             await self._fire(
@@ -1531,6 +1559,7 @@ class RuleRunner:
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
                 action_slot=action_slot,
+                trigger_event_id=trigger_event_id,
             )
         except Exception:
             logger.exception(
@@ -1677,6 +1706,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        trigger_event_id: str | None = None,
     ) -> RuleExecuteResult | None:
         """Pick the slot for (mode, event), execute, write log."""
         slot = self._select_slot(rule, event, action_slot)
@@ -1707,7 +1737,16 @@ class RuleRunner:
         )
 
         if kind == "static":
-            action_results = [await self._execute_action(rule.id, a) for a in value]
+            # 相位跟触发它的事件走, 与台账两列同源: 退出边沿(含 debounce 之后那次真
+            # fire)标 exit, 进入与达标都算触发支。
+            phase = "exit" if event is RuleEvent.EXITED else "enter"
+            action_results = [
+                await self._execute_action(
+                    rule.id, a,
+                    phase=phase, trigger_event_id=trigger_event_id,
+                )
+                for a in value
+            ]
             ok_all = all(r.result for r in action_results)
             exec_result = RuleExecuteResult(
                 event=event,
@@ -1811,13 +1850,17 @@ class RuleRunner:
         ] = time.time()
 
     async def _execute_scene_action(
-        self, rule_id: str, action: RuleAction
+        self,
+        rule_id: str,
+        action: RuleAction,
+        phase: str | None = None,
+        trigger_event_id: str | None = None,
     ) -> RuleActionExecuteResult:
         """触发米家场景（``iid`` 为 SCENE_IID，``did`` 位置是 scene_id）。
 
         去重只靠冷却（原因见 ``SCENE_IID``）。台账由
         ``miot.service._trigger_scene`` 统一落，与 CLI 触发同一形状，只是
-        ``source`` 标成 rule、``source_id`` 写 rule_id。
+        ``source`` 标成 rule、``source_id`` 写 rule_id，链路两列同 ``_execute_action``。
         """
         # service 校验只在 CRUD 走；runner 装载既有规则是直接从 repo 灌进来的，
         # 库里混进 idempotent=true 或 cooldown<1 的场景行都会让 _in_cooldown 直接
@@ -1846,7 +1889,8 @@ class RuleRunner:
 
         try:
             success = await _trigger_scene(
-                self._miot_proxy, action.did, source="rule", source_id=rule_id
+                self._miot_proxy, action.did, source="rule", source_id=rule_id,
+                phase=phase, trigger_event_id=trigger_event_id,
             )
         except Exception as e:
             # 场景不存在 / 不在允许的家庭 / SDK 抛错都归到这里；失败详情进
@@ -1867,7 +1911,11 @@ class RuleRunner:
         )
 
     async def _execute_action(
-        self, rule_id: str, action: RuleAction
+        self,
+        rule_id: str,
+        action: RuleAction,
+        phase: str | None = None,
+        trigger_event_id: str | None = None,
     ) -> RuleActionExecuteResult:
         """Execute a single RuleAction (设备直控路径).
 
@@ -1882,11 +1930,17 @@ class RuleRunner:
         - Dispatch via miot_proxy.set_device_properties /
           call_device_action and report success.
 
+        ``phase`` / ``trigger_event_id`` ride straight into the action ledger
+        and decide nothing here (skipped actions write no row at all).
+
         Cooldown state: ``self._state[rule_id].action_cooldown[(did, iid)]``.
         """
         # 场景没有 siid/aiid 可拆，必须在 iid 解析之前分流。
         if action.iid == SCENE_IID:
-            return await self._execute_scene_action(rule_id, action)
+            return await self._execute_scene_action(
+                rule_id, action,
+                phase=phase, trigger_event_id=trigger_event_id,
+            )
 
         # 白名单式判定：三种形态之外一律报错。少了这道，`scene.1.2` 会掉进
         # 「不是 prop. 就当 action.」的兜底，拿 scene_id 当 did 发出去。
@@ -1970,6 +2024,7 @@ class RuleRunner:
                 action_type=_ltype, did=action.did, iid=action.iid,
                 value_json=_lvalue, result_code=_lcode, result_msg=_lmsg,
                 success=success, error=err, source="rule", source_id=rule_id,
+                phase=phase, trigger_event_id=trigger_event_id,
             )
 
             if success:
@@ -1986,6 +2041,7 @@ class RuleRunner:
                 did=action.did, iid=action.iid, value_json=_lvalue,
                 result_code=None, result_msg=None,
                 success=False, error=str(e), source="rule", source_id=rule_id,
+                phase=phase, trigger_event_id=trigger_event_id,
             )
             logger.error(
                 "Failed to execute action %s %s: %s",

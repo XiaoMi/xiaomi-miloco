@@ -460,7 +460,13 @@ class PipelineProcessor:
 
             artifacts = OmniEventArtifacts()
             try:
-                result, early_sent_contents, early_sent_rule_ids, early_sent_sugg_ids = await self._perception_engine_proxy.realtime_perceive(
+                (
+                    result,
+                    early_sent_contents,
+                    early_sent_rule_ids,
+                    early_sent_sugg_ids,
+                    cycle_event_id,
+                ) = await self._perception_engine_proxy.realtime_perceive(
                     batch, artifacts=artifacts
                 )
             except Exception as e:
@@ -519,6 +525,9 @@ class PipelineProcessor:
                 early_sent_sugg_ids=early_sent_sugg_ids,
                 device_ids=device_ids,
                 artifacts=artifacts,
+                # 本 cycle 事件行的 id:两条规则判定路径与落库共用它,动作台账据此
+                # 挂回事件行(见 handle_realtime_perception_result 的说明)。
+                cycle_event_id=cycle_event_id,
             )
 
             # --- Assemble latency report from result.timing ---

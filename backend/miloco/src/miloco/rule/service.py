@@ -1849,16 +1849,21 @@ class RuleService:
         caption: str = "",
         device_name: str = "",
         cycle_source_states: dict[str, bool] | None = None,
+        trigger_event_id: str | None = None,
     ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
         See :meth:`RuleRunner.update_state`. Returns the resulting
         ``TriggerOutcome`` (surfaced in the resident activity log).
+
+        ``trigger_event_id`` 是感知路径专有的（感知侧 mint 的那条事件行）；record
+        源达标那条路直接调 runner、不走这里，故那边留空。
         """
         return await self._runner.update_state(
             rule_id, source_did, current_bool, context, trigger_room, trigger_dids,
             caption=caption, device_name=device_name,
             cycle_source_states=cycle_source_states,
+            trigger_event_id=trigger_event_id,
         )
 
     # ---- Logs ----
