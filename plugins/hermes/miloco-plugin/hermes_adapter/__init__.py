@@ -9,6 +9,7 @@ backend 启动时按 ``settings.agent.platform == "hermes"`` 加载。
   分级,组装 OpenAI ``<system>`` 消息文本
 - ``send_turn(ctx)``: 同步 POST 到 Hermes ``/v1/chat/completions``,携带 system msg + user msg,
   带 ``X-Hermes-Session-Id`` 头做会话连续;溢出自愈沿用 PR #279 的 best-effort(无 session 重试)
-- ``read_trace_meta(run_id)``: 读 ``$MILOCO_HOME/trace/<run_id>.meta.json``(plugin trace.py 写);
+- ``read_trace_meta(run_id)``: 读 ``$MILOCO_HOME/trace/agent/<YYYYMMDD>/`` 下的 meta.json
+  (plugin trace.py 写);两侧 run_id 口径不同,按发送原文与 meta 的 query 前缀反查;
   文件不存在 / 解析失败 → 返回 None,backend poller 走超时分支
 """

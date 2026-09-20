@@ -12,7 +12,7 @@
 
 #11 trace 读盘约定:
 - Adapter 提供 :meth:`read_trace_meta` 方法,backend 的 ``agent_meta_poller`` 轮询
-  ``get_trace`` 时由 Adapter 实现读 ``MILOCO_HOME/trace/*.meta.json`` 返回。
+  ``get_trace`` 时由 Adapter 实现读 plugin 落盘的 meta 返回,落盘路径由各 plugin 自定。
 - 这是文件 IPC 通道(plugin 写、Adapter 读),避免跨进程 webhook get_trace。
 """
 
@@ -127,10 +127,14 @@ class AgentPlatformAdapter(ABC):
 
     @abstractmethod
     async def read_trace_meta(self, run_id: str) -> Optional[TraceMeta]:
-        """读 ``MILOCO_HOME/trace/<run_id>.meta.json``,返回 :class:`TraceMeta` 或 None。
+        """读 plugin trace 落盘的 meta,返回 :class:`TraceMeta` 或 None。
 
         Backend ``agent_meta_poller`` 轮询 ``get_trace`` 时由本方法读盘返回。
-        Plugin 端 trace.py 负责常写(meta.json),Adapter 不感知写入,只读取。
+        Plugin 端负责写,Adapter 只读。
+
+        注意 ``run_id`` 不一定是文件名——两侧 run_id 口径可能不同(hermes 侧
+        adapter 用 uuid、plugin 用 session_id),如何把 ``run_id`` 关联到盘上那份
+        meta 由各 Adapter 自己决定(hermes 用发送原文与 meta 的 query 前缀匹配)。
         """
 
     async def aclose(self) -> None:
