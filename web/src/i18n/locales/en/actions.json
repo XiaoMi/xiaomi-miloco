@@ -9,6 +9,9 @@
     "typeCallAction": "Call action",
     "typeSceneTrigger": "Trigger scene",
     "typeUnknown": "Unknown action",
-    "limitHint": "Showing the latest 500 actions only"
+    "limitHint": "Showing the latest 500 actions only",
+    "rawKeyTitle": "Raw ledger key: ",
+    "listSep": ", ",
+    "quoted": "“{{v}}”"
   }
 }

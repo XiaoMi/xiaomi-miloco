@@ -4,11 +4,13 @@
  *
  * 数据源:GET /api/actions(observability/router::list_actions)。
  * 返回 BARE JSON 数组(无 {code,data} 信封),新到旧排序。一次 agent 控制/播报/触发一行。
- * ActionRow 展示:时间 · 设备名(米家别名)+ 房间 · 动作类型 humanize + iid + value 截断 · 成功/失败徽标。
+ * ActionRow 展示:时间 · 设备名(米家别名)+ 房间 · 动作人话(读不出时退回动作类型
+ * + 原始 iid + 截断的 value)· 成功/失败徽标。人话的取数与回落见 lib/actionText。
  */
 
 import type { TFunction } from "i18next";
 import { apiFetch } from "@/api/client";
+import { describeAction, type SpecTable } from "@/lib/actionText";
 import { TimeLabel } from "./TimeLabel";
 
 /** backend action_ledger 行——就地类型,不进 lib/types.ts(仅本组件用)。 */
@@ -78,9 +80,21 @@ function truncateValue(v: string | null): string {
  *  成功=低饱和的柔和绿(success-bg,~8-12% alpha 的主题 token)、失败=柔和红(error-bg),
  *  「尽量和原色接近一点,别太扎眼」——不再用统一的 brand 橙;左边条用语义色全值
  *  (2px 细条,比底色略强的强调)。失败徽标保持不变。 */
-export function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
+export function ActionRow({
+  row,
+  t,
+  spec,
+}: {
+  row: BackendActionRow;
+  t: TFunction;
+  /** 该设备(did)的 spec 表,iid → spec。缺省 / 取不到时整行退回原始键——
+   *  日志页顶层没拿到规格不该让动作行消失,退化今天的样子即可。 */
+  spec?: SpecTable;
+}) {
   const ok = row.success === 1;
-  const value = truncateValue(row.value_json);
+  const phrase = describeAction(row, spec, t);
+  // 有了人话就不再重复原始 JSON:值已经读进那句话里,原始键留 chip 可搜。
+  const value = phrase ? "" : truncateValue(row.value_json);
   // 失败原因:优先 result_msg,退回 error;成功时不显。
   const reason = !ok ? row.result_msg || row.error || "" : "";
   const deviceLabel = row.device_name || row.did;
@@ -104,9 +118,18 @@ export function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
             )}
           </div>
           <div className="text-caption text-text-secondary break-words">
-            {t(actionTypeKey(row.action_type))}
+            {phrase ? (
+              <span className="text-text-primary">{phrase}</span>
+            ) : (
+              t(actionTypeKey(row.action_type))
+            )}
             {row.iid && (
-              <span className="text-caption-mono text-text-tertiary ml-1.5">{row.iid}</span>
+              <span
+                className="text-caption-mono text-text-tertiary bg-bg-secondary rounded-sm px-1.5 py-px ml-1.5 break-all"
+                title={`${t("actions.rawKeyTitle")}${row.iid}`}
+              >
+                {row.iid}
+              </span>
             )}
             {value && (
               <span

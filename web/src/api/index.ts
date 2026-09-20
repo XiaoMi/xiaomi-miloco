@@ -7,6 +7,7 @@
  */
 
 import * as realImpl from "./real";
+import type { BackendPropSpec } from "./real";
 import { apiFetch } from "./client";
 import type {
   ActivityEvent,
@@ -53,6 +54,7 @@ import type {
   UpgradeStatus,
 } from "@/lib/types";
 export type { ScopeHome };
+export type { BackendPropSpec };
 
 const impl: typeof realImpl = realImpl;
 
@@ -316,6 +318,15 @@ export async function updateRuleQuery(
 export async function listDevices(homeId?: HomeId): Promise<Device[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListDevices();
+}
+
+/** did → 该设备的 spec 表。日志页把台账里的 iid 翻成人话用。
+ *  与设备控制页共用同一个 /api/miot/home 取数与缓存，不额外拉每台设备的状态。 */
+export async function listDeviceSpecs(
+  homeId?: HomeId,
+): Promise<Map<string, Record<string, BackendPropSpec>>> {
+  if (!isPrimary(homeId)) return new Map();
+  return impl.realDeviceSpecs();
 }
 
 export async function controlDeviceProp(

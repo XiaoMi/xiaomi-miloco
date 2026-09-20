@@ -16,12 +16,14 @@ import {
   eventCropMeta,
   eventRefUrl,
   listActivity,
+  listDeviceSpecs,
   listOnDemandLogs,
   onDemandClipUrl,
   revealDir,
   submitEventFeedback,
   submitOnDemandFeedback,
   subscribeEvents,
+  type BackendPropSpec,
 } from "@/api";
 import {
   humanizeRulesInText,
@@ -297,6 +299,12 @@ export function ActivityFeed({
   const [showActions, setShowActions] = useState(true);
   const [actions, setActions] = useState<BackendActionRow[]>([]);
 
+  /** 设备规格表:did → (iid → spec)。动作行拿它把台账的 iid / value_json 读成人话
+   *  (见 lib/actionText)。与动作流解耦:取不到就不翻,动作行退回原始键。 */
+  const [deviceSpecs, setDeviceSpecs] = useState<
+    Map<string, Record<string, BackendPropSpec>>
+  >(new Map());
+
   /** 动作拉取的 generation token(N1 同款,镜像事件流的 fetchGenRef):首屏先发的
    *  无 home 过滤请求 / 切家前旧请求若晚返回,不得覆盖已按新 home 过滤的结果。 */
   const actionsGenRef = useRef(0);
@@ -338,6 +346,20 @@ export function ActivityFeed({
   useEffect(() => {
     reloadActions();
   }, [reloadActions, homeId]);
+
+  // 设备规格:切家后重取(规格表是 home 级的)。失败静默——动作行自己会退回原始键,
+  // 这条依赖断掉不该让日志页报错或空转。
+  useEffect(() => {
+    let alive = true;
+    listDeviceSpecs(homeId)
+      .then((m) => {
+        if (alive) setDeviceSpecs(m);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [homeId]);
 
   const filterActive = appliedSince !== undefined || appliedBefore !== undefined;
 
@@ -761,7 +783,12 @@ export function ActivityFeed({
                 }}
               />
             ) : (
-              <ActionRow key={`a:${r.action.id}`} row={r.action} t={t} />
+              <ActionRow
+                key={`a:${r.action.id}`}
+                row={r.action}
+                t={t}
+                spec={deviceSpecs.get(r.action.did)}
+              />
             ),
           )}
           {/* 动作拉取达上限(500)**且该上限确实卡住了展示**时才提示 —— 见 actionsTruncated。 */}
