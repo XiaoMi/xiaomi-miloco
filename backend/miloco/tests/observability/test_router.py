@@ -188,3 +188,60 @@ async def test_list_actions_home_filter(app_with_db):
             assert [x["id"] for x in r.json()] == ["legacy", "h1-row"]
     finally:
         await client.stop()
+
+
+async def test_list_actions_trigger_event_filter(app_with_db):
+    """trigger_event_id 过滤(v5):一次取回一条事件的整组动作。
+
+    同一支的触发行与退出行携带同一个值,故这一次查询要同时拿到两条;别的链路与
+    无链路的行都不能混进来。
+    """
+    from miloco.config import get_settings
+    from miloco.observability.types import ActionLedgerRecord
+
+    token = get_settings().server.token
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    app, _db, client = app_with_db
+    await client.start()
+    try:
+        def rec(
+            rid: str, ts: int, phase: str | None, ev: str | None
+        ) -> ActionLedgerRecord:
+            return ActionLedgerRecord(
+                id=rid, timestamp=ts, action_type="set_property", did="d1",
+                device_name=None, room=None, iid="prop.2.1", value_json="true",
+                result_code=None, result_msg=None, success=True, error=None,
+                phase=phase, trigger_event_id=ev,
+            )
+
+        client.record_action(rec("enter-1", 1000, "enter", "ev-1"))
+        client.record_action(rec("exit-1", 2000, "exit", "ev-1"))
+        client.record_action(rec("other", 3000, "enter", "ev-2"))
+        client.record_action(rec("orphan", 4000, None, None))
+        await client.flush()
+
+        with TestClient(app) as tc:
+            # 不带该参数:全部返回(向后兼容)
+            r = tc.get("/api/actions", headers=headers)
+            assert r.status_code == 200
+            assert [x["id"] for x in r.json()] == ["orphan", "other", "exit-1", "enter-1"]
+
+            # 按事件取整组:进入支与退出支一起拿到,别的链路与无链路的行排除
+            r = tc.get("/api/actions?trigger_event_id=ev-1", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["exit-1", "enter-1"]
+            assert {x["phase"] for x in rows} == {"enter", "exit"}
+            assert {x["trigger_event_id"] for x in rows} == {"ev-1"}
+
+            # 与既有条件组合:WHERE 各子句是相加的,缩窗后组内只剩范围内的那条
+            r = tc.get(
+                "/api/actions?trigger_event_id=ev-1&since_ms=1500", headers=headers
+            )
+            assert [x["id"] for x in r.json()] == ["exit-1"]
+
+            # 空值等于不筛(与其余参数同一个惯例):置空后仍是全量,不是零行
+            r = tc.get("/api/actions?trigger_event_id=", headers=headers)
+            assert [x["id"] for x in r.json()] == ["orphan", "other", "exit-1", "enter-1"]
+    finally:
+        await client.stop()
