@@ -348,9 +348,11 @@ export async function triggerScene(id: string): Promise<void> {
 }
 
 // ── 活动 ──────────────────────────────────────────────────
+/** `opts.eventId` = 按主键单查一条事件(反查动作的宿主事件),命中即不看时间窗——
+ *  要反查的场景正是「这条事件已经翻出当前窗口了」。查不到返回空数组。 */
 export async function listActivity(
   homeId?: HomeId,
-  opts?: { since?: number; before?: number; limit?: number; offset?: number },
+  opts?: { since?: number; before?: number; limit?: number; offset?: number; eventId?: string },
 ): Promise<ActivityEvent[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListActivity(opts);

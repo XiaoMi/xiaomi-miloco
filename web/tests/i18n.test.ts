@@ -102,3 +102,38 @@ describe("UsageOmniConfig 引用的 usage.* key 均存在", () => {
     expect(enKeys.has(`usage.${key}`), `en 缺 usage.${key}`).toBe(true);
   });
 });
+
+/**
+ * 日志页(事件流 + 动作流 + 折叠件)引用的 actions.* key 均存在。
+ *
+ * 与上面那段同法,只是被扫的是三个文件。加它的理由:zh/en 对齐那段只比对两侧的
+ * **键集合**——两边都缺同一个键时它照样绿,而界面会原样显示 `actions.badgeAria`。
+ * 组件的静态渲染测试能盖住渲染路径上取到的键,取不到的(查询失败、范围外 chip 这些
+ * 边角分支)只能靠扫源码。
+ *
+ * 只认带引号的字面量:`actions.push` 这种成员访问不是 key。三个文件里的 key 全是
+ * 字面量(没有模板串拼 key),漏网的拼法会在下面那条「至少扫到一批」上先露馅。
+ */
+describe("日志页引用的 actions.* key 均存在", () => {
+  const SOURCES = ["ActivityFeed.tsx", "ActionsFeed.tsx", "FeedFold.tsx"].map((f) =>
+    readFileSync(fileURLToPath(new URL(`../src/components/${f}`, import.meta.url)), "utf8"),
+  );
+  const referenced = [
+    ...new Set(
+      SOURCES.flatMap((src) =>
+        [...src.matchAll(/["'`]actions\.([a-zA-Z0-9_]+)["'`]/g)].map((m) => `actions.${m[1]}`),
+      ),
+    ),
+  ];
+  const zhKeys = new Set(Object.keys(loadDomain("zh", "actions.json")));
+  const enKeys = new Set(Object.keys(loadDomain("en", "actions.json")));
+
+  it("至少扫到一批 key(防正则失效后静默放行)", () => {
+    expect(referenced.length).toBeGreaterThan(20);
+  });
+
+  it.each(referenced)("%s 在 zh 与 en 均有定义", (key) => {
+    expect(zhKeys.has(key), `zh 缺 ${key}`).toBe(true);
+    expect(enKeys.has(key), `en 缺 ${key}`).toBe(true);
+  });
+});

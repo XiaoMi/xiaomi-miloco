@@ -1379,15 +1379,23 @@ interface BackendMeaningfulEvent {
   feedback_pack_size?: number | null;
 }
 
+/** 拉有意义事件列表。
+ *
+ *  `eventId` 是**按主键单查**那条路(反查动作的宿主事件):命中就返回那一条、不看时间窗,
+ *  查不到返回空数组而不是报错——「没有这条事件」是正常答案。调用方是折叠视图里那枚
+ *  「触发事件未加载」的 chip:它要的是**说实话**(那条事件在不在、在哪一刻),不是把它
+ *  抓进列表,所以这里拿到的结果只用于提示、不并进 events。 */
 export async function realListActivity(opts?: {
   since?: number;
   before?: number;
   limit?: number;
   offset?: number;
+  eventId?: string;
 }): Promise<ActivityEvent[]> {
   const params = new URLSearchParams();
   if (opts?.since !== undefined) params.set("since", String(opts.since));
   if (opts?.before !== undefined) params.set("before", String(opts.before));
+  if (opts?.eventId) params.set("event_id", opts.eventId);
   params.set("limit", String(opts?.limit ?? 50));
   if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
   const qs = params.toString();
