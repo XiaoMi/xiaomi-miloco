@@ -472,6 +472,8 @@ class RuleRunner:
             return
 
         if rule.resolved_direction is RuleDirection.EXIT and value:
+            if rule.duration_seconds:
+                return
             if state_machine.runtime_state(rule.task_id) is not TaskRuntimeState.ON:
                 return
             await self._record_source.settle(rule.task_id)

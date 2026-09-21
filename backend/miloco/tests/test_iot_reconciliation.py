@@ -283,6 +283,27 @@ async def test_duration_exit_does_not_release_pending_enter():
 
 
 @pytest.mark.asyncio
+async def test_duration_exit_does_not_reconcile_before_window_is_ready():
+    enter_rule = _iot_rule("enter", RuleDirection.ENTER)
+    exit_rule = _duration_iot_rule("exit", RuleDirection.EXIT)
+    exit_rule.duration_seconds = 6
+    runner, state_machine = _runner_with_state_machine([enter_rule, exit_rule])
+    source = _FakeIotSource({"exit": True})
+    runner._iot_source = source
+    runner._record_source.settle = AsyncMock()
+    runner._fire = AsyncMock()
+    _set_task_on(state_machine, "task-1", "enter")
+
+    await runner._feed_iot("exit", True)
+    await runner.drain()
+
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.ON
+    runner._record_source.settle.assert_not_awaited()
+    runner._fire.assert_not_awaited()
+    assert source.compensated_exit_count == 0
+
+
+@pytest.mark.asyncio
 async def test_session_duration_exit_does_not_release_pending_enter():
     session_rule = _duration_iot_rule(
         "session", RuleDirection.SESSION, duration_ratio=0.5
