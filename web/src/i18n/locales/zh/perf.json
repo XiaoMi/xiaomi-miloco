@@ -73,11 +73,11 @@
 
     "kpiEmptyTrace": "所选窗口内暂无 trace 数据。",
     "kpiCycle": "轮次",
-    "kpiShouldProcess": "应处理",
+    "kpiShouldProcess": "应处理窗口",
     "kpiGateFilterRate": "Gate 过滤率",
     "kpiGateFilterRateHint": "被过滤占比",
     "kpiDropRate": "窗口丢弃率",
-    "kpiDropRateHint": "队列满整窗丢弃",
+    "kpiDropRateHint": "丢弃或跳过的设备窗口占比",
     "kpiOmniErrorRate": "Omni 错误率",
     "kpiOmniErrorRateHint": "omni 推理失败",
     "kpiRtfP95": "实时率 P95",

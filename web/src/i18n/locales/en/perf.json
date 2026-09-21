@@ -73,11 +73,11 @@
 
     "kpiEmptyTrace": "No trace data in the selected window.",
     "kpiCycle": "Cycles",
-    "kpiShouldProcess": "Expected",
+    "kpiShouldProcess": "Expected windows",
     "kpiGateFilterRate": "Gate filter rate",
     "kpiGateFilterRateHint": "share filtered out",
     "kpiDropRate": "Window drop rate",
-    "kpiDropRateHint": "full-window drops when queue is full",
+    "kpiDropRateHint": "dropped or skipped device windows",
     "kpiOmniErrorRate": "Omni error rate",
     "kpiOmniErrorRateHint": "omni inference failures",
     "kpiRtfP95": "RTF P95",
