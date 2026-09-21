@@ -360,6 +360,26 @@ async def test_exit_compensation_aborts_on_stale_value():
 
 
 @pytest.mark.asyncio
+async def test_exit_compensation_checks_current_value_before_settle():
+    enter_rule = _iot_rule("enter", RuleDirection.ENTER)
+    exit_rule = _iot_rule("exit", RuleDirection.EXIT)
+    runner, state_machine = _runner_with_state_machine([enter_rule, exit_rule])
+    source = _FakeIotSource({"exit": False})
+    runner._iot_source = source
+    _set_task_on(state_machine, "task-1", "enter")
+    runner._record_source.settle = AsyncMock()
+    runner._fire = AsyncMock()
+
+    await runner._reconcile_iot_task_state("exit", True)
+    await runner.drain()
+
+    runner._record_source.settle.assert_not_awaited()
+    runner._fire.assert_not_awaited()
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.ON
+    assert source.compensated_exit_count == 0
+
+
+@pytest.mark.asyncio
 async def test_exit_compensation_aborts_when_rule_disabled_during_settle():
     enter_rule = _iot_rule("enter", RuleDirection.ENTER)
     exit_rule = _iot_rule("exit", RuleDirection.EXIT)
@@ -719,3 +739,38 @@ async def test_unknown_guard_recovery_releases_pending_enter():
     assert runner.is_condition_satisfied("guard") is True
     assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
     fired.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_main_rule_unknown_keeps_pending_enter_until_guard_recovers():
+    enter_rule = _iot_rule("enter", RuleDirection.ENTER)
+    guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
+    runner, state_machine = _runner_with_state_machine([enter_rule, guard_rule])
+    source = _FakeIotSource({"enter": True, "guard": False})
+    runner._iot_source = source
+    fired = AsyncMock()
+    runner._fire = fired
+
+    await runner.update_state("guard", "device-1", False, "", skip_flicker=True)
+    blocked = await runner.update_state("enter", "device-1", True, "enter")
+    await runner.drain()
+    assert blocked is TriggerOutcome.STILL_IN
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+
+    runner.mark_source_unknown("enter", "device-1")
+    source.values["enter"] = True
+    recovered_main = await runner.update_state(
+        "enter", "device-1", True, "enter recovered", skip_flicker=True
+    )
+    assert recovered_main is TriggerOutcome.STILL_IN
+
+    source.values["guard"] = True
+    recovered_guard = await runner.update_state(
+        "guard", "device-1", True, "guard recovered", skip_flicker=True
+    )
+    await runner.drain()
+
+    assert recovered_guard is TriggerOutcome.FIRED
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+    fired.assert_awaited_once()
+    assert fired.await_args.args[1] is RuleEvent.ENTERED

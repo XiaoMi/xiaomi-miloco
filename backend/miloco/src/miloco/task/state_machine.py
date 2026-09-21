@@ -432,8 +432,11 @@ class TaskStateMachine:
             if direction not in (RuleDirection.ENTER, RuleDirection.SESSION):
                 pending.pop(rule_id, None)
                 continue
-            if self._is_condition_satisfied(rule_id) is not True:
+            condition_state = self._is_condition_satisfied(rule_id)
+            if condition_state is False:
                 pending.pop(rule_id, None)
+                continue
+            if condition_state is None:
                 continue
             if self._unmet_guards(topology):
                 continue

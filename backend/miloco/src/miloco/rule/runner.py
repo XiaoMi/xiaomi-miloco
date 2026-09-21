@@ -476,6 +476,8 @@ class RuleRunner:
                 return
             if state_machine.runtime_state(rule.task_id) is not TaskRuntimeState.ON:
                 return
+            if not self._iot_reconcile_value_is_current(rule_id, True):
+                return
             await self._record_source.settle(rule.task_id)
             if not self._iot_reconcile_value_is_current(rule_id, True):
                 return
@@ -593,9 +595,6 @@ class RuleRunner:
         src = self._ensure_source(rule_id, source_did)
         src.last_bool = None
         src.pending_exit = False
-        rule = self._rules.get(rule_id)
-        if rule is not None:
-            self._clear_pending_enter(rule.task_id, rule_id)
         state = self._state[rule_id]
         pending = state.exit_debounce_task
         if pending is not None:
