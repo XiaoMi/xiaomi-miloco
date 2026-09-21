@@ -507,7 +507,7 @@ def test_snapshot_carries_relative_seconds_and_cooldown(client):
 async def test_retry_probe_cancelled_falls_back_to_open_recoverable(monkeypatch):
     """review Finding 4:retry_now() 已把 state 置 HALF_OPEN,若 probe_omni 期间
     客户端断开(CancelledError),必须回落 OPEN_RECOVERABLE,让 tick 能重新驱动 probe。
-    修复前:HALF_OPEN 卡死,tick 只 arm OPEN_RECOVERABLE,before_call 又永远短路。"""
+    修复前:HALF_OPEN 卡死,tick 只 arm OPEN_*(HALF_OPEN 不在其列),before_call 又永远短路。"""
     import asyncio
 
     from miloco.admin import router as admin_router
@@ -759,3 +759,79 @@ def test_activate_endpoint_resets_open_config_breaker(client, mock_probe):
     r = client.post("/api/admin/omni-config/activate", json={"label": "乙"})
     assert r.status_code == 200
     assert cb.state_for_test() == CircuitState.CLOSED
+
+
+@pytest.mark.parametrize("failure", ["malformed_url", "settings_error", "reset_then_error"])
+async def test_retry_unexpected_error_releases_slot_and_allows_recovery(monkeypatch, failure):
+    """真实 URL 解析异常与配置读取异常不留 HALF_OPEN;旧探测异常不覆盖新配置。"""
+    from types import SimpleNamespace
+
+    from miloco.admin import router as admin_router
+    from miloco.config.settings import OmniModelSettings
+    from miloco.perception.engine.omni.circuit_breaker import (
+        CircuitState,
+        get_omni_circuit_breaker,
+    )
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    cb = get_omni_circuit_breaker()
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "test", ErrorCategory.CONFIG))
+    # str 校验接受不配对的 IPv6 方括号;真实 probe 在 urlparse 处抛 ValueError。
+    omni = OmniModelSettings(base_url="http://[::1", api_key="test-placeholder")
+    monkeypatch.setattr(admin_router, "get_settings", lambda: SimpleNamespace(model=SimpleNamespace(omni=omni)))
+    expected = ValueError
+    if failure == "settings_error":
+        def broken_settings():
+            raise RuntimeError("settings unavailable")
+        monkeypatch.setattr(admin_router, "get_settings", broken_settings)
+        expected = RuntimeError
+    elif failure == "reset_then_error":
+        async def old_probe(*args):
+            await cb.reset_on_config_change()
+            raise ValueError("old probe failed")
+        monkeypatch.setattr(admin_router._probe, "probe_omni", old_probe)
+
+    with pytest.raises(expected):
+        await admin_router.retry_omni_probe(current_user="test")
+    assert cb.probe_in_flight() is False
+    if failure == "reset_then_error":
+        assert cb.state_for_test() == CircuitState.CLOSED
+        assert cb.snapshot().code is None
+    else:
+        assert cb.state_for_test() == CircuitState.OPEN_RECOVERABLE
+        assert cb.snapshot().code == "unreachable"
+        import time
+        now = time.monotonic()
+        monkeypatch.setattr(time, "monotonic", lambda: now + 601)
+        assert cb.try_arm_probe() is True
+
+
+async def test_retry_result_recording_error_still_releases_slot(monkeypatch):
+    """失败记账本身抛异常时,finally 仍必须清除探测占位。"""
+    from types import SimpleNamespace
+
+    from miloco.admin import router as admin_router
+    from miloco.config.settings import OmniModelSettings
+    from miloco.perception.engine.omni.circuit_breaker import get_omni_circuit_breaker
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    cb = get_omni_circuit_breaker()
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "test", ErrorCategory.CONFIG))
+    omni = OmniModelSettings(api_key="")
+    monkeypatch.setattr(admin_router, "get_settings", lambda: SimpleNamespace(model=SimpleNamespace(omni=omni)))
+
+    async def broken_record(*args):
+        raise RuntimeError("recording unavailable")
+
+    monkeypatch.setattr(cb, "record_probe_result", broken_record)
+    with pytest.raises(RuntimeError, match="recording unavailable"):
+        await admin_router.retry_omni_probe(current_user="test")
+    assert cb.probe_in_flight() is False
