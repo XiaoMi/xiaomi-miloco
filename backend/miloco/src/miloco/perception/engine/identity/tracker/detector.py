@@ -6,7 +6,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -71,6 +71,7 @@ class Detector:
         conf_threshold: float = 0.5,
         iou_threshold: float = 0.7,
         use_gpu: bool = False,
+        session: Any | None = None,
     ):
         """
         初始化检测器
@@ -80,15 +81,18 @@ class Detector:
             conf_threshold: 置信度阈值
             iou_threshold: NMS的IoU阈值
             use_gpu: 是否使用GPU推理
+            session: 可选的共享 ONNX InferenceSession
         """
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
 
         # 加载ONNX模型
-        from miloco.perception.inference.ort_utils import make_session
+        if session is None:
+            from miloco.perception.inference.ort_utils import make_session
 
-        self.session = make_session(self.model_path, use_gpu=use_gpu)
+            session = make_session(self.model_path, use_gpu=use_gpu)
+        self.session = session
 
         # 获取输入输出信息
         self.input_name = self.session.get_inputs()[0].name

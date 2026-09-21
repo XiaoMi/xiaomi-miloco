@@ -5,7 +5,7 @@
 """
 
 import logging
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import cv2
 import numpy as np
@@ -31,6 +31,7 @@ class HumanReID:
         self,
         model_path: str = "models/human_body_reid_v2.onnx",
         use_gpu: bool = False,
+        session: Any | None = None,
     ):
         # v2 模型(10 MB)综合性能均优于旧版,且 input [1,3,192,96] BGR + output
         # head/out_emb:0 [1,1,1,128] + L2-norm 后处理与旧版完全一致,本类的
@@ -41,6 +42,7 @@ class HumanReID:
         Args:
             model_path: ONNX模型路径
             use_gpu: 是否使用GPU推理
+            session: 可选的共享 ONNX InferenceSession
         """
         self.net_h = 192
         self.net_w = 96
@@ -52,7 +54,12 @@ class HumanReID:
         self.output_name = None
         self.model_path = model_path
 
-        self.init(model_path, use_gpu)
+        if session is None:
+            self.init(model_path, use_gpu)
+        else:
+            self.session = session
+            self.input_name = session.get_inputs()[0].name
+            self.output_name = self.output_node
 
     def init(self, model_path: str, use_gpu: bool = False) -> bool:
         """

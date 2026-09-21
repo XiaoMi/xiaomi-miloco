@@ -55,6 +55,7 @@ class DeepSortTracker:
                    max_age_sec 是墙钟秒,各 fps 下一致生效(不再有 fps<=1 的特殊覆盖)。
         reid_model_path: ReID ONNX 路径;默认走 ``HumanReID`` 类内默认 path。
         use_gpu:   ReID 推理是否走 GPU(部署侧)。
+        reid_session: 可选的共享 ReID ONNX InferenceSession。
 
     track_human_only:由 update() 后置剔除,pet 类目标不进 tracks,只保留 HUMAN class。
     """
@@ -66,6 +67,7 @@ class DeepSortTracker:
         fps: int = 1,
         reid_model_path: str | None = None,
         use_gpu: bool = False,
+        reid_session=None,
     ) -> None:
         from miloco.perception.engine.config import DeepSortConfigDC
         from miloco.perception.engine.identity.tracker.config import TrackerConfig
@@ -80,9 +82,16 @@ class DeepSortTracker:
 
         # ReID(默认 v2 模型路径在 HumanReID 类内)
         if reid_model_path:
-            self._human_reid = HumanReID(model_path=reid_model_path, use_gpu=use_gpu)
+            self._human_reid = HumanReID(
+                model_path=reid_model_path,
+                use_gpu=use_gpu,
+                session=reid_session,
+            )
         else:
-            self._human_reid = HumanReID(use_gpu=use_gpu)
+            self._human_reid = HumanReID(
+                use_gpu=use_gpu,
+                session=reid_session,
+            )
 
         # 把 DeepSortConfigDC 业务字段映射到 TrackerConfig;其它字段
         # (max_cosine_distance / max_iou_distance / static_displacement_ratio /
@@ -114,6 +123,10 @@ class DeepSortTracker:
 
     def reset(self) -> None:
         self._mot.reset()
+
+    def release(self) -> None:
+        """Drop this camera wrapper's reference to the shared ReID session."""
+        self._human_reid.release()
 
     def set_fps(self, fps: int) -> None:
         """运行时更新 fps：重算 max_age 帧数并写穿到内部 MultiObjectTracker.config。
