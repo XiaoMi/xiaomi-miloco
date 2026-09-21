@@ -19,10 +19,14 @@ OpenAI 兼容族（MiMo / Qwen）继承 ``OpenAICompatAdapter``，协议方法�
 from __future__ import annotations
 
 import logging
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
+from urllib.parse import urlparse
 
+from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.utils.common import safe_log
 
 logger = logging.getLogger(__name__)
@@ -30,6 +34,43 @@ logger = logging.getLogger(__name__)
 # 已对哪些非 flash 的 gemini model 打过 thinkingBudget=0 告警——进程内按 model 去重,
 # 避免每个推理窗口刷屏(build_request_body 在热路径上每窗调一次)。
 _warned_non_flash_gemini: set[str] = set()
+
+
+def _is_opencode_go_base_url(base_url: str) -> bool:
+    """Return whether ``base_url`` is the official OpenCode Go endpoint."""
+    parsed = urlparse(base_url)
+    path = parsed.path.rstrip("/")
+    return (
+        parsed.scheme.lower() == "https"
+        and (parsed.hostname or "").lower() == "opencode.ai"
+        and (path == "/zen/go" or path.startswith("/zen/go/"))
+    )
+
+
+@lru_cache(maxsize=16)
+def _opencode_session_id(base_url: str) -> str:
+    """Return one process-stable, non-secret routing ID per OpenCode Go endpoint."""
+    return f"ses_{uuid.uuid4().hex}"
+
+
+def build_request_headers(
+    adapter: "OmniProviderAdapter", base_url: str, api_key: str
+) -> dict[str, str]:
+    """Build shared provider headers, including OpenCode Go routing affinity.
+
+    OpenCode Go rejects requests without ``x-opencode-session``. Miloco's omni
+    pipeline has no chat-conversation identifier, so the endpoint-scoped ID is
+    stable for the process lifetime and intentionally contains no credential.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        **adapter.auth_headers(api_key),
+        "User-Agent": MILOCO_USER_AGENT,
+    }
+    if _is_opencode_go_base_url(base_url):
+        normalized = base_url.rstrip("/")
+        headers["x-opencode-session"] = _opencode_session_id(normalized)
+    return headers
 
 
 @dataclass(frozen=True)

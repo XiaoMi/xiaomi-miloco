@@ -191,7 +191,10 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
         return {"ok": False, "code": "unreachable", "message": err}
     # 延迟 import 避免 probe 被 wire 时循环拉起 provider (provider 只依赖标准库,
     # 但保险起见延后到函数内)。
-    from miloco.perception.engine.omni.provider import get_adapter
+    from miloco.perception.engine.omni.provider import (
+        build_request_headers,
+        get_adapter,
+    )
 
     adapter = get_adapter(model)
     body = adapter.build_request_body(
@@ -204,13 +207,8 @@ async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     )
     forced_stream = body.get("stream", False)
     url = adapter.endpoint(base, model, stream=forced_stream)
-    # adapter.auth_headers 走 provider 特化 —— Gemini 用 ``x-goog-api-key`` 头,
-    # OpenAI 兼容族用 ``Authorization: Bearer``。硬编码 Bearer 会对合法 Gemini
-    # 配置误报失败(401)。
-    headers = {
-        **adapter.auth_headers(api_key),
-        "Content-Type": "application/json",
-    }
+    # 统一走 provider 特化鉴权，并确保 probe 与运行时发送相同的附加头。
+    headers = build_request_headers(adapter, base, api_key)
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:

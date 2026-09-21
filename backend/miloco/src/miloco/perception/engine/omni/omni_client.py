@@ -19,14 +19,17 @@ from miloco.perception.engine.omni.circuit_breaker import (
     CircuitOpenError,
     get_omni_circuit_breaker,
 )
-from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.perception.engine.omni.error_classifier import (
     ClassifiedError,
     ErrorCategory,
     classify_exception,
     classify_response,
 )
-from miloco.perception.engine.omni.provider import OmniProviderAdapter, get_adapter
+from miloco.perception.engine.omni.provider import (
+    OmniProviderAdapter,
+    build_request_headers,
+    get_adapter,
+)
 from miloco.perception.snapshot_context import push_omni_trace
 
 logger = logging.getLogger(__name__)
@@ -222,11 +225,7 @@ async def call_omni(
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     short_circuited = False
-    headers = {
-        "Content-Type": "application/json",
-        **adapter.auth_headers(api_key),
-        "User-Agent": MILOCO_USER_AGENT,
-    }
+    headers = build_request_headers(adapter, config.base_url, api_key)
     try:
         await cb.before_call()  # 熔断 OPEN → 直接抛 CircuitOpenError
         async with httpx.AsyncClient(timeout=config.timeout) as client:
@@ -440,11 +439,7 @@ async def call_omni_stream(
         top_p=config.top_p,
         stream=True,
     )
-    headers = {
-        "Content-Type": "application/json",
-        **adapter.auth_headers(api_key),
-        "User-Agent": MILOCO_USER_AGENT,
-    }
+    headers = build_request_headers(adapter, config.base_url, api_key)
     url = adapter.endpoint(config.base_url, config.model, stream=True)
 
     # 累积本次调用最后一次见到的 raw usage（OpenAI 字段），循环结束后统一上报一次，

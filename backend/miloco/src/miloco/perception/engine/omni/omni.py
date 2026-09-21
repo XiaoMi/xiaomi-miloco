@@ -18,7 +18,6 @@ from miloco.perception.engine.omni.circuit_breaker import (
     CircuitOpenError,
     get_omni_circuit_breaker,
 )
-from miloco.perception.engine.omni.constants import MILOCO_USER_AGENT
 from miloco.perception.engine.omni.error_classifier import (
     ClassifiedError,
     ErrorCategory,
@@ -42,7 +41,7 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_stream_prompt,
     format_person_label,
 )
-from miloco.perception.engine.omni.provider import get_adapter
+from miloco.perception.engine.omni.provider import build_request_headers, get_adapter
 from miloco.perception.engine.omni.response_parser import (
     parse_identity_assignments,
     parse_omni_response,
@@ -321,11 +320,7 @@ async def _call_omni_messages(
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     short_circuited = False
-    headers = {
-        "Content-Type": "application/json",
-        **adapter.auth_headers(api_key),
-        "User-Agent": MILOCO_USER_AGENT,
-    }
+    headers = build_request_headers(adapter, config.base_url, api_key)
     try:
         await cb.before_call()
         if not forced_stream:

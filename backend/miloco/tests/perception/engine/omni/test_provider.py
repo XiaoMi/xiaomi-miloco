@@ -7,6 +7,7 @@ from miloco.perception.engine.omni.provider import (
     MiMoAdapter,
     OpenAICompatAdapter,
     QwenOmniAdapter,
+    build_request_headers,
     get_adapter,
 )
 
@@ -19,6 +20,35 @@ _AUDIO_MEDIA = LocalMediaInfo(
     has_audio=True, audio_sample_rate=16000,
 )
 _MESSAGES = [{"role": "user", "content": "test"}]
+
+
+class TestBuildRequestHeaders:
+    adapter = MiMoAdapter()
+
+    def test_opencode_go_gets_stable_session_header(self):
+        first = build_request_headers(
+            self.adapter, "https://opencode.ai/zen/go/v1", "secret-key"
+        )
+        second = build_request_headers(
+            self.adapter, "https://opencode.ai/zen/go/v1/", "secret-key"
+        )
+
+        assert first["x-opencode-session"] == second["x-opencode-session"]
+        assert first["x-opencode-session"].startswith("ses_")
+        assert len(first["x-opencode-session"]) == 36
+        assert "secret-key" not in first["x-opencode-session"]
+        assert first["User-Agent"].startswith("xiaomi-miloco/")
+        assert first["Authorization"] == "Bearer secret-key"
+
+    def test_other_endpoints_do_not_get_opencode_header(self):
+        for base_url in (
+            "https://api.openai.com/v1",
+            "https://opencode.ai/zen/v1",
+            "https://opencode.ai.evil.example/zen/go/v1",
+            "http://opencode.ai/zen/go/v1",
+        ):
+            headers = build_request_headers(self.adapter, base_url, "secret-key")
+            assert "x-opencode-session" not in headers
 
 
 class TestGetAdapter:
