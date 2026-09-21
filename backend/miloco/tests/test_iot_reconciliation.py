@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from miloco.rule.iot_source import IotRef, IotSource
@@ -168,6 +168,17 @@ def _iot_rule(
     )
 
 
+def _duration_iot_rule(
+    rule_id: str,
+    direction: RuleDirection,
+    task_id: str = "task-1",
+) -> Rule:
+    rule = _iot_rule(rule_id, direction, task_id=task_id, exit_debounce_seconds=0)
+    rule.duration_seconds = 1
+    rule.duration_ratio = 1.0
+    return rule
+
+
 def _runner_with_state_machine(rules: list[Rule]):
     runner = RuleRunner(
         rules=rules,
@@ -234,6 +245,40 @@ async def test_exit_rule_compensation_fires_once():
     assert fired == [(RuleEvent.ENTERED, "iot_reconcile_exit")]
     assert source.compensated_exit_count == 1
     runner._record_source.disarm.assert_called_once_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_duration_exit_does_not_release_pending_enter():
+    enter_rule = _iot_rule("enter", RuleDirection.ENTER)
+    exit_rule = _duration_iot_rule("exit", RuleDirection.EXIT)
+    guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
+    runner, state_machine = _runner_with_state_machine(
+        [enter_rule, exit_rule, guard_rule]
+    )
+    source = _FakeIotSource({"enter": True, "exit": True, "guard": False})
+    runner._iot_source = source
+    runner._record_source.settle = AsyncMock()
+    fired: list[tuple[str, RuleEvent]] = []
+
+    async def fire(rule, event, *_args, **_kwargs):
+        fired.append((rule.id, event))
+
+    runner._fire = fire
+
+    await runner.update_state("guard", "device-1", False, "", skip_flicker=True)
+    await runner.update_state("enter", "device-1", True, "", skip_flicker=True)
+    source.values["guard"] = True
+
+    with patch("miloco.rule.runner.time.time") as clock:
+        clock.return_value = 100.0
+        await runner.update_state("exit", "device-1", True, "", skip_flicker=True)
+        clock.return_value = 100.5
+        await runner.update_state("exit", "device-1", True, "", skip_flicker=True)
+
+    await runner.drain()
+
+    assert fired == []
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
 
 
 @pytest.mark.asyncio
