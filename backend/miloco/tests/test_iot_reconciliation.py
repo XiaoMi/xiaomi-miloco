@@ -400,3 +400,49 @@ async def test_guard_refresh_marks_unknown_and_blocks_entry():
     assert runner.is_condition_satisfied("guard") is None
     assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
     runner._fire.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_guard_refresh_releases_entry_that_was_already_blocked():
+    enter_rule = _iot_rule("enter", RuleDirection.ENTER)
+    exit_rule = _iot_rule("exit", RuleDirection.EXIT, value=False)
+    guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
+    runner, state_machine = _runner_with_state_machine(
+        [enter_rule, exit_rule, guard_rule]
+    )
+    source = _FakeIotSource({"guard": False, "exit": False})
+    runner._iot_source = source
+    fired = AsyncMock()
+    runner._fire = fired
+
+    await runner.update_state("guard", "device-1", False, "guard false")
+    outcome = await runner.update_state(
+        "enter",
+        "device-1",
+        True,
+        "主规则进入",
+        trigger_room="客厅",
+        trigger_dids=["camera-1"],
+        caption="有人进入",
+        device_name="客厅摄像头",
+    )
+    await runner.drain()
+
+    assert outcome is TriggerOutcome.STILL_IN
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+    fired.assert_not_awaited()
+
+    source.values["guard"] = True
+    await runner.update_state("guard", "device-1", True, "guard true")
+    await runner.drain()
+
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.ON
+    fired.assert_awaited_once()
+    assert fired.await_args.kwargs["trigger_room"] == "客厅"
+    assert fired.await_args.kwargs["trigger_dids"] == ["camera-1"]
+    assert fired.await_args.kwargs["caption"] == "有人进入"
+    assert fired.await_args.kwargs["device_name"] == "客厅摄像头"
+
+    await runner.update_state("guard", "device-1", True, "guard still true")
+    await runner.drain()
+    fired.assert_awaited_once()

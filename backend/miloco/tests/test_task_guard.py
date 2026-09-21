@@ -35,8 +35,8 @@ class Harness:
         )
 
 
-def _entered(rule_id="r_enter", slot=ActionSlot.ON_ENTER):
-    return TaskSignal("t1", rule_id, SignalKind.ENTERED, slot)
+def _entered(rule_id="r_enter", slot=ActionSlot.ON_ENTER, payload=None):
+    return TaskSignal("t1", rule_id, SignalKind.ENTERED, slot, payload)
 
 
 # ── 前提不产信号 ──────────────────────────────────────────────────
@@ -109,6 +109,61 @@ def test_blocked_event_type_dispatches_nothing():
     h.sm.handle(_entered("a"))
 
     assert h.dispatched == []
+
+
+def test_blocked_event_can_be_released_after_guard_becomes_true():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a", payload={"caption": "原始上下文"})
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [signal]
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_blocked_session_release_enters_once_and_preserves_payload():
+    h = Harness({"s": True, "g": False})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION, "g": RuleDirection.GUARD})
+    signal = _entered("s", payload={"room": "客厅"})
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+    h.satisfied["g"] = True
+
+    released = h.sm.release_pending_enters("t1")
+    assert released == [signal]
+    assert released[0].payload == {"room": "客厅"}
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_pending_enter_is_dropped_when_main_rule_is_no_longer_true():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+    h.satisfied["a"] = False
+    h.satisfied["g"] = True
+
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_pending_enter_is_cleared_by_reconfigure_and_suspend():
+    h = Harness({"g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.sm.reconfigure("t1", {"a": RuleDirection.ENTER})
+    assert h.sm.release_pending_enters("t1") == []
+
+    h.satisfied["g"] = False
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+    h.sm.suspend("t1")
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
 
 
 # ── session 型 task 的前提 ────────────────────────────────────────
