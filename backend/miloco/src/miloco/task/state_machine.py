@@ -375,16 +375,24 @@ class TaskStateMachine:
         unmet = self._unmet_guards(topology)
         if unmet:
             # 条件层锁存后不会再产生同一条 false→true 边沿，因此先保存信号，等前提
-            # 满足后由上游释放。
-            logger.info(
-                "task %s 的进入被前提拦下 (rule=%s): %s",
-                signal.task_id,
-                signal.rule_id,
-                ", ".join(f"{rid}={why}" for rid, why in unmet),
-            )
-            self._pending_enters.setdefault(signal.task_id, {}).setdefault(
-                signal.rule_id, signal
-            )
+            # 满足后由上游释放。保存原始信号也意味着 session 的起点按主条件首次成立
+            # 计，而不是按前提恢复时刻计。
+            pending = self._pending_enters.setdefault(signal.task_id, {})
+            if signal.rule_id not in pending:
+                logger.info(
+                    "task %s 的进入被前提拦下 (rule=%s): %s",
+                    signal.task_id,
+                    signal.rule_id,
+                    ", ".join(f"{rid}={why}" for rid, why in unmet),
+                )
+            else:
+                logger.debug(
+                    "task %s 的进入仍被前提拦下 (rule=%s): %s",
+                    signal.task_id,
+                    signal.rule_id,
+                    ", ".join(f"{rid}={why}" for rid, why in unmet),
+                )
+            pending.setdefault(signal.rule_id, signal)
             return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
 
         if not topology.is_session_type:
@@ -573,9 +581,21 @@ class TaskStateMachine:
                     self._track(TransitionOutcome.SIGNAL_DROPPED, stale)
                 queue.clear()
 
-            was_on = self.runtime_state(task_id) is TaskRuntimeState.ON
-            self._pending_enters.pop(task_id, None)
             new_topology = TaskTopology(task_id, dict(directions))
+            pending = self._pending_enters.get(task_id)
+            if pending is not None:
+                pending = {
+                    rule_id: signal
+                    for rule_id, signal in pending.items()
+                    if new_topology.directions.get(rule_id)
+                    in (RuleDirection.ENTER, RuleDirection.SESSION)
+                }
+                if pending:
+                    self._pending_enters[task_id] = pending
+                else:
+                    self._pending_enters.pop(task_id, None)
+
+            was_on = self.runtime_state(task_id) is TaskRuntimeState.ON
             self._topologies[task_id] = new_topology
             self._queues.setdefault(task_id, deque(maxlen=SIGNAL_QUEUE_DEPTH))
             self._wakeups.setdefault(task_id, asyncio.Event())

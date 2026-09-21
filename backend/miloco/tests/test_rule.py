@@ -2626,6 +2626,21 @@ class TestRuleRunnerEventDuration:
         )
 
     @pytest.mark.asyncio
+    async def test_duration_entry_refreshes_iot_guards_before_gate(
+        self, runner_fast, monkeypatch
+    ):
+        rule = _make_event_duration_rule(rule_id="rule-guard-refresh", duration_seconds=1)
+        runner_fast._sample_interval = 1
+        runner_fast.add_rule(rule)
+        refresh = AsyncMock()
+        monkeypatch.setattr(runner_fast, "_refresh_iot_guards", refresh)
+
+        with patch("miloco.rule.runner.time.time", return_value=100.0):
+            await runner_fast._evaluate_duration(rule, True, "cam-001", "")
+
+        refresh.assert_awaited_once_with(rule.task_id, rule.id)
+
+    @pytest.mark.asyncio
     async def test_duration_none_fires_immediately(
         self, runner_fast, mock_miot_proxy
     ):

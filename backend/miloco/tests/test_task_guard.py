@@ -103,6 +103,20 @@ def test_event_type_blocked_when_guard_false():
     assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
 
 
+def test_blocked_enter_is_logged_once_while_waiting_for_guard(caplog):
+    h = Harness({"g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    blocked_logs = [
+        record for record in caplog.records if "的进入被前提拦下" in record.message
+    ]
+    assert len(blocked_logs) == 1
+
+
 def test_blocked_event_type_dispatches_nothing():
     h = Harness({"g": False})
     h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
@@ -171,13 +185,30 @@ def test_pending_enter_is_dropped_when_main_rule_is_no_longer_true():
     assert h.sm.release_pending_enters("t1") == []
 
 
-def test_pending_enter_is_cleared_by_reconfigure_and_suspend():
+def test_reconfigure_preserves_pending_enter_that_remains_an_entry_rule():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.sm.reconfigure("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [signal]
+
+
+def test_reconfigure_drops_pending_enter_removed_from_entry_topology():
     h = Harness({"g": False})
     h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
     assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
 
-    h.sm.reconfigure("t1", {"a": RuleDirection.ENTER})
+    h.sm.reconfigure("t1", {"g": RuleDirection.GUARD})
     assert h.sm.release_pending_enters("t1") == []
+
+
+def test_suspend_clears_pending_enter():
+    h = Harness({"g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
 
     h.satisfied["g"] = False
     h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})

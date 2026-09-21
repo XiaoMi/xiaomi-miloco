@@ -349,6 +349,34 @@ def test_enter_rule_with_completed_record_still_filtered_out(real_db):
     assert skipped == ["t_focus"]
 
 
+def test_guard_of_completed_event_task_is_filtered_with_entry_rule(real_db):
+    _insert_task("t_focus")
+    _insert_duration_record("t_focus", "completed")
+
+    rules = [
+        _make_rule("r-enter", "t_focus", "event", "enter"),
+        _make_rule("r-guard", "t_focus", "event", "guard"),
+    ]
+    kept, skipped = _filter_completed_event_rules(rules)
+
+    assert kept == []
+    assert skipped == ["t_focus"]
+
+
+def test_guard_of_completed_session_task_is_kept(real_db):
+    _insert_task("t_focus")
+    _insert_duration_record("t_focus", "completed")
+
+    rules = [
+        _make_rule("r-session", "t_focus", "state", "session"),
+        _make_rule("r-guard", "t_focus", "event", "guard"),
+    ]
+    kept, skipped = _filter_completed_event_rules(rules)
+
+    assert [r["id"] for r in kept] == ["r-session", "r-guard"]
+    assert skipped == []
+
+
 def test_milestone_rule_with_completed_record_kept(real_db):
     """达标规则的条件来自 record 源, 不走摄像头, 剔它没有意义。"""
     _insert_task("t_focus")

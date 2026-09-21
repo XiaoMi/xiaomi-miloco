@@ -207,6 +207,25 @@ def _is_enter_rule(rule: dict) -> bool:
     return getattr(mode, "value", mode) == RuleMode.EVENT.value
 
 
+def _direction_value(rule: dict) -> str:
+    raw = rule.get("direction")
+    if raw:
+        return getattr(raw, "value", raw)
+    return ""
+
+
+def _is_session_rule(rule: dict) -> bool:
+    from miloco.rule.schema import RuleDirection
+
+    return _direction_value(rule) == RuleDirection.SESSION.value
+
+
+def _is_guard_rule(rule: dict) -> bool:
+    from miloco.rule.schema import RuleDirection
+
+    return _direction_value(rule) == RuleDirection.GUARD.value
+
+
 def _filter_completed_event_rules(
     rules: list[dict],
 ) -> tuple[list[dict], list[str]]:
@@ -249,6 +268,18 @@ def _filter_completed_event_rules(
             skipped.add(tid)
             continue
         kept.append(r)
+
+    kept_task_ids_with_entry = {
+        r.get("task_id")
+        for r in kept
+        if r.get("task_id") and (_is_enter_rule(r) or _is_session_rule(r))
+    }
+    kept = [
+        r
+        for r in kept
+        if not _is_guard_rule(r)
+        or r.get("task_id") in kept_task_ids_with_entry
+    ]
     return kept, sorted(skipped)
 
 

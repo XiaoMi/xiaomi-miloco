@@ -1229,6 +1229,8 @@ class RuleRunner:
                 # 瞬时翻转那条路同一份处理, 两条都是退出的入口。
                 await self._record_source.settle(rule.task_id)
 
+            await self._refresh_iot_guards(rule.task_id, rule.id)
+
             sources = self._sources_currently_true(rule.id) or [source_did]
             payload = PendingEnterContext(
                 sources=sources,
@@ -1573,6 +1575,8 @@ class RuleRunner:
                 payload.context,
                 payload.trigger_room,
                 payload.trigger_dids,
+                # Guard 只延迟动作，不改写主条件成立的时间；record session 因此从
+                # 原始进入边沿开始计，而不是从前提恢复时刻重新起算。
                 extra_metadata=payload.extra_metadata,
                 caption=payload.caption,
                 device_name=payload.device_name,
