@@ -274,6 +274,15 @@ class CameraSettings(BaseModel):
     """摄像头采集参数。"""
 
     frame_interval: int = Field(default=1000, description="帧采集间隔（毫秒）")
+    decoded_frame_interval: int = Field(
+        default=0,
+        ge=0,
+        le=10_000,
+        description=(
+            "无人直播/录像时的感知 BGR 帧回调最小间隔（毫秒）；"
+            "实时订阅期间自动恢复全帧率，0 始终不限流。"
+        ),
+    )
     max_cache_images: int = Field(default=6, description="最大缓存图像数量")
 
 
@@ -296,6 +305,10 @@ class PerceptionCollectSettings(BaseModel):
     """感知采集模块窗口参数。"""
 
     window_size: int = Field(default=4, description="时间窗口大小（秒）")
+    stagger_devices: bool = Field(
+        default=False,
+        description="多摄像头按 1/N 周期均匀错开感知窗口（默认关闭）",
+    )
     max_windows: int = Field(default=3, description="最大待处理窗口数")
     settle_ms: int = Field(default=500, description="等待慢轨道的宽限期（毫秒）")
     full_action: str = Field(

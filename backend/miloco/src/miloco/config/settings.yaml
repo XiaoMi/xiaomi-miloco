@@ -62,6 +62,7 @@ notify:
 # 摄像头采集参数
 camera:
   frame_interval: 1000   # 帧采集间隔（毫秒）
+  decoded_frame_interval: 0  # 无直播/录像时的感知 BGR 回调间隔；实时订阅自动全速；0=不限流
   max_cache_images: 6    # 最大缓存图像数量
 
 # 规则引擎相关配置
@@ -75,6 +76,7 @@ perception:
   tier_u_dump_enable: false    # POST /api/identity/pool/dump 调试端点开关（生产保持 false，本地调试可设 true）
   collect:
     window_size: 4           # 时间窗口大小（秒）
+    stagger_devices: false   # 多摄像头按 1/N 周期错峰；默认关闭以保持旧行为
     max_windows: 3           # 最大待处理窗口数
     settle_ms: 500           # 等待慢轨道的宽限期（毫秒）
     full_action: "clear"     # 窗口满载处理策略：drop | clear | keep

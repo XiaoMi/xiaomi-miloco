@@ -271,6 +271,9 @@ class MiotProxy:
 
         _settings = get_settings()
         self._frame_interval: int = _settings.camera.frame_interval
+        self._decoded_frame_interval: int = (
+            _settings.camera.decoded_frame_interval
+        )
         self._max_cache_images: int = _settings.camera.max_cache_images
 
         # two times cache ttl, at least 1 second
@@ -762,12 +765,16 @@ class MiotProxy:
         camera_id: str,
         channel: int,
         callback: Callable[[str, VideoFrame, int, int], Coroutine],
+        *,
+        full_rate: bool = False,
     ) -> int:
         if camera_id not in self._camera_img_managers:
             logger.warning("Camera %s not found in managers", camera_id)
             return -1
         instance = self._camera_img_managers[camera_id]
-        reg_id = await instance.register_decode_video_frame_stream(callback, channel)
+        reg_id = await instance.register_decode_video_frame_stream(
+            callback, channel, full_rate=full_rate
+        )
         logger.info(
             "Started decode video frame stream, camera_id: %s, channel: %s, reg_id: %d",
             camera_id,
@@ -863,7 +870,9 @@ class MiotProxy:
     ) -> MIoTCameraInstance | None:
         try:
             return await self._miot_client.create_camera_instance_async(
-                camera_info, frame_interval=self._frame_interval
+                camera_info,
+                frame_interval=self._frame_interval,
+                decoded_frame_interval=self._decoded_frame_interval,
             )
         except Exception as e:
             logger.error("Failed to get camera instance: %s", e)

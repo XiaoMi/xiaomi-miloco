@@ -794,6 +794,7 @@ class MIoTClient:
         self,
         camera_info: MIoTCameraInfo,
         frame_interval: int = 500,
+        decoded_frame_interval: int = 0,
         enable_hw_accel: bool = True,
     ) -> MIoTCameraInstance:
         """Create camera instance.
@@ -807,6 +808,7 @@ class MIoTClient:
         return await self._camera_client.create_camera_async(
             camera_info=camera_info,
             frame_interval=frame_interval,
+            decoded_frame_interval=decoded_frame_interval,
             enable_hw_accel=enable_hw_accel,
         )
 

@@ -1048,7 +1048,11 @@ async def test_create_camera_img_manager_denied_by_disabled(_scope_proxy_env):
     result = await proxy._create_camera_img_manager(cam)
 
     # create_camera_instance_async 仍然被调(不 gate)，但返回 None 时 manager=None
-    miot_client.create_camera_instance_async.assert_called_once()
+    miot_client.create_camera_instance_async.assert_awaited_once_with(
+        cam,
+        frame_interval=1000,
+        decoded_frame_interval=0,
+    )
     assert result is None  # instance 为 None 时 handler 不建
     assert "c1" not in proxy._camera_img_managers
 

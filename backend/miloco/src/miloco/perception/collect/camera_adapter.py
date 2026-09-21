@@ -86,6 +86,19 @@ DEFAULT_AUDIO_CHANNEL = 0
 _CHANNEL_SEP = ":ch"
 
 
+def _window_phase_offsets(
+    dids: list[str], *, window_ms: int, enabled: bool
+) -> dict[str, int]:
+    """Return deterministic, evenly spaced window phases for camera IDs."""
+    if window_ms <= 0:
+        raise ValueError("window_ms must be positive")
+    ordered = sorted(dids)
+    if not enabled or len(ordered) <= 1:
+        return {did: 0 for did in ordered}
+    count = len(ordered)
+    return {did: index * window_ms // count for index, did in enumerate(ordered)}
+
+
 def split_channel_did(did: str) -> tuple[str, int]:
     """拆合成 did → (物理 did, 通道号)。
 
@@ -141,6 +154,29 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self._last_ondemand_refresh_ms = 0
         # 静默重连防抖标记：did -> 最近一次重连的 monotonic ms。
         self._last_reconnect_ms: dict[str, int] = {}
+
+    def _rebalance_window_phases(self) -> int:
+        """Evenly stagger connected cameras using stable synthetic-DID order."""
+        collect_cfg = get_settings().perception.collect
+        window_ms = collect_cfg.window_size * 1000
+        offsets = _window_phase_offsets(
+            list(self._devices),
+            window_ms=window_ms,
+            enabled=getattr(collect_cfg, "stagger_devices", False),
+        )
+        changed = 0
+        for did, phase_ms in offsets.items():
+            if self._devices[did].sync_buffer.set_phase_offset_ms(phase_ms):
+                changed += 1
+        if changed:
+            logger.info(
+                "[camera] Rebalanced perception window phases: devices=%d "
+                "window_ms=%d offsets=%s",
+                len(offsets),
+                window_ms,
+                offsets,
+            )
+        return changed
 
     async def discover_devices(
         self,
@@ -292,6 +328,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             all_devices, disconnect_require_lan=disconnect_require_lan
         )
         await self._converge_feed_cap(all_devices)
+        self._rebalance_window_phases()
 
     async def _converge_feed_cap(self, all_devices: dict | None = None) -> None:
         """把超出投喂上限的通道断掉,口径与 select_active_camera_dids 完全一致。
