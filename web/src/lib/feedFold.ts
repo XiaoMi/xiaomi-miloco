@@ -147,6 +147,21 @@ export function orphanChipOf(action: FoldActionLike): FoldChip {
   return action.phase === "legacy" ? "preLink" : "noTrigger";
 }
 
+/** 事件行底下要替哪几支画成员表:**只有强档画**。
+ *
+ *  弱档那一支自己就占一行、自己展开(见 FeedFold 的 BranchRow),而展开集合是与强档
+ *  **共用的一把键**。若这里也跟着 openKeys 画,同一份成员表会在一屏里出现两次,连同
+ *  FoldMembers 里那两个 id(`m-<key>` / `<key>-m0`)一起在文档里重一遍——三枚
+ *  aria-controls 指向一个存在两份的 id。两档的渲染面各归各:强档并进事件行,弱档留在
+ *  支行自己身上。 */
+export function inlinedBranches(
+  strength: FoldStrength,
+  branches: FoldBranch[],
+  openKeys: ReadonlySet<string>,
+): FoldBranch[] {
+  return strength === "strong" ? branches.filter((b) => openKeys.has(b.key)) : [];
+}
+
 /** 装配折叠视图的行。返回的行已按「新的在前」排好,**同秒时动作在它的事件之前**
  *  (降序里动作更靠前)。
  *

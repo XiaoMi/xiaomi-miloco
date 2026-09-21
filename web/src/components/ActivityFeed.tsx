@@ -30,7 +30,13 @@ import {
   splitHumanizedSections,
   type TriggerStatusKind,
 } from "@/lib/eventText";
-import { buildFoldRows, foldCounts, feedLowerBound, type FoldBranch } from "@/lib/feedFold";
+import {
+  buildFoldRows,
+  foldCounts,
+  feedLowerBound,
+  inlinedBranches,
+  type FoldBranch,
+} from "@/lib/feedFold";
 import { smartTimeLabel } from "@/lib/relativeTime";
 import type { ActivityEvent, EventCropMeta, HomeId, OnDemandLogEntry } from "@/lib/types";
 import { useFoldStrength } from "@/hooks/useFoldStrength";
@@ -906,7 +912,7 @@ export function ActivityFeed({
                   />
                 )),
               ];
-              const opened = r.branches.filter((b) => openKeys.has(b.key));
+              const opened = inlinedBranches(strength, r.branches, openKeys);
               return (
                 <ActivityRow
                   key={`e:${r.key}`}

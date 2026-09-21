@@ -15,6 +15,7 @@ import {
   buildFoldRows,
   foldCounts,
   formatLatency,
+  inlinedBranches,
   latencyMs,
   orphanChipOf,
   type FoldActionLike,
@@ -195,6 +196,34 @@ describe("buildFoldRows — 块级窗口", () => {
       { beforeMs: DAY + 820 },
     );
     expect(branchesOf(rows, "e1")).toHaveLength(1);
+  });
+});
+
+describe("inlinedBranches — 事件行底下的成员表只归强档", () => {
+  const branch = (phase: string): FoldBranch => ({
+    key: `e1::${phase}`,
+    eventId: "e1",
+    phase,
+    ts: DAY,
+    actions: [],
+    failed: false,
+    chip: null,
+  });
+  const enter = branch("enter");
+  const exit = branch("exit");
+
+  it("强档:展开的那支并进事件行", () => {
+    expect(inlinedBranches("strong", [enter, exit], new Set(["e1::enter"]))).toEqual([enter]);
+  });
+
+  it("强档:没展开的不并", () => {
+    expect(inlinedBranches("strong", [enter, exit], new Set())).toEqual([]);
+  });
+
+  // 弱档那一支自己成行、自己展开,而展开集合是与强档**共用的一把键**。这里若跟着画,
+  // 一屏里就有两份成员表,连同 `m-<key>` / `<key>-m0` 两个 id 也在文档里各重一遍。
+  it("弱档:一支都不并,哪怕它的键就在展开集合里", () => {
+    expect(inlinedBranches("weak", [enter, exit], new Set(["e1::enter"]))).toEqual([]);
   });
 });
 
