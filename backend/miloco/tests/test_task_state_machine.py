@@ -137,6 +137,27 @@ def test_exit_when_already_off_is_noop():
     assert h.dispatched == []
 
 
+def test_reconcile_exit_is_atomic_and_idempotent():
+    h = Harness()
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
+    assert h.sm.handle(_entered(rule_id="a")) is TransitionOutcome.ENTERED
+    h.dispatched.clear()
+
+    assert h.sm.reconcile_exit("t1", "x") is TransitionOutcome.EXITED
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.sm.reconcile_exit("t1", "x") is TransitionOutcome.ALREADY_OFF
+    assert h.dispatched == []
+
+
+def test_reconcile_exit_rejects_session_direction():
+    h = Harness()
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION})
+
+    assert h.sm.reconcile_exit("t1", "s") is TransitionOutcome.UNKNOWN_RULE
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.dispatched == []
+
+
 # ── 非互反模式 + §5.1 稳态交叉判定 ────────────────────────────────────
 
 

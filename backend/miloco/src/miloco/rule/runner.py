@@ -66,6 +66,7 @@ from miloco.rule.schema import (
 from miloco.task.state_machine import (
     ActionSlot,
     SignalKind,
+    TaskRuntimeState,
     TaskSignal,
     TaskStateMachine,
     TransitionOutcome,
@@ -76,6 +77,7 @@ from miloco.utils.time_utils import ms_to_iso_local, now_ms
 logger = logging.getLogger(__name__)
 
 _EMPTY_RESULT_MSG = "MIoT 返回为空/不可判定,无法确认执行结果"
+_IOT_RECONCILE_CONTEXT = "iot_reconcile_exit"
 
 
 def _summarize_rule_result(obj: object) -> tuple[bool, int | None, str | None]:
@@ -272,6 +274,17 @@ class RuleRuntimeState:
     action_cooldown: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
+@dataclass
+class PendingEnterContext:
+    sources: list[str]
+    context: str
+    trigger_room: str = ""
+    trigger_dids: list[str] | None = None
+    extra_metadata: dict | None = None
+    caption: str = ""
+    device_name: str = ""
+
+
 class RuleRunner:
     """V3 rule runner: per-frame state diff + slot-aware execution."""
 
@@ -443,6 +456,85 @@ class RuleRunner:
             context="iot",
             skip_flicker=True,
         )
+        await self._reconcile_iot_task_state(rule_id, value)
+
+    async def _reconcile_iot_task_state(self, rule_id: str, value: bool) -> None:
+        rule = self._rules.get(rule_id)
+        source = self._iot_source
+        state_machine = self._state_machine
+        if (
+            rule is None
+            or source is None
+            or state_machine is None
+            or not self._is_effectively_enabled(rule)
+            or not state_machine.owns(rule.task_id)
+        ):
+            return
+
+        if rule.resolved_direction is RuleDirection.EXIT and value:
+            if state_machine.runtime_state(rule.task_id) is not TaskRuntimeState.ON:
+                return
+            await self._record_source.settle(rule.task_id)
+            if not self._iot_reconcile_value_is_current(rule_id, True):
+                return
+            if not self._is_effectively_enabled(rule):
+                return
+            if state_machine.runtime_state(rule.task_id) is not TaskRuntimeState.ON:
+                return
+            outcome = state_machine.reconcile_exit(rule.task_id, rule.id)
+            if outcome is not TransitionOutcome.EXITED:
+                return
+            self._record_source.disarm(rule.task_id)
+            self._spawn_fire(
+                rule,
+                RuleEvent.ENTERED,
+                self._sources_currently_true(rule_id),
+                _IOT_RECONCILE_CONTEXT,
+                action_slot=ActionSlot.ON_EXIT,
+                actual_exited_at=ms_to_iso_local(now_ms()),
+            )
+            source.record_compensated_exit()
+            logger.info(
+                "IOT_RECONCILE_EXIT: rule=%s task=%s direction=exit",
+                rule.id,
+                rule.task_id,
+            )
+            return
+
+        if rule.resolved_direction is not RuleDirection.SESSION or value:
+            return
+        if state_machine.runtime_state(rule.task_id) is not TaskRuntimeState.ON:
+            return
+        state = self._ensure_state(rule_id)
+        if state.exit_debounce_task is not None:
+            return
+        await self._dispatch_event(
+            rule,
+            RuleEvent.EXITED,
+            self._iot_source_did(rule_id),
+            _IOT_RECONCILE_CONTEXT,
+        )
+        if state.exit_debounce_task is not None:
+            logger.info(
+                "IOT_RECONCILE_EXIT: rule=%s task=%s direction=session",
+                rule.id,
+                rule.task_id,
+            )
+
+    def _iot_reconcile_value_is_current(
+        self, rule_id: str, expected: bool
+    ) -> bool:
+        source = self._iot_source
+        rule = self._rules.get(rule_id)
+        if source is None or rule is None or not self._is_effectively_enabled(rule):
+            return False
+        value, _ = source.evaluate_current(rule_id)
+        if value is None:
+            ref = iot_ref_of(rule)
+            if ref is not None:
+                self.mark_source_unknown(rule_id, ref.did)
+            return False
+        return value is expected
 
     def _iot_source_did(self, rule_id: str) -> str:
         ref = self._iot_ref_of_rule(rule_id)
@@ -499,6 +591,9 @@ class RuleRunner:
         src = self._ensure_source(rule_id, source_did)
         src.last_bool = None
         src.pending_exit = False
+        rule = self._rules.get(rule_id)
+        if rule is not None:
+            self._clear_pending_enter(rule.task_id, rule_id)
         state = self._state[rule_id]
         pending = state.exit_debounce_task
         if pending is not None:
@@ -722,6 +817,9 @@ class RuleRunner:
         # record timer 不在 state 里 (它按 rule_id 存在 record 源那边), 所以先撤,
         # 且不受下面 state 为空的早返影响。
         self._record_source.cancel_rule(rule_id)
+        rule = self._rules.get(rule_id)
+        if rule is not None:
+            self._clear_pending_enter(rule.task_id, rule_id)
         state = self._state.pop(rule_id, None)
         if state is None:
             return
@@ -769,6 +867,8 @@ class RuleRunner:
         """
         if paused:
             self._paused_tasks.add(task_id)
+            if self._state_machine is not None:
+                self._state_machine.clear_pending_enters(task_id)
             for rule in self._rules.values():
                 if rule.task_id == task_id:
                     self._reset_runtime_state(rule.id)
@@ -921,6 +1021,11 @@ class RuleRunner:
             rule_state.last_rule_state = new_rule_state
 
             if old_rule_state == new_rule_state:
+                if new_rule_state and rule.resolved_direction in (
+                    RuleDirection.ENTER,
+                    RuleDirection.SESSION,
+                ) and await self._release_pending_enters(rule.task_id):
+                    return TriggerOutcome.FIRED
                 return out(
                     TriggerOutcome.STILL_IN if new_rule_state else TriggerOutcome.NOT_FIRED
                 )
@@ -1124,7 +1229,18 @@ class RuleRunner:
                 # 瞬时翻转那条路同一份处理, 两条都是退出的入口。
                 await self._record_source.settle(rule.task_id)
 
-            if not self._state_machine_allows(rule, RuleEvent.ENTERED):
+            sources = self._sources_currently_true(rule.id) or [source_did]
+            payload = PendingEnterContext(
+                sources=sources,
+                context=context,
+                extra_metadata={
+                    "duration_seconds": rule.duration_seconds,
+                    **_edge_timestamp(slot, edge_at),
+                },
+                caption=caption,
+                device_name=device_name,
+            )
+            if not self._state_machine_allows(rule, RuleEvent.ENTERED, payload):
                 # 在清窗口 / 标记 fired 之前问闸：被吞掉时这两样都不该动，否则
                 # 白丢一次累积。
                 return TriggerOutcome.STILL_IN
@@ -1139,16 +1255,12 @@ class RuleRunner:
                 # session：标记 fired 拦截 STILL_IN 重复 fire；窗口留着无害
                 # （fired 拦截了，后续 evaluate 不会用），_debounced_exit 真完成时一并清
                 state.state_duration_fired = True
-            sources = self._sources_currently_true(rule.id) or [source_did]
             self._spawn_fire(
                 rule,
                 RuleEvent.ENTERED,
                 sources,
                 context,
-                extra_metadata={
-                    "duration_seconds": rule.duration_seconds,
-                    **_edge_timestamp(slot, edge_at),
-                },
+                extra_metadata=payload.extra_metadata,
                 caption=caption, device_name=device_name,
             )
             self._sync_record_source(rule, slot)
@@ -1178,6 +1290,11 @@ class RuleRunner:
         ``NOT_FIRED`` — for duration rules the caller ignores this and uses
         ``_evaluate_duration``."""
         state = self._ensure_state(rule.id)
+        if event is RuleEvent.ENTERED and rule.resolved_direction is RuleDirection.GUARD:
+            released = await self._release_pending_enters(rule.task_id)
+            return TriggerOutcome.FIRED if released else TriggerOutcome.NOT_FIRED
+        if event is RuleEvent.EXITED:
+            self._clear_pending_enter(rule.task_id, rule.id)
         if event == RuleEvent.ENTERED:
             # 进入分支瞬间锚定 wall-clock 作为边沿时刻：fire 到达 agent 时已晚 N 秒
             # （链路延迟），但 metadata 时间戳是过去时刻，agent --at <ts> 不受影响。
@@ -1227,12 +1344,26 @@ class RuleRunner:
                 # off 之前 —— 翻完再喂会被 NOT_IN_SESSION 拦掉, 这一天的达标就丢了。
                 await self._record_source.settle(rule.task_id)
 
-            if not self._state_machine_allows(rule, RuleEvent.ENTERED):
+            await self._refresh_iot_guards(rule.task_id, rule.id)
+
+            sources = self._sources_currently_true(rule.id) or [source_did]
+            payload = PendingEnterContext(
+                sources=sources,
+                context=context,
+                trigger_room=trigger_room,
+                trigger_dids=trigger_dids,
+                extra_metadata={
+                    **_edge_timestamp(slot, edge_at),
+                    **(extra_metadata or {}),
+                },
+                caption=caption,
+                device_name=device_name,
+            )
+            if not self._state_machine_allows(rule, RuleEvent.ENTERED, payload):
                 # 状态机吞掉了这次边沿（已在态内 / 被对侧条件拦住）。按 STILL_IN
                 # 上报——与帧级抖动吸收同语义：规则确实在态，只是没有新一次进入。
                 return TriggerOutcome.STILL_IN
 
-            sources = self._sources_currently_true(rule.id) or [source_did]
             # Fire-and-forget: dynamic callback retry is up to 1+2+4=7s of sleep,
             # and update_state() runs on perception's hot path. Awaiting fire
             # here would freeze the main loop for the duration of every dynamic
@@ -1253,8 +1384,7 @@ class RuleRunner:
             self._spawn_fire(
                 rule, event, sources, context, trigger_room, trigger_dids,
                 extra_metadata={
-                    **_edge_timestamp(slot, edge_at),
-                    **(extra_metadata or {}),
+                    **(payload.extra_metadata or {}),
                 },
                 caption=caption, device_name=device_name,
             )
@@ -1366,6 +1496,8 @@ class RuleRunner:
 
         if not self._state_machine_allows(rule, RuleEvent.EXITED):
             return
+        if context == _IOT_RECONCILE_CONTEXT and self._iot_source is not None:
+            self._iot_source.record_compensated_exit()
         self._record_source.disarm(rule.task_id)
 
         # Background-task path: swallow exceptions so they don't surface as
@@ -1380,6 +1512,74 @@ class RuleRunner:
             logger.exception(
                 "Rule %s debounced exit fire failed", rule.id
             )
+
+    async def _refresh_iot_guards(self, task_id: str, entering_rule_id: str) -> None:
+        source = self._iot_source
+        if source is None:
+            return
+        for guard in self._rules.values():
+            if (
+                guard.id == entering_rule_id
+                or guard.task_id != task_id
+                or guard.resolved_direction is not RuleDirection.GUARD
+            ):
+                continue
+            ref = iot_ref_of(guard)
+            if ref is None:
+                continue
+            value, _ = source.evaluate_current(guard.id)
+            if value is None:
+                self.mark_source_unknown(guard.id, ref.did)
+                continue
+            await self.update_state(
+                guard.id,
+                ref.did,
+                value,
+                context="iot_guard_sync",
+                skip_flicker=True,
+            )
+
+    def _clear_pending_enter(self, task_id: str, rule_id: str) -> None:
+        if self._state_machine is not None:
+            self._state_machine.clear_pending_enters(task_id, rule_id)
+
+    async def _release_pending_enters(self, task_id: str) -> bool:
+        state_machine = self._state_machine
+        if state_machine is None or not state_machine.owns(task_id):
+            return False
+
+        released = state_machine.release_pending_enters(task_id)
+        fired = False
+        for signal in released:
+            rule = self._rules.get(signal.rule_id)
+            payload = signal.payload
+            if (
+                rule is None
+                or not self._is_effectively_enabled(rule)
+                or not isinstance(payload, PendingEnterContext)
+            ):
+                continue
+            if rule.duration_seconds:
+                state = self._ensure_state(rule.id)
+                if rule.resolved_direction is RuleDirection.SESSION:
+                    state.state_duration_fired = True
+                else:
+                    state.duration_window = None
+                    state.last_duration_round = None
+            self._spawn_fire(
+                rule,
+                RuleEvent.ENTERED,
+                payload.sources,
+                payload.context,
+                payload.trigger_room,
+                payload.trigger_dids,
+                extra_metadata=payload.extra_metadata,
+                caption=payload.caption,
+                device_name=payload.device_name,
+            )
+            self._sync_record_source(rule, signal.slot)
+            fired = True
+        return fired
 
     # ---- Fire-and-forget plumbing ----
 
@@ -1444,7 +1644,12 @@ class RuleRunner:
         elif slot is ActionSlot.ON_EXIT:
             self._record_source.disarm(rule.task_id)
 
-    def _state_machine_allows(self, rule: Rule, event: RuleEvent) -> bool:
+    def _state_machine_allows(
+        self,
+        rule: Rule,
+        event: RuleEvent,
+        payload: object | None = None,
+    ) -> bool:
         """问 task 状态机: 这次已确认的边沿该不该 fire。
 
         未接管该 task → 恒 True。线上走不到: 名下有 rule 的 task 在启动
@@ -1482,7 +1687,7 @@ class RuleRunner:
         # dispatch=False: 本调用只要结论。动作由下面的 _spawn_fire / _fire 走
         # 原路径执行, 让状态机再派一次会重复触发。
         outcome = sm.handle(
-            TaskSignal(rule.task_id, rule.id, kind, slot), dispatch=False
+            TaskSignal(rule.task_id, rule.id, kind, slot, payload), dispatch=False
         )
         return outcome in _FIRING_OUTCOMES
 
@@ -1498,6 +1703,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        actual_exited_at: str | None = None,
     ) -> None:
         """Schedule a fire as a background task; record handle to prevent GC."""
         task = asyncio.create_task(
@@ -1506,6 +1712,7 @@ class RuleRunner:
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
                 action_slot=action_slot,
+                actual_exited_at=actual_exited_at,
             )
         )
         self._fire_tasks.add(task)
@@ -1524,6 +1731,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        actual_exited_at: str | None = None,
     ) -> None:
         try:
             await self._fire(
@@ -1531,6 +1739,7 @@ class RuleRunner:
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
                 action_slot=action_slot,
+                actual_exited_at=actual_exited_at,
             )
         except Exception:
             logger.exception(

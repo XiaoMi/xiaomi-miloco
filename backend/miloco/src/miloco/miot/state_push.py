@@ -4,9 +4,9 @@
 """把 MIoT 的上下线推送和属性变化推送写进状态容器。
 
 启动对齐只拉一次，之后容器要跟上真实世界只能靠推送。两条链路共用这一个模块，因为它们
-共用同样的两道闸和同样的作用域判定，分开写会变成两份判据。
+共用同样的作用域判定，分开写会变成两份判据。
 
-**两道闸对应两种失效**：
+**作用域的两道闸对应两种失效**：
 
 * 换作用域用 `scope_is_aligned()`（它比的是「已对齐的代号 == 当前代号」，代号一推进就
   自动失效）—— 授权新账号时旧 MIPS 连接还没拆，那段窗口里旧账号的推送会写进刚清空的树；
@@ -23,10 +23,10 @@
 **值只能写叶子，不能写父路径**。容器的 `set` 恒为替换，写 `iot/device/<did>/prop` 会把
 同级其他属性全删掉。这与对齐整台写一次的用法方向相反，别照抄那一处。
 
-**推送和上线补拉这两条通道，往 `iot/device/*/prop` 写的都走这里。** 两道闸因此只有一份，
-且都在**写入的那一刻**判 —— 补拉要打一趟云端，往返期间设备可能搬出当前家庭（同一代之内，
-代号不变），只在往返前判一次是挡不住的。补拉那一侧自己也有几道早退，那是为了省掉没必要的
-云端往返，不是闸；正确性只靠这里。
+**推送和拉取这两条通道，往 `iot/device/*/prop` 写的都走这里。** 作用域闸因此只有一份，
+且在**写入的那一刻**判 —— 拉取要打一趟云端，往返期间设备可能搬出当前家庭或掉线，只在往返前
+判一次是挡不住的。拉取那一侧自己也有早退，那是为了省掉没必要的云端往返；写入处仍需保留
+在线检查，避免把离线设备的云端缓存值写进容器。
 
 启动对齐那条通道不走这里，它有自己的一套判据（采集期就按当前家庭取设备、每台设备前比一次
 代号）：`state_align._write_device` 整台写 `prop` 子树、用的是替换语义，而它被容器拒收后
@@ -105,7 +105,7 @@ def present_prop_iids(store: StateStore, did: str) -> set[str]:
 
 
 class IotPushWriter:
-    """推送写容器的两个入口。两道闸都在这里，调用方不自己判。"""
+    """推送和拉取写容器的入口。作用域与在线闸门在这里统一判。"""
 
     def __init__(
         self,
@@ -136,11 +136,14 @@ class IotPushWriter:
 
     async def _in_current_home(self, did: str) -> bool:
         try:
-            return did in await self._proxy.devices_in_current_home()
+            return await self._current_home_device(did) is not None
         except Exception as e:
             # 拿不到设备集就当不在：写错一台设备的值比少写一次更难查
             logger.warning("push: 取当前家庭设备失败 did=%s: %s", did, e)
             return False
+
+    async def _current_home_device(self, did: str) -> Any | None:
+        return (await self._proxy.devices_in_current_home()).get(did)
 
     async def on_device_state(self, msg: Any) -> None:
         """云端上下线推送。只过第二道闸 —— 理由见模块 docstring。"""
@@ -159,8 +162,8 @@ class IotPushWriter:
         """把拉来的一批属性写进容器，过与推送同一套闸。返回写进去的条数。
 
         `values` 的键是 `"<siid>.<piid>"`。拉来的都走这里而不是自己写，是为了让「逐
-        叶子往 `iot/device/*/prop` 写的都过同一套闸」成为结构保证 —— 两道闸都在写入
-        的那一刻判，所以云端往返期间设备搬出当前家庭也挡得住。
+        叶子往 `iot/device/*/prop` 写的都过同一套闸」成为结构保证 —— 作用域和在线状态都在
+        写入的那一刻判，所以云端往返期间设备搬出当前家庭或掉线也挡得住。
 
         **不用旧值盖掉更新的值。** 云端给的是缓存里的最后一次上报、推送给的是实时值，
         谁新只能靠叶子上的 `last_reported` 判。`keep_reported_since` 是这次拉取开始
@@ -174,8 +177,17 @@ class IotPushWriter:
         if not self._scope_is_aligned():
             self._count("pull_not_aligned")
             return 0
-        if not await self._in_current_home(did):
+        try:
+            device = await self._current_home_device(did)
+        except Exception as e:
+            # 拿不到设备集时拒绝写入，避免把未确认归属或状态的值落入容器。
+            logger.warning("push: 取当前家庭设备失败 did=%s: %s", did, e)
+            device = None
+        if device is None:
             self._count("pull_out_of_home")
+            return 0
+        if not getattr(device, "online", True):
+            self._count("pull_offline")
             return 0
         written = 0
         for iid, value in values.items():
