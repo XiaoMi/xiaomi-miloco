@@ -180,6 +180,13 @@ class Manager:
         """
         if self._iot_push_writer is None:
             return 0
+        device = (await self._miot_proxy.devices_in_current_home()).get(did)
+        if device is None:
+            logger.debug("重连拉属性：设备不在当前家庭，跳过 did=%s", did)
+            return 0
+        if not getattr(device, "online", True):
+            logger.debug("重连拉属性：设备当前离线，跳过 did=%s", did)
+            return 0
         started_ms = now_ms()
         values = await read_props(self._miot_proxy, did, iids)
         if not values:

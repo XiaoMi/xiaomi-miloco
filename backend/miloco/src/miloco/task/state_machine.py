@@ -374,8 +374,8 @@ class TaskStateMachine:
 
         unmet = self._unmet_guards(topology)
         if unmet:
-            # 被拦下的这次进入没有补发路径: 条件层锁存, 触发规则的 false→true 不会
-            # 再来第二次。
+            # 条件层锁存后不会再产生同一条 false→true 边沿，因此先保存信号，等前提
+            # 满足后由上游释放。
             logger.info(
                 "task %s 的进入被前提拦下 (rule=%s): %s",
                 signal.task_id,
@@ -441,7 +441,8 @@ class TaskStateMachine:
                 signal,
             )
             releasable.append(signal)
-            break
+            if topology.is_session_type:
+                break
 
         if releasable:
             pending.clear()

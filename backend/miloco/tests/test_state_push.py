@@ -22,11 +22,14 @@ async def store():
     s.stop()
 
 
-def _writer(store, *, home=("d1",), aligned=True):
+def _writer(store, *, home=("d1",), online=True, aligned=True):
     """proxy 只提供 devices_in_current_home；对齐判据由一个可调对象给。"""
 
     async def devices_in_current_home():
-        return {did: SimpleNamespace(home_id="H1") for did in home}
+        return {
+            did: SimpleNamespace(home_id="H1", online=online)
+            for did in home
+        }
 
     return IotPushWriter(
         store,
@@ -286,6 +289,15 @@ async def test_a_pull_overwrites_a_value_older_than_the_pull(store):
 
     assert written == 1
     assert store.get("iot/device/d1/prop/2.1") == 30
+
+
+async def test_a_pull_does_not_write_for_an_offline_device(store):
+    written = await _writer(store, online=False).write_pulled_props(
+        "d1", {"2.1": 30}
+    )
+
+    assert written == 0
+    assert store.get("iot/device/d1/prop/2.1") is MISSING
 
 
 @pytest.mark.asyncio

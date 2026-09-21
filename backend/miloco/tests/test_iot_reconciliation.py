@@ -388,7 +388,7 @@ async def test_guard_refresh_marks_unknown_and_blocks_entry():
 
     assert (
         await runner.update_state("guard", "device-1", True, "test")
-        is TriggerOutcome.STILL_IN
+        is TriggerOutcome.NOT_FIRED
     )
     await runner.drain()
     runner._fire.reset_mock()
@@ -438,8 +438,8 @@ async def test_guard_refresh_releases_entry_that_was_already_blocked():
 
     assert state_machine.runtime_state("task-1") is TaskRuntimeState.ON
     fired.assert_awaited_once()
-    assert fired.await_args.kwargs["trigger_room"] == "客厅"
-    assert fired.await_args.kwargs["trigger_dids"] == ["camera-1"]
+    assert fired.await_args.args[5] == "客厅"
+    assert fired.await_args.args[6] == ["camera-1"]
     assert fired.await_args.kwargs["caption"] == "有人进入"
     assert fired.await_args.kwargs["device_name"] == "客厅摄像头"
 
