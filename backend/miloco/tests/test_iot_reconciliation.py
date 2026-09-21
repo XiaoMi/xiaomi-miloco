@@ -172,10 +172,11 @@ def _duration_iot_rule(
     rule_id: str,
     direction: RuleDirection,
     task_id: str = "task-1",
+    duration_ratio: float = 1.0,
 ) -> Rule:
     rule = _iot_rule(rule_id, direction, task_id=task_id, exit_debounce_seconds=0)
     rule.duration_seconds = 1
-    rule.duration_ratio = 1.0
+    rule.duration_ratio = duration_ratio
     return rule
 
 
@@ -274,6 +275,38 @@ async def test_duration_exit_does_not_release_pending_enter():
         await runner.update_state("exit", "device-1", True, "", skip_flicker=True)
         clock.return_value = 100.5
         await runner.update_state("exit", "device-1", True, "", skip_flicker=True)
+
+    await runner.drain()
+
+    assert fired == []
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+
+
+@pytest.mark.asyncio
+async def test_session_duration_exit_does_not_release_pending_enter():
+    session_rule = _duration_iot_rule(
+        "session", RuleDirection.SESSION, duration_ratio=0.5
+    )
+    guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
+    runner, state_machine = _runner_with_state_machine([session_rule, guard_rule])
+    source = _FakeIotSource({"session": True, "guard": False})
+    runner._iot_source = source
+    fired: list[tuple[str, RuleEvent]] = []
+
+    async def fire(rule, event, *_args, **_kwargs):
+        fired.append((rule.id, event))
+
+    runner._fire = fire
+
+    await runner.update_state("guard", "device-1", False, "", skip_flicker=True)
+    await runner.update_state("session", "device-1", True, "", skip_flicker=True)
+
+    with patch("miloco.rule.runner.time.time") as clock:
+        clock.return_value = 100.0
+        await runner.update_state("session", "device-1", True, "", skip_flicker=True)
+        source.values["guard"] = True
+        clock.return_value = 100.5
+        await runner.update_state("session", "device-1", False, "", skip_flicker=True)
 
     await runner.drain()
 

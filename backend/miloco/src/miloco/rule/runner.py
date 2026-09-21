@@ -1229,7 +1229,10 @@ class RuleRunner:
                 # 瞬时翻转那条路同一份处理, 两条都是退出的入口。
                 await self._record_source.settle(rule.task_id)
 
-            if rule.resolved_direction in (RuleDirection.ENTER, RuleDirection.SESSION):
+            if new_rule_state and rule.resolved_direction in (
+                RuleDirection.ENTER,
+                RuleDirection.SESSION,
+            ):
                 window_before_guard_refresh = win
                 await self._refresh_iot_guards(rule.task_id, rule.id)
                 if state.duration_window is not window_before_guard_refresh:
