@@ -447,3 +447,108 @@ async def test_guard_refresh_releases_entry_that_was_already_blocked():
     await runner.update_state("guard", "device-1", True, "guard still true")
     await runner.drain()
     fired.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_session_guard_releases_pending_enter_and_exits():
+    session_rule = _iot_rule(
+        "session", RuleDirection.SESSION, exit_debounce_seconds=0
+    )
+    guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
+    runner, state_machine = _runner_with_state_machine([session_rule, guard_rule])
+    source = _FakeIotSource({"session": True, "guard": False})
+    runner._iot_source = source
+    fired = AsyncMock()
+    runner._fire = fired
+
+    await runner.update_state("guard", "device-1", False, "guard false")
+    blocked = await runner.update_state("session", "device-1", True, "session enter")
+    await runner.drain()
+
+    assert blocked is TriggerOutcome.STILL_IN
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+    fired.assert_not_awaited()
+
+    source.values["guard"] = True
+    released = await runner.update_state("guard", "device-1", True, "guard true")
+    await runner.drain()
+
+    assert released is TriggerOutcome.FIRED
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.ON
+    fired.assert_awaited_once()
+    assert fired.await_args.args[1] is RuleEvent.ENTERED
+
+    exited = await runner.update_state(
+        "session", "device-1", False, "session exit", skip_flicker=True
+    )
+    exit_task = runner._ensure_state("session").exit_debounce_task
+    assert exit_task is not None
+    await exit_task
+
+    assert exited is TriggerOutcome.NOT_FIRED
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+    assert [call.args[1] for call in fired.await_args_list] == [
+        RuleEvent.ENTERED,
+        RuleEvent.EXITED,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_guard_release_does_not_fire_after_main_rule_exits():
+    enter_rule = _iot_rule("enter", RuleDirection.ENTER)
+    guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
+    runner, state_machine = _runner_with_state_machine([enter_rule, guard_rule])
+    source = _FakeIotSource({"enter": True, "guard": False})
+    runner._iot_source = source
+    fired = AsyncMock()
+    runner._fire = fired
+
+    await runner.update_state("guard", "device-1", False, "guard false")
+    blocked = await runner.update_state("enter", "device-1", True, "main true")
+    await runner.drain()
+
+    assert blocked is TriggerOutcome.STILL_IN
+    fired.assert_not_awaited()
+
+    source.values["enter"] = False
+    exited = await runner.update_state(
+        "enter", "device-1", False, "main false", skip_flicker=True
+    )
+    await runner.drain()
+
+    assert exited is TriggerOutcome.NOT_FIRED
+    source.values["guard"] = True
+    released = await runner.update_state("guard", "device-1", True, "guard true")
+    await runner.drain()
+
+    assert released is TriggerOutcome.NOT_FIRED
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+    fired.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_guard_recovery_releases_pending_enter():
+    enter_rule = _iot_rule("enter", RuleDirection.ENTER)
+    guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
+    runner, state_machine = _runner_with_state_machine([enter_rule, guard_rule])
+    source = _FakeIotSource({"guard": None})
+    runner._iot_source = source
+    fired = AsyncMock()
+    runner._fire = fired
+
+    blocked = await runner.update_state("enter", "device-1", True, "main true")
+    await runner.drain()
+
+    assert blocked is TriggerOutcome.STILL_IN
+    assert runner.is_condition_satisfied("guard") is None
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+    fired.assert_not_awaited()
+
+    source.values["guard"] = True
+    recovered = await runner.update_state("guard", "device-1", True, "guard recovered")
+    await runner.drain()
+
+    assert recovered is TriggerOutcome.FIRED
+    assert runner.is_condition_satisfied("guard") is True
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+    fired.assert_awaited_once()
