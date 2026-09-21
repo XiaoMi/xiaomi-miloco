@@ -13,6 +13,8 @@
     "rawKeyTitle": "Raw ledger key: ",
     "listSep": ", ",
     "quoted": "“{{v}}”",
+    "foldToggle": "Fold actions",
+    "foldToggleTitle": "Fold actions into their trigger events; turn off to give each action its own row",
     "foldStrengthAria": "Fold strength",
     "foldWeak": "Weak",
     "foldStrong": "Strong",

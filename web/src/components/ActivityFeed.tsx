@@ -39,7 +39,7 @@ import {
 } from "@/lib/feedFold";
 import { smartTimeLabel } from "@/lib/relativeTime";
 import type { ActivityEvent, EventCropMeta, HomeId, OnDemandLogEntry } from "@/lib/types";
-import { useFoldStrength } from "@/hooks/useFoldStrength";
+import { useFoldEnabled, useFoldStrength } from "@/hooks/useFoldStrength";
 
 /** Lightbox 内容类型:clip 走 <video>,Smart Crop 参考帧走 <img>. */
 type LightboxKind = "video" | "image";
@@ -55,6 +55,7 @@ import {
   FoldBadge,
   FoldChipPill,
   FoldMembers,
+  FoldToggle,
   StrengthToggle,
   firstMemberIdOf,
   hostRegionOf,
@@ -287,6 +288,9 @@ export function ActivityFeed({
   // ── 折叠:动作并进它的触发事件(规则见 lib/feedFold)──
   /** 折叠强度。存在本机、不跟随账号——代价与默认强档的理由见 useFoldStrength。 */
   const { strength, setStrength } = useFoldStrength();
+  /** 折叠开不开。关掉 = 未折叠态:动作各自成行、各锚在自己的时刻上。**关掉不清空档位**,
+   *  两个键分开存就是为了翻一遍再打开还是原来那档(见 useFoldEnabled)。 */
+  const { folded, setFolded } = useFoldEnabled();
   /** 就地展开着的支(按支的 key)。**不持久化**:展开面是"我现在要核对这几条",
    *  离开再回来重新点一次比带着一屏张开的口子回来更符合预期。 */
   const [openKeys, setOpenKeys] = useState<Set<string>>(new Set());
@@ -591,8 +595,8 @@ export function ActivityFeed({
     fetchPage({ mode: "append", pageOffset: offset });
   };
 
-  // 事件 + 动作装配成一条时间倒序流:动作按「宿主事件 + 相位」收成支,强度决定支是自己占
-  // 一行(弱档)还是并进宿主的事件行(强档)。窗口规则、分组、并列次序全在 lib/feedFold。
+  // 事件 + 动作装配成一条时间倒序流:**三种画法**——未折叠(动作各自成行)、弱档(支自己占
+  // 一行)、强档(支并进宿主的事件行)。窗口规则、分组、并列次序全在 lib/feedFold。
   const rows = useMemo(
     () =>
       buildFoldRows({
@@ -601,11 +605,22 @@ export function ActivityFeed({
         showEvents,
         showActions,
         strength,
+        folded,
         sinceMs: appliedSince,
         beforeMs: appliedBefore,
         hasMoreEvents: hasMore,
       }),
-    [events, actions, showEvents, showActions, strength, appliedSince, appliedBefore, hasMore],
+    [
+      events,
+      actions,
+      showEvents,
+      showActions,
+      strength,
+      folded,
+      appliedSince,
+      appliedBefore,
+      hasMore,
+    ],
   );
 
   /** 宿主事件的取用表:支行要画宿主标题、算退出延迟,都得按 id 回查。 */
@@ -818,10 +833,15 @@ export function ActivityFeed({
             />
             {t("actions.filterActions")}
           </label>
-          {/* 折叠强度。与上面两个 checkbox 不是一回事:那两个决定"有哪些流",这一枚决定
-              "动作怎么画"——勾着事件、勾着动作,动作可以是各自一行,也可以是事件行上的一枚
-              徽标。两档都保留全部数据,所以它放在筛选旁边而不是筛选里面。 */}
-          <StrengthToggle strength={strength} onChange={setStrength} />
+          {/* 折叠开关 + 强度。与上面两个 checkbox 不是一回事:那两个决定"有哪些流",
+              这两枚决定"动作怎么画"——勾着事件、勾着动作,动作可以各自一行(关掉折叠),
+              也可以折进事件(开着折叠,再分两档)。三种画法都保留全部数据,所以它们放在
+              筛选旁边而不是筛选里面。
+              关掉折叠时强度控件**整个不渲染**:未折叠态没有"折叠强度"这回事,留着一个
+              不生效的控件就是在问一个当前不成立的问题(它的 aria-controls 也随之不写,
+              见 FeedFold 的 STRENGTH_CTL_ID)。 */}
+          <FoldToggle folded={folded} onChange={setFolded} />
+          {folded && <StrengthToggle strength={strength} onChange={setStrength} />}
           <TimeRangeFilter
             since={since}
             before={before}
@@ -968,13 +988,32 @@ export function ActivityFeed({
                 />
               );
             }
+            // 单条动作行。**两种来路共用这一个分支**:未折叠态下每条动作都走这儿,折叠态下
+            // 走这儿的只剩挂不上任何支的那几条(无触发源 / 早于链路记录)。两者的信息面本来
+            // 就是同一个,差别只在——未折叠态**多一枚回返角标**(指回宿主事件行),而那正是
+            // 折叠态由支行标题承担的那件事。宿主没加载时给的是那枚可点的「触发事件未加载」,
+            // 点了去问后端(同支行)。
+            const hostId = r.hostId;
             return (
               <ActionRow
                 key={`a:${r.key}`}
                 row={r.action}
                 t={t}
                 spec={deviceSpecs.get(r.action.did)}
-                chip={<FoldChipPill chip={r.chip} />}
+                chip={
+                  r.chip ? (
+                    <FoldChipPill
+                      chip={r.chip}
+                      onLookup={
+                        // 只有"有宿主、只是没翻到"那枚可点:去后端单查它在不在。
+                        r.chip === "hostMissing" && hostId ? () => lookupHost(hostId) : undefined
+                      }
+                    />
+                  ) : undefined
+                }
+                back={
+                  r.hostRendered && hostId ? { eventId: hostId, onBack: locate } : undefined
+                }
               />
             );
           })}

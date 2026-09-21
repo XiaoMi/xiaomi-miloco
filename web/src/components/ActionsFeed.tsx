@@ -98,6 +98,7 @@ export function ActionRow({
   nested = false,
   domId,
   chip,
+  back,
 }: {
   row: FoldActionLike;
   t: TFunction;
@@ -110,6 +111,11 @@ export function ActionRow({
   domId?: string;
   /** 挂在行上的说明 chip(「无触发事件」/「早于链路记录」)。 */
   chip?: ReactNode;
+  /** 回返槽:指回这条动作的宿主事件。**只在未折叠态给**——折叠态下这条动作要么并进了
+   *  支(回返角标长在支的标题上),要么挂不上宿主(那就不该画一枚点了没反应的按钮)。
+   *  给了它就由**设备名自己**当按钮:旁边再挂一枚独立按钮既把标题挤开,又让读屏在同一
+   *  次跳转上撞见两个控件(同 BranchRow 那条)。 */
+  back?: { eventId: string; onBack: (eventId: string) => void };
 }) {
   const ok = row.success === 1;
   const phrase = describeAction(row, spec, t);
@@ -134,7 +140,36 @@ export function ActionRow({
 
         <div className="min-w-0 sm:order-2">
           <div className="text-body text-text-primary break-words">
-            <span className="font-medium">{deviceLabel}</span>
+            {back ? (
+              <button
+                type="button"
+                data-back={back.eventId}
+                onClick={() => back.onBack(back.eventId)}
+                title={t("actions.backToEvent")}
+                aria-label={t("actions.backToEvent")}
+                className="inline-flex items-center gap-1 max-w-full align-baseline font-medium hover:text-text-secondary transition-colors"
+              >
+                <span className="truncate">{deviceLabel}</span>
+                {/* 与支行标题上那枚是同一枚直落箭头(FeedFold 的 ICON.back):它出现的地方
+                    目标都在下方,见 lib/feedFold 末尾的并列规则。两处各画一份是本地惯例
+                    (每个组件自带 svg),改这一枚时要一起看。 */}
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="w-3 h-3 shrink-0"
+                  aria-hidden="true"
+                >
+                  <path d="M12 4v13" />
+                  <path d="m6 12 6 6 6-6" />
+                </svg>
+              </button>
+            ) : (
+              <span className="font-medium">{deviceLabel}</span>
+            )}
             {row.room && (
               <span className="text-caption text-text-tertiary ml-2">{row.room}</span>
             )}

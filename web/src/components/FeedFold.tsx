@@ -56,6 +56,8 @@ const ICON = {
     </>
   ),
   unlink: <path d="M9 17H7A5 5 0 0 1 7 7h2M15 7h2a5 5 0 0 1 3.5 8.5M3 3l18 18" />,
+  /* 三条收窄的横线:说的就是折叠在做的事——把多条并成更少的行。 */
+  fold: <path d="M3 6h18M7 12h10M10 18h4" />,
 } as const;
 
 function Icon({ d, className }: { d: ReactNode; className?: string }) {
@@ -94,6 +96,10 @@ export function membersIdOf(key: string): string {
 export function firstMemberIdOf(key: string): string {
   return key + "-m0";
 }
+/** 强度分段控件的 id。「折叠动作」那枚按钮的 `aria-controls` 指它——两者是一组:关掉折叠
+ *  时档位控件整个不渲染,那时那枚按钮也**不写** `aria-controls`(指向一个不存在的 id 是
+ *  ARIA 作者错误,同成员表那条)。 */
+export const STRENGTH_CTL_ID = "fold-strength-ctl";
 
 function phaseName(phase: string | null, t: TFunction): string {
   if (phase === "exit") return t("actions.phaseExit");
@@ -431,6 +437,39 @@ export function BranchRow({
   );
 }
 
+/* ── 折叠开关 ───────────────────────────────────────────────
+   一枚**真的开关**(`aria-pressed`),不是"切换视图"的普通按钮:它按下与弹起各对应一个
+   稳定的画法,读屏据此报告状态。关掉时强度控件整个不渲染——未折叠态没有"折叠强度"这回事,
+   留着它就是在问一个当前不成立的问题。 */
+export function FoldToggle({
+  folded,
+  onChange,
+}: {
+  folded: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  const { t } = useTranslation();
+  const label = t("actions.foldToggle");
+  return (
+    <button
+      type="button"
+      aria-pressed={folded}
+      {...(folded ? { "aria-controls": STRENGTH_CTL_ID } : {})}
+      onClick={() => onChange(!folded)}
+      title={t("actions.foldToggleTitle")}
+      aria-label={label}
+      className={`inline-flex items-center gap-1 text-caption px-2 py-0.5 rounded-md border transition-colors ${
+        folded
+          ? "border-brand-ring bg-brand-soft text-text-primary"
+          : "border-border text-text-secondary hover:bg-bg-tertiary"
+      }`}
+    >
+      <Icon d={ICON.fold} className="w-3.5 h-3.5" />
+      {label}
+    </button>
+  );
+}
+
 /* ── 强度分段控件 ───────────────────────────────────────────
    两档是**两个离散的模式**,不是一个连续量,所以是分段控件而不是滑块:滑块唯一的优势是
    它教得会,代价是用户拖的是自己正在读的内容;分段控件改档时同样会重排,但那是用户明确
@@ -464,6 +503,7 @@ export function StrengthToggle({
   };
   return (
     <span
+      id={STRENGTH_CTL_ID}
       role="radiogroup"
       aria-label={t("actions.foldStrengthAria")}
       onKeyDown={onKeyDown}

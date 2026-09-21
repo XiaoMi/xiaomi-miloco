@@ -24,8 +24,11 @@ import {
   type FoldStrength,
 } from "@/lib/feedFold";
 import {
+  FOLD_ENABLED_DEFAULT,
+  FOLD_ENABLED_KEY,
   FOLD_STRENGTH_DEFAULT,
   FOLD_STRENGTH_KEY,
+  readStoredFoldEnabled,
   readStoredFoldStrength,
 } from "@/hooks/useFoldStrength";
 import type { ActivityEvent } from "@/lib/types";
@@ -59,6 +62,7 @@ function fold(
   actions: FoldActionLike[],
   extra: {
     strength?: FoldStrength;
+    folded?: boolean;
     showEvents?: boolean;
     showActions?: boolean;
     sinceMs?: number;
@@ -72,6 +76,7 @@ function fold(
     showEvents: extra.showEvents ?? true,
     showActions: extra.showActions ?? true,
     strength: extra.strength ?? "strong",
+    folded: extra.folded ?? true,
     sinceMs: extra.sinceMs,
     beforeMs: extra.beforeMs,
     hasMoreEvents: extra.hasMoreEvents,
@@ -262,7 +267,112 @@ describe("buildFoldRows — 两档各自生成哪些行", () => {
   });
 });
 
+describe("buildFoldRows — 未折叠态:动作各自成行", () => {
+  const host = ev("e1", DAY + 100);
+  const enter = act({ id: "a-enter", timestamp: DAY + 110, trigger_event_id: "e1", phase: "enter" });
+  const exit = act({ id: "a-exit", timestamp: DAY + 200, trigger_event_id: "e1", phase: "exit" });
+
+  it("每条动作一行、各锚在自己的时刻上(不再是「一条支一行」)", () => {
+    const rows = fold([host], [enter, exit], { folded: false });
+    expect(rows.map((r) => r.kind)).toEqual(["action", "action", "event"]);
+    expect(labels(rows)).toEqual(["a-exit", "a-enter", "e1"]);
+  });
+
+  it("事件行照画,但一枚徽标都不带(没有「支」这回事了)", () => {
+    const rows = fold([host], [enter, exit], { folded: false });
+    const row = rows.find((r) => r.kind === "event");
+    expect(row?.kind === "event" && row.branches).toEqual([]);
+    expect(row?.kind === "event" && row.hostOutside).toBe(false);
+  });
+
+  it("**档位不参与装配**:两档下未折叠态一模一样(正交:档位只管怎么折)", () => {
+    const weak = fold([host], [enter, exit], { folded: false, strength: "weak" });
+    const strong = fold([host], [enter, exit], { folded: false, strength: "strong" });
+    expect(labels(weak)).toEqual(labels(strong));
+  });
+
+  it("宿主行画得出来 → 动作行带回返目标(hostId + hostRendered)", () => {
+    const rows = fold([host], [enter], { folded: false });
+    const a = rows.find((r) => r.kind === "action");
+    expect(a?.kind === "action" && a.hostId).toBe("e1");
+    expect(a?.kind === "action" && a.hostRendered).toBe(true);
+    // 有宿主可回返时那枚「挂不上」的 chip 不该同时出现
+    expect(a?.kind === "action" && a.chip).toBeNull();
+  });
+
+  it("有宿主但没加载 → 打「触发事件未加载」,并且带得住反查要用的 hostId", () => {
+    const rows = fold([], [act({ id: "a-x", trigger_event_id: "e-gone", phase: "enter" })], {
+      folded: false,
+    });
+    const a = rows[0];
+    expect(a.kind === "action" && a.chip).toBe("hostMissing");
+    expect(a.kind === "action" && a.hostId).toBe("e-gone");
+    expect(a.kind === "action" && a.hostRendered).toBe(false);
+  });
+
+  it("无触发源 / 早于链路记录:chip 照折叠态那两种,且没有回返目标", () => {
+    const rows = fold([], [act({ id: "a1" }), act({ id: "a2", phase: "legacy" })], {
+      folded: false,
+    });
+    expect(rows.map((r) => (r.kind === "action" ? r.chip : null))).toEqual([
+      "noTrigger",
+      "preLink",
+    ]);
+    expect(rows.every((r) => r.kind === "action" && r.hostId === null)).toBe(true);
+  });
+
+  it("事件流被关掉:不画事件行,也不解释宿主去哪了(界面选择的后果不是数据缺失)", () => {
+    const rows = fold([host], [enter], { folded: false, showEvents: false });
+    expect(rows.map((r) => r.kind)).toEqual(["action"]);
+    const a = rows[0];
+    expect(a.kind === "action" && a.hostRendered).toBe(false);
+    expect(a.kind === "action" && a.chip).toBeNull();
+    // 无触发源是动作自己的事实,与事件流开不开无关 —— 它照样说
+    const orphan = fold([host], [act({ id: "a1" })], { folded: false, showEvents: false });
+    expect(orphan[0].kind === "action" && orphan[0].chip).toBe("noTrigger");
+  });
+
+  it("动作的 checkbox 关掉 → 一条动作都不进来", () => {
+    const rows = fold([host], [enter, exit], { folded: false, showActions: false });
+    expect(labels(rows)).toEqual(["e1"]);
+  });
+
+  it("两个都关 → 空", () => {
+    expect(fold([host], [enter], { folded: false, showEvents: false, showActions: false })).toEqual(
+      [],
+    );
+  });
+
+  it("窗口规则与折叠态同源:地平线、since、before 一条不少", () => {
+    // 地平线:事件只到 DAY+100,更早的动作不该露出来
+    const rows = fold([host], [act({ id: "a-old", timestamp: DAY + 50 })], { folded: false });
+    expect(labels(rows)).toEqual(["e1"]);
+    // since 是硬界
+    const since = fold([host], [enter], { folded: false, sinceMs: DAY + 150 });
+    expect(labels(since)).toEqual(["e1"]);
+    // before 是上界
+    const before = fold([host], [enter], { folded: false, beforeMs: DAY + 50 });
+    expect(labels(before)).toEqual(["e1"]);
+  });
+
+  it("计数与折叠态一致:切开关不该让「已加载多少条」变", () => {
+    const on = foldCounts(fold([host], [enter, exit]));
+    const off = foldCounts(fold([host], [enter, exit], { folded: false }));
+    expect(off).toEqual({ events: 1, actions: 2 });
+    expect(off).toEqual(on);
+  });
+});
+
 describe("buildFoldRows — 同一时刻的次序", () => {
+  it("未折叠态:动作与它的事件同 ts 时也排在事件之前(回返角标恒为直落)", () => {
+    const rows = fold(
+      [ev("e1", DAY + 500)],
+      [act({ id: "a1", timestamp: DAY + 500, trigger_event_id: "e1", phase: "enter" })],
+      { folded: false },
+    );
+    expect(labels(rows)).toEqual(["a1", "e1"]);
+  });
+
   it("支与宿主同 ts:支排在事件之前(降序里更靠前,回返角标才恒为直落)", () => {
     const weak = fold(
       [ev("e1", DAY + 500)],
@@ -397,5 +507,56 @@ describe("readStoredFoldStrength — 认不出的档位当没存过", () => {
   it("存储整个不可用(隐私模式)→ 默认,不抛", () => {
     delete (globalThis as { localStorage?: unknown }).localStorage;
     expect(readStoredFoldStrength()).toBe(FOLD_STRENGTH_DEFAULT);
+  });
+});
+
+describe("readStoredFoldEnabled — 开关与档位各存各的", () => {
+  const store = new Map<string, string>();
+  beforeEach(() => {
+    store.clear();
+    (globalThis as { localStorage?: unknown }).localStorage = {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+      removeItem: (k: string) => void store.delete(k),
+    };
+  });
+  afterEach(() => {
+    delete (globalThis as { localStorage?: unknown }).localStorage;
+  });
+
+  it("开 / 关各自原样读回", () => {
+    store.set(FOLD_ENABLED_KEY, "1");
+    expect(readStoredFoldEnabled()).toBe(true);
+    store.set(FOLD_ENABLED_KEY, "0");
+    expect(readStoredFoldEnabled()).toBe(false);
+  });
+
+  it("没存过 → 默认开着(折叠是这一版要交付的形态)", () => {
+    expect(readStoredFoldEnabled()).toBe(FOLD_ENABLED_DEFAULT);
+    expect(FOLD_ENABLED_DEFAULT).toBe(true);
+  });
+
+  it("存了别的值 → 退回默认,不让第三种状态流进渲染层", () => {
+    for (const bad of ["", "true", "false", "yes", "2", "{}"]) {
+      store.set(FOLD_ENABLED_KEY, bad);
+      expect(readStoredFoldEnabled()).toBe(FOLD_ENABLED_DEFAULT);
+    }
+  });
+
+  it("存储整个不可用(隐私模式)→ 默认,不抛", () => {
+    delete (globalThis as { localStorage?: unknown }).localStorage;
+    expect(readStoredFoldEnabled()).toBe(FOLD_ENABLED_DEFAULT);
+  });
+
+  // 两个键分开存买到的就是这个:关掉折叠翻一遍,再打开还是原来那档。
+  it("两个键互不相干:写开关不动档位,写档位不动开关", () => {
+    store.set(FOLD_STRENGTH_KEY, "weak");
+    store.set(FOLD_ENABLED_KEY, "0");
+    expect(readStoredFoldStrength()).toBe("weak");
+    expect(readStoredFoldEnabled()).toBe(false);
+    store.set(FOLD_ENABLED_KEY, "1");
+    expect(readStoredFoldStrength()).toBe("weak");
+    // 键名也不能撞:撞了就是"关掉折叠顺手把档位也清了"
+    expect(FOLD_ENABLED_KEY).not.toBe(FOLD_STRENGTH_KEY);
   });
 });

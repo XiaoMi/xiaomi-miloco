@@ -88,10 +88,24 @@ export type FoldRow =
       /** 宿主行在不在本次渲染里——在,才画得出一枚能跳的 ↩。 */
       hostRendered: boolean;
     }
-  /** 单条、且挂不上任何支的动作。单独成一类而不是塞进「只有一个成员的支」,是因为
-   *  它**没有相位可说**:画成支行会顶着一枚空相位头、还把设备名与人话藏进展开面,
-   *  比今天的信息还少。它按原样画一行动作,只多一枚说明来历的 chip。 */
-  | { kind: "action"; key: string; ts: number; action: FoldActionLike; chip: FoldChip };
+  /** 单条动作行。**两种来路共用这一种行**:未折叠态下每条动作都是它;折叠态下它是
+   *  挂不上任何支的那几条(无触发源 / 早于链路记录)。两种来路的信息面本来就是同一个:
+   *  一行一条、按原样画,只多一枚说明来历的 chip、或者一枚指回宿主事件的回返角标。
+   *
+   *  折叠态下不把它塞进「只有一个成员的支」,是因为它**没有相位可说**:画成支行会顶着
+   *  一枚空相位头、还把设备名与人话藏进展开面,比今天的信息还少。 */
+  | {
+      kind: "action";
+      key: string;
+      ts: number;
+      action: FoldActionLike;
+      /** 挂不上宿主时的说明 chip;有宿主可回返时为 null。 */
+      chip: FoldChip | null;
+      /** 宿主事件 id —— 反查那枚 chip 要用它。null = 这条动作确实没有触发源。 */
+      hostId: string | null;
+      /** 宿主行在不在本次渲染里 —— 在,才画得出一枚跳得过去的回返角标。 */
+      hostRendered: boolean;
+    };
 
 /** 单流的时间下界 —— 两个下界取**较晚**的那个。纯函数,导出供 tests 与截断提示复用。
  *
@@ -128,6 +142,10 @@ export interface BuildFoldRowsInput {
   showEvents: boolean;
   showActions: boolean;
   strength: FoldStrength;
+  /** 折叠开不开。关掉 = 未折叠态:动作不分组,每条自己一行、锚在自己的时刻上,每行带
+   *  一枚指回宿主事件的回返角标。**档位只在折叠开着时有意义**——关掉时它不是被清空,
+   *  只是暂时不生效(见 useFoldEnabled)。 */
+  folded: boolean;
   /** 用户显式筛的起点;undefined = 不限。 */
   sinceMs?: number;
   /** 用户筛的截止;undefined = 至现在。 */
@@ -162,22 +180,62 @@ export function inlinedBranches(
   return strength === "strong" ? branches.filter((b) => openKeys.has(b.key)) : [];
 }
 
-/** 装配折叠视图的行。返回的行已按「新的在前」排好,**同秒时动作在它的事件之前**
- *  (降序里动作更靠前)。
- *
- *  这条并列规则是从「回返角标恒为直落」倒推出来的:弱档的支行锚在自己(更晚)的时刻上,
- *  它的事件因此**永远在它下方**,直落箭头恒真;只有当两者同秒并列时先后才有歧义,
- *  按这个方向排,歧义那一半也落在同一边。反过来的排法(事件在前)会让同一屏里的角标
- *  一半指上、一半指下。 */
+/** 装配这一屏的行。**三种画法共用一个入口**:未折叠(动作各自成行)、弱档(每条支一行)、
+ *  强档(支并进事件行)。共用是为了让地平线、并列规则、三种 chip 只有一处定义——它们说的是
+ *  "数据是什么",而档位改的是"怎么画",两件事必须正交(见文件头)。
+ *  返回的行已按新的在前排好,次序规则见 sortRows。 */
 export function buildFoldRows(input: BuildFoldRowsInput): FoldRow[] {
-  const { events, actions, showEvents, showActions, strength } = input;
+  const { events, actions, showEvents, showActions, strength, folded } = input;
   if (!showEvents && !showActions) return [];
   const lower = feedLowerBound(events, showEvents, input.sinceMs, input.hasMoreEvents);
   const upper = input.beforeMs ?? Infinity;
   const inWin = (ts: number) => ts >= lower && ts <= upper;
 
-  // ── 分组:按宿主事件 + 相位收成支;挂不上宿主的单列出来 ──
   const hostById = new Map(events.map((e) => [e.id, e]));
+
+  // ── 未折叠:动作不分组,每条自己一行、锚在自己的时刻上 ──
+  //  地平线、并列规则、三种 chip**与两档同源**,不另写一套:这三条正是"排布会变、事实不会"
+  //  的那类规则,两套渲染里各算各的,迟早有一处对不上(症状是尾部多出一段没有事件的动作、
+  //  或者同一屏里的回返角标一半指上一半指下)。
+  if (!folded) {
+    const rows: FoldRow[] = [];
+    if (showEvents) {
+      // 事件行照画,但**不带徽标**——未折叠态没有"支"这回事,branches 恒空。
+      for (const e of events) {
+        rows.push({
+          kind: "event",
+          key: e.id,
+          ts: e.timestamp,
+          event: e,
+          branches: [],
+          hostOutside: false,
+        });
+      }
+    }
+    if (showActions) {
+      for (const a of actions) {
+        if (!inWin(a.timestamp)) continue;
+        const hostId = a.trigger_event_id ?? null;
+        const hostRendered = showEvents && hostId !== null && hostById.has(hostId);
+        // 「没有触发源」是动作自己的事实,与事件流开不开无关;「宿主未加载」在用户亲手关掉
+        // 事件流时不说——那是界面选择的后果,不是数据缺失(同 BranchRow 的理由)。
+        const chip: FoldChip | null =
+          hostId === null ? orphanChipOf(a) : hostRendered || !showEvents ? null : "hostMissing";
+        rows.push({
+          kind: "action",
+          key: a.id,
+          ts: a.timestamp,
+          action: a,
+          chip,
+          hostId,
+          hostRendered,
+        });
+      }
+    }
+    return sortRows(rows);
+  }
+
+  // ── 分组:按宿主事件 + 相位收成支;挂不上宿主的单列出来 ──
   const branchMap = new Map<string, FoldBranch>();
   const branchOrder: FoldBranch[] = [];
   const singles: FoldActionLike[] = [];
@@ -263,10 +321,27 @@ export function buildFoldRows(input: BuildFoldRowsInput): FoldRow[] {
   // ── 无宿主动作:没有相位头可画,按原样一行一条 ──
   for (const a of singles) {
     if (!inWin(a.timestamp)) continue;
-    rows.push({ kind: "action", key: a.id, ts: a.timestamp, action: a, chip: orphanChipOf(a) });
+    rows.push({
+      kind: "action",
+      key: a.id,
+      ts: a.timestamp,
+      action: a,
+      chip: orphanChipOf(a),
+      hostId: null,
+      hostRendered: false,
+    });
   }
 
-  // 新的在前;同一时刻动作排在它的事件前面(降序里更靠前),见函数头。
+  return sortRows(rows);
+}
+
+/** 行的次序。**三种画法共用这一条**——排布会变,时刻不会。
+ *
+ *  新的在前;同一秒时动作排在它的事件之前(降序里更靠前)。这条并列规则是从「回返角标
+ *  恒为直落」倒推出来的:弱档的支行锚在自己(更晚)的时刻上,它的事件因此永远在它下方;
+ *  未折叠态的动作行同理(动作发生在事件之后)。只有当两者同秒并列时先后才有歧义,按这个
+ *  方向排,歧义那一半也落在同一边。反过来的排法会让同一屏里的角标一半指上、一半指下。 */
+function sortRows(rows: FoldRow[]): FoldRow[] {
   const rank = (r: FoldRow) => (r.kind === "event" ? 1 : 0);
   return rows.sort((x, y) => (y.ts !== x.ts ? y.ts - x.ts : rank(x) - rank(y)));
 }
