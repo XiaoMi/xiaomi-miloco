@@ -774,3 +774,44 @@ async def test_main_rule_unknown_keeps_pending_enter_until_guard_recovers():
     assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
     fired.assert_awaited_once()
     assert fired.await_args.args[1] is RuleEvent.ENTERED
+
+
+@pytest.mark.asyncio
+async def test_guard_recovery_keeps_pending_enter_while_main_rule_is_unknown():
+    enter_rule = _iot_rule("enter", RuleDirection.ENTER)
+    guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
+    runner, state_machine = _runner_with_state_machine([enter_rule, guard_rule])
+    source = _FakeIotSource({"enter": True, "guard": False})
+    runner._iot_source = source
+    fired = AsyncMock()
+    runner._fire = fired
+
+    await runner.update_state("guard", "device-1", False, "", skip_flicker=True)
+    blocked = await runner.update_state("enter", "device-1", True, "enter")
+    await runner.drain()
+    assert blocked is TriggerOutcome.STILL_IN
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+
+    runner.mark_source_unknown("enter", "device-1")
+    runner.mark_source_unknown("guard", "device-1")
+
+    source.values["guard"] = True
+    recovered_guard = await runner.update_state(
+        "guard", "device-1", True, "guard recovered", skip_flicker=True
+    )
+    await runner.drain()
+
+    assert recovered_guard is TriggerOutcome.NOT_FIRED
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+    fired.assert_not_awaited()
+
+    source.values["enter"] = True
+    recovered_main = await runner.update_state(
+        "enter", "device-1", True, "enter recovered", skip_flicker=True
+    )
+    await runner.drain()
+
+    assert recovered_main is TriggerOutcome.FIRED
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.OFF
+    fired.assert_awaited_once()
+    assert fired.await_args.args[1] is RuleEvent.ENTERED
