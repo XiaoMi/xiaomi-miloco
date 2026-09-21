@@ -1466,8 +1466,21 @@ class RuleRunner:
             )
             self._rewind_abandoned_exit(self._ensure_state(rule.id))
             return
-        # Cleanup before firing so a re-entry during fire doesn't see stale handle
         rs = self._ensure_state(rule.id)
+        # 达标兜底必须排在状态机翻 off 之前：达标动作要求 task 还在 session 里,
+        # 翻完再喂就被 NOT_IN_SESSION 拦掉。撤 timer 反过来必须排在之后 —— 多 rule
+        # 时这次退出可能被别的条件挡住 (STILL_HELD), session 还在, 撤了就丢达标。
+        await self._record_source.settle(rule.task_id)
+        if self.is_condition_satisfied(rule.id) is not False:
+            logger.info(
+                "EXIT_DEBOUNCE_ABANDONED: rule=%s name=%s 条件在退出提交前已变化",
+                rule.id, rule.name,
+            )
+            self._rewind_abandoned_exit(rs)
+            return
+
+        # Cleanup after settle and its condition recheck so an in-flight re-entry or
+        # unknown source can still cancel this exit.
         rs.exit_debounce_task = None
         rs.exit_debounce_at = None
         # debounce 已真完成，rule 离开 exit_debounce 阶段；清掉所有 source 的
@@ -1479,10 +1492,6 @@ class RuleRunner:
             rs.state_duration_fired = False
             rs.duration_window = None
             rs.last_duration_round = None
-        # 达标兜底必须排在状态机翻 off 之前：达标动作要求 task 还在 session 里,
-        # 翻完再喂就被 NOT_IN_SESSION 拦掉。撤 timer 反过来必须排在之后 —— 多 rule
-        # 时这次退出可能被别的条件挡住 (STILL_HELD), session 还在, 撤了就丢达标。
-        await self._record_source.settle(rule.task_id)
         # record-bound duration rule：注入今日累计 / target metadata，让 fire-agent
         # 在 on-exit-desc 含「若今日累计已达目标则使用手机推送通知...」条件通知文案时，
         # 按真实数据拼装通知（accumulated >= target 才推；文案不写死时长）。

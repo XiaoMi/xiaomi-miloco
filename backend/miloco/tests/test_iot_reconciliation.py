@@ -452,6 +452,74 @@ async def test_session_compensation_counts_after_debounce():
 
 
 @pytest.mark.asyncio
+async def test_session_exit_reentry_during_settle_cancels_stale_exit():
+    session_rule = _iot_rule("session", RuleDirection.SESSION, exit_debounce_seconds=0)
+    runner, state_machine = _runner_with_state_machine([session_rule])
+    source = _FakeIotSource({"session": False})
+    runner._iot_source = source
+    _set_task_on(state_machine, "task-1", "session")
+    runner._ensure_source("session", "device-1").last_bool = False
+    runner._ensure_state("session").last_rule_state = False
+
+    settle_started = asyncio.Event()
+    release_settle = asyncio.Event()
+
+    async def settle(_task_id: str) -> None:
+        settle_started.set()
+        await release_settle.wait()
+
+    runner._record_source.settle = settle
+    runner._record_source.disarm = MagicMock()
+    runner._fire = AsyncMock()
+
+    await runner._reconcile_iot_task_state("session", False)
+    exit_task = runner._ensure_state("session").exit_debounce_task
+    assert exit_task is not None
+    await settle_started.wait()
+
+    await runner.update_state("session", "device-1", True, "", skip_flicker=True)
+    release_settle.set()
+    result = await asyncio.gather(exit_task, return_exceptions=True)
+
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.ON
+    assert isinstance(result[0], asyncio.CancelledError)
+    runner._fire.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_exit_becoming_unknown_during_settle_abandons_exit():
+    session_rule = _iot_rule("session", RuleDirection.SESSION, exit_debounce_seconds=0)
+    runner, state_machine = _runner_with_state_machine([session_rule])
+    runner._iot_source = _FakeIotSource({"session": False})
+    _set_task_on(state_machine, "task-1", "session")
+    runner._ensure_source("session", "device-1").last_bool = False
+    runner._ensure_state("session").last_rule_state = False
+
+    settle_started = asyncio.Event()
+    release_settle = asyncio.Event()
+
+    async def settle(_task_id: str) -> None:
+        settle_started.set()
+        await release_settle.wait()
+
+    runner._record_source.settle = settle
+    runner._record_source.disarm = MagicMock()
+    runner._fire = AsyncMock()
+
+    await runner._reconcile_iot_task_state("session", False)
+    exit_task = runner._ensure_state("session").exit_debounce_task
+    assert exit_task is not None
+    await settle_started.wait()
+
+    runner.mark_source_unknown("session", "device-1")
+    release_settle.set()
+    result = await asyncio.gather(exit_task, return_exceptions=True)
+
+    assert state_machine.runtime_state("task-1") is TaskRuntimeState.ON
+    assert isinstance(result[0], asyncio.CancelledError)
+    runner._fire.assert_not_awaited()
+
+@pytest.mark.asyncio
 async def test_guard_refresh_unblocks_entry():
     enter_rule = _iot_rule("enter", RuleDirection.ENTER)
     exit_rule = _iot_rule("exit", RuleDirection.EXIT, value=False)
