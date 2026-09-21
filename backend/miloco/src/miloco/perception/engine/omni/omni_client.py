@@ -298,8 +298,8 @@ async def call_omni(
             error=error,
             model=config.model,
             inference_params={
-                "temperature": config.temperature,
-                "top_p": config.top_p,
+                "temperature": body.get("temperature", config.temperature),
+                "top_p": body.get("top_p", config.top_p),
                 "max_tokens": config.max_completion_tokens,
             },
         )
@@ -519,8 +519,8 @@ async def call_omni_stream(
             error=error,
             model=config.model,
             inference_params={
-                "temperature": config.temperature,
-                "top_p": config.top_p,
+                "temperature": body.get("temperature", config.temperature),
+                "top_p": body.get("top_p", config.top_p),
                 "max_tokens": config.max_completion_tokens,
             },
         )

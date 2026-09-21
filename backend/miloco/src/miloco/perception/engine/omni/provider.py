@@ -161,6 +161,55 @@ class MiMoAdapter(OpenAICompatAdapter):
         return body
 
 
+class KimiAdapter(MiMoAdapter):
+    """Moonshot Kimi OpenAI-compatible adapter.
+
+    kimi-k2.6 currently accepts only temperature=1 and top_p=0.95.
+    Keep the generic Miloco settings for other providers, but normalize these
+    two fields for this model so both probe and runtime calls use valid values.
+    """
+
+    def build_video_block(self, video_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        """Use the minimal video block documented by Moonshot's official API."""
+        return {
+            "type": "video_url",
+            "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
+        }
+
+    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        """Keep the audio block explicit instead of inheriting future MiMo extensions."""
+        return {
+            "type": "input_audio",
+            "input_audio": {"data": f"data:audio/m4a;base64,{audio_base64}"},
+        }
+
+    def build_request_body(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        if "kimi-k2.6" in model.lower():
+            temperature = 1.0
+            top_p = 0.95
+        body = super().build_request_body(
+            messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stream=stream,
+        )
+        # `thinking` is a MiMo-specific extension.  Kimi interprets an explicit
+        # disabled value as a different mode with incompatible sampling limits.
+        body.pop("thinking", None)
+        return body
+
+
 class QwenOmniAdapter(OpenAICompatAdapter):
     """Qwen3.5-Omni 系列 API adapter（qwen3.5-omni-plus / qwen3.5-omni-flash）。
 
@@ -463,6 +512,7 @@ def adjust_fps_for_omni(fps: int, omni_fps: int) -> int:
 _DEFAULT_ADAPTER = MiMoAdapter()
 _QWEN_ADAPTER = QwenOmniAdapter()
 _GEMINI_ADAPTER = GeminiAdapter()
+_KIMI_ADAPTER = KimiAdapter()
 
 
 def get_adapter(model: str) -> OmniProviderAdapter:
@@ -478,4 +528,6 @@ def get_adapter(model: str) -> OmniProviderAdapter:
         return _QWEN_ADAPTER
     if "gemini" in name:
         return _GEMINI_ADAPTER
+    if "kimi" in name:
+        return _KIMI_ADAPTER
     return _DEFAULT_ADAPTER

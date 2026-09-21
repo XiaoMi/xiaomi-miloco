@@ -3,6 +3,7 @@
 from miloco.perception.engine.omni import provider
 from miloco.perception.engine.omni.provider import (
     GeminiAdapter,
+    KimiAdapter,
     LocalMediaInfo,
     MiMoAdapter,
     OpenAICompatAdapter,
@@ -46,16 +47,24 @@ class TestGetAdapter:
     def test_gemini_case_insensitive(self):
         assert isinstance(get_adapter("Gemini-3-Pro"), GeminiAdapter)
 
+    def test_kimi(self):
+        assert isinstance(get_adapter("kimi-k2.6"), KimiAdapter)
+
+    def test_kimi_case_insensitive(self):
+        assert isinstance(get_adapter("Kimi-K2.6"), KimiAdapter)
+
     def test_openai_compat_family(self):
-        # MiMo / Qwen 都归 OpenAI 兼容族；Gemini 不是。
+        # MiMo / Qwen / Kimi 都归 OpenAI 兼容族；Gemini 不是。
         assert isinstance(get_adapter("xiaomi/mimo-v2.5"), OpenAICompatAdapter)
         assert isinstance(get_adapter("qwen3.5-omni-flash"), OpenAICompatAdapter)
+        assert isinstance(get_adapter("kimi-k2.6"), OpenAICompatAdapter)
         assert not isinstance(get_adapter("gemini-3-flash-preview"), OpenAICompatAdapter)
 
     def test_singleton(self):
         assert get_adapter("xiaomi/mimo-v2.5") is get_adapter("xiaomi/mimo-v2.5")
         assert get_adapter("qwen3.5-omni-flash") is get_adapter("qwen3.5-omni-plus")
         assert get_adapter("gemini-3-flash") is get_adapter("gemini-3-pro")
+        assert get_adapter("kimi-k2.6") is get_adapter("kimi-k2-turbo-preview")
 
 
 class TestMiMoAdapter:
@@ -90,6 +99,51 @@ class TestMiMoAdapter:
         assert body["stream"] is True
         assert body["stream_options"] == {"include_usage": True}
         assert body["thinking"] == {"type": "disabled"}
+
+
+class TestKimiAdapter:
+    adapter = KimiAdapter()
+
+    def test_video_block_matches_moonshot_documented_shape(self):
+        block = self.adapter.build_video_block("AAAA", _VIDEO_MEDIA)
+        assert block == {
+            "type": "video_url",
+            "video_url": {"url": "data:video/mp4;base64,AAAA"},
+        }
+
+    def test_audio_block_shape_is_explicit(self):
+        block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA)
+        assert block == {
+            "type": "input_audio",
+            "input_audio": {"data": "data:audio/m4a;base64,BBBB"},
+        }
+
+    def test_kimi_k2_6_forces_supported_sampling_parameters(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="kimi-k2.6",
+            max_tokens=512, temperature=0.1, top_p=1.0, stream=False,
+        )
+        assert body["temperature"] == 1.0
+        assert body["top_p"] == 0.95
+        assert "thinking" not in body
+
+    def test_other_kimi_models_passthrough_sampling(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="kimi-k2-turbo-preview",
+            max_tokens=512, temperature=0.1, top_p=0.9, stream=False,
+        )
+        assert body["temperature"] == 0.1
+        assert body["top_p"] == 0.9
+        assert "thinking" not in body
+
+    def test_stream_keeps_usage_options_and_strips_thinking(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="kimi-k2.6",
+            max_tokens=512, temperature=0.1, top_p=1.0, stream=True,
+        )
+        assert body["stream"] is True
+        assert body["stream_options"] == {"include_usage": True}
+        assert "thinking" not in body
 
 
 class TestQwenOmniAdapter:
