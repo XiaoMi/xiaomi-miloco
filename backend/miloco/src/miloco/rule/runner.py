@@ -1291,8 +1291,8 @@ class RuleRunner:
         ``_evaluate_duration``."""
         state = self._ensure_state(rule.id)
         if event is RuleEvent.ENTERED and rule.resolved_direction is RuleDirection.GUARD:
-            await self._release_pending_enters(rule.task_id)
-            return TriggerOutcome.NOT_FIRED
+            released = await self._release_pending_enters(rule.task_id)
+            return TriggerOutcome.FIRED if released else TriggerOutcome.NOT_FIRED
         if event is RuleEvent.EXITED:
             self._clear_pending_enter(rule.task_id, rule.id)
         if event == RuleEvent.ENTERED:

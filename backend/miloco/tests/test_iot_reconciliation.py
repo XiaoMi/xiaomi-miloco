@@ -433,9 +433,10 @@ async def test_guard_refresh_releases_entry_that_was_already_blocked():
     fired.assert_not_awaited()
 
     source.values["guard"] = True
-    await runner.update_state("guard", "device-1", True, "guard true")
+    guard_outcome = await runner.update_state("guard", "device-1", True, "guard true")
     await runner.drain()
 
+    assert guard_outcome is TriggerOutcome.FIRED
     assert state_machine.runtime_state("task-1") is TaskRuntimeState.ON
     fired.assert_awaited_once()
     assert fired.await_args.args[5] == "客厅"
