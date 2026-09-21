@@ -493,6 +493,9 @@ class MiotService:
         # 由 test_clear_account_scope_state_clears_all_scope_keys 钉住。
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_CROP_DENY_LIST_KEY)
         self._lru.clear()
+        # 去重键是纯文案、不带账号维度:不清的话「A 刚发过同一句 → 切到 B → B 再发」
+        # 会命中去重,send_notify 打一条 skipped 日志后正常返回,用户永远收不到。
+        self._notify_deduper.clear()
 
     @property
     def miot_client(self):
@@ -509,7 +512,27 @@ class MiotService:
 
             async def _rebuild() -> None:
                 self._clear_account_scope_state()
-                await self._miot_proxy.get_miot_auth_info(code=code, state=state)
+                # Account switch: delete the previous account's local cert and reset
+                # the virtual did (still the old uid here, before the new token is
+                # fetched) so the new account gets a clean central-hub identity.
+                await self._miot_proxy.reset_central_identity_async()
+                try:
+                    await self._miot_proxy.get_miot_auth_info(code=code, state=state)
+                except Exception:
+                    # 换号失败(OAuth code 短时效:粘错/过期/token 交换网络抖动)而**旧账号
+                    # 的 token 仍然有效**:上一句已经把旧账号的中枢协调器拆掉了,而能重建它
+                    # 的路径只有"再次登录成功 / deinit+init / 进程重启"(token 刷新只更新
+                    # token 不建 hub)。不补这一手,用户留在旧账号且云端一切正常,却
+                    # can_control 恒 False —— 所有控制无限期走云端,日志里只有一条
+                    # authorize 失败。与 Zirconi 那条首登不刷 scope 的 P1 同族。
+                    try:
+                        await self._miot_proxy.miot_client.setup_central_hub_async()
+                    except Exception as restore_err:
+                        logger.warning(
+                            "restore central hub after failed account switch: %s",
+                            restore_err,
+                        )
+                    raise
                 # 建立启用集必须排在刷新和对齐之前：上一行把启用集删了，而
                 # is_home_allowed 对空启用集一律返回假 —— 这时候刷新，所有摄像头
                 # 被跳过、managers 建不出来；这时候对齐，空作用域会按「零可读属性
@@ -521,6 +544,16 @@ class MiotService:
                 # 选家分支里也有一份，改调 _ensure_home_selected 之后这条路断了，必须
                 # 在这里自己补 —— 不补的话旧账号的设备 / 房间 / 习惯会串进新账号
                 self._schedule_agent_session_reset()
+                # 同样，中枢 scope 刷新也在 list_homes 的兜底选家分支里有一份，走
+                # _ensure_home_selected 之后这条路同样断了，必须在这里自己补——不补的话
+                # 首登/换号时 _owned_group_ids 还停留在旧/空集，mDNS 发现的网关会被跳过，
+                # 本地控制不生效直到手动切家或重启（Zirconi 那条 P1）。
+                try:
+                    await self._miot_proxy.refresh_central_hub_scope_async()
+                except Exception as e:
+                    logger.warning(
+                        "authorize_with_code central hub scope refresh failed: %s", e
+                    )
                 # get_miot_auth_info 内部那次刷新跑在启用集还空着的时候，这里重来一遍
                 await self._refresh_all_caches()
 
@@ -718,6 +751,9 @@ class MiotService:
 
             async def _rebuild() -> None:
                 self._clear_account_scope_state()
+                # Logout: drop the local central-hub identity (cert + virtual did)
+                # before tearing down; the re-init below rebuilds with a fresh did.
+                await self._miot_proxy.reset_central_identity_async()
                 await self._miot_proxy.deinit()
                 # deinit 已清空 _camera_info_dict 和 token；init 重建 client 但无
                 # 有效 token，refresh_cameras 大概率静默失败（返回 None）。
@@ -1269,7 +1305,20 @@ class MiotService:
         homes, changed = await self._ensure_home_selected()
         if changed:
             self._schedule_agent_session_reset()
-            self._schedule_scope_reset(self._refresh_all_caches)
+
+            async def _rebuild() -> None:
+                # 与 switch_home 同构：刷新放编排锁内 + 后台执行。refresh_scope_async
+                # 是完整 deinit/init（含逐台串行 mTLS），既不该让 HTTP 响应等，也不能
+                # 与显式切家的 rebuild 交错 —— 它自身无重入门禁，锁是唯一串行化手段。
+                try:
+                    await self._miot_proxy.refresh_central_hub_scope_async()
+                except Exception as e:
+                    logger.warning(
+                        "list_homes auto-select central hub scope refresh failed: %s", e
+                    )
+                await self._refresh_all_caches()
+
+            self._schedule_scope_reset(_rebuild)
         return homes
 
     async def _ensure_home_selected(self) -> tuple[list[dict], bool]:
@@ -1400,7 +1449,19 @@ class MiotService:
         # 两件事都放后台：刷新和对齐都要打云端，让 HTTP 响应等它们会卡住几秒
         allow = allowed_home_ids(self._kv_repo)
         if allow != prev_allow:
-            self._schedule_scope_reset(self._refresh_all_caches)
+
+            async def _rebuild() -> None:
+                # 启用集变了才重置本地中枢：让它按新家庭重连（收口的归属过滤在
+                # 连接时按 live 白名单生效）。切家庭本就要重拉设备表，这里同类开销。
+                try:
+                    await self._miot_proxy.refresh_central_hub_scope_async()
+                except Exception as e:
+                    logger.warning(
+                        "switch_home central hub scope refresh failed: %s", e
+                    )
+                await self._refresh_all_caches()
+
+            self._schedule_scope_reset(_rebuild)
             self._schedule_agent_session_reset()
         else:
             # 前端家庭列表里当前那个家也是可点的，点它语义上什么都没换：作用域重置会为

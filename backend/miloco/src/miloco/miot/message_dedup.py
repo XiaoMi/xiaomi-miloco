@@ -68,6 +68,16 @@ class MessageDeduper:
             return
         self._recent[key] = self._clock()
 
+    def clear(self) -> None:
+        """Forget every recorded key.
+
+        Keys are plain message text with no account dimension, so an account
+        switch must drop them: otherwise a message the *previous* account sent
+        seconds ago suppresses the new account's identical message, and the
+        caller sees a successful send the user never receives.
+        """
+        self._recent.clear()
+
     def _prune(self, now: float) -> None:
         expired = [k for k, ts in self._recent.items() if now - ts >= self._window_sec]
         for k in expired:

@@ -43,6 +43,7 @@ from miot.types import MIoTActionParam, MIoTGetPropertyParam, MIoTSetPropertyPar
 from miloco.database.rule_repo import RuleLogRepo
 from miloco.dispatch import dispatch_event
 from miloco.miot.client import MiotProxy
+from miloco.miot.result_codes import is_result_unknown
 from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
 from miloco.rule.iot_source import IotRef, IotSource, iot_ref_of
@@ -1972,7 +1973,17 @@ class RuleRunner:
                 success=success, error=err, source="rule", source_id=rule_id,
             )
 
-            if success:
+            # 冷却的用途是**防非幂等动作重复执行**,所以判据不是"成功",而是"这条指令
+            # 有没有可能已经落到设备上":
+            #   - 成功 → 显然要落冷却
+            #   - 结果未知(-10006/-10041/-10040,请求已到过网关)→ **也要落**。这些码在
+            #     台账里仍是失败(用户需要知道没确认),但若因此跳过冷却,人还在动、规则
+            #     几秒后再触发就会把"窗帘 +10%"又执行一遍——SDK 层不做云端重发正是为了
+            #     避开这次双发,不能被这一层重新引入。
+            #   - 空返回 / None / 不可判定(code 为 None)→ **不落**。那种情况请求未必发
+            #     出去过,误落冷却会压掉用户接下来的真实动作
+            #     (见 test_empty_result_is_failure_no_cooldown)。
+            if success or is_result_unknown(_lcode):
                 self._mark_cooldown(rule_id, action)
 
             return RuleActionExecuteResult(

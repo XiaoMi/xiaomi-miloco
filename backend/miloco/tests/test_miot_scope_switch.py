@@ -91,6 +91,13 @@ async def scene():
         refresh_cameras=AsyncMock(return_value=None),
         refresh_scenes=AsyncMock(return_value=None),
         get_miot_auth_info=AsyncMock(),
+        # 中枢身份重置/scope 刷新：authorize_with_code / unbind_miot 无条件调用
+        # reset_central_identity_async（换号/登出必须可靠清干净，不允许吞异常），
+        # list_homes / switch_home 的 refresh_central_hub_scope_async 虽已包了
+        # try/except，但同样补上 mock 让这几条路径在本 harness 下走真实分支
+        # 而不是静默落进 AttributeError 的 except 分支。
+        reset_central_identity_async=AsyncMock(),
+        refresh_central_hub_scope_async=AsyncMock(),
         # 两个家庭：切到 H2 才是真切换，切到 H1（启用集里那个）是幂等点击
         get_devices=AsyncMock(
             return_value={

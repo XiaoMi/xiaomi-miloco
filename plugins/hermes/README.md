@@ -15,7 +15,7 @@ hermes gateway restart
 
 The install script is idempotent: it copies the 16 miloco-\* skills to `~/.hermes/skills/`, copies the plugin to `~/.hermes/plugins/miloco/`, deploys the AgentPlatformAdapter to `$MILOCO_HOME/agent_platform/hermes/`, patches `$MILOCO_HOME/config.json::agent` (auto-backup, keep newest 3), writes `API_SERVER_KEY` to `~/.hermes/.env`, starts the backend (`miloco-cli service start`), and runs `hermes plugins enable miloco` (idempotent).
 
-The backend runs under supervisord and is managed via `miloco-cli service {start,stop,restart,status,logs}`.
+The backend runs under a platform process manager (Linux: supervisord, macOS: launchd) and is managed uniformly via `miloco-cli service {start,stop,restart,status,logs}`.
 
 For a step-by-step guide written for an AI agent to follow (covers pre-flight checks, OAuth + API-key user-terminal steps, and verification), see [scripts/install-guide-hermes.md](../../scripts/install-guide-hermes.md).
 

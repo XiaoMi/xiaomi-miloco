@@ -67,16 +67,16 @@ miloco 原本只通过 OpenClaw 插件（`plugins/openclaw/`）接入小米内�
 
 ### 与 OpenClaw 集成的关键差异
 
-| 维度             | OpenClaw 版                                       | Hermes 版                                                                           |
-| ---------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| 插件语言         | TypeScript                                        | Python                                                                              |
-| 上下文注入       | `before_prompt_build` → system prompt             | adapter.build_system → `<system>` 消息（丢线程池，不阻塞事件循环）                  |
-| 入站回调         | 插件内 `api.registerHttpRoute("/miloco/webhook")` | backend adapter 直调 Hermes `/v1/chat/completions`                                  |
-| 同步等 turn      | `api.runtime.subagent.run` + `waitForRun`         | adapter.send_turn 内 httpx POST `/v1/chat/completions`（sync，X-Hermes-Session-Id） |
-| get_trace        | 内存 trace buffer，后端反向轮询取 meta            | 文件 IPC：trace.py 写 `$MILOCO_HOME/trace/*.meta.json`，adapter 读盘                |
-| 溢出自愈         | `deleteSession({deleteTranscript:true})` + 重跑   | 丢弃会话上下文、无 session 头全新 turn 重试一次                                     |
-| 通知投递         | subagent run with deliver:true                    | adapter._deliver_response → `hermes send --json --to <platform:chat_id>`            |
-| backend 生命周期 | 有（`miloco-cli service restart/stop`）           | 有（supervisord 管理）                                                              |
+| 维度             | OpenClaw 版                                       | Hermes 版                                                                                   |
+| ---------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| 插件语言         | TypeScript                                        | Python                                                                                      |
+| 上下文注入       | `before_prompt_build` → system prompt             | adapter.build_system → `<system>` 消息（丢线程池，不阻塞事件循环）                          |
+| 入站回调         | 插件内 `api.registerHttpRoute("/miloco/webhook")` | backend adapter 直调 Hermes `/v1/chat/completions`                                          |
+| 同步等 turn      | `api.runtime.subagent.run` + `waitForRun`         | adapter.send_turn 内 httpx POST `/v1/chat/completions`（sync，X-Hermes-Session-Id）         |
+| get_trace        | 内存 trace buffer，后端反向轮询取 meta            | 文件 IPC：trace.py 写 `$MILOCO_HOME/trace/*.meta.json`，adapter 读盘                        |
+| 溢出自愈         | `deleteSession({deleteTranscript:true})` + 重跑   | 丢弃会话上下文、无 session 头全新 turn 重试一次                                             |
+| 通知投递         | subagent run with deliver:true                    | adapter._deliver_response → `hermes send --json --to <platform:chat_id>`                    |
+| backend 生命周期 | 有（`miloco-cli service restart/stop`）           | 有（平台进程管理器：Linux supervisord / macOS launchd，均由 `miloco-cli service` 统一驱动） |
 
 ### 配置共享
 

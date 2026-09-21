@@ -1,0 +1,5 @@
+# The vendored, code-signed launcher app is byte-sensitive: any text
+# normalization (CRLF, whitespace) would break the adhoc code signature
+# (cdhash) and invalidate the one-time macOS Local Network grant. Treat the
+# whole vendored bundle as binary and never touch it.
+darwin/miloco.app/** binary

@@ -2,7 +2,7 @@
 
 装好 miloco 兼容层后用户 / agent 能主动验证链路是否完整：
 
-- ``miloco_status`` — 一键自检 7 项不变量，返回结构化 JSON（plugin enabled /
+- ``miloco_status`` — 一键自检 10 项不变量，返回结构化 JSON（plugin enabled /
   state.json deliver.target / adapter health / 4 cron jobs / 16+ skills /
   miloco backend status / 上次 webhook 时间）。诊断 root cause 用。
 - ``miloco_test_push`` — 强制走一次完整投递链路（绕开 cron / perception），用户能立刻
@@ -271,29 +271,96 @@ def _check_trace_hooks() -> Dict[str, Any]:
     }
 
 
-def _check_miloco_backend() -> Dict[str, Any]:
-    """检查 miloco 后端是否在跑（调 miloco-cli service status）。"""
+def _run_miloco_service_status() -> Optional[Dict[str, Any]]:
+    """跑一次 ``miloco-cli service status``，解析出 JSON dict；拿不到就 None。
+
+    调用方各自处理 subprocess 失败(PATH 缺失/超时/异常),这里只管解析。
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("miloco-cli"):
+        return None
+    result = subprocess.run(
+        ["miloco-cli", "service", "status"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    out = (result.stdout or "").strip()
+    try:
+        data = json.loads(out) if out[:1] == "{" else {}
+    except json.JSONDecodeError:
+        data = {}
+    data["_returncode"] = result.returncode
+    data["_output"] = out[:300] or (result.stderr or "").strip()[:300]
+    return data
+
+
+def _check_miloco_backend(data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """检查 miloco 后端是否在跑（调 miloco-cli service status）。
+
+    ``data`` 是调用方传入的共享快照（见 ``gather_status``）：两个 backend check
+    各跑一次 subprocess 时，两次之间的重启/崩溃会让同一份报告自相矛盾。
+    """
     import shutil
     import subprocess
 
     if not shutil.which("miloco-cli"):
         return {"ok": False, "error": "miloco-cli 不在 PATH"}
     try:
-        result = subprocess.run(
-            ["miloco-cli", "service", "status"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        # 不同 miloco-cli 版本输出格式不一：宽松判 ok / running / active 之一
-        out = (result.stdout or "") + (result.stderr or "")
-        ok = result.returncode == 0 and any(
-            marker in out.lower() for marker in ("running", "active", "ok", "started")
-        )
+        # 必须解析 JSON，不能 grep 关键词：service status 不论死活都以 0 退出，
+        # 后端停止时输出就是 {"running": false}，字面含 "running" → 松 grep
+        # 恒命中，这项自检永远 ✓（同 install-hermes.sh 检查 #4 的注释、同一个坑）。
+        data = data if data is not None else _run_miloco_service_status()
+        if data is None:
+            return {"ok": False, "error": "miloco-cli 不在 PATH"}
+        running = bool(data.get("running"))
         return {
-            "ok": ok,
-            "returncode": result.returncode,
-            "output": out.strip()[:300],
+            "ok": data["_returncode"] == 0 and running,
+            "running": running,
+            "pid": data.get("pid"),
+            "returncode": data["_returncode"],
+            "output": data["_output"],
+            "fix": "miloco-cli service start（macOS=launchd / Linux=supervisord）",
+        }
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "miloco-cli service status 超时"}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _check_miloco_backend_managed(
+    data: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """检查在跑的 miloco 后端是不是被进程管理器托管（launchd/supervisord）。
+
+    与 ``_check_miloco_backend``（在不在跑）分开报：两者修复动作不同——
+    没在跑用 ``service start``，在跑但没托管用 ``service restart``（走
+    launchd/supervisord 重新纳管），压进同一个 ok 会让 agent 给不出准确建议。
+    未在跑时这项没有独立意义，直接跟随 running 报 ok（避免"没跑"被同时报成
+    "没跑"+"没托管"两条 fail，误导成两个问题）。
+
+    ``data`` 同 ``_check_miloco_backend``：共享同一轮自检的快照。
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("miloco-cli"):
+        return {"ok": False, "error": "miloco-cli 不在 PATH"}
+    try:
+        data = data if data is not None else _run_miloco_service_status()
+        if data is None:
+            return {"ok": False, "error": "miloco-cli 不在 PATH"}
+        running = bool(data.get("running"))
+        managed = bool(data.get("managed"))
+        return {
+            "ok": (not running) or managed,
+            "running": running,
+            "managed": managed,
+            "returncode": data["_returncode"],
+            "output": data["_output"],
+            "fix": "miloco-cli service restart（重新纳入 launchd/supervisord 托管）",
         }
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "miloco-cli service status 超时"}
@@ -336,8 +403,18 @@ def _check_hermes_plugin_enabled() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def gather_status(ctx: Any) -> Dict[str, Any]:
-    """一键自检 7 项不变量，返回结构化 JSON。"""
+    """一键自检 10 项不变量，返回结构化 JSON。"""
     checks: Dict[str, Dict[str, Any]] = {}
+    # 两个 backend check 共用一份快照：各跑一次 service status 时，两次之间后端若
+    # 重启/崩溃，同一份报告会自相矛盾（一个说在跑、一个说没托管），agent 据此给出
+    # 的修复建议随之失准；顺带把 subprocess 开销减半。
+    # 快照取失败（5s 超时 / OSError）不能击穿 gather_status —— 退回 None 后两个 check
+    # 会在自己的 try 里重取，最坏只是那两项报定向错误，其余 8 项照常出结果。
+    try:
+        backend_snapshot = _run_miloco_service_status()
+    except Exception:  # noqa: BLE001
+        logger.exception("backend 状态快照失败，退回各 check 自行调用")
+        backend_snapshot = None
     # 顺序按「最可能是 root cause → 最不可能」排，agent 报告时一眼看到关键项
     for name, fn, ctx_arg in (
         ("plugin_self", _check_plugin_self, None),
@@ -345,7 +422,12 @@ def gather_status(ctx: Any) -> Dict[str, Any]:
         ("hermes_plugin_enabled", _check_hermes_plugin_enabled, None),
         ("adapter_health", _check_adapter_health, None),
         ("cron_jobs", _check_cron_jobs, None),
-        ("miloco_backend", _check_miloco_backend, None),
+        ("miloco_backend", lambda: _check_miloco_backend(backend_snapshot), None),
+        (
+            "miloco_backend_managed",
+            lambda: _check_miloco_backend_managed(backend_snapshot),
+            None,
+        ),
         ("skills_installed", _check_skills_installed, None),
         ("versions", _check_versions, ctx),
         ("trace_hooks", _check_trace_hooks, None),
@@ -402,7 +484,7 @@ def test_push(ctx: Any, message: Optional[str] = None) -> Dict[str, Any]:
 MILOCO_STATUS_SCHEMA: Dict[str, Any] = {
     "name": "miloco_status",
     "description": (
-        "一键自检 miloco 推送链路 7 项不变量（plugin / state.json target / hermes plugin enabled / "
+        "一键自检 miloco 推送链路 10 项不变量（plugin / state.json target / hermes plugin enabled / "
         "adapter health / 4 cron jobs / miloco backend / 16+ skills）。\n"
         "返回结构化 JSON：checks[*].ok + 失败项 fix 提示。**没收到推送时第一时间调这个**——"
         "会告诉你卡在哪一环（绝大多数情况是 state.json::deliver.target=null）。\n"

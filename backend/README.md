@@ -53,7 +53,7 @@ uv run task check    # ty 类型检查
 uv run task reset    # 全量重装依赖
 ```
 
-> 正常使用建议通过 `miloco-cli service start` 以 daemon 模式启动（会写 `~/.openclaw/miloco/log/miloco-backend_<ts>.log`）。
+> 正常使用建议通过 `miloco-cli service start` 以 daemon 模式启动（会写 `~/.openclaw/miloco/log/miloco-backend.log`，按 10MB × 20 份滚动为 `.1` … `.20`）。早前的 per-boot 时间戳名 `miloco-backend_<ts>.log` 已不再产生，按该 glob 收集日志的脚本需改用固定名。
 
 ## 配置
 
