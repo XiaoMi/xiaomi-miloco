@@ -228,6 +228,7 @@ def _is_guard_rule(rule: dict) -> bool:
 
 def _filter_completed_event_rules(
     rules: list[dict],
+    guard_needed_task_ids: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[list[dict], list[str]]:
     """剔除 event mode 中关联 task 当前活跃期 record 已「本周期达标」的 rule。
 
@@ -242,7 +243,8 @@ def _filter_completed_event_rules(
     源, 本来就不走摄像头。无 record 的 rule 保留（维持现状）。
 
     返回 (kept_rules, skipped_task_ids)。skipped_task_ids 按 task 去重后排序，
-    供调用方做去重打印。
+    供调用方做去重打印。``guard_needed_task_ids`` 来自全量规则：即使非 omni
+    进入规则不在感知列表里，对应 task 的 omni guard 仍不能被剔除。
     """
     event_task_ids = {
         r["task_id"] for r in rules if _is_enter_rule(r) and r.get("task_id")
@@ -279,6 +281,7 @@ def _filter_completed_event_rules(
         for r in kept
         if not _is_guard_rule(r)
         or r.get("task_id") in kept_task_ids_with_entry
+        or r.get("task_id") in guard_needed_task_ids
     ]
     return kept, sorted(skipped)
 
@@ -760,9 +763,21 @@ class PerceptionEngineProxy:
 
             from miloco.manager import get_manager
 
-            rules = await get_manager().rule_service.get_effectively_enabled_rules()
-            rules = [rule.model_dump() for rule in omni_rules_only(rules)]
-            rules, skipped_task_ids = _filter_completed_event_rules(rules)
+            all_rules = await get_manager().rule_service.get_effectively_enabled_rules()
+            from miloco.rule.schema import OMNI_SOURCE_TYPE, RuleDirection
+
+            guard_needed_task_ids = {
+                rule.task_id
+                for rule in all_rules
+                if rule.task_id
+                and rule.resolved_direction
+                in (RuleDirection.ENTER, RuleDirection.SESSION)
+                and rule.resolved_source_type != OMNI_SOURCE_TYPE
+            }
+            rules = [rule.model_dump() for rule in omni_rules_only(all_rules)]
+            rules, skipped_task_ids = _filter_completed_event_rules(
+                rules, guard_needed_task_ids
+            )
 
             device_count = sum(1 for d in batch.devices.values() if d.has_data)
 

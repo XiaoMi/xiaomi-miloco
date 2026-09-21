@@ -370,10 +370,29 @@ def test_guard_of_completed_session_task_is_kept(real_db):
     rules = [
         _make_rule("r-session", "t_focus", "state", "session"),
         _make_rule("r-guard", "t_focus", "event", "guard"),
+        _make_rule("r-other-enter", "t_other", "event", "enter"),
     ]
     kept, skipped = _filter_completed_event_rules(rules)
 
-    assert [r["id"] for r in kept] == ["r-session", "r-guard"]
+    assert [r["id"] for r in kept] == [
+        "r-session",
+        "r-guard",
+        "r-other-enter",
+    ]
+    assert skipped == []
+
+
+def test_guard_is_kept_for_task_with_non_omni_entry_rule(real_db):
+    rules = [
+        _make_rule("r-iot-guard", "t_iot", "event", "guard"),
+        _make_rule("r-other-enter", "t_other", "event", "enter"),
+    ]
+
+    kept, skipped = _filter_completed_event_rules(
+        rules, guard_needed_task_ids={"t_iot"}
+    )
+
+    assert [r["id"] for r in kept] == ["r-iot-guard", "r-other-enter"]
     assert skipped == []
 
 

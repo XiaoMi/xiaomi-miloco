@@ -2641,6 +2641,48 @@ class TestRuleRunnerEventDuration:
         refresh.assert_awaited_once_with(rule.task_id, rule.id)
 
     @pytest.mark.asyncio
+    async def test_duration_refresh_release_does_not_refire_same_window(
+        self, runner_fast, mock_miot_proxy, monkeypatch
+    ):
+        rule = _make_event_duration_rule(
+            rule_id="rule-guard-refresh-release",
+            duration_seconds=1,
+            duration_ratio=1.0,
+        )
+        runner_fast._sample_interval = 0.5
+        runner_fast.add_rule(rule)
+        runner_fast.set_task_actions(
+            "test_task",
+            {
+                "on_enter_actions": [
+                    {
+                        "did": "device-dur",
+                        "iid": "prop.2.1",
+                        "value": True,
+                        "params": None,
+                        "idempotent": False,
+                        "cooldown_minutes": None,
+                    }
+                ],
+                "on_enter_desc": None,
+            },
+        )
+
+        async def refresh_and_release(_task_id, _rule_id):
+            runner_fast._state[rule.id].duration_window = None
+
+        monkeypatch.setattr(runner_fast, "_refresh_iot_guards", refresh_and_release)
+
+        with patch("miloco.rule.runner.time.time") as mt:
+            mt.return_value = 100.0
+            await runner_fast.update_state(rule.id, "cam-001", True, "")
+            mt.return_value = 100.5
+            await runner_fast.update_state(rule.id, "cam-001", True, "")
+
+        await runner_fast.drain()
+        assert mock_miot_proxy.set_device_properties.call_count == 0
+
+    @pytest.mark.asyncio
     async def test_duration_none_fires_immediately(
         self, runner_fast, mock_miot_proxy
     ):
