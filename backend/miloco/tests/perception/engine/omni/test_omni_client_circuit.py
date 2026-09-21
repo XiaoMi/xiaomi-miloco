@@ -210,11 +210,11 @@ async def test_call_omni_bad_response_non_dict(monkeypatch):
     assert snap.state == "warn" and snap.code == "bad_response"
 
 
-# ─── resolve_live_omni_config × 三元组变化 ──────────────────────────────────
+# ─── resolve_live_omni_config × 指纹变化 ────────────────────────────────────
 
 
 async def test_resolve_live_config_no_change_keeps_state(monkeypatch):
-    """三元组不变时不动熔断。"""
+    """指纹不变时不动熔断。"""
     from miloco.config import reset_settings
 
     reset_settings()
@@ -224,13 +224,13 @@ async def test_resolve_live_config_no_change_keeps_state(monkeypatch):
     assert cb.snapshot().state == "error"
 
     # 第一次调用建立 cache
-    if hasattr(omni_client._maybe_reset_breaker_on_config_change, "_last_triple"):
-        del omni_client._maybe_reset_breaker_on_config_change._last_triple
+    if hasattr(omni_client._maybe_reset_breaker_on_config_change, "_last_fingerprint"):
+        del omni_client._maybe_reset_breaker_on_config_change._last_fingerprint
     base = OmniConfig(model="m1", base_url="https://x/v1", api_key="sk-1")
     omni_client.resolve_live_omni_config(base)
     # 第二次调用同样值:不 reset
     omni_client.resolve_live_omni_config(base)
-    # settings 里的 api_key 和 base.api_key 一样(sk-1),triple 不变
+    # settings 里的 api_key 和 base.api_key 一样(sk-1),指纹不变
     assert cb.snapshot().state == "error"
 
 
@@ -246,8 +246,8 @@ async def test_resolve_live_config_strips_trailing_slash(monkeypatch):
     from miloco.config import reset_settings
 
     reset_settings()
-    if hasattr(omni_client._maybe_reset_breaker_on_config_change, "_last_triple"):
-        del omni_client._maybe_reset_breaker_on_config_change._last_triple
+    if hasattr(omni_client._maybe_reset_breaker_on_config_change, "_last_fingerprint"):
+        del omni_client._maybe_reset_breaker_on_config_change._last_fingerprint
 
     class _Mo:
         model = "m1"
@@ -268,15 +268,16 @@ async def test_resolve_live_config_strips_trailing_slash(monkeypatch):
 
 
 async def test_resolve_live_config_change_resets_breaker(monkeypatch):
-    """settings.model.omni 三元组变化时清熔断。"""
+    """settings.model.omni 指纹变化时清熔断。"""
     from miloco.config import reset_settings
 
     reset_settings()
     cb = get_omni_circuit_breaker()
-    omni_client._maybe_reset_breaker_on_config_change._last_triple = (
+    omni_client._maybe_reset_breaker_on_config_change._last_fingerprint = (
         "m1",
         "https://x/v1",
         "sk-OLD",
+        "video",  # 视觉输入模式也是指纹的一维, 缺了这维 prev 长度对不上
     )
     for _ in range(3):
         await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
@@ -311,6 +312,70 @@ async def test_resolve_live_config_change_resets_breaker(monkeypatch):
 
     await asyncio.sleep(0)
     assert cb.snapshot().state == "ok"
+
+
+def _settings_with_mode(mode: str):
+    """settings 替身: 只带熔断指纹用到的字段, 模式可换。"""
+
+    class _Mo:
+        model = "m1"
+        base_url = "https://x/v1"
+        api_key = "sk-1"
+
+    class _M:
+        omni = _Mo()
+
+    class _P:
+        engine = {"input": {"omni_visual_input_mode": mode}}
+
+    class _S:
+        model = _M()
+        perception = _P()
+
+    return _S()
+
+
+async def test_resolve_live_config_mode_change_resets_breaker(monkeypatch):
+    """只有视觉输入模式变了也要清熔断, 没变则不许清。
+
+    熔断是两种模式共用一个计数器的: 视频模式连挂到阈值后切到图片模式, 新模式会被上一
+    模式的失败计数挡在门外, 表现出来是"切了模式还是不通" —— 而这恰恰是拿这个开关做
+    A/B 时最需要区分的一次切换。指纹里少了这一维, 上述现象静默发生、没有任何报错信号。
+
+    指纹不手写: 先经生产路径建立一次("模式没变不清"这一条只有真跑出来的 prev 才验得
+    了 —— 手写的 prev 长度与变异后的指纹对不上, 会"因为长度不同"而清掉, 测试看着绿),
+    再只改模式调第二次。
+    """
+    import asyncio
+
+    import miloco.perception.engine.omni.omni_client as oc
+    from miloco.config import reset_settings
+
+    reset_settings()
+    if hasattr(oc._maybe_reset_breaker_on_config_change, "_last_fingerprint"):
+        del oc._maybe_reset_breaker_on_config_change._last_fingerprint
+
+    cb = get_omni_circuit_breaker()
+    base = OmniConfig(model="m1", base_url="https://x/v1", api_key="sk-1")
+
+    monkeypatch.setattr(
+        "miloco.config.get_settings", lambda: _settings_with_mode("video"), raising=True
+    )
+    oc.resolve_live_omni_config(base)  # 建立指纹
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    assert cb.snapshot().state == "error"
+
+    oc.resolve_live_omni_config(base)  # 同模式: 指纹不变
+    await asyncio.sleep(0)
+    assert cb.snapshot().state == "error", "模式没变却把熔断清了"
+
+    monkeypatch.setattr(
+        "miloco.config.get_settings", lambda: _settings_with_mode("image"), raising=True
+    )
+    oc.resolve_live_omni_config(base)  # 只切模式
+    await asyncio.sleep(0)
+    assert cb.snapshot().state == "ok", "切了视觉输入模式却没清熔断"
 
 
 # ─── forced-stream 路径熔断器记录(review #1 回归防护) ──────────────────────

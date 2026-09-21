@@ -43,6 +43,9 @@ class TestGetAdapter:
     def test_gemini(self):
         assert isinstance(get_adapter("gemini-3-flash-preview"), GeminiAdapter)
 
+    def test_gemini_36_flash(self):
+        assert isinstance(get_adapter("gemini-3.6-flash"), GeminiAdapter)
+
     def test_gemini_case_insensitive(self):
         assert isinstance(get_adapter("Gemini-3-Pro"), GeminiAdapter)
 
@@ -241,18 +244,20 @@ class TestGeminiAdapter:
         assert video_part["video_metadata"] == {"fps": 1}
         assert "video_metadata" not in video_part["inline_data"]
 
-    def test_request_body_image_and_audio_inline_data(self):
+    def test_request_body_multiple_images_and_audio_inline_data(self):
         messages = [{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,IMG"}},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,IMG1"}},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,IMG2"}},
             self.adapter.build_audio_block("AUD", _AUDIO_MEDIA),
         ]}]
         body = self.adapter.build_request_body(
-            messages, model="gemini-3-flash",
+            messages, model="gemini-3.6-flash",
             max_tokens=512, temperature=0.1, top_p=0.95,
         )
         parts = body["contents"][0]["parts"]
-        assert parts[0]["inline_data"] == {"mime_type": "image/png", "data": "IMG"}
-        assert parts[1]["inline_data"] == {"mime_type": "audio/mp4", "data": "AUD"}
+        assert parts[0]["inline_data"] == {"mime_type": "image/jpeg", "data": "IMG1"}
+        assert parts[1]["inline_data"] == {"mime_type": "image/jpeg", "data": "IMG2"}
+        assert parts[2]["inline_data"] == {"mime_type": "audio/mp4", "data": "AUD"}
 
     def test_parse_response_to_openai_shape(self):
         raw = {

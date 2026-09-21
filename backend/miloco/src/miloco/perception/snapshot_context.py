@@ -87,6 +87,8 @@ class OmniEventArtifacts:
     """
 
     clips: dict[str, tuple[bytes, ClipKind]] = field(default_factory=dict)
+    image_frames: dict[str, list[bytes]] = field(default_factory=dict)
+    image_audio: dict[str, bytes] = field(default_factory=dict)
     trace: dict[str, Any] | None = None
     gallery: dict[str, dict[str, bytes]] = field(default_factory=dict)
     ref_frames: dict[str, bytes] = field(default_factory=dict)
@@ -133,6 +135,28 @@ def push_clip_bytes(clip_bytes: bytes, kind: ClipKind) -> None:
     if ctx is None:
         return
     artifacts.clips[ctx.device_id] = (clip_bytes, kind)
+
+
+def push_image_frames(frames: list[bytes]) -> None:
+    """把当前 device 实际发给 Omni 的 JPEG 主画面序列存入 artifacts。"""
+    artifacts = _artifacts.get()
+    if artifacts is None or not frames:
+        return
+    ctx = get_device_context()
+    if ctx is None:
+        return
+    artifacts.image_frames[ctx.device_id] = list(frames)
+
+
+def push_image_audio(audio_bytes: bytes) -> None:
+    """把图片模式随主画面发送的独立 M4A 存入 artifacts。"""
+    artifacts = _artifacts.get()
+    if artifacts is None or not audio_bytes:
+        return
+    ctx = get_device_context()
+    if ctx is None:
+        return
+    artifacts.image_audio[ctx.device_id] = audio_bytes
 
 
 def push_ref_frame(image_bytes: bytes) -> None:
@@ -244,6 +268,9 @@ def push_omni_trace(
             "latency_ms": latency_ms,
             "error": error,
         }
+        visual_input = _summarize_visual_input(request_messages)
+        if visual_input:
+            call_record["visual_input"] = visual_input
         if inference_params:
             call_record["inference_params"] = inference_params
         # Smart Crop:该 device 本次走了裁切 → 把 crop 坐标/尺寸挂进 call 记录,
@@ -281,9 +308,54 @@ def _strip_base64(messages: list[dict[str, Any]]) -> dict[str, Any]:
                 t = block.get("type")
                 if t == "text":
                     user_blocks.append({"type": "text", "text": block.get("text", "")})
-                elif t in ("video_url", "image_url"):
+                elif t in ("video_url", "image_url", "input_audio"):
                     user_blocks.append({"type": t})
     return {"system": system, "user_blocks": user_blocks}
+
+
+def _summarize_visual_input(messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """Summarize media modality without retaining inline payload bytes.
+
+    ``mode`` 以 video_url 优先判定。image_url 块不等于"图片模式": fused 的 gallery
+    参考图、Smart Crop 全景参考帧、非 fused 的 tracker crops 都是 image_url 块,
+    视频调用照样带着它们 —— 反过来按 image_url 判会把视频调用标成 image, 而 mode
+    正是按需查询用图片序列开关上线后区分两种模态、做对照复盘的那一列。
+
+    ``image_block_count`` 数的是 messages 里**全部** image_url 块, 口径含上面那些
+    参考图, 所以它比"主画面帧数"大, 不要拿它当图片模式专属计数用。messages 这一层
+    拿不到精确的主画面帧数, 故不叫 frame_count 以免误读。
+
+    **已知残余边界(复盘筛选时要排掉)**: 视频模式有一条既有退化路径——mp4 编码产物不达
+    损坏尺寸闸时跳过 video_url 块、退化成 text-only, 而 gallery 参考图 / Smart Crop
+    全景参考帧(都是 image_url 块)已先进 content。这种窗口 video_attached=False 而
+    image_block_count>0, 会被记成 ``"mode": "image"``, 于是图片组里混进少量"其实是视频
+    模式的退化窗口"。发生频率低(仅 PyAV 产出损坏产物时), 故没有把本窗口权威的
+    ``visual_input_mode`` 一路透传进来。按图片组复盘时, 排除「有 image_url 块但没有
+    主画面序列说明块」的样本(图片模式恒带一段「## 主画面图片序列」说明)。
+    """
+    image_block_count = 0
+    audio_attached = False
+    video_attached = False
+    for message in messages:
+        if message.get("role") != "user" or not isinstance(message.get("content"), list):
+            continue
+        for block in message["content"]:
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            if block_type == "image_url":
+                image_block_count += 1
+            elif block_type == "video_url":
+                video_attached = True
+            elif block_type == "input_audio":
+                audio_attached = True
+    if not image_block_count and not video_attached and not audio_attached:
+        return {}
+    return {
+        "mode": "video" if video_attached else ("image" if image_block_count else "audio"),
+        "image_block_count": image_block_count,
+        "audio_attached": audio_attached,
+    }
 
 
 def _pick_response_fields(raw: dict[str, Any] | None) -> dict[str, Any]:

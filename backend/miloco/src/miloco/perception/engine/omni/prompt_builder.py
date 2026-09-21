@@ -28,6 +28,7 @@ from miot.tuning import ENCODE_THREADS
 from numpy.typing import NDArray
 
 from miloco.config import get_settings
+from miloco.perception.engine.config import VisualInputMode
 from miloco.perception.engine.identity.gallery_composite import (
     build_body_composite_png,
     build_face_composite_png,
@@ -124,6 +125,7 @@ def build_prompt(
     identity_packet: IdentityPacket,
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> dict:
     """Build the prompt payload for the omni model (single device).
 
@@ -133,34 +135,49 @@ def build_prompt(
 
     Returns dict with keys: system_prompt, user_content, video_base64, media_info, crops.
     """
-    return _build_payload([identity_packet], context, stream=False, label_lookup=label_lookup)
+    return _build_payload(
+        [identity_packet], context, stream=False, label_lookup=label_lookup,
+        visual_input_mode=visual_input_mode,
+    )
 
 
 def build_batch_prompt(
     identity_packets: list[IdentityPacket],
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> dict:
     """Build the prompt payload for multi-device omni inference (same room)."""
-    return _build_payload(identity_packets, context, stream=False, label_lookup=label_lookup)
+    return _build_payload(
+        identity_packets, context, stream=False, label_lookup=label_lookup,
+        visual_input_mode=visual_input_mode,
+    )
 
 
 def build_stream_prompt(
     identity_packet: IdentityPacket,
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> dict:
     """Build prompt payload for streaming omni call (single device, speeches first)."""
-    return _build_payload([identity_packet], context, stream=True, label_lookup=label_lookup)
+    return _build_payload(
+        [identity_packet], context, stream=True, label_lookup=label_lookup,
+        visual_input_mode=visual_input_mode,
+    )
 
 
 def build_batch_stream_prompt(
     identity_packets: list[IdentityPacket],
     context: OmniContext,
     label_lookup: "dict[str, str] | None" = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> dict:
     """Build prompt payload for streaming omni call (multi-device, speeches first)."""
-    return _build_payload(identity_packets, context, stream=True, label_lookup=label_lookup)
+    return _build_payload(
+        identity_packets, context, stream=True, label_lookup=label_lookup,
+        visual_input_mode=visual_input_mode,
+    )
 
 
 def build_query_prompt(
@@ -168,6 +185,7 @@ def build_query_prompt(
     query: str,
     last_caption: str | None = None,
     label_lookup: "dict[str, str] | None" = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> dict:
     """Build prompt for active user query — uses Identity results, free-text output."""
     parts = [
@@ -175,30 +193,58 @@ def build_query_prompt(
         _OUTPUT_MODE_FREE,
         _COMMONSENSE,
     ]
+    # 家庭档案是用户手写的 .md, 与 build_system_prompt 同口径: 模板段才改写、用户手写段
+    # 原样(整串包一层会把用户自己写的"视频"字也机械替换掉)。video 模式下改写是恒等变换
+    # → 与改造前逐字节一致。
+    system_parts = [_adapt_visual_prompt("\n\n".join(parts), visual_input_mode)]
     home_profile = get_home_profile_prefix()
     if home_profile:
-        parts.append(home_profile)
+        system_parts.append(home_profile)
     # query 不接 crop(v1 范围外);走 _effective_panorama_short_edge() 兜掉历史 config.json 里
     # 可能残留的 0(早期哨兵),否则 _encode_video_mp4 会算出 scale=0 崩掉按需查询。
-    video_b64, media_info = _encode_batch_video(
-        identity_packets, short_edge=_effective_panorama_short_edge()
-    )
-    if not video_b64:
-        # query 路径只有 video 一个媒体块,拼不出就是纯文本问模型"现在怎么样",而 prompt 里
-        # 还注入了上一窗的 last_caption。零帧已由引擎入口的 _drop_frameless_snapshots 挡在
-        # 外面,走到这里说明编码本身失败。event 名与 fused 两条路由一致。
-        logger.warning(
-            "event=fused_no_media_block route=query reason=empty_video room=%s, "
-            "本窗口未拼出 video 块、走 text-only",
-            (identity_packets[0].room_name if identity_packets else None) or "-",
-        )
-    return {
-        "system_prompt": "\n\n".join(parts),
-        "user_content": _build_query_user_content(identity_packets, query, last_caption, label_lookup),
-        "video_base64": video_b64,
-        "media_info": media_info,
+    base: dict = {
+        "system_prompt": "\n\n".join(system_parts),
+        # 措辞改写由 _build_query_user_content 内部只对模板段做 —— 整串包一层会把
+        # 用户原话与上一窗 caption 一起改掉, 见该函数的 docstring
+        "user_content": _build_query_user_content(
+            identity_packets, query, last_caption, label_lookup, visual_input_mode
+        ),
+        "visual_input_mode": visual_input_mode,
         "crops": [],
     }
+    if visual_input_mode == "image":
+        image_frames, prepared, media_packet = _encode_batch_images(
+            identity_packets, short_edge=_effective_panorama_short_edge()
+        )
+        if not image_frames or prepared is None or media_packet is None:
+            raise ValueError("image query requires at least one valid visual frame")
+        base["image_frames"] = image_frames
+        base["user_content"] += "\n\n" + _image_sequence_note(prepared)
+        if _packet_audio_included(media_packet):
+            audio_b64 = _encode_audio_m4a(
+                media_packet.audio_clip,
+                media_packet.sample_rate,
+                artifact_target="image",
+            )
+            if audio_b64:
+                base["audio_base64"] = audio_b64
+                base["audio_media_info"] = _audio_only_media_info(
+                    media_packet.sample_rate
+                )
+    else:
+        video_b64, media_info = _encode_batch_video(
+            identity_packets, short_edge=_effective_panorama_short_edge()
+        )
+        if not video_b64:
+            logger.warning(
+                "event=fused_no_media_block route=query reason=empty_video room=%s, "
+                "本窗口未拼出 video 块、走 text-only",
+                (identity_packets[0].room_name if identity_packets else None) or "-",
+            )
+        base["video_base64"] = video_b64
+        base["video_media_info"] = media_info
+        base["media_info"] = media_info
+    return base
 
 
 def build_fused_payload(
@@ -210,6 +256,7 @@ def build_fused_payload(
     label_lookup: "dict[str, str] | None" = None,
     adapter: OmniProviderAdapter | None = None,
     matching_moot: bool = False,
+    visual_input_mode: VisualInputMode = "video",
 ) -> dict:
     """构造 fused 主调用的 payload（身份识别和场景理解合并到同一次 omni 调用）。
 
@@ -268,18 +315,14 @@ def build_fused_payload(
             user_content.append({"type": "text", "text": f"当前时间: {context.current_time}"})
         if context.room_name:
             user_content.append({"type": "text", "text": f"位置: {context.room_name}"})
-        if audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN:
+        if audio_b64:
             user_content.append(adapter.build_audio_block(audio_b64, _audio_only_media_info(ep.sample_rate)))
-        elif audio_b64:
-            logger.warning(
-                "event=fused_audio_b64_too_short size=%d (< %d), 跳过 input_audio 块, "
-                "本窗口走 text-only",
-                len(audio_b64), _MIN_AUDIO_B64_LEN,
-            )
         else:
-            # 编不出音频(_encode_audio_only_mp4 对过短采样返回 None)。audio route 的
+            # 编不出音频: 采样不足一个 AAC 帧, 或编出来尺寸不达标 —— 两种都在
+            # _encode_audio_m4a 出口统一收口(见 _MIN_AUDIO_B64_LEN)。audio route 的
             # user_content 里没有参考图,一个媒体块都没有时模型手里只剩时间和房间名。
-            # 与 video route 同一个 event 名,一次 grep 覆盖两条路由。
+            # 与 video route 同一个 event 名,一次 grep 覆盖两条路由; 尺寸不达标那档
+            # 另有 event=audio_m4a_too_short 从编码层留痕(带 size)。
             logger.warning(
                 "event=fused_no_media_block route=audio reason=empty_audio room=%s, "
                 "本窗口未拼出 input_audio 块、走 text-only",
@@ -313,6 +356,9 @@ def build_fused_payload(
     # 与模型实际所见一致(避免 clip 存 crop、模型看全景的产物不一致,见 snapshot_context)。
     video_b64: str | None = None
     media_info: "LocalMediaInfo | None" = None
+    image_frames: list[EncodedImageFrame] | None = None
+    image_prepared: PreparedVisualFrames | None = None
+    image_audio_b64: str | None = None
     ref_image_jpeg: bytes | None = None
     # 「crop 生效」与「bbox 会被换算进 crop 坐标系」必须同进同退:在此处一起构好回调,
     # 而不是把 region / frame_size 当两个独立可选参数往下传。漏传一个的后果是静默错配
@@ -361,22 +407,66 @@ def build_fused_payload(
                 return False
         return True
 
-    adaptive = _maybe_encode_adaptive(
-        packets,
-        region_ok=_candidate_bbox_ok,
-        per_camera_enabled=context.per_camera_crop_enabled,
-    )
-    if adaptive is not None:
-        video_b64, media_info = adaptive.video_b64, adaptive.media_info
-        ref_image_jpeg = adaptive.ref_image_jpeg
-        _region, _frame_size = adaptive.region, adaptive.frame_size
-
-        def bbox_remap(b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
-            return remap_bbox_norm_to_crop(b, _region, _frame_size)
-    if video_b64 is None:
-        video_b64, media_info = _encode_batch_video(
-            packets, short_edge=_effective_panorama_short_edge()
+    if visual_input_mode == "image":
+        adaptive = _maybe_encode_adaptive(
+            packets,
+            region_ok=_candidate_bbox_ok,
+            per_camera_enabled=context.per_camera_crop_enabled,
+            encode_video=False,
         )
+        if adaptive is not None:
+            media_packet = next((p for p in packets if p.all_frames), None)
+            if media_packet is None:
+                raise ValueError("adaptive image input requires a visual packet")
+            image_prepared = adaptive.prepared_frames
+            # 图片编码是最终表达层；编码失败直接失败，不回退到全景或减少帧数。
+            image_frames = _encode_image_frames(image_prepared)
+            ref_image_jpeg = adaptive.ref_image_jpeg
+            _region, _frame_size = adaptive.region, adaptive.frame_size
+
+            def bbox_remap(b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
+                return remap_bbox_norm_to_crop(b, _region, _frame_size)
+
+            from miloco.perception.snapshot_context import (
+                push_crop_meta,
+                push_ref_frame,
+            )
+
+            push_ref_frame(ref_image_jpeg)
+            push_crop_meta(
+                region=adaptive.region,
+                frame_size=adaptive.frame_size,
+                short_edge=adaptive.crop_short_edge,
+            )
+        else:
+            image_frames, image_prepared, media_packet = _encode_batch_images(
+                packets, short_edge=_effective_panorama_short_edge()
+            )
+        if not image_frames or image_prepared is None or media_packet is None:
+            raise ValueError("image fused input requires at least one valid visual frame")
+        if _packet_audio_included(media_packet):
+            image_audio_b64 = _encode_audio_m4a(
+                media_packet.audio_clip,
+                media_packet.sample_rate,
+                artifact_target="image",
+            )
+    else:
+        adaptive = _maybe_encode_adaptive(
+            packets,
+            region_ok=_candidate_bbox_ok,
+            per_camera_enabled=context.per_camera_crop_enabled,
+        )
+        if adaptive is not None:
+            video_b64, media_info = adaptive.video_b64, adaptive.media_info
+            ref_image_jpeg = adaptive.ref_image_jpeg
+            _region, _frame_size = adaptive.region, adaptive.frame_size
+
+            def bbox_remap(b: tuple[int, int, int, int]) -> tuple[int, int, int, int] | None:
+                return remap_bbox_norm_to_crop(b, _region, _frame_size)
+        if video_b64 is None:
+            video_b64, media_info = _encode_batch_video(
+                packets, short_edge=_effective_panorama_short_edge()
+            )
 
     # has_speech 只由本轮 VAD 决定：本轮真有人声（含 pending 的延续语音）→ VAD 自然过、
     # 保留 speeches、模型把 <pending_speech> 拼成完整句；本轮无人声 → 剥 speeches，挂着的
@@ -387,6 +477,7 @@ def build_fused_payload(
         has_speech=_batch_video_has_speech(packets),
         has_pets=_has_pets_for_scene(),
         identity_match_disabled=matching_moot,
+        visual_input_mode=visual_input_mode,
     )
     system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
     user_content = _build_fused_user_content(
@@ -396,6 +487,14 @@ def build_fused_payload(
         gallery_snapshot=gallery_snapshot,
         video_b64=video_b64,
         media_info=media_info,
+        image_frames=image_frames,
+        image_prepared=image_prepared,
+        image_audio_b64=image_audio_b64,
+        image_audio_sample_rate=(
+            media_packet.sample_rate
+            if visual_input_mode == "image" and media_packet is not None
+            else 16000
+        ),
         ref_image_jpeg=ref_image_jpeg,
         bbox_remap=bbox_remap,
         adapter=adapter,
@@ -403,6 +502,7 @@ def build_fused_payload(
         label_lookup=label_lookup,
         has_pets=scene.has_pets,  # 复用 scene 已算好的 has_pets，避免注入点再读一次 profile.md
         matching_moot=matching_moot,
+        visual_input_mode=visual_input_mode,
     )
 
     messages = _assemble_fused_messages(
@@ -491,6 +591,7 @@ def _build_payload(
     stream: bool,
     label_lookup: "dict[str, str] | None" = None,
     include_home_profile: bool = True,
+    visual_input_mode: VisualInputMode = "video",
 ) -> dict:
     route = _resolve_route(packets)
     # has_audio：video 路由下音频未过 gate 时为 False → schema 剥掉 speeches/env_sounds，
@@ -505,35 +606,118 @@ def _build_payload(
         route=route, has_identity=False, stream=stream,
         has_audio=has_audio, has_speech=has_speech,
         has_pets=_has_pets_for_scene(),
+        visual_input_mode=visual_input_mode,
     )
     user_text = _build_user_content(
         packets, context, stream=stream, label_lookup=label_lookup,
+        visual_input_mode=visual_input_mode,
     )
     base: dict = {
         "system_prompt": build_system_prompt(scene, include_home_profile=include_home_profile, camera_prompt=context.camera_prompt),
         "user_content": user_text,
         "crops": [],
+        "visual_input_mode": visual_input_mode,
     }
     if route == "audio":
         ep = packets[0]
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
-        base["media_info"] = _audio_only_media_info(ep.sample_rate)
+        base["audio_media_info"] = _audio_only_media_info(ep.sample_rate)
+        base["media_info"] = base["audio_media_info"]
+        # 纯音频路由没有视觉输入, payload 恒按 video 语义走: _build_messages 对
+        # "image 模式 + 无帧且无音频" 抛 ValueError, 而音频编不出来(采样不足一个
+        # AAC 帧)在这条路由上是既有降级路径(退化成纯文本问模型)。模式开关是给
+        # 视觉表达做 A/B 的, 不该把一个与视觉无关的窗口从降级变成整轮失败。
+        base["visual_input_mode"] = "video"
     else:
         # 自适应分辨率(Smart Crop)只接 fused 生产路径。此路(非 fused/legacy)不裁切:
         # crops 通道把参考图渲染在 video 之后且无说明文字,模型会把局部裁切当整个房间描述
         # (反而比不接更糟)。非生产路径不值得为它复刻 fused 的「参考图在前+说明」结构,
         # 恒走全景 = 字节等同本 PR 之前的行为(零回归)。
-        video_b64, media_info = _encode_batch_video(
-            packets, short_edge=_effective_panorama_short_edge()
-        )
-        base["video_base64"] = video_b64
-        base["media_info"] = media_info
+        if visual_input_mode == "image":
+            image_frames, prepared, media_packet = _encode_batch_images(
+                packets, short_edge=_effective_panorama_short_edge()
+            )
+            if not image_frames or prepared is None or media_packet is None:
+                raise ValueError("image mode requires at least one valid visual frame")
+            base["image_frames"] = image_frames
+            base["user_content"] += "\n\n" + _image_sequence_note(prepared)
+            if _packet_audio_included(media_packet):
+                audio_b64 = _encode_audio_m4a(
+                    media_packet.audio_clip,
+                    media_packet.sample_rate,
+                    artifact_target="image",
+                )
+                if audio_b64:
+                    base["audio_base64"] = audio_b64
+                    base["audio_media_info"] = _audio_only_media_info(media_packet.sample_rate)
+        else:
+            video_b64, media_info = _encode_batch_video(
+                packets, short_edge=_effective_panorama_short_edge()
+            )
+            base["video_base64"] = video_b64
+            base["video_media_info"] = media_info
+            base["media_info"] = media_info
     return base
 
 
 # =============================================================================
 # System prompt (unified)
 # =============================================================================
+
+
+# 长串在前、单字"视频"垫底: str.replace 按序生效, 垫底那条会把漏网的都吃掉。
+# 键必须与 prompt 正文逐字一致 —— 正文里是 markdown 加粗的 *视频**最后一帧***,
+# 写成不带星号的"视频最后一帧"匹配不上, 会被垫底那条改出"按时间排列的画面图片**最后一帧**"。
+_IMAGE_PROMPT_REPLACEMENTS: tuple[tuple[str, str], ...] = (
+    ("视频**最后一帧**", "**最后一张主画面图片**"),
+    ("本轮的视频和音频", "本轮按时间排列的画面图片和音频"),
+    ("本轮的视频 / 音频", "本轮按时间排列的画面图片 / 音频"),
+    ("本轮视频与音频", "本轮按时间排列的画面图片与音频"),
+    ("本轮的视频", "本轮按时间排列的画面图片"),
+    ("本轮视频", "本轮按时间排列的画面图片"),
+    ("无视频画面", "无主画面图片"),
+    ("视频画面", "主画面图片"),
+    ("视频里", "主画面图片中"),
+    ("视频与音频", "画面图片与音频"),
+    ("视频和音频", "画面图片和音频"),
+    ("视频 / 音频", "画面图片 / 音频"),
+    ("视频", "按时间排列的画面图片"),
+)
+
+
+def _adapt_visual_prompt(text: str, visual_input_mode: VisualInputMode) -> str:
+    if visual_input_mode == "video":
+        return text
+    adapted = text
+    for source, target in _IMAGE_PROMPT_REPLACEMENTS:
+        adapted = adapted.replace(source, target)
+    return adapted
+
+
+def _image_sequence_note(prepared: PreparedVisualFrames) -> str:
+    """图片序列的时间口径: 只给"窗口时长 + 采样率", 不给"相邻间隔"。
+
+    相邻间隔是拿配置帧率反推的(见 ``sampling_fps``), 与实际投递率不符时会把话说错;
+    而"这段画面覆盖多长时间、按什么密度采样"是模型真正需要的两个量, 且都能从本窗口
+    实际送出的帧算出来 —— 模型据此自己就能推断间隔, 不需要我们替它断言。
+    """
+    if prepared.frame_count == 1:
+        cadence = "仅一张图片"
+    elif prepared.duration_s > 0:
+        cadence = (
+            f"窗口时长约 {prepared.duration_s:g} 秒、"
+            f"采样率约 {round(prepared.sampling_fps, 2):g} fps"
+        )
+    elif prepared.fps > 0:
+        # 时长缺失(老调用方只传 fps)时退回配置帧率; 配置写坏成 0/负则不给采样率。
+        cadence = f"采样率约 {prepared.fps} fps"
+    else:
+        cadence = "采样率未知"
+    return (
+        "## 主画面图片序列\n"
+        f"以下 {prepared.frame_count} 张主画面属于同一连续时间窗口，按拍摄时间从早到晚排列，"
+        f"{cadence}；最后一张是窗口末帧，与人物 bbox 的时刻对齐。"
+    )
 
 
 def build_system_prompt(
@@ -578,6 +762,12 @@ def build_system_prompt(
         commonsense,
         _render_examples(scene),
     ]
+    # 图片模式的措辞改写只作用于**模板生成段**：家庭档案与机位说明都是用户手写原文，
+    # 机械替换「视频」会改掉用户自己的话（例：「忽略视频左上角的时间戳水印」）。video
+    # 模式下 `_adapt_visual_prompt` 是恒等变换 → 与改造前逐字节一致。
+    if not is_audio:
+        parts = [_adapt_visual_prompt(p, scene.visual_input_mode) for p in parts]
+    # 用户手写段一律原样：家庭档案（用户写的 .md）与机位说明的正文
     if include_home_profile:
         home_profile = get_home_profile_prefix()
         if home_profile:
@@ -585,10 +775,13 @@ def build_system_prompt(
     # camera_prompt — 低频变动，放在 system prompt 尾部 → prefix cache 能命中前面的共享前缀
     note = camera_prompt.strip() if camera_prompt else ""
     if note:
-        parts.append(
+        note_header = (
             "## 本摄像头须知\n\n"
-            "以下是该机位的环境说明（要关注/忽略什么），请严格遵循以下指导进行感知描述——\n" + note
+            "以下是该机位的环境说明（要关注/忽略什么），请严格遵循以下指导进行感知描述——\n"
         )
+        if not is_audio:
+            note_header = _adapt_visual_prompt(note_header, scene.visual_input_mode)
+        parts.append(note_header + note)
     return "\n\n".join(p for p in parts if p)
 
 
@@ -698,24 +891,36 @@ def _build_user_content(
     *,
     stream: bool = False,
     label_lookup: "dict[str, str] | None" = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> str:
     # 非 fused 兜底路径：单条 user 文本，规则 + 历史 + 本轮事实内联（fused 路径才把它们
     # 拆成独立 message）。规则用新「# 待判断规则」格式，与 fused 一致。
+    #
+    # 图片模式的措辞改写**只作用于模板生成的段落**（名册 bbox 说明、末尾锚点）：用户规则
+    # 原文、pending_speech 引文都是用户/现场话语，改一个「视频」字就会把转写静默篡改，
+    # 并顺着 speeches 流进 agent 与设备控制派发。fused 路径靠"用户话语放独立只读消息"
+    # 天然隔离，非 fused 内联在同一条文本里，只能在拼装时按段区分。video 模式下
+    # `_adapt_visual_prompt` 是恒等变换 → 逐字节不变。
     parts: list[str] = []
     is_video = _resolve_route(packets) == "video"
     # matched_rules 仅 video 路由有（audio-only 剥离）→ audio 不下发「# 待判断规则」段
     if is_video:
         rule_conditions = _render_rule_conditions(context)
         if rule_conditions:
-            parts.append(rule_conditions)
+            parts.append(rule_conditions)  # 用户规则原文: 原样
         # 名册是视频特征（定位画面里的人），audio route 无视频 → 不渲染
-        parts.extend(_build_device_header(packets, label_lookup=label_lookup))
+        parts.extend(
+            _adapt_visual_prompt(p, visual_input_mode)
+            for p in _build_device_header(packets, label_lookup=label_lookup)
+        )
+    # pending_speech 是用户话语引文: 原样（与 query 路径「用户原话不改写」同一原则）
     parts.extend(_build_context_parts(context, stream=stream))
     if context.current_time:
         parts.append(f"当前时间: {context.current_time}")
     if context.room_name:
         parts.append(f"位置: {context.room_name}")
-    parts.append(_USER_REF_BOUNDARY if is_video else _USER_REF_BOUNDARY_AUDIO)
+    boundary = _USER_REF_BOUNDARY if is_video else _USER_REF_BOUNDARY_AUDIO
+    parts.append(_adapt_visual_prompt(boundary, visual_input_mode) if is_video else boundary)
     text = "\n".join(parts)
     _log_user_content(text)
     return text
@@ -729,6 +934,10 @@ def _build_fused_user_content(
     gallery_snapshot: dict[str, "GallerySamples"],
     video_b64: str | None,
     media_info: LocalMediaInfo | None,
+    image_frames: list[EncodedImageFrame] | None = None,
+    image_prepared: PreparedVisualFrames | None = None,
+    image_audio_b64: str | None = None,
+    image_audio_sample_rate: int = 16000,
     ref_image_jpeg: bytes | None = None,
     bbox_remap: "Callable[[tuple[int, int, int, int]], tuple[int, int, int, int] | None] | None" = None,
     adapter: OmniProviderAdapter,
@@ -736,6 +945,7 @@ def _build_fused_user_content(
     label_lookup: "dict[str, str] | None" = None,
     has_pets: bool = False,
     matching_moot: bool = False,
+    visual_input_mode: VisualInputMode = "video",
 ) -> list[dict]:
     """构建 user 消息的 content 列表（text/image_url/video_url 块交错）。
 
@@ -916,11 +1126,21 @@ def _build_fused_user_content(
         )})
         content.append(ref_block)
 
-    # 5. 主 video
+    # 5. 主视觉输入
     # video_b64 size sanity check — PyAV 编码异常情况下可能返回非空但损坏的极短
     # base64 串, 入 payload 会让 omni 服务端 400 Multimodal data is corrupted。
     # 太短 → 跳过 video_url 块, 退化为"无视频窗口"(text + gallery 仍能识别)。
-    if video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
+    if image_frames:
+        if image_prepared is None:
+            raise ValueError("image_prepared is required with image_frames")
+        content.append({"type": "text", "text": _image_sequence_note(image_prepared)})
+        for image_frame in image_frames:
+            content.append(_jpeg_block(image_frame.data))
+        if image_audio_b64:
+            content.append(adapter.build_audio_block(
+                image_audio_b64, _audio_only_media_info(image_audio_sample_rate)
+            ))
+    elif video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
         content.append(adapter.build_video_block(video_b64, media_info))
     elif video_b64:
         logger.warning(
@@ -950,6 +1170,10 @@ def _build_fused_user_content(
             other_media,
         )
 
+    if visual_input_mode == "image":
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                block["text"] = _adapt_visual_prompt(block.get("text", ""), "image")
     _log_user_content(content)
     return content
 
@@ -1381,6 +1605,54 @@ def _resolve_person_face_jpg(
 # =============================================================================
 
 _VIDEO_SHORT_EDGE = 512  # fallback; runtime value from settings.yaml / config.json via _get_video_short_edge()
+_OMNI_IMAGE_JPEG_QUALITY = 95
+
+
+@dataclass(frozen=True)
+class PreparedVisualFrames:
+    frames: tuple[NDArray[np.uint8], ...]
+    width: int
+    height: int
+    fps: int
+    duration_s: float = 0.0  # 采集窗口时长(秒); 0 = 未知
+
+    @property
+    def frame_count(self) -> int:
+        return len(self.frames)
+
+    @property
+    def sampling_fps(self) -> float:
+        """实际采样率 = 帧数 / 窗口时长。
+
+        ``fps`` 是**配置**下的源帧率反推出的有效帧率(``round(src_fps/step)``), 与实际
+        投递率不符时(相机按 18fps 送、配置写 3fps)会偏小一个量级: 那种窗口下 ``fps``
+        说 1fps 而真实间隔是 0.17s。这里的帧数是本窗口实际送出的帧, 时长是窗口自身的
+        时长, 两者相除得的采样率不依赖配置。时长未知时退回 ``fps``。
+        """
+        if self.duration_s > 0:
+            return self.frame_count / self.duration_s
+        return float(self.fps)
+
+
+def _window_duration_s(frame_info: object) -> float:
+    """由 packet.frame_info 的起止时刻(ms)换算出窗口时长(秒)。
+
+    缺失/倒挂/类型不符时返回 0, 调用方退回配置帧率 —— 只影响 prompt 措辞, 不值得为
+    一个坏 packet 打断整轮推理。
+    """
+    start = getattr(frame_info, "start_timestamp", 0)
+    end = getattr(frame_info, "end_timestamp", 0)
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return 0.0
+    span_ms = end - start
+    return span_ms / 1000.0 if span_ms > 0 else 0.0
+
+
+@dataclass(frozen=True)
+class EncodedImageFrame:
+    data: bytes
+    sequence_index: int
+    is_last: bool
 
 
 def _audio_only_media_info(sample_rate: int) -> LocalMediaInfo:
@@ -1488,12 +1760,101 @@ def _encode_target_wh(w0: int, h0: int, short_edge: int) -> tuple[int, int]:
     return int(w0 * scale) // 2 * 2, int(h0 * scale) // 2 * 2
 
 
+def _prepare_omni_visual_frames(
+    frames: list[NDArray[np.uint8]],
+    *,
+    fps: int,
+    short_edge: int,
+    duration_s: float = 0.0,
+) -> PreparedVisualFrames | None:
+    """Create the canonical BGR frame sequence shared by video/image modes."""
+    if not frames:
+        return None
+    first = frames[0]
+    if first.ndim != 3 or first.shape[2] != 3 or first.size == 0:
+        raise ValueError("invalid omni visual frame at index 0")
+    h0, w0 = first.shape[:2]
+    target_w, target_h = _encode_target_wh(w0, h0, short_edge)
+    if target_w <= 0 or target_h <= 0:
+        raise ValueError(f"invalid omni target size: {target_w}x{target_h}")
+    scale = short_edge / min(h0, w0)
+    # 缩小用 INTER_AREA(区域平均,抗锯齿最好);放大时 INTER_AREA 会退化成近似最近邻
+    # (它按源像素落到的目标格子做平均,放大时每格只摊到一个源像素),必须换重采样核。
+    # LANCZOS4 是离线对照里实测的那一个(与 CUBIC 统计上无法区分 p=0.63,取被测过的)。
+    #
+    # 注意 scale **没有钳到 1.0**,本函数被全景 / query / legacy / crop 四条路径共用,
+    # 所以「源短边 < 目标短边」时它们同样走放大分支 —— miloco 恒定拉相机子码流(LOW,
+    # 见「全链分辨率」表②),其像素数由机型决定;离线实测到 720p,此时用户选 768/1080
+    # 档就命中(scale=1.07 / 1.50),是常见配置而非边角。这条路径本来就在放大,只是此前
+    # 用的是退化成最近邻的 INTER_AREA;换核后画质更好但**编码字节会变**,落盘 clip.mp4
+    # 随之变化。即:双闸全关的用户走的也是被本行改过的路径,不是零回归。
+    interp = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
+    prepared: list[NDArray[np.uint8]] = []
+    for index, frame in enumerate(frames):
+        if frame.ndim != 3 or frame.shape[2] != 3 or frame.size == 0:
+            raise ValueError(f"invalid omni visual frame at index {index}")
+        prepared.append(
+            cv2.resize(frame, (target_w, target_h), interpolation=interp)
+        )
+    return PreparedVisualFrames(
+        frames=tuple(prepared),
+        width=target_w,
+        height=target_h,
+        fps=fps,
+        duration_s=duration_s,
+    )
+
+
+def _encode_image_frames(
+    prepared: PreparedVisualFrames,
+) -> list[EncodedImageFrame]:
+    from miloco.perception.snapshot_context import push_image_frames
+
+    encoded: list[EncodedImageFrame] = []
+    last_index = prepared.frame_count - 1
+    for index, frame in enumerate(prepared.frames):
+        ok, buffer = cv2.imencode(
+            ".jpg",
+            frame,
+            [cv2.IMWRITE_JPEG_QUALITY, _OMNI_IMAGE_JPEG_QUALITY],
+        )
+        if not ok:
+            raise ValueError(f"failed to encode omni image frame {index}")
+        data = buffer.tobytes()
+        if len(data) < _MIN_JPEG_BYTES:
+            raise ValueError(f"encoded omni image frame {index} is too short")
+        encoded.append(
+            EncodedImageFrame(
+                data=data,
+                sequence_index=index,
+                is_last=index == last_index,
+            )
+        )
+    push_image_frames([frame.data for frame in encoded])
+    return encoded
+
+
 def _encode_video_mp4(
     frames: list[NDArray[np.uint8]],
     audio_clip: NDArray[np.int16],
     sample_rate: int,
     fps: int,
     short_edge: int = _VIDEO_SHORT_EDGE,
+) -> tuple[str | None, LocalMediaInfo | None]:
+    prepared = _prepare_omni_visual_frames(
+        frames,
+        fps=fps,
+        short_edge=short_edge,
+    )
+    if prepared is None:
+        return None, None
+    return _encode_prepared_video_mp4(prepared, audio_clip, sample_rate)
+
+
+def _encode_prepared_video_mp4(
+    prepared: PreparedVisualFrames,
+    audio_clip: NDArray[np.int16],
+    sample_rate: int,
 ) -> tuple[str | None, LocalMediaInfo | None]:
     """Encode BGR frames + PCM audio into mp4 using PyAV.
 
@@ -1512,8 +1873,10 @@ def _encode_video_mp4(
 
     from miloco.perception.snapshot_context import push_clip_bytes
 
-    if not frames:
-        return None, None
+    frames = prepared.frames
+    fps = prepared.fps
+    target_w = prepared.width
+    target_h = prepared.height
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name
@@ -1521,20 +1884,6 @@ def _encode_video_mp4(
     try:
         container = av.open(tmp_path, "w")
 
-        h0, w0 = frames[0].shape[:2]
-        scale = short_edge / min(h0, w0)
-        target_w, target_h = _encode_target_wh(w0, h0, short_edge)
-        # 缩小用 INTER_AREA(区域平均,抗锯齿最好);放大时 INTER_AREA 会退化成近似最近邻
-        # (它按源像素落到的目标格子做平均,放大时每格只摊到一个源像素),必须换重采样核。
-        # LANCZOS4 是离线对照里实测的那一个(与 CUBIC 统计上无法区分 p=0.63,取被测过的)。
-        #
-        # 注意 scale **没有钳到 1.0**,本函数被全景 / query / legacy / crop 四条路径共用,
-        # 所以「源短边 < 目标短边」时它们同样走放大分支 —— miloco 恒定拉相机子码流(LOW,
-        # 见「全链分辨率」表②),其像素数由机型决定;离线实测到 720p,此时用户选 768/1080
-        # 档就命中(scale=1.07 / 1.50),是常见配置而非边角。这条路径本来就在放大,只是此前
-        # 用的是退化成最近邻的 INTER_AREA;换核后画质更好但**编码字节会变**,落盘 clip.mp4
-        # 随之变化。即:双闸全关的用户走的也是被本行改过的路径,不是零回归。
-        interp = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
         v_stream = container.add_stream("h264", rate=fps)
         v_stream.width = target_w
         v_stream.height = target_h
@@ -1556,10 +1905,7 @@ def _encode_video_mp4(
             a_stream.layout = "mono"
 
         for frame_data in frames:
-            resized = cv2.resize(
-                frame_data, (target_w, target_h), interpolation=interp,
-            )
-            frame = av.VideoFrame.from_ndarray(resized, format="bgr24")
+            frame = av.VideoFrame.from_ndarray(frame_data, format="bgr24")
             for packet in v_stream.encode(frame):
                 container.mux(packet)
         for packet in v_stream.encode():
@@ -1653,9 +1999,11 @@ def _resolve_route(packets: list[IdentityPacket]) -> RouteType:
     return "audio" if _is_audio_only(packets) else "video"
 
 
-def _encode_audio_only_mp4(
+def _encode_audio_m4a(
     audio_clip: NDArray[np.int16],
     sample_rate: int,
+    *,
+    artifact_target: Literal["clip", "image"] = "clip",
 ) -> str | None:
     """audio route 专用：真 m4a 容器（ftyp = "M4A "）+ AAC LC 编码。
 
@@ -1666,11 +2014,14 @@ def _encode_audio_only_mp4(
     在 read 字节之后,调 push_clip_bytes 把 m4a 字节旁路给 meaningful_events 复用
     (跟 _encode_video_mp4 对称,UI 端用同一个 <video> 控件播放;m4a 容器虽然只
     有音频,HTML5 <video> 也能 render audio-only track).
+
+    返回 None 有两种情况: 采样不足一个 AAC 帧(编不出来), 或编出来的 b64 短于
+    _MIN_AUDIO_B64_LEN(编码异常产出的损坏容器, 见该常量的说明)。两种都不落盘。
     """
     import os
     import tempfile
 
-    from miloco.perception.snapshot_context import push_clip_bytes
+    from miloco.perception.snapshot_context import push_clip_bytes, push_image_audio
 
     _AAC_FRAME_SIZE = 1024
     if audio_clip is None or audio_clip.size < _AAC_FRAME_SIZE:
@@ -1704,12 +2055,33 @@ def _encode_audio_only_mp4(
 
         with open(tmp_path, "rb") as f:
             m4a_bytes = f.read()
-        # 旁路把 audio-only 的 m4a 字节 push 给 meaningful_events 复用(零重编)
-        push_clip_bytes(m4a_bytes, "m4a")
-        return base64.b64encode(m4a_bytes).decode()
+        b64 = base64.b64encode(m4a_bytes).decode()
+        # 尺寸闸收口在这里而不是各调用点: 图片模式的三个附加点(非 fused query /
+        # fused image / 非 fused image)与 audio route 共用本函数, 闸放在 push 之前
+        # 才能保证「落盘产物 = 实际请求」—— 不达标的音频既不进 payload 也不落盘,
+        # 不会留下模型没听过的回放数据。
+        if len(b64) < _MIN_AUDIO_B64_LEN:
+            logger.warning(
+                "event=audio_m4a_too_short size=%d (< %d), 丢弃该音频(不入 payload / 不落盘)",
+                len(b64),
+                _MIN_AUDIO_B64_LEN,
+            )
+            return None
+        if artifact_target == "image":
+            push_image_audio(m4a_bytes)
+        else:
+            push_clip_bytes(m4a_bytes, "m4a")
+        return b64
     finally:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+
+
+def _encode_audio_only_mp4(
+    audio_clip: NDArray[np.int16],
+    sample_rate: int,
+) -> str | None:
+    return _encode_audio_m4a(audio_clip, sample_rate, artifact_target="clip")
 
 
 def _encode_batch_video(
@@ -1726,6 +2098,33 @@ def _encode_batch_video(
         if b64 is not None:
             return b64, media_info
     return None, None
+
+
+def _encode_images(
+    identity_packet: IdentityPacket,
+    short_edge: int = _VIDEO_SHORT_EDGE,
+) -> tuple[list[EncodedImageFrame], PreparedVisualFrames | None]:
+    prepared = _prepare_omni_visual_frames(
+        identity_packet.all_frames,
+        fps=identity_packet.frame_info.fps,
+        short_edge=short_edge,
+        duration_s=_window_duration_s(identity_packet.frame_info),
+    )
+    if prepared is None:
+        return [], None
+    return _encode_image_frames(prepared), prepared
+
+
+def _encode_batch_images(
+    edge_packets: list[IdentityPacket],
+    short_edge: int = _VIDEO_SHORT_EDGE,
+) -> tuple[list[EncodedImageFrame], PreparedVisualFrames | None, IdentityPacket | None]:
+    for packet in edge_packets:
+        if not packet.all_frames:
+            continue
+        frames, prepared = _encode_images(packet, short_edge=short_edge)
+        return frames, prepared, packet
+    return [], None, None
 
 
 def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, str]]:
@@ -1824,6 +2223,8 @@ class _AdaptiveResult:
     # [0,1000] 换算进 crop 坐标系(remap_bbox_norm_to_crop),否则坐标与画面错配。
     region: tuple[int, int, int, int]
     frame_size: tuple[int, int]
+    prepared_frames: PreparedVisualFrames
+    crop_short_edge: int
 
 
 def _maybe_encode_adaptive(
@@ -1831,8 +2232,12 @@ def _maybe_encode_adaptive(
     *,
     region_ok: "Callable[[tuple[int, int, int, int], tuple[int, int]], bool] | None" = None,
     per_camera_enabled: bool = True,
+    encode_video: bool = True,
 ) -> "_AdaptiveResult | None":
-    """Smart Crop 开启时算 crop 区域、编码 crop 视频 + 全景参考帧。
+    """Smart Crop 开启时算 crop 区域并准备 canonical 帧。
+
+    ``encode_video=True`` 保持现有视频路径；``False`` 只准备同一批 resized
+    crop 帧，供图片路径编码。两条路径共享 crop region、帧顺序、目标尺寸和插值算法。
 
     返回 None = 回退全景(既有路径)。下表是 ``event=adaptive_crop_fallback`` 的**全部**
     ``reason=`` 取值。排查按 ``grep adaptive_crop_fallback`` 后看 reason,但**注意日志级别**:
@@ -2000,13 +2405,26 @@ def _maybe_encode_adaptive(
             else np.empty(0, dtype=np.int16)
         )
         # fps 沿用 frame_info.fps(下采样后真实帧间隔),与全景视频一致——crop 逐帧不抽帧,
-        # 用独立帧率会让视频时长/音画错位(全景用的正是这个 fps)。
-        video_b64, media_info = _encode_video_mp4(
-            cropped, audio, ep.sample_rate, fps=ep.frame_info.fps, short_edge=cse,
+        # 用独立帧率会让视频时长/音画错位(全景用的正是这个 fps)。先准备 canonical
+        # 帧，再按最终表达方式编码，确保 image/video 两路看到的画面完全一致。
+        prepared = _prepare_omni_visual_frames(
+            cropped,
+            fps=ep.frame_info.fps,
+            short_edge=cse,
+            duration_s=_window_duration_s(ep.frame_info),
         )
-        if not video_b64 or len(video_b64) < _MIN_VIDEO_B64_LEN:
-            logger.info("event=adaptive_crop_fallback reason=video_too_short region=%s", region)
+        if prepared is None:
+            logger.info("event=adaptive_crop_fallback reason=crop_empty region=%s", region)
             return None
+        video_b64 = ""
+        media_info: LocalMediaInfo | None = None
+        if encode_video:
+            video_b64, media_info = _encode_prepared_video_mp4(
+                prepared, audio, ep.sample_rate,
+            )
+            if not video_b64 or len(video_b64) < _MIN_VIDEO_B64_LEN:
+                logger.info("event=adaptive_crop_fallback reason=video_too_short region=%s", region)
+                return None
         # 参考帧取末帧:与 crop 视频的时间轴对齐(视频末帧正是这一帧的裁切结果),模型对照
         # 「全景 → 放大」时看到的是同一时刻的场景,不会被窗内位移错开。
         # 注:它**不**是 bbox 的坐标基准 —— bbox 已由 remap_bbox_norm_to_crop 换算进 crop
@@ -2029,14 +2447,27 @@ def _maybe_encode_adaptive(
             n_det, len(frames), n_motion,
         )
         # 旁路落盘:参考帧字节 + crop 元数据(坐标进 trace),供 badcase 复盘对照。
-        # 无 active scope / device_ctx 时静默 no-op,不影响推理主流程。
-        from miloco.perception.snapshot_context import push_crop_meta, push_ref_frame
+        # 图片编码失败时不能留下与实际请求不一致的 crop 产物,所以图片路径由调用方
+        # 在 JPEG 编码成功后再调用同一段记录逻辑。
+        if encode_video:
+            from miloco.perception.snapshot_context import (
+                push_crop_meta,
+                push_ref_frame,
+            )
 
-        push_ref_frame(ref_jpeg)
-        # short_edge 记的是**目标**短边;实际编码值会被 _encode_video_mp4 的 //2*2 取偶
-        # (以及浮点截断)下调 1-2px,按它反算送模型的像素网格会有这点误差。
-        push_crop_meta(region=region, frame_size=(fw, fh), short_edge=cse)
-        return _AdaptiveResult(video_b64, media_info, ref_jpeg, region, (fw, fh))
+            push_ref_frame(ref_jpeg)
+            # short_edge 记的是**目标**短边;实际编码网格已在
+            # _prepare_omni_visual_frames 中完成偶数对齐。
+            push_crop_meta(region=region, frame_size=(fw, fh), short_edge=cse)
+        return _AdaptiveResult(
+            video_b64,
+            media_info,
+            ref_jpeg,
+            region,
+            (fw, fh),
+            prepared,
+            cse,
+        )
     except Exception:  # noqa: BLE001 —— 任何失败都回退全景,不让 crop 打断推理
         # 统一 event 名(adaptive_crop_fallback),灰度期按单一 event grep 不漏异常回退
         logger.warning("event=adaptive_crop_fallback reason=exception 回退全景", exc_info=True)
@@ -2053,7 +2484,16 @@ def _build_query_user_content(
     query: str,
     last_caption: str | None,
     label_lookup: "dict[str, str] | None" = None,
+    visual_input_mode: VisualInputMode = "video",
 ) -> str:
+    """query 路径的 user 文本。
+
+    图片模式的措辞改写**只作用于本函数按模板生成的那几段**(检测结果/场景状态/
+    音频), "当前场景参考"与"用户问题"原样拼接: 前者是上一窗模型输出的引文、后者
+    是用户原话, 改写等于篡改引用 —— 用户问"视频里那个人是谁"会被改成"按时间排列
+    的画面图片里那个人是谁"再送模型。fused 实时路径对用户话语(pending_speech)也
+    是原样放进独立 user 消息、末尾的统一改写碰不到它, 两条路对齐。
+    """
     parts: list[str] = []
 
     for i, ep in enumerate(edge_packets):
@@ -2069,11 +2509,15 @@ def _build_query_user_content(
         parts.append(f"音频：{ep.audio_analysis.type.value}（能量: {ep.audio_analysis.energy_level:.3f}）")
         parts.append("")
 
+    tail_parts: list[str] = []
     if last_caption:
-        parts.append(f"当前场景参考：{last_caption}")
+        tail_parts.append(f"当前场景参考：{last_caption}")
+    tail_parts.append(f"\n用户问题：{query}")
 
-    parts.append(f"\n用户问题：{query}")
-    return "\n".join(parts)
+    # 原实现是 "\n".join(parts + tail_parts) —— 这里等值展开成"改写前半段、后半段
+    # 原样", video 模式下 _adapt_visual_prompt 是恒等变换, 输出逐字节不变。
+    head = _adapt_visual_prompt("\n".join(parts), visual_input_mode)
+    return "\n".join(([head] if parts else []) + tail_parts)
 
 
 # =============================================================================

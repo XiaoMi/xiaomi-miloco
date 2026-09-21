@@ -198,6 +198,66 @@ def test_build_pack_no_ref_frame(tmp_path, monkeypatch):
         assert not any(n.endswith("ref.jpg") for n in tar.getnames())
 
 
+def test_build_pack_includes_image_mode_artifacts(tmp_path, monkeypatch):
+    """图片模式事件:frames/*.jpg 与独立音频 audio.m4a 都进包,并记入 components.
+
+    audio.m4a 是 CLIP_CANDIDATES 的第三项 —— 文件名不匹配打包清单里的 clip.* 通配,
+    解包者拿 metadata.json 的 clips_found 核对产物时最容易在这里对不上,故连文件名一起钉.
+    """
+    from miloco.perception.snapshot_writer import (
+        IMAGE_AUDIO_FILENAME,
+        IMAGE_FRAME_DIRNAME,
+        region_slug,
+    )
+
+    event_id = "33333333-4444-5555-6666-777777777777"
+
+    snapshot_root = tmp_path / "snapshots"
+    event_dir = snapshot_root / event_id
+    event_dir.mkdir(parents=True)
+
+    slug = region_slug("cam1")
+    clip_dir = event_dir / slug
+    frames_dir = clip_dir / IMAGE_FRAME_DIRNAME
+    frames_dir.mkdir(parents=True)
+    (frames_dir / "000.jpg").write_bytes(b"\xff\xd8\xff\xe0fake-frame-0")
+    (frames_dir / "001.jpg").write_bytes(b"\xff\xd8\xff\xe0fake-frame-1")
+    (clip_dir / IMAGE_AUDIO_FILENAME).write_bytes(b"fake-m4a")
+
+    mock_dao = MagicMock()
+    mock_dao.get_by_id.return_value = {
+        "id": event_id,
+        "timestamp": 1000,
+        "text": "t",
+        "device_ids": ["cam1"],
+    }
+    mock_mgr = MagicMock()
+    mock_mgr.meaningful_events_dao = mock_dao
+
+    monkeypatch.setattr("miloco.admin.feedback_pack.get_snapshot_root", lambda: snapshot_root)
+    monkeypatch.setattr("miloco.admin.feedback_pack.miloco_home", lambda: tmp_path)
+
+    with patch("miloco.manager.get_manager", return_value=mock_mgr):
+        result = build_feedback_pack(
+            event_id=event_id, error_types=[], feedback_text="",
+        )
+
+    components = result["components"]
+    assert f"{slug}/{IMAGE_AUDIO_FILENAME}" in components["clips_found"]
+    assert components["image_frames_found"] == [
+        f"{slug}/frames/000.jpg",
+        f"{slug}/frames/001.jpg",
+    ]
+    # 有音频或帧即不算"该设备缺产物"
+    assert components["clips_missing"] == []
+
+    with tarfile.open(result["path"], "r:gz") as tar:
+        names = tar.getnames()
+        assert f"clips/{slug}/{IMAGE_AUDIO_FILENAME}" in names
+        assert f"clips/{slug}/frames/000.jpg" in names
+        assert f"clips/{slug}/frames/001.jpg" in names
+
+
 def test_build_pack_event_not_found(tmp_path, monkeypatch):
     """event 不存在时抛 EventNotFoundError."""
     import pytest

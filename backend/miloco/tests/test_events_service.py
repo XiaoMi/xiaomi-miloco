@@ -746,6 +746,103 @@ class TestBuildFeedbackIndex:
         assert log_id in idx
 
 
+class TestProbeVisualArtifacts:
+    """``probe_visual_artifacts`` 按盘上形状反推载体 —— SSE / 列表 / 按需三条通路同源。
+
+    这里全部走真实写入端(save_event_artifacts)再读回, 免得手搭目录把"写出来的形状"
+    和"读的时候假设的形状"两边一起写错。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_root(self, tmp_path, monkeypatch):
+        from miloco.perception import snapshot_writer
+
+        monkeypatch.setattr(snapshot_writer, "get_snapshot_root", lambda: tmp_path)
+        self.root = tmp_path
+
+    def _save(self, eid, artifacts):
+        from miloco.perception.snapshot_writer import save_event_artifacts
+
+        return save_event_artifacts(eid, artifacts)
+
+    def test_images_only(self):
+        from miloco.perception.events_service import probe_visual_artifacts
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+
+        self._save("e1", OmniEventArtifacts(image_frames={"cam_a": [b"x", b"y"]}))
+        kind, has_audio, counts = probe_visual_artifacts(self.root, "e1", ["cam_a"])
+        assert (kind, has_audio) == ("images", False)
+        assert counts == {"cam_a": 2}
+
+    def test_images_with_independent_audio(self):
+        from miloco.perception.events_service import probe_visual_artifacts
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+
+        self._save(
+            "e2",
+            OmniEventArtifacts(
+                image_frames={"cam_a": [b"x"]}, image_audio={"cam_a": b"m4a"}
+            ),
+        )
+        kind, has_audio, counts = probe_visual_artifacts(self.root, "e2", ["cam_a"])
+        assert (kind, has_audio, counts) == ("images", True, {"cam_a": 1})
+
+    def test_snapshot_cleaned_up_returns_none(self):
+        """cleanup 删掉整个 event 目录后 → none, 不残留 images(DB 行还在)。"""
+        import shutil
+
+        from miloco.perception.events_service import probe_visual_artifacts
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+
+        self._save(
+            "e3",
+            OmniEventArtifacts(
+                image_frames={"cam_a": [b"x"]}, image_audio={"cam_a": b"m4a"}
+            ),
+        )
+        shutil.rmtree(self.root / "e3")
+        assert probe_visual_artifacts(self.root, "e3", ["cam_a"]) == ("none", False, {})
+
+    def test_frames_removed_but_audio_kept(self):
+        """帧目录被清理、audio.m4a 还在 → 退成 audio, 不是 none。"""
+        import shutil
+
+        from miloco.perception.events_service import probe_visual_artifacts
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+
+        self._save(
+            "e4",
+            OmniEventArtifacts(
+                image_frames={"cam_a": [b"x"]}, image_audio={"cam_a": b"m4a"}
+            ),
+        )
+        shutil.rmtree(self.root / "e4" / "cam_a" / "frames")
+        assert probe_visual_artifacts(self.root, "e4", ["cam_a"]) == ("audio", True, {})
+
+    def test_video_and_audio_only_shapes_unchanged(self):
+        """视频 / 纯音频两条既有通路的判定不能被图片分支抢走。"""
+        from miloco.perception.events_service import probe_visual_artifacts
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+
+        self._save("e5", OmniEventArtifacts(clips={"cam_v": (b"mp4", "mp4")}))
+        assert probe_visual_artifacts(self.root, "e5", ["cam_v"]) == ("video", False, {})
+
+        self._save("e6", OmniEventArtifacts(clips={"cam_a": (b"m4a", "m4a")}))
+        assert probe_visual_artifacts(self.root, "e6", ["cam_a"]) == ("audio", True, {})
+
+    def test_multi_device_counts_only_devices_with_frames(self):
+        """多设备: 有帧的才进 counts, 事件里列了但没落帧的设备不出现。"""
+        from miloco.perception.events_service import probe_visual_artifacts
+        from miloco.perception.snapshot_context import OmniEventArtifacts
+
+        self._save("e7", OmniEventArtifacts(image_frames={"cam_a": [b"x", b"y", b"z"]}))
+        kind, _, counts = probe_visual_artifacts(
+            self.root, "e7", ["cam_a", "cam_b"]
+        )
+        assert kind == "images"
+        assert counts == {"cam_a": 3}
+
+
 class TestManagerSingleton:
     async def test_lazy_singleton(self, isolated_db):
         from miloco.manager import get_manager

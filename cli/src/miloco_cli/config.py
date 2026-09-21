@@ -106,6 +106,11 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "",
         "仅 Gemini：每帧视觉 token 预算档位（\"\"/\"low\"=省，\"high\"=小目标更清但 4× token），下一周期生效",
     ),
+    "perception.engine.input.omni_visual_input_mode": (
+        str,
+        "video",
+        "Omni 视觉输入模式（video=视频，image=图片）",
+    ),
     # 本表这两个是 Smart Crop 的**全局**闸，相与后仍只是必要条件——还要该机位自己的
     # per-camera 闸也开（`miloco-cli scope camera crop-on/crop-off` 逐路配，默认开），
     # 三闸相与才裁切。默认值同下方注释的对齐约定（yaml 里都是 true）。
@@ -335,6 +340,13 @@ def _coerce(path: str, raw: str) -> Any:
             raise ValueError(
                 f"{path} 仅支持 low / high（留空=默认 low），收到 {raw!r}。"
                 f"注：Gemini media_resolution 有效档位只有 low/high，medium 等同 low。"
+            )
+        return norm
+    if path == "perception.engine.input.omni_visual_input_mode":
+        norm = raw.strip().lower()
+        if norm not in ("video", "image"):
+            raise ValueError(
+                f"{path} 仅支持 video / image，收到 {raw!r}"
             )
         return norm
     # min_suggestion_urgency 与 backend PerceptionSettings 的 Literal 对齐——CLI 先兜住,

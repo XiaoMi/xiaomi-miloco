@@ -23,11 +23,14 @@ from typing import TYPE_CHECKING, Literal
 
 from pydantic import ValidationError
 
-from miloco.perception.schema import EventCropMeta, MeaningfulEvent
+from miloco.perception.schema import EventCropMeta, MeaningfulEvent, VisualArtifactKind
 from miloco.perception.snapshot_writer import (
     CLIP_CANDIDATES,
+    IMAGE_AUDIO_FILENAME,
     get_snapshot_root,
+    image_frame_files,
     locate_clip_file,
+    locate_image_frame_file,
     region_slug,
 )
 from miloco.utils.paths import miloco_home
@@ -76,6 +79,40 @@ def probe_has_ref(snapshot_root: Path, event_id: str, device_ids: list[str]) -> 
         if (snapshot_root / event_id / region_slug(did) / _REF_FILENAME).exists():
             return True
     return False
+
+
+def probe_image_frame_counts(
+    snapshot_root: Path, event_id: str, device_ids: list[str]
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for did in device_ids:
+        count = len(image_frame_files(snapshot_root / event_id / region_slug(did)))
+        if count:
+            counts[did] = count
+    return counts
+
+
+def probe_visual_artifacts(
+    snapshot_root: Path, event_id: str, device_ids: list[str]
+) -> tuple[VisualArtifactKind, bool, dict[str, int]]:
+    """从落盘文件推导事件当前可回放的载体，兼容 cleanup 后的 metadata-only。"""
+    image_counts = probe_image_frame_counts(snapshot_root, event_id, device_ids)
+    has_audio = False
+    has_video = False
+    for did in device_ids:
+        device_dir = snapshot_root / event_id / region_slug(did)
+        has_audio = has_audio or (device_dir / IMAGE_AUDIO_FILENAME).exists()
+        clip = locate_clip_file(device_dir)
+        if clip is not None:
+            has_audio = has_audio or clip[0].suffix == ".m4a"
+            has_video = has_video or clip[0].suffix == ".mp4"
+    if image_counts:
+        return "images", has_audio, image_counts
+    if has_video:
+        return "video", has_audio, {}
+    if has_audio:
+        return "audio", True, {}
+    return "none", False, {}
 
 
 class EventsService:
@@ -177,6 +214,20 @@ class EventsService:
         if path.exists():
             return ("found", path, row["timestamp"])
         return ("gone", None, None)
+
+    async def locate_image_frame(
+        self, event_id: str, device_id: str, frame_index: int
+    ) -> tuple[SnapshotStatus, Path | None, int | None]:
+        """定位图片模式 canonical sequence 中的一张 JPEG。"""
+        row = self._dao.get_by_id(event_id)
+        if row is None or device_id not in row["device_ids"]:
+            return ("not_found", None, None)
+        path = locate_image_frame_file(
+            get_snapshot_root() / event_id / region_slug(device_id), frame_index
+        )
+        if path is None:
+            return ("gone", None, None)
+        return ("found", path, row["timestamp"])
 
     async def read_crop_meta(
         self, event_id: str, device_id: str
@@ -287,6 +338,10 @@ class EventsService:
             return None
         for did in device_ids:
             device_dir = snapshot_root / event_id / region_slug(did)
+            # 图片模式的音频单独落为 audio.m4a；旧 clip_kind 不能把“图片+音频”
+            # 误报成纯音频，图片载体由 visual_artifact_kind 表达。
+            if image_frame_files(device_dir):
+                return None
             for filename in CLIP_CANDIDATES:
                 path = device_dir / filename
                 if path.exists():
@@ -339,6 +394,9 @@ class EventsService:
         event_id = row["id"]
         clip_kind = EventsService._probe_clip_kind(snapshot_root, event_id, device_ids)
         has_ref = probe_has_ref(snapshot_root, event_id, device_ids)
+        visual_kind, has_audio_artifact, image_frame_counts = probe_visual_artifacts(
+            snapshot_root, event_id, device_ids
+        )
         has_trace = (snapshot_root / event_id / "omni_trace.json.gz").exists()
         fb = feedback_index.get(event_id)
         has_feedback = fb is not None
@@ -360,4 +418,7 @@ class EventsService:
             feedback_pack_size=feedback_pack_size,
             clip_kind=clip_kind,
             has_ref=has_ref,
+            visual_artifact_kind=visual_kind,
+            image_frame_counts=image_frame_counts,
+            has_audio_artifact=has_audio_artifact,
         )
