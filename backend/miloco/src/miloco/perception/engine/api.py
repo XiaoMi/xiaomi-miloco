@@ -1037,6 +1037,9 @@ class PerceptionEngine(BasePerceptionEngine):
         on_early_speeches: Callable[[list[Speech]], Awaitable[None]] | None = None,
         on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]] | None = None,
         on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None = None,
+        trace_id: str | None = None,
+        device_trace_ids: dict[str, str] | None = None,
+        collect_flow_diagnostics: bool = False,
     ) -> RealtimePerceptionResult | None:
         """Run full engine batch pipeline with rule evaluation."""
         from miloco.perception.engine.pipeline import run_batch_pipeline
@@ -1159,6 +1162,9 @@ class PerceptionEngine(BasePerceptionEngine):
                 gate_last_audio_pass_ts=self._gate_last_audio_pass_ts,
                 gate_hold_active=self._gate_hold_active,
                 gate_hold_started_at=self._gate_hold_started_at,
+                trace_id=trace_id,
+                device_trace_ids=device_trace_ids,
+                collect_flow_diagnostics=collect_flow_diagnostics,
             )
         except Exception as e:
             logger.error("Batch pipeline failed: %s", e, exc_info=True)
@@ -1274,6 +1280,7 @@ class PerceptionEngine(BasePerceptionEngine):
             skipped=all_skipped,
             timing=timing or None,
             device_rule_map=device_rule_map or {},
+            flow_diagnostics=result.flow_diagnostics,
         )
 
         for room_name, room_result in result.rooms.items():

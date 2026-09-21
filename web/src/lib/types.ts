@@ -529,6 +529,177 @@ export interface OmniModelsResult {
   message?: string;
 }
 
+// ── Generic Graph JSON ───────────────────────────────────
+
+export type GraphSource =
+  | "observed"
+  | "configured"
+  | "model_fixed"
+  | "unknown";
+export type GraphStatus =
+  | "ok"
+  | "warning"
+  | "skipped"
+  | "backpressure"
+  | "error"
+  | "inactive"
+  | "unknown";
+export type GraphFreshness = "fresh" | "stale" | "unknown";
+export type GraphKind =
+  | "source"
+  | "buffer"
+  | "transform"
+  | "filter"
+  | "inference"
+  | "encoder"
+  | "external"
+  | "sink"
+  | "generic";
+export type GraphRole =
+  | "input"
+  | "output"
+  | "config"
+  | "flow"
+  | "state"
+  | "detail";
+export type GraphSeverity = "info" | "warning" | "error";
+export type GraphValue = string | number | boolean;
+
+export interface GraphDatum {
+  value: number | null;
+  source: GraphSource;
+}
+
+export interface GraphMedia {
+  width: GraphDatum | null;
+  height: GraphDatum | null;
+  fps: GraphDatum | null;
+  frame_count: GraphDatum | null;
+  duration_ms: GraphDatum | null;
+}
+
+export interface GraphMetric {
+  key: string;
+  label: string;
+  value: GraphValue | null;
+  unit: string | null;
+  source: GraphSource;
+  role: GraphRole;
+  severity: GraphSeverity | null;
+}
+
+export interface GraphWarning {
+  code: string;
+  message: string;
+  severity: GraphSeverity;
+  params: Record<string, GraphValue>;
+}
+
+export interface GraphEvidence {
+  trace_id: string | null;
+  device_trace_id: string | null;
+  observed_at: number | null;
+  age_ms: number | null;
+}
+
+export interface GraphNode {
+  id: string;
+  kind: GraphKind;
+  label: string;
+  group: string | null;
+  rank: number | null;
+  order: number;
+  status: GraphStatus;
+  freshness: GraphFreshness;
+  last_observed_status: GraphStatus | null;
+  standalone: boolean;
+  metrics: GraphMetric[];
+  input: GraphMedia | null;
+  output: GraphMedia | null;
+  warnings: GraphWarning[];
+  evidence: GraphEvidence | null;
+}
+
+export interface GraphEdge {
+  id: string;
+  from: string;
+  to: string;
+  label: string | null;
+  active: boolean;
+  status: GraphStatus;
+  freshness: GraphFreshness;
+  last_observed_status: GraphStatus | null;
+  media: GraphMedia | null;
+  metrics: GraphMetric[];
+  warnings: GraphWarning[];
+  evidence: GraphEvidence | null;
+}
+
+export interface GraphLayout {
+  rank_separation: number;
+  node_separation: number;
+}
+
+export interface GraphGroup {
+  id: string;
+  label: string;
+  order: number;
+}
+
+export interface GraphDefinition {
+  id: string;
+  label: string;
+  direction: "LR" | "TB";
+  layout: GraphLayout;
+  groups: GraphGroup[];
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export interface GraphScope {
+  device_id: string | null;
+  room_name: string | null;
+}
+
+export interface GraphDeviceSummary {
+  device_id: string;
+  room_name: string | null;
+  trace_id: string | null;
+  device_trace_id: string | null;
+  observed_at: number | null;
+  freshness: GraphFreshness;
+  status: GraphStatus;
+}
+
+export interface GraphSummary {
+  latest_trace_id: string | null;
+  latest_device_trace_id: string | null;
+  observed_at: number | null;
+  freshness: GraphFreshness;
+  devices: GraphDeviceSummary[];
+}
+
+export interface GraphResponse {
+  schema_version: 1;
+  generated_at: number;
+  process_started_at: number;
+  stale_after_sec: number;
+  scope: GraphScope;
+  graph: GraphDefinition;
+  summary: GraphSummary;
+}
+
+export interface GraphProtocolWarning {
+  code: "unknown_kind" | "unknown_status";
+  message: string;
+  path: string;
+  value: string;
+}
+
+export type GraphDecodeResult =
+  | { ok: true; graph: GraphResponse; warnings: GraphProtocolWarning[] }
+  | { ok: false; error: string };
+
 /** 提交给后端的 omni 配置(保存/测试)；档案名 label = 唯一 id。 */
 export interface OmniConfigUpdate {
   /** 档案名(唯一 id，非空)。 */

@@ -111,6 +111,9 @@ class DeviceData:
     overflow_count: int = 0  # 仅 put 侧 full_action 触发次数,不含 drain skip
     max_buffer_depth: int = 0
     last_overflow_action: str | None = None  # "clear" | "drop" | "skip" | None
+    last_drain_observed_at: int | None = None
+    last_drain_ready_depth_before: int | None = None
+    last_drain_ready_depth_after: int | None = None
 
     @property
     def has_data(self) -> bool:

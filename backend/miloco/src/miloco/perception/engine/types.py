@@ -9,6 +9,10 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from miloco.observability.perception_flow import (
+    PerceptionFlowCycleDiagnostics,
+    PerDeviceFlowDiagnostics,
+)
 from miloco.perception.types import DeviceSnapshot
 
 # =============================================================================
@@ -354,6 +358,7 @@ class DevicePipelineResult:
     identity_packet: IdentityPacket | None = None
     omni_output: OmniOutput | None = None
     skipped: bool = False
+    flow_diagnostics: PerDeviceFlowDiagnostics | None = None
 
 
 @dataclass
@@ -400,3 +405,4 @@ class BatchPipelineResult:
 
     rooms: dict[str, RoomPipelineResult] = field(default_factory=dict)
     timing: dict[str, Any] | None = None
+    flow_diagnostics: PerceptionFlowCycleDiagnostics | None = None

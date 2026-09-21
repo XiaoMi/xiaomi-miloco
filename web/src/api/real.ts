@@ -48,6 +48,15 @@ import type {
   TaskRuleSourceType,
 } from "@/lib/types";
 
+export async function realGetPerceptionFlow(
+  deviceId?: string,
+): Promise<unknown> {
+  const query = deviceId
+    ? `?device_id=${encodeURIComponent(deviceId)}`
+    : "";
+  return apiFetch<unknown>(`/api/perf/perception-flow${query}`);
+}
+
 // backend NormalResponse 包装：{ code, message, data }
 interface Normal<T> {
   code: number;

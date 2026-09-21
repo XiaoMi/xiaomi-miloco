@@ -88,6 +88,7 @@ class PerceptionRunner:
             logger.warning("[engine] 引擎已在运行，忽略重复启动")
             return
 
+        self._pipeline.clear_flow_snapshots()
         self._is_running = True
 
         # 重启时重读窗口时长（config 可能在停止期间被改）——__init__ 只读一次，
@@ -112,7 +113,7 @@ class PerceptionRunner:
         self._pipeline.set_inference_worker(self._inference_worker)
 
         # Initial device sync before first tick
-        await self._collector.sync_all_devices()
+        await self._sync_devices()
 
         self._perception_task = asyncio.create_task(self._perception_loop())
         self._sync_devices_task = asyncio.create_task(self._sync_devices_loop())
@@ -122,6 +123,7 @@ class PerceptionRunner:
     async def stop(self) -> None:
         """Stop the realtime perception loop and shutdown collector."""
         if not self._is_running:
+            self._pipeline.clear_flow_snapshots()
             logger.warning("[engine] 引擎未运行，忽略重复停止")
             return
 
@@ -152,6 +154,8 @@ class PerceptionRunner:
             await self._pipeline.close()
         except Exception as e:  # noqa: BLE001
             logger.error("[engine] 关闭引擎失败 | %s", e)
+        finally:
+            self._pipeline.clear_flow_snapshots()
 
         await self._collector.shutdown()
         logger.info("Perception engine stopped")
@@ -166,7 +170,9 @@ class PerceptionRunner:
         # 非 OPEN_RECOVERABLE 时 try_arm_probe 零开销直接返 False,前置安全。
         self._pipeline.drive_omni_probe()
 
-        if not self._collector.get_all_active_sources():
+        active_device_ids = set(self._collector.get_all_active_sources())
+        self._pipeline.retain_flow_devices(active_device_ids)
+        if not active_device_ids:
             return
 
         # 每个 tick 自愈一次:出厂态配好 key / 补完模型后,下个推理周期(默认 4s)自动转
@@ -228,8 +234,14 @@ class PerceptionRunner:
                 break
 
             try:
-                await self._collector.sync_all_devices()
+                await self._sync_devices()
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("[runner] 设备同步失败 | %s", e, exc_info=True)
+
+    async def _sync_devices(self) -> None:
+        await self._collector.sync_all_devices()
+        self._pipeline.retain_flow_devices(
+            set(self._collector.get_all_active_sources())
+        )

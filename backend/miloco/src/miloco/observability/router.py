@@ -9,11 +9,36 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
+from miloco.config import get_settings
 from miloco.middleware import verify_token
 from miloco.observability.metrics_db import connect
+from miloco.observability.perception_flow import (
+    build_perception_flow_graph,
+    get_perception_flow_process_started_at,
+    get_perception_flow_store,
+)
 from miloco.observability.stats import VIEWS as STATS_VIEWS
 
 router = APIRouter(dependencies=[Depends(verify_token)])
+
+
+@router.get("/api/perf/perception-flow")
+async def get_perception_flow(device_id: str | None = None):
+    store = get_perception_flow_store()
+    if store is None:
+        raise HTTPException(503, "perception flow diagnostics unavailable")
+
+    stale_after_sec = max(
+        2 * get_settings().perception.collect.window_size,
+        30,
+    )
+    graph = build_perception_flow_graph(
+        store,
+        device_id=device_id,
+        stale_after_sec=stale_after_sec,
+        process_started_at=get_perception_flow_process_started_at(),
+    )
+    return graph.model_dump(by_alias=True)
 
 
 @router.get("/api/trace/{trace_id}")
