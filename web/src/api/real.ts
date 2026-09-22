@@ -149,7 +149,7 @@ interface BackendDevice {
   sub_devices?: unknown;
 }
 
-interface BackendPropSpec {
+export interface BackendPropSpec {
   description?: string;
   prop_description?: string;
   format?: string;
@@ -161,6 +161,8 @@ interface BackendPropSpec {
   unit?: string;
   value_list?: { name: string; value: number | string }[];
   value_range?: number[];
+  /** 仅 action 有：入参的名字与格式，按顺序对齐台账 value_json 里的入参数组。 */
+  in_params?: { name: string; format: string }[];
 }
 
 interface BackendDeviceStatus {
@@ -882,6 +884,23 @@ async function batchWithConcurrency<T>(
   return results;
 }
 
+/** did → 该设备的 spec 表（iid → spec）。日志页拿它把台账里的 iid 翻成人话。
+ *
+ *  走的是与设备控制页同一个 home 请求（5s TTL 缓存共享），**不拉每台设备的 status**
+ *  ——realListDevices 会为每台设备各打一次 /status（并发 6 路、单次 2.5s 超时），
+ *  日志页只要 spec，付不起那个代价，也会撞 MiOT 云端限频。
+ *  取不到 spec 的行由调用方回落成原始 iid，不是错误路径。 */
+export async function realDeviceSpecs(): Promise<
+  Map<string, Record<string, BackendPropSpec>>
+> {
+  const r = await fetchMiotHome();
+  const byDid = new Map<string, Record<string, BackendPropSpec>>();
+  for (const d of r.data.devices) {
+    if (d.spec) byDid.set(d.did, d.spec);
+  }
+  return byDid;
+}
+
 export async function realListDevices(): Promise<Device[]> {
   const r = await fetchMiotHome();
   const devices = r.data.devices;
@@ -948,13 +967,42 @@ export async function realListDevices(): Promise<Device[]> {
   });
 }
 
+/** iid → 住户能读的名字。`prop_description` 是 miot spec 的英文原名，`description`
+ *  是云端译好的「服务名 属性名」——先取英文原名再过 zhLabel 词表，表外原样回退
+ *  （英文模式天然就是原文）。导出给日志页复用：同一个属性在两个页面必须同名。 */
+export function specLabel(iid: string, spec: BackendPropSpec): string {
+  return zhLabel(spec.prop_description || spec.description || iid);
+}
+
+/** spec + 值 → 一句话。分支与 mapProp 同源（bool / value_list / unit 三种），
+ *  差别只在输出形态：mapProp 给的是控件（开关、下拉、滑杆），这里给的是文本。
+ *  读不出意思时返回 null，由调用方回落成原始 JSON——不猜。 */
+export function propValueText(
+  spec: BackendPropSpec,
+  value: unknown,
+): string | null {
+  if (value === null || value === undefined) return null;
+  if (spec.format === "bool") {
+    // 借枚举词表译「开/关」：bool 与枚举 On/Off 在同一个词表里不该有两种译法。
+    return zhEnumValue(value ? "On" : "Off");
+  }
+  if (spec.value_list && spec.value_list.length > 0) {
+    // 用字符串比对：台账的 value_json 过了一次 JSON 往返，数值与字符串的边界会漂。
+    const hit = spec.value_list.find((v) => String(v.value) === String(value));
+    // 值不在枚举里（固件 / 规格漂移）→ 不贴一个近似的名，交给回落。
+    return hit ? zhEnumValue(hit.name) : null;
+  }
+  if (typeof value === "number") return `${value}${zhUnit(spec.unit) ?? ""}`;
+  if (typeof value === "string") return value;
+  return null;
+}
+
 function mapProp(
   iid: string,
   spec: BackendPropSpec,
   value: unknown,
 ): DeviceProperty {
-  const rawLabel = spec.prop_description || spec.description || iid;
-  const label = zhLabel(rawLabel);
+  const label = specLabel(iid, spec);
   const unit = zhUnit(spec.unit);
   const writeable = !!spec.writeable;
 
@@ -1331,15 +1379,23 @@ interface BackendMeaningfulEvent {
   feedback_pack_size?: number | null;
 }
 
+/** 拉有意义事件列表。
+ *
+ *  `eventId` 是**按主键单查**那条路(反查动作的宿主事件):命中就返回那一条、不看时间窗,
+ *  查不到返回空数组而不是报错——「没有这条事件」是正常答案。调用方是折叠视图里那枚
+ *  「触发事件未加载」的 chip:它要的是**说实话**(那条事件在不在、在哪一刻),不是把它
+ *  抓进列表,所以这里拿到的结果只用于提示、不并进 events。 */
 export async function realListActivity(opts?: {
   since?: number;
   before?: number;
   limit?: number;
   offset?: number;
+  eventId?: string;
 }): Promise<ActivityEvent[]> {
   const params = new URLSearchParams();
   if (opts?.since !== undefined) params.set("since", String(opts.since));
   if (opts?.before !== undefined) params.set("before", String(opts.before));
+  if (opts?.eventId) params.set("event_id", opts.eventId);
   params.set("limit", String(opts?.limit ?? 50));
   if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
   const qs = params.toString();

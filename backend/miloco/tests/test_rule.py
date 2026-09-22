@@ -304,6 +304,105 @@ async def test_rule_action_exception_ledger_keeps_attempted_value(
     assert kw["value_json"] == "true"
 
 
+@pytest.mark.asyncio
+async def test_action_link_columns_reach_ledger(runner, monkeypatch):
+    """phase / trigger_event_id 从 _execute_action 直落台账两列。"""
+    from unittest.mock import AsyncMock as _AM
+
+    from miloco.rule.schema import RuleAction
+
+    spy = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", spy)
+
+    action = RuleAction(did="dev1", iid="prop.2.1", value=True,
+                        idempotent=False, cooldown_minutes=10)
+    await runner._execute_action(
+        "rule-42", action, phase="enter", trigger_event_id="ev-1"
+    )
+
+    kw = spy.await_args.kwargs
+    assert kw["phase"] == "enter"
+    assert kw["trigger_event_id"] == "ev-1"
+
+
+@pytest.mark.asyncio
+async def test_entered_fire_marks_enter_phase_with_cycle_event(runner, monkeypatch):
+    """进入边沿：台账 phase=enter，trigger_event_id=本周期那条事件行。
+
+    守的是整条透传链(update_state → _dispatch_event → _spawn_fire → _fire_safely
+    → _fire → _execute_action → 台账)。相位只在一处分叉，这里与下面的退出用例合起来
+    覆盖它的两个分支(达标走 else 支，同进入)。
+    """
+    from unittest.mock import AsyncMock as _AM
+
+    spy = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", spy)
+
+    await runner.update_state(
+        "rule-1", "cam-001", True, "进入", trigger_event_id="ev-enter"
+    )
+    await runner.drain()
+
+    kw = spy.await_args.kwargs
+    assert kw["phase"] == "enter"
+    assert kw["trigger_event_id"] == "ev-enter"
+
+
+@pytest.mark.asyncio
+async def test_debounced_exit_reuses_enter_event_id(runner, monkeypatch):
+    """退出支挂回**进入时**那条事件，而不是退出这一刻的。
+
+    确认离开的那个感知周期不写事件行，退出时刻现找只能找到空或别人的行——父指针在
+    进入时就定下并一路透传。用例刻意给退出那次调用喂另一个 id：实现若改成「退出用
+    本帧传来的 id」，这里的断言就变红。
+    """
+    from unittest.mock import AsyncMock as _AM
+
+    rule = _make_state_rule(
+        rule_id="rule-link",
+        on_enter_actions=[_make_action(did="enter-d", iid="prop.2.1")],
+        on_exit_actions=[_make_action(did="exit-d", iid="prop.2.1")],
+        exit_debounce_seconds=0,
+    )
+    runner.add_rule(rule)
+    runner.set_task_actions('test_task-rule-link', {'on_enter_actions': [{'did': 'enter-d', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-d', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
+
+    spy = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", spy)
+
+    await runner.update_state(
+        "rule-link", "cam-001", True, "进", trigger_event_id="ev-enter"
+    )
+    await runner.update_state("rule-link", "cam-001", False, "出")  # 抖动观察窗
+    await runner.update_state(
+        "rule-link", "cam-001", False, "出", trigger_event_id="ev-exit"
+    )
+    await asyncio.sleep(0.05)  # 0 秒 debounce，让退出 fire 跑完
+    await runner.drain()
+
+    links = [(c.kwargs["phase"], c.kwargs["trigger_event_id"]) for c in spy.await_args_list]
+    assert links == [("enter", "ev-enter"), ("exit", "ev-enter")]
+
+
+@pytest.mark.asyncio
+async def test_service_update_state_forwards_trigger_event_id(service, monkeypatch):
+    """RuleService.update_state 必须把 trigger_event_id 转给 runner。
+
+    这一层是薄包装、只挑一部分形参往下传（skip_flicker / extra_metadata 就不传），
+    漏转一个新参数的现象是「代码看着全对、台账恒 NULL」——不报错、不打日志。感知
+    client 走的正是这个入口（不是 runner 本体），漏转等于上游整条链路白做。
+    """
+    seen: dict = {}
+
+    async def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return TriggerOutcome.NOT_FIRED
+
+    monkeypatch.setattr(service._runner, "update_state", spy)
+    await service.update_state("r1", "cam-001", True, "有人", trigger_event_id="ev-1")
+    assert seen["trigger_event_id"] == "ev-1"
+
+
 def _make_duration_rule(rule_id, duration_seconds):
     """STATE duration 规则；on_enter_desc 让 slot 非空。sample_interval 默认 3s，
     duration_seconds=3 → maxlen=1（首帧即达标 FIRED）；=6 → maxlen=2（首帧 COUNTING）。"""
@@ -3127,6 +3226,58 @@ class TestRuleRunnerStateDuration:
         assert "rule-sd-silent" not in runner_fast._state_duration_fired
 
     @pytest.mark.asyncio
+    async def test_state_duration_target_fire_id_rides_to_exit(
+        self, runner_fast, monkeypatch
+    ):
+        """duration 达标那次 fire 的事件 id,由退出支原样带走。
+
+        达标 fire 落在**没有边沿**的周期上(规则已在态内,帧路径不动状态机),
+        所以 _dispatch_event 记 id 的那行不会执行——这条路上只有 _evaluate_duration
+        自己那份记下来的值。退出时若它没被记下,退出支就挂空。
+        """
+        from unittest.mock import AsyncMock as _AM
+
+        rule = _make_state_duration_rule(
+            rule_id="rule-sd-link", duration_seconds=1, duration_ratio=1.0
+        )
+        # sample_interval=0.5, maxlen=2, threshold=2
+        runner_fast.add_rule(rule)
+        runner_fast.set_task_actions('test_task', {'on_enter_actions': [{'did': 'enter-d', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-d', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
+
+        spy = _AM()
+        monkeypatch.setattr("miloco.miot.service._write_action_ledger", spy)
+
+        with patch("miloco.rule.runner.time.time") as mt:
+            # 第一帧:窗口 1/2 未达标,只做状态维护,不 fire
+            mt.return_value = 100.0
+            await runner_fast.update_state(
+                "rule-sd-link", "cam-001", True, "", trigger_event_id="ev-t1"
+            )
+            # 第二帧:窗口 2/2 达标 → 这一次真 fire,id 是 ev-t2
+            mt.return_value = 100.5
+            await runner_fast.update_state(
+                "rule-sd-link", "cam-001", True, "", trigger_event_id="ev-t2"
+            )
+            await runner_fast.drain()
+            # 抖动观察窗,再确认 EXIT(退出那一刻的 id 是 ev-t4,不该被用)
+            mt.return_value = 101.0
+            await runner_fast.update_state("rule-sd-link", "cam-001", False, "")
+            mt.return_value = 101.5
+            await runner_fast.update_state(
+                "rule-sd-link", "cam-001", False, "", trigger_event_id="ev-t4"
+            )
+        await asyncio.sleep(0.05)  # debounce=0,让退出 fire 跑完
+        await runner_fast.drain()
+
+        links = [
+            (c.kwargs["phase"], c.kwargs["trigger_event_id"])
+            for c in spy.await_args_list
+        ]
+        assert links == [("enter", "ev-t2"), ("exit", "ev-t2")], (
+            f"达标 fire 的 id 未随退出支带下去,实际 {links}"
+        )
+
+    @pytest.mark.asyncio
     async def test_state_duration_exit_then_re_enter_can_still_fire(
         self, runner_fast, mock_miot_proxy
     ):
@@ -4708,7 +4859,10 @@ class TestRuleRunnerSceneAction:
         spy = _AM(return_value=True)
         monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
 
-        result = await runner._execute_action("rule-77", _make_scene_action())
+        result = await runner._execute_action(
+            "rule-77", _make_scene_action(),
+            phase="exit", trigger_event_id="ev-scene",
+        )
 
         assert result.result is True
         assert result.skipped is False
@@ -4717,6 +4871,10 @@ class TestRuleRunnerSceneAction:
         assert spy.await_args.args[1] == "scene-1"
         assert spy.await_args.kwargs["source"] == "rule"
         assert spy.await_args.kwargs["source_id"] == "rule-77"
+        # 链路两列也要跟着走：场景动作与属性动作走的是两条分支，
+        # 只钉住其中一条的话另一条丢掉两列不会有任何用例变红。
+        assert spy.await_args.kwargs["phase"] == "exit"
+        assert spy.await_args.kwargs["trigger_event_id"] == "ev-scene"
 
     @pytest.mark.asyncio
     async def test_scene_action_never_reaches_iid_parsing(self, runner, monkeypatch):

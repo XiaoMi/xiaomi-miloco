@@ -4,11 +4,15 @@
  *
  * 数据源:GET /api/actions(observability/router::list_actions)。
  * 返回 BARE JSON 数组(无 {code,data} 信封),新到旧排序。一次 agent 控制/播报/触发一行。
- * ActionRow 展示:时间 · 设备名(米家别名)+ 房间 · 动作类型 humanize + iid + value 截断 · 成功/失败徽标。
+ * ActionRow 展示:时间 · 设备名(米家别名)+ 房间 · 动作人话(读不出时退回动作类型
+ * + 原始 iid + 截断的 value)· 成功/失败徽标。人话的取数与回落见 lib/actionText。
  */
 
+import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
 import { apiFetch } from "@/api/client";
+import { describeAction, type SpecTable } from "@/lib/actionText";
+import type { FoldActionLike } from "@/lib/feedFold";
 import { TimeLabel } from "./TimeLabel";
 
 /** backend action_ledger 行——就地类型,不进 lib/types.ts(仅本组件用)。 */
@@ -28,12 +32,17 @@ export interface BackendActionRow {
   trace_id: string | null;
   /** v4:设备所属家庭;老行 / 解析失败为 null(后端按 home 过滤时对 null 放行) */
   home_id?: string | null;
+  /** v5:相位。'enter' | 'exit' | 'legacy'(迁移前的历史行);无链路的行恒 null。
+   *  可选——老后端不吐这两列时前端不该炸,只是折叠时它们全落进"无触发事件"那一档。 */
+  phase?: string | null;
+  /** v5:触发事件主键(宿主)。null = 这条动作没有触发源,或早于链路记录。 */
+  trigger_event_id?: string | null;
 }
 
 const VALUE_MAX = 60;
 
-/** 单流合并窗口用 limit=500 一次拉全,不再分页(见 ActivityFeed mergeFeedRows)。
- *  导出供 ActivityFeed 判「是否已达上限」以渲染截断提示。 */
+/** 动作一次拉全的条数上限(见 lib/feedFold 的窗口规则)。导出供 ActivityFeed 判「是否已达
+ *  上限」以渲染截断提示。 */
 export const ACTIONS_LIMIT = 500;
 
 /** 统一拉取——failedOnly 时带 failed_only=1;传时间窗时带 since_ms/until_ms(与事件流同口径,
@@ -77,19 +86,52 @@ function truncateValue(v: string | null): string {
 /** 动作行——并入 ActivityFeed 单流时,动作行按**结果**着底色跟事件行(无底色)区分:
  *  成功=低饱和的柔和绿(success-bg,~8-12% alpha 的主题 token)、失败=柔和红(error-bg),
  *  「尽量和原色接近一点,别太扎眼」——不再用统一的 brand 橙;左边条用语义色全值
- *  (2px 细条,比底色略强的强调)。失败徽标保持不变。 */
-export function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
+ *  (2px 细条,比底色略强的强调)。失败徽标保持不变。
+ *
+ *  入参取 lib/feedFold 的窄类型(FoldActionLike)而不是 BackendActionRow:本组件只读
+ *  那几个字段,台账内部列(result_code / trace_id / home_id)不该长进它的契约里——
+ *  折叠后的成员行本来就是从支里拿的行,不是重新从后端取的那一份。 */
+export function ActionRow({
+  row,
+  t,
+  spec,
+  nested = false,
+  domId,
+  chip,
+  back,
+}: {
+  row: FoldActionLike;
+  t: TFunction;
+  /** 该设备(did)的 spec 表,iid → spec。缺省 / 取不到时整行退回原始键——
+   *  日志页顶层没拿到规格不该让动作行消失,退化今天的样子即可。 */
+  spec?: SpecTable;
+  /** 展开面里的成员行:缩进、压扁、去掉自己的左边条(那条属于它所属的支)。 */
+  nested?: boolean;
+  /** 供程序化聚焦用的 id(展开后焦点落到第一条动作)。 */
+  domId?: string;
+  /** 挂在行上的说明 chip(「无触发事件」/「早于链路记录」)。 */
+  chip?: ReactNode;
+  /** 回返槽:指回这条动作的宿主事件。**只在未折叠态给**——折叠态下这条动作要么并进了
+   *  支(回返角标长在支的标题上),要么挂不上宿主(那就不该画一枚点了没反应的按钮)。
+   *  给了它就由**设备名自己**当按钮:旁边再挂一枚独立按钮既把标题挤开,又让读屏在同一
+   *  次跳转上撞见两个控件(同 BranchRow 那条)。 */
+  back?: { eventId: string; onBack: (eventId: string) => void };
+}) {
   const ok = row.success === 1;
-  const value = truncateValue(row.value_json);
+  const phrase = describeAction(row, spec, t);
+  // 有了人话就不再重复原始 JSON:值已经读进那句话里,原始键留 chip 可搜。
+  const value = phrase ? "" : truncateValue(row.value_json);
   // 失败原因:优先 result_msg,退回 error;成功时不显。
   const reason = !ok ? row.result_msg || row.error || "" : "";
   const deviceLabel = row.device_name || row.did;
 
   return (
     <li
-      className={`px-5 py-2.5 border-l-2 transition-colors ${
-        ok ? "bg-success-bg border-success" : "bg-error-bg border-error"
-      }`}
+      id={domId}
+      tabIndex={domId ? -1 : undefined}
+      className={`transition-colors ${
+        nested ? "pl-9 pr-5 py-1.5" : "px-5 py-2.5 border-l-2"
+      } ${ok ? "bg-success-bg" : "bg-error-bg"} ${nested ? "" : ok ? "border-success" : "border-error"}`}
     >
       {/* 时间列与事件行(ActivityRow)完全一致:同一 TimeLabel 组件 + 同 70px 列宽,
           合并单流里两种行的时间格式/对齐不再有差异(修「时间格式不一致」)。 */}
@@ -98,15 +140,54 @@ export function ActionRow({ row, t }: { row: BackendActionRow; t: TFunction }) {
 
         <div className="min-w-0 sm:order-2">
           <div className="text-body text-text-primary break-words">
-            <span className="font-medium">{deviceLabel}</span>
+            {back ? (
+              <button
+                type="button"
+                data-back={back.eventId}
+                onClick={() => back.onBack(back.eventId)}
+                title={t("actions.backToEvent")}
+                aria-label={t("actions.backToEvent")}
+                className="inline-flex items-center gap-1 max-w-full align-baseline font-medium hover:text-text-secondary transition-colors"
+              >
+                <span className="truncate">{deviceLabel}</span>
+                {/* 与支行标题上那枚是同一枚直落箭头(FeedFold 的 ICON.back):它出现的地方
+                    目标都在下方,见 lib/feedFold 末尾的并列规则。两处各画一份是本地惯例
+                    (每个组件自带 svg),改这一枚时要一起看。 */}
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="w-3 h-3 shrink-0"
+                  aria-hidden="true"
+                >
+                  <path d="M12 4v13" />
+                  <path d="m6 12 6 6 6-6" />
+                </svg>
+              </button>
+            ) : (
+              <span className="font-medium">{deviceLabel}</span>
+            )}
             {row.room && (
               <span className="text-caption text-text-tertiary ml-2">{row.room}</span>
             )}
+            {chip && <span className="ml-2 align-middle">{chip}</span>}
           </div>
           <div className="text-caption text-text-secondary break-words">
-            {t(actionTypeKey(row.action_type))}
+            {phrase ? (
+              <span className="text-text-primary">{phrase}</span>
+            ) : (
+              t(actionTypeKey(row.action_type))
+            )}
             {row.iid && (
-              <span className="text-caption-mono text-text-tertiary ml-1.5">{row.iid}</span>
+              <span
+                className="text-caption-mono text-text-tertiary bg-bg-secondary rounded-sm px-1.5 py-px ml-1.5 break-all"
+                title={`${t("actions.rawKeyTitle")}${row.iid}`}
+              >
+                {row.iid}
+              </span>
             )}
             {value && (
               <span

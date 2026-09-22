@@ -150,6 +150,52 @@ class TestListEventsEndpoint:
         assert resp.status_code == 200
         assert len(resp.json()["data"]["events"]) == 1
 
+    def test_event_id_returns_that_one_event(self, client, dao):
+        """按主键单查:只返这一条。
+
+        这条路是给动作台账反查宿主事件的(折叠 UI 要知道一条动作挂在哪条事件上)。
+        """
+        eid = _insert(dao, timestamp=2000, text="有人进门")
+        _insert(dao, timestamp=3000, text="别的")
+        resp = client.get(f"/api/events?event_id={eid}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["code"] == 0
+        events = body["data"]["events"]
+        assert [e["event_id"] for e in events] == [eid]
+        assert events[0]["text"] == "有人进门"
+
+    def test_event_id_missing_returns_empty_list_not_error(self, client):
+        """查不到 = 空列表(200),不是 404/500。
+
+        调用方要靠"空列表"与"请求失败"区分「这条事件不存在」和「后端出问题了」,
+        故这里不能把「没有」折成错误码。
+        """
+        resp = client.get("/api/events?event_id=no-such-event")
+        assert resp.status_code == 200
+        assert resp.json()["data"]["events"] == []
+
+    def test_event_id_ignores_time_window(self, client, dao):
+        """单查忽略时间窗:事件已翻出窗口,仍取得到。
+
+        这是这条路唯一的用处 —— 要反查的场景恰恰是「这条事件不在当前列表里了」。
+        若跟着列表一起按窗裁,该返回的会变成空列表,而空列表与「确实不存在」同形,
+        反查就永远只能说"没找到"。同组窗参数不带 event_id 时对照为取不到。
+        """
+        eid = _insert(dao, timestamp=int(time.time() * 1000))
+        far = int(time.time() * 1000) + 10_000_000
+        resp = client.get(f"/api/events?event_id={eid}&since={far}&before={far + 1000}")
+        assert [e["event_id"] for e in resp.json()["data"]["events"]] == [eid]
+
+        resp = client.get(f"/api/events?since={far}&before={far + 1000}")
+        assert resp.json()["data"]["events"] == []
+
+    def test_event_id_empty_falls_back_to_list(self, client, dao):
+        """空串 = 不筛(与其余参数同一惯例):退回列表口径,不是"拿空 id 去筛"."""
+        _insert(dao)
+        resp = client.get("/api/events?event_id=")
+        assert len(resp.json()["data"]["events"]) == 1
+
 
 class TestGetClipEndpoint:
     def test_event_not_found_404(self, client):

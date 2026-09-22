@@ -6,13 +6,16 @@ v0(无版本号老 db) → 要求删 db(无法判断列集)。
 
 v2:新增 action_ledger 表(agent 控制设备 / 播 TTS / 触发场景的持久审计)。
 纯 additive CREATE,对 v1 老库走 _MIGRATIONS 步进补表,无需删 db。
+
+v5:action_ledger 补链路两列 phase / trigger_event_id,并把迁移前的老行回填
+phase='legacy'——「写在链路记录之前」与「确实没有触发源」必须能分开。
 """
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _TRACES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -132,6 +135,10 @@ CREATE INDEX IF NOT EXISTS idx_agent_runs_success ON agent_runs(success) WHERE s
 # source ∈ {cli, rule} 区分触发源(v3)：cli=control_device 路径 / rule=RuleRunner 直控
 # (source_id=rule_id)。trace_id 目前是**预留槽**(NULL)——尚未实际串联 agent turn,
 # 后续经 CLI --trace-id / X-Miloco-Trace-Id → ContextVar 串联(见 PR 后续工作)。
+# phase / trigger_event_id 是链路两列(v5)：phase ∈ {enter, exit} 标这条动作属于
+# 触发时还是退出时的那一支;trigger_event_id 指向触发它的事件行,是「动作折叠到
+# 事件之下」的唯一依据。非规则路径(人手直控、动态槽走 agent)两列均 NULL;
+# phase='legacy' 专指迁移前写入的老行——那时还没有链路可记。
 _ACTION_LEDGER_SCHEMA = """
 CREATE TABLE IF NOT EXISTS action_ledger (
   id            TEXT    NOT NULL PRIMARY KEY,
@@ -149,11 +156,14 @@ CREATE TABLE IF NOT EXISTS action_ledger (
   trace_id      TEXT,
   source        TEXT,
   source_id     TEXT,
-  home_id       TEXT
+  home_id       TEXT,
+  phase         TEXT,
+  trigger_event_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_ledger_ts ON action_ledger(timestamp);
 CREATE INDEX IF NOT EXISTS idx_action_ledger_source_ts ON action_ledger(source, timestamp);
 CREATE INDEX IF NOT EXISTS idx_action_ledger_home_ts ON action_ledger(home_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_action_ledger_trigger ON action_ledger(trigger_event_id);
 """
 
 _TRACES_V_VIEW = """
@@ -228,8 +238,9 @@ def init_schema(conn: sqlite3.Connection) -> None:
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         return
 
-    # cur ∈ (0, SCHEMA_VERSION):步进迁移。每步是 additive DDL(建表/加列),
+    # cur ∈ (0, SCHEMA_VERSION):步进迁移。每步以 additive DDL(建表/加列)为主,
     # 幂等(CREATE ... IF NOT EXISTS),做完把 user_version 推到目标步。
+    # 例外:v5 另需回填老行的来源标记(见 _migrate_v5_action_link),仍是幂等的。
     for step, migrate in sorted(_MIGRATIONS.items()):
         if cur < step:
             migrate(conn)
@@ -281,9 +292,41 @@ def _migrate_v4_action_home(conn: sqlite3.Connection) -> None:
     )
 
 
-# 步进迁移注册表:{target_version: fn}。fn 只做 additive DDL,须幂等。
+def _migrate_v5_action_link(conn: sqlite3.Connection) -> None:
+    """v4 → v5:给 action_ledger 补链路两列 phase / trigger_event_id(幂等)。
+
+    ``phase`` ∈ {enter, exit} 标这条动作落在触发支还是退出支;``trigger_event_id``
+    指向触发它的那条事件行——两者合起来才够把动作折回它的事件之下。
+
+    与本文件其余迁移不同,这一步**会写数据**:把迁移前的老行回填
+    ``phase='legacy'``。老行没有链路可补(两列恒 NULL),而 NULL 与新写入的
+    「确实没有触发源」(人手直控 / 动态槽走 agent)撞在同一个值上——不作标记,
+    前端只能把整段历史说成「无触发事件」,那是一句我们并不掌握的话。
+    ``legacy`` 只声明「这行写于链路记录之前」,对老行恒真。
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    if "phase" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN phase TEXT")
+    if "trigger_event_id" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN trigger_event_id TEXT")
+    # 回填范围只认「两列皆空」:迁移是 v4→v5 的单向一步,走到这里时不可能已有
+    # v5 写入的行——init_schema 到不了 SCHEMA_VERSION 就不会放行启动。**故本函数
+    # 不可在 v5 之后重跑**:那会把 v5 里「确实没有触发源」的行误标成 legacy。
+    conn.execute(
+        "UPDATE action_ledger SET phase = 'legacy' "
+        "WHERE phase IS NULL AND trigger_event_id IS NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_action_ledger_trigger "
+        "ON action_ledger(trigger_event_id)"
+    )
+
+
+# 步进迁移注册表:{target_version: fn}。fn 以 additive DDL 为主,须幂等
+# (v5 例外:另含一次老行回填,同样幂等)。
 _MIGRATIONS = {
     2: _migrate_v2_action_ledger,
     3: _migrate_v3_action_source,
     4: _migrate_v4_action_home,
+    5: _migrate_v5_action_link,
 }

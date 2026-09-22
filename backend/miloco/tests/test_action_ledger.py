@@ -170,6 +170,49 @@ async def test_writer_records_source_rule(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ledger_records_link_columns(bound_client, tmp_path):
+    """公共 helper 带 phase / trigger_event_id 时台账落链路两列(v5)。
+
+    这两列是「动作折叠回触发它的那条事件」唯一的接缝:写丢了,折叠页就只能靠
+    时间相近去猜父子,而猜错比不折叠更难查。
+    """
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="dev1", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None, source="rule", source_id="rule-42",
+        phase="exit", trigger_event_id="ev-enter",
+    )
+    await client.flush()
+    r = _rows(obs_db)[0]
+    assert r["phase"] == "exit"
+    assert r["trigger_event_id"] == "ev-enter"
+
+
+@pytest.mark.asyncio
+async def test_ledger_link_columns_null_by_default(bound_client, tmp_path):
+    """不传时两列留 NULL——人工 CLI 与动态槽没有触发事件,占位值会伪造出父子关系。"""
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="dev1", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None, source="cli",
+    )
+    await client.flush()
+    r = _rows(obs_db)[0]
+    assert r["phase"] is None
+    assert r["trigger_event_id"] is None
+
+
+@pytest.mark.asyncio
 async def test_ledger_records_device_home_id(bound_client, tmp_path):
     """v4:写入时从 device cache 解析设备所属家庭(dev1 ∈ H1),合流页才能按家过滤。"""
     client, obs_db = bound_client
@@ -415,7 +458,7 @@ async def test_no_client_bound_control_still_works(tmp_path):
 
 @pytest.mark.asyncio
 async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
-    """规则直控场景:台账 source=rule / source_id=rule_id。
+    """规则直控场景:台账 source=rule / source_id=rule_id,链路两列一并透传。
 
     没有这条透传,规则触发的场景在台账里和人工 CLI 触发无法区分,
     「规则触发 → 实际执行了什么」这条链就是断的。
@@ -425,7 +468,8 @@ async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
     client, obs_db = bound_client
     svc = _make_service(tmp_path)
     ok = await _trigger_scene(
-        svc._miot_proxy, "scene1", source="rule", source_id="rule-77"
+        svc._miot_proxy, "scene1", source="rule", source_id="rule-77",
+        phase="enter", trigger_event_id="ev-open",
     )
     await client.flush()
 
@@ -434,6 +478,8 @@ async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
     assert r["action_type"] == "scene_trigger"
     assert r["source"] == "rule"
     assert r["source_id"] == "rule-77"
+    assert r["phase"] == "enter"
+    assert r["trigger_event_id"] == "ev-open"
     # 场景无 did:did/iid 都占 scene_id,与 CLI 触发同一形状
     assert r["did"] == "scene1"
     assert r["iid"] == "scene1"
@@ -441,7 +487,7 @@ async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
 
 @pytest.mark.asyncio
 async def test_scene_trigger_failure_records_source_rule(bound_client, tmp_path):
-    """异常路径也要带 source/source_id——失败的规则动作最需要能回指到规则。"""
+    """异常路径也要带 source/source_id 与链路两列——失败的规则动作最需要能回指到规则。"""
     from miloco.middleware.exceptions import MiotServiceException
     from miloco.miot.service import _trigger_scene
 
@@ -450,7 +496,8 @@ async def test_scene_trigger_failure_records_source_rule(bound_client, tmp_path)
     svc._miot_proxy.execute_miot_scene = AsyncMock(side_effect=RuntimeError("boom"))
     with pytest.raises(MiotServiceException):
         await _trigger_scene(
-            svc._miot_proxy, "scene1", source="rule", source_id="rule-77"
+            svc._miot_proxy, "scene1", source="rule", source_id="rule-77",
+            phase="exit", trigger_event_id="ev-open",
         )
     await client.flush()
 
@@ -458,6 +505,8 @@ async def test_scene_trigger_failure_records_source_rule(bound_client, tmp_path)
     assert r["success"] == 0
     assert r["source"] == "rule"
     assert r["source_id"] == "rule-77"
+    assert r["phase"] == "exit"
+    assert r["trigger_event_id"] == "ev-open"
 
 
 @pytest.mark.asyncio
