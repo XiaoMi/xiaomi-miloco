@@ -20,6 +20,53 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FoldStrength } from "@/lib/feedFold";
 
+/* ── 两个偏好共用的持久化骨架 ──────────────────────────────────
+   读回并校验 → useState → 同页自定义事件 + storage 双监听 → 写入成功后广播：两个偏好
+   逐字同构，差别只有存储键、事件名、和「值怎么变成存储里的那个字符串」。
+
+   各写一份的代价不是今天的重复，是明天的漏改：广播时机、隐私模式回退这类修法都得动两遍，
+   而只改了一处时，症状是「这个偏好跨标签页同步、那个不同步」——极难一眼看出的不一致。
+   骨架共用，两个键仍各存各的（见文件头）：共用的是骨架，不是状态。 */
+function useStoredPref<T>(
+  key: string,
+  eventName: string,
+  /** 读回并校验。认不出的值退回默认，别让第三种状态流进渲染层（见文件头）。 */
+  read: () => T,
+  /** 值 → 存储里的字符串。 */
+  serialize: (v: T) => string,
+): { value: T; setValue: (v: T) => void } {
+  const [value, setLocal] = useState(read);
+
+  useEffect(() => {
+    const onSync = () => setLocal(read());
+    window.addEventListener(eventName, onSync);
+    window.addEventListener("storage", onSync);
+    return () => {
+      window.removeEventListener(eventName, onSync);
+      window.removeEventListener("storage", onSync);
+    };
+  }, [eventName, read]);
+
+  const setValue = useCallback(
+    (v: T) => {
+      setLocal(v);
+      try {
+        localStorage.setItem(key, serialize(v));
+        // 广播只在写成功后发：同步处理器是回读存储的，写失败还广播会让本实例把刚设的
+        // 值打回默认。
+        window.dispatchEvent(new Event(eventName));
+      } catch {
+        // 存储不可用（隐私模式）→ 不广播，本实例内存里的新值仍生效
+      }
+    },
+    // read / serialize 都是模块层的稳定引用，所以 setValue 的身份恒定——与它被抽出来之前
+    // 一样。写成内联箭头就会每次渲染换一个身份，传染给一切拿它当依赖的 effect。
+    [key, eventName, serialize],
+  );
+
+  return { value, setValue };
+}
+
 export const FOLD_STRENGTH_KEY = "web:activity:foldStrength";
 export const FOLD_STRENGTH_DEFAULT: FoldStrength = "strong";
 
@@ -33,35 +80,20 @@ export function readStoredFoldStrength(): FoldStrength {
   return raw === "weak" || raw === "strong" ? raw : FOLD_STRENGTH_DEFAULT;
 }
 
+/** 档位原样存：`"weak"` / `"strong"` 本身就是存储格式。 */
+const serializeStrength = (s: FoldStrength): string => s;
+
 export function useFoldStrength(): {
   strength: FoldStrength;
   setStrength: (s: FoldStrength) => void;
 } {
-  const [strength, setLocal] = useState(readStoredFoldStrength);
-
-  useEffect(() => {
-    const onSync = () => setLocal(readStoredFoldStrength());
-    window.addEventListener(EVENT, onSync);
-    window.addEventListener("storage", onSync);
-    return () => {
-      window.removeEventListener(EVENT, onSync);
-      window.removeEventListener("storage", onSync);
-    };
-  }, []);
-
-  const setStrength = useCallback((s: FoldStrength) => {
-    setLocal(s);
-    try {
-      localStorage.setItem(FOLD_STRENGTH_KEY, s);
-      // 广播只在写成功后发：同步处理器是回读存储的，写失败还广播会让本实例把刚设的
-      // 档位打回默认值。
-      window.dispatchEvent(new Event(EVENT));
-    } catch {
-      // 存储不可用（隐私模式）→ 不广播，本实例内存里的新档位仍生效
-    }
-  }, []);
-
-  return { strength, setStrength };
+  const { value, setValue } = useStoredPref(
+    FOLD_STRENGTH_KEY,
+    EVENT,
+    readStoredFoldStrength,
+    serializeStrength,
+  );
+  return { strength: value, setStrength: setValue };
 }
 
 /* ── 折叠开不开 ────────────────────────────────────────────────
@@ -89,32 +121,18 @@ export function readStoredFoldEnabled(): boolean {
   return raw === "1" ? true : raw === "0" ? false : FOLD_ENABLED_DEFAULT;
 }
 
+/** 开关存 `"1"` / `"0"`。 */
+const serializeEnabled = (v: boolean): string => (v ? "1" : "0");
+
 export function useFoldEnabled(): {
   folded: boolean;
   setFolded: (v: boolean) => void;
 } {
-  const [folded, setLocal] = useState(readStoredFoldEnabled);
-
-  useEffect(() => {
-    const onSync = () => setLocal(readStoredFoldEnabled());
-    window.addEventListener(ENABLED_EVENT, onSync);
-    window.addEventListener("storage", onSync);
-    return () => {
-      window.removeEventListener(ENABLED_EVENT, onSync);
-      window.removeEventListener("storage", onSync);
-    };
-  }, []);
-
-  const setFolded = useCallback((v: boolean) => {
-    setLocal(v);
-    try {
-      localStorage.setItem(FOLD_ENABLED_KEY, v ? "1" : "0");
-      // 广播只在写成功后发，同 useFoldStrength。
-      window.dispatchEvent(new Event(ENABLED_EVENT));
-    } catch {
-      // 存储不可用（隐私模式）→ 本实例内存里的新状态仍生效
-    }
-  }, []);
-
-  return { folded, setFolded };
+  const { value, setValue } = useStoredPref(
+    FOLD_ENABLED_KEY,
+    ENABLED_EVENT,
+    readStoredFoldEnabled,
+    serializeEnabled,
+  );
+  return { folded: value, setFolded: setValue };
 }

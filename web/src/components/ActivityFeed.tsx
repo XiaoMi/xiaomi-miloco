@@ -107,7 +107,8 @@ type FocusTarget = { kind: "member"; key: string } | { kind: "control"; key: str
  *  为什么是待办而不是当场做:目标行与展开面都是**这次渲染之后**才存在的节点 ——
  *  点开的那一刻去 querySelector,拿到的是 null。记下意图,由 effect 在提交后消费一次。 */
 type PendingMove = {
-  /** 滚进视口的目标:支行的 key,或展开面 id(展开面比行精确:一行可能有十几屏高)。 */
+  /** 滚进视口的目标:支行的 key、承载它的那一行的 id,或展开面 id(展开面比行精确:
+   *  一行可能有十几屏高)。 */
   scroll: string;
   /** 高亮闪一下的行 id。省略则不闪(收起/展开后的焦点交还不该闪,那不是"跳转")。 */
   flash?: string;
@@ -691,15 +692,26 @@ export function ActivityFeed({
     });
   }, []);
 
-  /** 收起一片支,并把焦点交还它的开合控件。不闪:焦点交还不是跳转,闪一下反而像发生了别的。 */
-  const closeBranch = useCallback((key: string) => {
+  /** 收起一片支,并把焦点交还它的开合控件。不闪:焦点交还不是跳转,闪一下反而像发生了别的。
+   *
+   *  `hostKey` 是承载这一片的**那一行**的 id。强档下支不占行(装配层直接跳过),`id=key`
+   *  没有元素承载,于是收起后 `getElementById` 必然落空:视口一步不动,而几屏高的成员表
+   *  整段消失,用户眼前换成原本排在它下方的行,刚收起的事件行留在上方几屏之外;焦点则
+   *  落到事件行那枚徽标上,还带着 `preventScroll`——读屏焦点与可见内容因此脱节。
+   *  收起消不掉承载它的那一行,所以拿它当落点。弱档与无宿主支不传:支行行体自己带着
+   *  `id=key`,落点本来就是它。 */
+  const closeBranch = useCallback((key: string, hostKey?: string) => {
     setOpenKeys((prev) => {
       if (!prev.has(key)) return prev;
       const next = new Set(prev);
       next.delete(key);
       return next;
     });
-    setPending({ scroll: key, focus: { kind: "control", key }, block: "nearest" });
+    setPending({
+      scroll: hostKey ?? key,
+      focus: { kind: "control", key },
+      block: "nearest",
+    });
   }, []);
 
   /** 支行上的开合:展开面就在这一行里,滚它、也闪这一行。 */
@@ -730,7 +742,7 @@ export function ActivityFeed({
         return;
       }
       const region = document.getElementById(hostRegionOf(branch.key));
-      if (region && isInViewport(region)) closeBranch(branch.key);
+      if (region && isInViewport(region)) closeBranch(branch.key, hostKey);
       else locate(hostRegionOf(branch.key), hostKey);
     },
     [strength, openKeys, locate, openBranch, closeBranch],
@@ -787,8 +799,12 @@ export function ActivityFeed({
       if (e.key !== "Escape") return;
       const active = document.activeElement;
       if (!(active instanceof HTMLElement)) return;
-      const key = active.closest<HTMLElement>("[data-region]")?.dataset.region;
-      if (key) closeBranch(key);
+      // 宿主行从**展开面**上溯,不从焦点元素上溯:展开后焦点正落在第一条成员上,而成员行
+      // 自己也带 id(`<key>-m0`),按焦点上溯会抓到它——一个随成员表一起卸载的节点,
+      // 落点照样落空。展开面是它所在那一行的直系后代,从它上溯才稳。
+      const region = active.closest<HTMLElement>("[data-region]");
+      const key = region?.dataset.region;
+      if (region && key) closeBranch(key, region.closest<HTMLElement>("li[id]")?.id);
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -955,7 +971,7 @@ export function ActivityFeed({
                             <FoldMembers
                               branch={b}
                               specs={deviceSpecs}
-                              onToggle={() => closeBranch(b.key)}
+                              onToggle={() => closeBranch(b.key, r.key)}
                             />
                           </div>
                         ))
