@@ -256,6 +256,51 @@ async def test_an_offline_event_writes_the_flag_and_tops_up_nothing(store, monke
     manager._prop_top_up.deinit()
 
 
+async def test_a_reconnect_does_not_pull_props_for_an_offline_device(store):
+    """离线设备的云端响应是缓存值，重连拉取不能把它当成最新状态写回。"""
+    store.set("iot/device/d1/prop/2.1", 18, source="iot_push")
+    proxy, manager = _wired_proxy_from(
+        store,
+        _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)]),
+        online=False,
+    )
+
+    written = await manager._pull_iot_props("d1", ["2.1"])
+
+    assert written == 0
+    assert proxy.calls == []
+    assert store.get("iot/device/d1/prop/2.1") == 18
+    manager._prop_top_up.deinit()
+
+
+async def test_a_reconnect_does_not_write_if_the_device_goes_offline_during_pull(store):
+    store.set("iot/device/d1/prop/2.1", 18, source="iot_push")
+    fake = _proxy(["prop.2.1"], [_row("d1", 2, 1, 26)])
+    online = True
+    proxy, manager = _wired_proxy_from(store, fake)
+
+    async def devices_in_current_home():
+        return {"d1": SimpleNamespace(home_id="H1", online=online)}
+
+    proxy.devices_in_current_home = devices_in_current_home
+
+    original_get_device_properties = proxy.get_device_properties
+
+    async def get_device_properties(params):
+        nonlocal online
+        rows = await original_get_device_properties(params)
+        online = False
+        return rows
+
+    proxy.get_device_properties = get_device_properties
+
+    written = await manager._pull_iot_props("d1", ["2.1"])
+
+    assert written == 0
+    assert store.get("iot/device/d1/prop/2.1") == 18
+    manager._prop_top_up.deinit()
+
+
 async def test_the_top_up_budget_runs_out_within_one_scope(store):
     """永久不可读的属性永远不进容器，所以「容器里没有」会让反复掉线的设备每次上线都
     重新请求同一批读不到的属性 —— 额度是挡这个的。"""

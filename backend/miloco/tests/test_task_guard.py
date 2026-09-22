@@ -35,8 +35,8 @@ class Harness:
         )
 
 
-def _entered(rule_id="r_enter", slot=ActionSlot.ON_ENTER):
-    return TaskSignal("t1", rule_id, SignalKind.ENTERED, slot)
+def _entered(rule_id="r_enter", slot=ActionSlot.ON_ENTER, payload=None):
+    return TaskSignal("t1", rule_id, SignalKind.ENTERED, slot, payload)
 
 
 # ── 前提不产信号 ──────────────────────────────────────────────────
@@ -103,12 +103,168 @@ def test_event_type_blocked_when_guard_false():
     assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
 
 
+def test_blocked_enter_is_logged_once_while_waiting_for_guard(caplog):
+    h = Harness({"g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    blocked_logs = [
+        record for record in caplog.records if "的进入被前提拦下" in record.message
+    ]
+    assert len(blocked_logs) == 1
+
+
 def test_blocked_event_type_dispatches_nothing():
     h = Harness({"g": False})
     h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
     h.sm.handle(_entered("a"))
 
     assert h.dispatched == []
+
+
+def test_blocked_event_can_be_released_after_guard_becomes_true():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a", payload={"caption": "原始上下文"})
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [signal]
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_blocked_event_releases_all_pending_enters_after_guard_becomes_true():
+    h = Harness({"a": True, "b": True, "g": False})
+    h.sm.register_task(
+        "t1",
+        {
+            "a": RuleDirection.ENTER,
+            "b": RuleDirection.ENTER,
+            "g": RuleDirection.GUARD,
+        },
+    )
+    first = _entered("a", payload={"caption": "第一条"})
+    second = _entered("b", payload={"caption": "第二条"})
+
+    assert h.sm.handle(first) is TransitionOutcome.BLOCKED_BY_GUARD
+    assert h.sm.handle(second) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [first, second]
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_releasing_event_keeps_unknown_sibling_pending():
+    h = Harness({"a": True, "b": True, "g": False})
+    h.sm.register_task(
+        "t1",
+        {
+            "a": RuleDirection.ENTER,
+            "b": RuleDirection.ENTER,
+            "g": RuleDirection.GUARD,
+        },
+    )
+    first = _entered("a")
+    second = _entered("b")
+
+    assert h.sm.handle(first) is TransitionOutcome.BLOCKED_BY_GUARD
+    assert h.sm.handle(second) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["b"] = None
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [first]
+
+    h.satisfied["b"] = True
+    assert h.sm.release_pending_enters("t1") == [second]
+
+
+def test_event_fire_keeps_unknown_sibling_pending():
+    h = Harness({"a": False, "b": True, "g": False})
+    h.sm.register_task(
+        "t1",
+        {
+            "a": RuleDirection.ENTER,
+            "b": RuleDirection.ENTER,
+            "g": RuleDirection.GUARD,
+        },
+    )
+    pending = _entered("b")
+
+    assert h.sm.handle(pending) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["b"] = None
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+
+    h.satisfied["a"] = True
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.EVENT_FIRED
+
+    h.satisfied["b"] = True
+    assert h.sm.release_pending_enters("t1") == [pending]
+
+
+def test_blocked_session_release_enters_once_and_preserves_payload():
+    h = Harness({"s": True, "g": False})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION, "g": RuleDirection.GUARD})
+    signal = _entered("s", payload={"room": "客厅"})
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+    h.satisfied["g"] = True
+
+    released = h.sm.release_pending_enters("t1")
+    assert released == [signal]
+    assert released[0].payload == {"room": "客厅"}
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_pending_enter_is_dropped_when_main_rule_is_no_longer_true():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+    h.satisfied["a"] = False
+    h.satisfied["g"] = True
+
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_reconfigure_preserves_pending_enter_that_remains_an_entry_rule():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.sm.reconfigure("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [signal]
+
+
+def test_reconfigure_drops_pending_enter_removed_from_entry_topology():
+    h = Harness({"g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.sm.reconfigure("t1", {"g": RuleDirection.GUARD})
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_suspend_clears_pending_enter():
+    h = Harness({"g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["g"] = False
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+    h.sm.suspend("t1")
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
 
 
 # ── session 型 task 的前提 ────────────────────────────────────────

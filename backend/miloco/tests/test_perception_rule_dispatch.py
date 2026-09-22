@@ -14,12 +14,11 @@ async def test_realtime_perceive_takes_effectively_enabled_rules():
     """两个口径都能跑通, 断言取的是有效启用那个。"""
     from miloco.perception.client import PerceptionEngineProxy
 
-    proxy = PerceptionEngineProxy()
-    proxy.perception_engine = MagicMock()  # ready
-
     rule_service = MagicMock()
     rule_service.get_effectively_enabled_rules = AsyncMock(return_value=[])
     rule_service.get_all_rules = AsyncMock(return_value=[])
+    proxy = PerceptionEngineProxy()
+    proxy.perception_engine = MagicMock()  # ready
     manager = MagicMock()
     manager.rule_service = rule_service
 
