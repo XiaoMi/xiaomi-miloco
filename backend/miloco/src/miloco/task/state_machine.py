@@ -397,7 +397,7 @@ class TaskStateMachine:
 
         if not topology.is_session_type:
             # 事件型: runtime_state 恒 off, 每次进信号都执行 on_enter, 不卡死。
-            self._pending_enters.pop(signal.task_id, None)
+            self.clear_pending_enters(signal.task_id, signal.rule_id)
             self._maybe_dispatch(signal.task_id, ActionSlot.ON_ENTER, signal.payload)
             return self._done(TransitionOutcome.EVENT_FIRED, signal)
 
@@ -455,8 +455,12 @@ class TaskStateMachine:
             if topology.is_session_type:
                 break
 
-        if releasable:
-            pending.clear()
+        if topology.is_session_type:
+            if releasable:
+                pending.clear()
+        else:
+            for signal in releasable:
+                pending.pop(signal.rule_id, None)
         if not pending:
             self._pending_enters.pop(task_id, None)
         return releasable

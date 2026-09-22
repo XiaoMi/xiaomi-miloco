@@ -158,6 +158,55 @@ def test_blocked_event_releases_all_pending_enters_after_guard_becomes_true():
     assert h.sm.release_pending_enters("t1") == []
 
 
+def test_releasing_event_keeps_unknown_sibling_pending():
+    h = Harness({"a": True, "b": True, "g": False})
+    h.sm.register_task(
+        "t1",
+        {
+            "a": RuleDirection.ENTER,
+            "b": RuleDirection.ENTER,
+            "g": RuleDirection.GUARD,
+        },
+    )
+    first = _entered("a")
+    second = _entered("b")
+
+    assert h.sm.handle(first) is TransitionOutcome.BLOCKED_BY_GUARD
+    assert h.sm.handle(second) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["b"] = None
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [first]
+
+    h.satisfied["b"] = True
+    assert h.sm.release_pending_enters("t1") == [second]
+
+
+def test_event_fire_keeps_unknown_sibling_pending():
+    h = Harness({"a": False, "b": True, "g": False})
+    h.sm.register_task(
+        "t1",
+        {
+            "a": RuleDirection.ENTER,
+            "b": RuleDirection.ENTER,
+            "g": RuleDirection.GUARD,
+        },
+    )
+    pending = _entered("b")
+
+    assert h.sm.handle(pending) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["b"] = None
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+
+    h.satisfied["a"] = True
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.EVENT_FIRED
+
+    h.satisfied["b"] = True
+    assert h.sm.release_pending_enters("t1") == [pending]
+
+
 def test_blocked_session_release_enters_once_and_preserves_payload():
     h = Harness({"s": True, "g": False})
     h.sm.register_task("t1", {"s": RuleDirection.SESSION, "g": RuleDirection.GUARD})
