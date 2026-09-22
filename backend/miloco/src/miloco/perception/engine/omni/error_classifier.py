@@ -1,8 +1,13 @@
 """omni 调用异常/响应到统一错误码集合的映射。
 
 映射规则见 spec §2。CODES 与 web 前端 omniHealth.codes 一一对应(10 个 code),
-前端直接复用 i18n。「测试连接」结果表 OMNI_CODE_KEY 是本集合的裁剪变体:去掉
-probe 路径不会产生的 timeout(probe 把所有异常统一归 unreachable)、加上成功码 ok。
+前端直接复用 i18n。前端的 OMNI_CODE_KEY 是「测试连接」与「模型下拉」**两条路共用**的
+机器码 → i18n 表,为本集合的裁剪+增补变体:去掉 probe 路径不会产生的 timeout(probe 把
+所有异常统一归 unreachable)、加上成功码 ok、再加上只由 fetch_models 产出的
+list_unsupported —— 后者不参与熔断,故**不**属于本集合。
+
+新增任何面向前端的机器码,**不论走哪条路径**,都要同步登记进 OMNI_CODE_KEY 并补中英文案;
+漏登记时界面会回退到后端硬编码的中文 message、污染英文界面。
 """
 
 from __future__ import annotations
