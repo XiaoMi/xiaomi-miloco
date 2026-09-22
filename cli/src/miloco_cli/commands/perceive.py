@@ -9,6 +9,7 @@ from miloco_cli.output import dump, print_result
 
 def _cursor_file():
     from miloco_cli.config import miloco_home
+
     return miloco_home() / "perception_cursor.json"
 
 
@@ -45,6 +46,7 @@ def _load_cursor() -> str | None:
 def _save_cursor(cursor_iso: str) -> None:
     """原子写入 perception cursor（ISO 8601）。"""
     from miloco_cli.config import atomic_write
+
     atomic_write(_cursor_file(), {"cursor": cursor_iso})
 
 
@@ -89,10 +91,19 @@ def perceive_query(sources, query_text, pretty):
     "--since",
     default=None,
     help="[仅供调试] 相对时长，返回最近一段时间的日志，不读写 cursor 文件。"
-         "支持 h/m/s/d 单位及组合，如 1h、30m、90s、7d、2h30m。",
+    "支持 h/m/s/d 单位及组合，如 1h、30m、90s、7d、2h30m。",
 )
-@click.option("--limit", default=None, type=int, help="[仅供调试] 最大返回条数，默认无限制。")
-@click.option("--jsonl", is_flag=True, help="JSONL 输出格式：每行输出一条 JSONL（时间: 日志JSON）。")
+@click.option(
+    "--limit",
+    default=None,
+    type=int,
+    help="[仅供调试] 返回筛选窗口中最新的 N 条；默认无限制。",
+)
+@click.option(
+    "--jsonl",
+    is_flag=True,
+    help="JSONL 输出格式：每行输出一条 JSONL（时间: 日志JSON）。",
+)
 @click.option("--pretty", is_flag=True)
 def perceive_logs(since, limit, jsonl, pretty):
     """查询感知日志。
@@ -134,15 +145,16 @@ def perceive_logs(since, limit, jsonl, pretty):
     if jsonl:
         logs = data.get("data", {}).get("logs", [])
         if not logs:
-            print('No logs found')
+            print("No logs found")
             return
-        
+
         for log in logs:
             t = log.get("t", "")
             d = log.get("d", "")
             print(f"{t}: {dump(d)}")
     else:
         print_result(data, pretty)
+
 
 @perceive_group.command("clear")
 @click.option("--pretty", is_flag=True)

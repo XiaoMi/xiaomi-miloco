@@ -107,13 +107,23 @@ async def on_demand_perceive(request: OnDemandPerceptionRequest):
     dependencies=[Depends(verify_token)],
 )
 async def query_logs(
-    limit: int | None = Query(None, ge=1, le=1000, description="Max entries; omit for unlimited"),
-    after: str | None = Query(None, description="ISO 8601 timestamp cursor"),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=1000,
+        description="Latest N entries in the filtered window; omit for unlimited",
+    ),
+    after: str | None = Query(
+        None,
+        description="ISO 8601 exclusive lower bound; omit limit for forward cursor reads",
+    ),
     before: str | None = Query(
         None,
-        description="ISO 8601 upper-bound; combined with ``after`` allows windowed pagination",
+        description="ISO 8601 exclusive upper bound",
     ),
-    since: str | None = Query(None, description="Relative time, e.g. '1h', '30m', '2h30m'"),
+    since: str | None = Query(
+        None, description="Relative time, e.g. '1h', '30m', '2h30m'"
+    ),
 ):
     data = manager.perception_service.query_logs(
         after=after, before=before, since=since, limit=limit
@@ -130,7 +140,9 @@ async def query_on_demand_logs(
     limit: int = Query(50, ge=1, le=200, description="每页条数,上限 200"),
     since: int | None = Query(None, description="Unix ms lower bound (inclusive)"),
     before: int | None = Query(None, description="Unix ms upper bound (exclusive)"),
-    before_id: str | None = Query(None, description="Compound cursor tiebreaker (used with before)"),
+    before_id: str | None = Query(
+        None, description="Compound cursor tiebreaker (used with before)"
+    ),
 ):
     data = manager.perception_service.query_on_demand_logs(
         since_ms=since, before_ms=before, before_id=before_id, limit=limit
@@ -163,7 +175,8 @@ async def get_on_demand_clip(log_id: str, device_id: str) -> FileResponse:
     if result is not None:
         path, media_type = result
         return FileResponse(
-            path=path, media_type=media_type,
+            path=path,
+            media_type=media_type,
             filename=clip_download_name(row["timestamp"], path.suffix[1:]),
             content_disposition_type="inline",
         )
@@ -210,7 +223,8 @@ async def submit_on_demand_feedback(log_id: str, body: OnDemandFeedbackBody):
         uid=uid,
     )
     return NormalResponse(
-        code=0, message="ok",
+        code=0,
+        message="ok",
         data={
             "log_id": log_id,
             "pack_path": result["path"],
@@ -234,5 +248,3 @@ async def list_devices():
         message="ok",
         data=[asdict(d) for d in devices],
     )
-
-

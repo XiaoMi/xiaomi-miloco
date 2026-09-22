@@ -91,7 +91,11 @@ class PerceptionService:
                     await self._engine.start()
                 return True
             except Exception as e:  # noqa: BLE001
-                logger.error("[service] 感知参数变更后重启失败(config 已写盘) | %s", e, exc_info=True)
+                logger.error(
+                    "[service] 感知参数变更后重启失败(config 已写盘) | %s",
+                    e,
+                    exc_info=True,
+                )
                 return False
 
     async def apply_omni_fps_live(self, omni_fps: int) -> bool:
@@ -109,7 +113,9 @@ class PerceptionService:
                 await self._pipeline.apply_omni_fps(omni_fps)
                 return True
             except Exception as e:  # noqa: BLE001
-                logger.error("[service] omni_fps 热更失败(config 已写盘) | %s", e, exc_info=True)
+                logger.error(
+                    "[service] omni_fps 热更失败(config 已写盘) | %s", e, exc_info=True
+                )
                 return False
 
     def engine_status(self) -> PerceptionEngineStatus:
@@ -182,9 +188,7 @@ class PerceptionService:
         valid_dids: list[str] = []
         for did in request.sources:
             if did not in active_sources:
-                logger.warning(
-                    "[service](device=%s) 未激活感知(skipped)", did
-                )
+                logger.warning("[service](device=%s) 未激活感知(skipped)", did)
                 continue
             valid_dids.append(did)
 
@@ -198,7 +202,9 @@ class PerceptionService:
         t_start = now_ms()
 
         # Single batch inference call — collector assembles batch, processor infers
-        pipeline_result = await self._pipeline.process_on_demand(valid_dids, request.query)
+        pipeline_result = await self._pipeline.process_on_demand(
+            valid_dids, request.query
+        )
 
         if not pipeline_result:
             raise BusinessException(
@@ -232,7 +238,9 @@ class PerceptionService:
 
             settings = get_settings()
             snapshot_root = get_snapshot_root()
-            if check_disk_space(snapshot_root, settings.perception.snapshot_min_free_disk_mb):
+            if check_disk_space(
+                snapshot_root, settings.perception.snapshot_min_free_disk_mb
+            ):
                 clip_dids = save_event_artifacts(log_id, artifacts)
                 clip_kinds = {
                     did: artifacts.clips[did][1]
@@ -284,13 +292,14 @@ class PerceptionService:
         """Query perception logs.
 
         Args:
-            after: ISO 8601 timestamp cursor — return entries after this time.
+            after: ISO 8601 exclusive lower bound. Omit limit for forward cursor reads.
             before: ISO 8601 upper bound — return entries before this time.
             since: Relative time string like "1h", "30m", "2h30m".
-            limit: Max entries to return. None means no limit.
+            limit: Return the latest N entries in the filtered window. None means no limit.
 
         Returns:
-            Dict with logs, count, and total_inferences.
+            Dict with logs, count, and total_inferences. ``logs`` is always
+            ordered oldest-first, with or without ``limit``.
         """
         from miloco.utils.time_utils import parse_iso_ms, since_to_ms
 
