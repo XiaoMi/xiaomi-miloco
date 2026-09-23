@@ -132,9 +132,10 @@ def _check_cron_jobs() -> Dict[str, Any]:
 
 
 def _check_skills_installed() -> Dict[str, Any]:
-    """检查 miloco-* skill 是否装到 ~/.hermes/skills/（至少 16 个）。"""
+    """检查 miloco-* skill 是否装到 $HERMES_HOME/skills/（至少 16 个）。"""
     min_expected = 16
-    skills_dir = Path.home() / ".hermes" / "skills"
+    hermes_home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes").expanduser()
+    skills_dir = hermes_home / "skills"
     if not skills_dir.is_dir():
         return {"ok": False, "installed": 0, "expected": min_expected, "fix": "重跑 install-hermes.sh"}
     installed = sorted(
@@ -458,5 +459,4 @@ def make_test_push_handler(ctx: Any):
             result = {"ok": False, "error": f"internal error: {exc}"}
         return json.dumps(result, ensure_ascii=False)
     return _handler
-
 

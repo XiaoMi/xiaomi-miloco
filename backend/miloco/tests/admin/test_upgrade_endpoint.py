@@ -8,8 +8,8 @@
 - `GET /upgrade/check`：release+有新版 → has_update；GitHub 不可达 → reachable=false、
   不 500、has_update=false；dev 部署即使远端更新也 has_update=false（只提示不给一键）。
 - `POST /upgrade/run`：dev → 400；release → 起 detached 进程（Popen 被 mock）+ 单飞 409。
-- `POST /upgrade/run` 的安装器调用契约：显式 export MILOCO_HOME + 按本端 agent.platform
-  透传 --agent-platform（缺参时 install.py 会 fallback openclaw，hermes 部署会被装歪）。
+- `POST /upgrade/run` 的安装器调用契约：显式 export MILOCO_HOME / MILOCO_AGENT_PLATFORM
+  并按本端 agent.platform 透传 --agent-platform。
 """
 
 import asyncio
@@ -298,7 +298,7 @@ def test_run_rejected_when_latest_unknown(client):
     assert resp.status_code == 400
 
 
-def test_run_starts_detached_and_singleflight(client):
+def test_run_starts_detached_and_singleflight(client, monkeypatch):
     launched = {"n": 0, "argv": None}
 
     class FakePopen:
@@ -309,6 +309,10 @@ def test_run_starts_detached_and_singleflight(client):
             assert k.get("start_new_session") is True
             assert k.get("stdin") is not None
 
+    monkeypatch.setenv("MILOCO_AGENT__PLATFORM", "hermes")
+    from miloco.config.settings import reset_settings
+
+    reset_settings()
     _seed_cache_newer()
     with (
         patch("miloco.admin.router._pkg_version", return_value="2026.7.2"),  # release
@@ -340,9 +344,10 @@ def test_run_starts_detached_and_singleflight(client):
     # 不能用 set -e（会在写标记前提前中止），curl 须被 `|| rc=$?` 收进 rc。
     assert "set -e" not in script
     assert re.search(r"curl -fsSL \S+ -o \S+ \|\| rc=\$\?", script)
-    # MILOCO_HOME 必须显式 export（不靠继承 backend 环境）：缺它时 install.py 会按
-    # agent 平台推默认路径（openclaw→~/.openclaw/miloco），把升级装到别处。
+    # MILOCO_HOME 和平台必须显式 export（不靠继承 backend 环境）：升级脚本在干净
+    # 子进程里也要使用 backend 已确认的数据目录和平台。
     assert re.search(r"export MILOCO_HOME=\S+;", script)
+    assert "export MILOCO_AGENT_PLATFORM=hermes;" in script
 
 
 def _run_and_capture_script(client) -> str:
@@ -363,10 +368,7 @@ def _run_and_capture_script(client) -> str:
 
 
 class TestAgentPlatformPassthrough:
-    """跨 PR 契约：install.py 的 `_decide_agent_platform` 在非交互 agent 模式下**不读**
-    已持久化的 agent.platform，缺 --agent-platform 即 fallback openclaw。故 hermes 部署
-    必须由后端把自己的平台透传下去，否则升级会走 openclaw 插件分支（无 openclaw CLI →
-    整体失败），hermes 的 adapter/config/plugins/post-install 全被跳过。"""
+    """跨 PR 契约：后端升级必须把已确认的平台显式传给安装器。"""
 
     def test_hermes_platform_forwarded_to_both_steps(self, client, monkeypatch):
         from miloco.config.settings import reset_settings
@@ -378,7 +380,7 @@ class TestAgentPlatformPassthrough:
         assert "--agent-finish --agent-platform=hermes" in script
 
     def test_empty_platform_omits_flag(self, client):
-        # 未配平台（webhook 过渡模式）→ 不传，退回安装器默认，不改变既有行为。
+        # 未配平台（webhook 过渡模式）→ 不传平台参数，保留安装器自动探测路径。
         script = _run_and_capture_script(client)
         assert "--agent-platform" not in script
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -15,7 +16,7 @@ from urllib.parse import urlparse
 
 import click
 
-from miloco_cli.config import miloco_home
+from miloco_cli.config import miloco_home, read_runtime_env
 from miloco_cli.output import print_result
 
 _PROGRAM_NAME = "miloco-backend"
@@ -255,13 +256,91 @@ def _resolve_timezone() -> str | None:
     return explicit_timezone_name()
 
 
+def _read_runtime_env() -> dict[str, str]:
+    """读取用户级 runtime 环境，供 supervisord 继承。"""
+    return read_runtime_env()
+
+
+def _ensure_miloco_home_in_env() -> None:
+    """确保从 runtime 指针文件设置 ``os.environ['MILOCO_HOME']``。
+
+    优先级：
+      1. ``os.environ`` 已有 ``MILOCO_HOME``，直接使用；
+      2. 否则从 ``~/.config/miloco/default.env`` 注入；
+      3. 都没有时使用 ``miloco_home()`` 的当前 fallback，保持原行为。
+
+    本函数不修改 ``miloco_home()`` 或 ``.env``，只确保当前进程环境已有值。
+    """
+    if os.environ.get("MILOCO_HOME"):
+        return
+    runtime_env = _read_runtime_env()
+    if "MILOCO_HOME" in runtime_env:
+        os.environ["MILOCO_HOME"] = runtime_env["MILOCO_HOME"]
+        return
+    # 最后使用 miloco_home() 的结果，保持原有 fallback 行为。
+    os.environ["MILOCO_HOME"] = str(miloco_home())
+
+
+_SUPERVISOR_INLINE_COMMENT_RE = re.compile(r"\s[#;]")
+
+
+def _escape_supervisor_env_value(value: str) -> str:
+    """转义 supervisord 带引号的 ``environment=`` 配置值。"""
+    if "\n" in value or "\r" in value:
+        raise click.ClickException(
+            "runtime env 的值不能包含换行符，请修正 ~/.config/miloco/default.env"
+        )
+    if "'" in value and '"' in value:
+        raise click.ClickException(
+            "runtime env 的值不能同时包含单引号和双引号，"
+            "请改用 shell 环境变量传递"
+        )
+    if _SUPERVISOR_INLINE_COMMENT_RE.search(value):
+        raise click.ClickException(
+            "runtime env 的值不能在空白字符后包含 # 或 ;"
+            "（supervisord 会将其视为内联注释并截断 environment 配置），"
+            "请改用 shell 环境变量传递"
+        )
+    # supervisord 先做配置插值，再用 shlex 解析 environment。字面 '%' 需
+    # 加倍；单引号内的反斜杠不会被 shlex 处理，因此值含反斜杠或双引号时
+    # 优先走单引号路径。无法安全表达的单双引号组合在上面明确拒绝。
+    return value.replace("%", "%%")
+
+
+def _supervisor_env_item(key: str, value: str) -> str:
+    escaped = _escape_supervisor_env_value(value)
+    if "'" not in value and ("\"" in value or "\\" in value):
+        return f"{key}='{escaped}'"
+    # 双引号路径中 shlex 会解释反斜杠，必须加倍才能保留原值。
+    escaped_backslashes = escaped.replace("\\", "\\\\")
+    return f'{key}="{escaped_backslashes}"'
+
+
 def _generate_supervisor_conf(server_cmd: str) -> None:
     log_dir = _log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     sup_conf_path = _supervisor_conf()
     tz = _resolve_timezone()
     # 解析到时区才追加 TZ + MILOCO_TIMEZONE；否则不塞,交给子进程继承宿主 + backend 兜底。
-    tz_env = f',TZ="{tz}",MILOCO_TIMEZONE="{tz}"' if tz else ""
+    tz_env = (
+        f",{_supervisor_env_item('TZ', tz)},"
+        f'{_supervisor_env_item("MILOCO_TIMEZONE", tz)}'
+        if tz
+        else ""
+    )
+
+    # 1. 先确保 os.environ['MILOCO_HOME'] 有值（runtime pointer / fallback）
+    _ensure_miloco_home_in_env()
+
+    # 2. 从用户级 runtime env 读所有 env，序列化进 supervisord.conf::environment=
+    #    backend 启动不依赖 user shell rc。
+    runtime_env = _read_runtime_env()
+    # MILOCO_HOME 强制用 os.environ 此刻的值（最权威）
+    runtime_env["MILOCO_HOME"] = os.environ["MILOCO_HOME"]
+    runtime_env_items = ",".join(
+        _supervisor_env_item(key, value) for key, value in runtime_env.items()
+    )
+
     conf = f"""\
 [supervisord]
 logfile={_supervisor_log()}
@@ -290,7 +369,7 @@ redirect_stderr=true
 stdout_logfile={log_dir}/miloco-backend.log
 stdout_logfile_maxbytes=10MB
 stdout_logfile_backups=20
-environment=MILOCO_SUPERVISED="1",MILOCO_HOME="{miloco_home()}"{tz_env}
+environment=MILOCO_SUPERVISED="1",{runtime_env_items}{tz_env}
 """
     if sup_conf_path.exists() and sup_conf_path.read_text() == conf:
         return

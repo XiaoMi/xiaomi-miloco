@@ -8,16 +8,16 @@
 # [tool.uv]
 # exclude-newer = "2026-04-30"
 # ///
-"""Miloco Installer — Python core logic.
+"""Miloco 安装器——Python 核心逻辑。
 
-Handles the full installation flow:
-  Phase 1: Environment check
-  Phase 2: Package install + supervisor (web 静态资源由 miloco wheel 自带)
-  Phase 3: Initialize service (engine warm-up; 仅临时拉起，退出时自动 stop)
-  Phase 4: Mi Home account binding
-  Phase 5: Omni model configuration
-  Phase 6: Perception model download
-  Phase 7: OpenClaw plugin installation (optional)
+完整处理以下安装流程：
+  阶段 1：环境检查
+  阶段 2：安装软件包和 supervisor（web 静态资源由 miloco wheel 自带）
+  阶段 3：初始化服务（仅临时拉起，退出时自动停止）
+  阶段 4：绑定米家账号
+  阶段 5：配置 Omni 模型
+  阶段 6：下载感知模型
+  阶段 7：安装 OpenClaw 插件（可选）
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ import locale
 import os
 import platform as _platform
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -650,9 +651,7 @@ class Installer:
             return
 
         if not self.platform.is_interactive:
-            self.agent_platform = "openclaw"
-            self.ui.step_skip(self.ui.i18n.t("platform.skip_non_interactive"))
-            return
+            raise RuntimeError("非交互安装必须由调用方先确定 agent_platform")
 
         openclaw_label = self.ui.i18n.t("platform.openclaw_option")
         hermes_label = self.ui.i18n.t("platform.hermes_option")
@@ -1385,7 +1384,7 @@ class Installer:
             scripts/ / skills/，只能整段跳，由 POST_INSTALL_SKIP guard 兜底
           - **幂等重跑**：step 5 (config set) / 6 (.env) / 7 (backend 重启) / 8 (enable)
             —— 都是幂等的，重跑一遍保证状态收敛（代价是 step 7 会多一次 stop+3s+start）
-          - **本模式真正补齐**：1.6/1.75/1.9 env 持久化、4.7 感知模型、8.5 disable 残留
+          - **本模式真正补齐**：环境变量持久化、感知模型配置和 disable 残留清理
             清理、9 版本记录、10 cron reconcile、收尾 banner「hermes gateway restart」提示
 
         install-hermes.sh 由 build.sh::build_hermes 打进 miloco-hermes-plugin tarball，
@@ -1828,7 +1827,7 @@ def parse_args() -> argparse.Namespace:
         dest="agent_platform",
         default="",
         choices=["", "openclaw", "hermes"],
-        help="Agent platform to deploy the plugin for (default: openclaw)",
+        help="要部署插件的 Agent 平台（非交互模式自动探测；交互模式默认 openclaw）",
     )
     parser.add_argument(
         "--agent-prepare",
@@ -1857,23 +1856,147 @@ def _print_error_summary(ui: UI, _args: argparse.Namespace) -> None:
     ui.console.print()
 
 
+def _default_runtime_pointer() -> Path:
+    return Path.home() / ".config" / "miloco" / "default.env"
+
+
+def _runtime_pointer_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    if runtime_env := os.environ.get("MILOCO_RUNTIME_ENV"):
+        candidates.append(Path(runtime_env).expanduser())
+    default = _default_runtime_pointer()
+    if default not in candidates:
+        candidates.append(default)
+    return candidates
+
+
+def _read_runtime_pointer(path: Path) -> dict[str, str]:
+    """读取与 CLI 配置及 Hermes 安装脚本共用的 runtime 指针格式。"""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+
+    values: dict[str, str] = {}
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        try:
+            assignment = shlex.split(line, comments=False, posix=True)
+        except ValueError:
+            continue
+        if len(assignment) != 1 or "=" not in assignment[0]:
+            continue
+        key, _, value = assignment[0].partition("=")
+        key = key.strip()
+        if not key or not (key[0].isalpha() or key[0] == "_"):
+            continue
+        if not all(char.isalnum() or char == "_" for char in key):
+            continue
+        values[key] = value
+    return values
+
+
+def _detect_installed_agent_platform() -> str | None:
+    """检测本机已装的 agent runtime。hermes / openclaw / None（未识别）。
+
+    判定信号（任一命中即返）：
+    - 安装器持久化的 ``MILOCO_AGENT_PLATFORM``（环境变量优先于指针文件）
+    - hermes:
+        - $HERMES_HOME env 已设且目录存在
+        - 或 ~/.hermes/ 目录存在
+        - 或 ~/.config/systemd/user/hermes-gateway.service unit 文件存在
+    - openclaw:
+        - ~/.config/systemd/user/openclaw-gateway.service unit 文件存在
+        - 或 ~/.config/systemd/user/clawdbot-gateway.service unit 文件存在
+    - 都没命中 → None（调用方决定 fallback）
+    """
+    explicit = os.environ.get("MILOCO_AGENT_PLATFORM", "")
+    if explicit in {"hermes", "openclaw"}:
+        return explicit
+    for path in _runtime_pointer_candidates():
+        platform = _read_runtime_pointer(path).get("MILOCO_AGENT_PLATFORM", "")
+        if platform in {"hermes", "openclaw"}:
+            return platform
+
+    hermes_home = os.environ.get("HERMES_HOME", "")
+    if hermes_home and Path(hermes_home).is_dir():
+        return "hermes"
+    if (Path.home() / ".hermes").is_dir():
+        return "hermes"
+    user_units = Path.home() / ".config" / "systemd" / "user"
+    if (user_units / "hermes-gateway.service").exists():
+        return "hermes"
+    if (
+        (user_units / "openclaw-gateway.service").exists()
+        or (user_units / "clawdbot-gateway.service").exists()
+    ):
+        return "openclaw"
+    return None
+
+
+def _verify_platform_installed(agent_platform: str) -> None:
+    """检查用户指定的平台并以显式参数为准。
+
+    平台参数可能来自后端升级链路。调用方已经明确指定平台时，探测只能作为
+    诊断提示，不能因为 macOS、非默认 HERMES_HOME 或残留 runtime 误判而阻断升级。
+    """
+    detected = _detect_installed_agent_platform()
+    if detected is None:
+        print(
+            f"[install] 警告：显式指定 --agent-platform={agent_platform}，"
+            "但未探测到已安装的 runtime；以显式指定为准。",
+            file=sys.stderr,
+        )
+    elif detected != agent_platform:
+        print(
+            f"[install] 警告：显式指定 --agent-platform={agent_platform}，"
+            f"但探测到 {detected}；以显式指定为准。",
+            file=sys.stderr,
+        )
+
+
 def _decide_agent_platform(
     args: argparse.Namespace, plat: "Platform", ui: "UI"
 ) -> str:
-    """决定 agent_platform：--agent-platform > 非交互 fallback openclaw > 交互 prompt。
+    """决定 agent_platform：--agent-platform > 本机 detect（必命中）> 交互 prompt。
 
     必须在 miloco_home 计算之前跑，否则交互选 hermes 时 miloco_home 仍走 openclaw 默认。
-    非交互路径（agent-prepare/agent-finish/uninstall/no tty）不弹 prompt，直接 fallback。
+
+    非交互路径（agent-prepare/agent-finish/uninstall/no tty）走本机 detect：
+    - 检测命中（hermes/openclaw）→ 用检测结果
+    - 检测未命中（都没装）→ 视为配置错误，raise SystemExit 中断安装
+
+    原因：silent fallback "openclaw" 会导致在只装 hermes 的机器上把 miloco plugin 装到
+    ~/.openclaw/miloco，hermes 找不到 → 后续 agent flow 拉 miloco 全失败。
+    同样的反向问题也存在 hermes fallback 到 openclaw 上。
+
+    用户显式 --agent-platform=hermes/openclaw：探测结果只告警，不否决显式参数。
     """
     if args.agent_platform:
+        # 用户显式指定：探测只用于告警，不能否决调用方的权威参数。
+        # agent-prepare/agent-finish 自动流程不走这条（args.agent_platform == ""），
+        # 所以这里只处理明确指定的平台。
+        _verify_platform_installed(args.agent_platform)
         return args.agent_platform
     if (
         args.agent_prepare
         or args.agent_finish
-        or args.uninstall
         or not plat.is_interactive
     ):
-        return "openclaw"
+        detected = _detect_installed_agent_platform()
+        if detected is not None:
+            return detected
+        # 非交互 + 探测未命中 = 配置错误，中断。不再兼容 fallback openclaw。
+        msg = (
+            "未检测到任何 agent runtime（既无 hermes 也无 openclaw）：\n"
+            "  - hermes: HERMES_HOME env 已设 / ~/.hermes/ 目录存在 / "
+            "~/.config/systemd/user/hermes-gateway.service 文件存在\n"
+            "  - openclaw: ~/.config/systemd/user/openclaw-gateway.service 文件存在\n"
+            "请先装 hermes 或 openclaw 后重试，或显式 --agent-platform=hermes/openclaw"
+        )
+        raise SystemExit(f"[install] FATAL: {msg}")
     openclaw_label = ui.i18n.t("platform.openclaw_option")
     hermes_label = ui.i18n.t("platform.hermes_option")
     choice = ui.prompt_select(
@@ -1885,9 +2008,80 @@ def _decide_agent_platform(
 
 
 def _default_miloco_home(agent_platform: str) -> Path:
-    """按 agent runtime 决定 MILOCO_HOME 默认路径。hermes → ~/.hermes/miloco，其余 → ~/.openclaw/miloco。"""
-    subdir = ".hermes" if agent_platform == "hermes" else ".openclaw"
-    return Path.home() / subdir / "miloco"
+    """返回指定平台的 Miloco 默认数据目录。
+
+    Hermes 通过 ``HERMES_HOME`` 管理 runtime 根目录；OpenClaw 为保持兼容性，
+    继续使用历史默认目录 ``~/.openclaw/miloco``。
+    """
+    if agent_platform == "hermes":
+        hermes_home = Path(
+            os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")
+        ).expanduser()
+        return hermes_home / "miloco"
+    return Path.home() / ".openclaw" / "miloco"
+
+
+def _write_runtime_pointer(miloco_home: Path, agent_platform: str) -> Path:
+    """写入与 CLI 配置及 Hermes 安装脚本共用的 runtime 指针格式。"""
+    runtime_dir = _default_runtime_pointer().parent
+    runtime_file = runtime_dir / "default.env"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(runtime_dir, 0o700)
+
+    updates = {
+        "MILOCO_HOME": str(miloco_home),
+        "MILOCO_AGENT_PLATFORM": agent_platform,
+    }
+    try:
+        lines = runtime_file.read_text(encoding="utf-8").splitlines(keepends=True)
+    except FileNotFoundError:
+        lines = []
+
+    seen: set[str] = set()
+    output: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        key = stripped.split("=", 1)[0].strip() if "=" in stripped else ""
+        if key in updates:
+            if key not in seen:
+                output.append(f"{key}={shlex.quote(updates[key])}\n")
+                seen.add(key)
+        else:
+            output.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            output.append(f"{key}={shlex.quote(value)}\n")
+
+    runtime_file.write_text("".join(output), encoding="utf-8")
+    os.chmod(runtime_file, 0o600)
+    return runtime_file
+
+
+def _resolve_uninstall_home() -> Path:
+    if env_home := os.environ.get("MILOCO_HOME"):
+        return Path(env_home).expanduser()
+    for path in _runtime_pointer_candidates():
+        if home := _read_runtime_pointer(path).get("MILOCO_HOME"):
+            return Path(home).expanduser()
+    detected = _detect_installed_agent_platform()
+    return _default_miloco_home(detected or "openclaw")
+
+
+def _warn_legacy_hermes_home(miloco_home: Path, agent_platform: str) -> None:
+    """在改用 HERMES_HOME 派生的新目录、放弃旧版数据前发出告警。"""
+    if agent_platform != "hermes":
+        return
+    legacy_home = Path.home() / ".hermes" / "miloco"
+    if legacy_home == miloco_home:
+        return
+    if (legacy_home / "config.json").is_file() and not (
+        miloco_home / "config.json"
+    ).exists():
+        print(
+            f"[install] 警告：检测到旧 Hermes 数据目录 {legacy_home}，"
+            f"当前目录为 {miloco_home}；旧数据不会自动迁移。",
+            file=sys.stderr,
+        )
 
 
 def main() -> None:
@@ -1903,14 +2097,25 @@ def main() -> None:
     if not plat.is_interactive and _try_tty_fallback():
         plat = replace(plat, is_interactive=True)
 
+    if args.uninstall:
+        if not plat.is_interactive:
+            if not _try_tty_fallback():
+                ui.fail(ui.i18n.t("error.non_interactive"))
+        uninstall_home = _resolve_uninstall_home()
+        Uninstaller(ui, uninstall_home).run()
+        _default_runtime_pointer().unlink(missing_ok=True)
+        return
+
     agent_platform = _decide_agent_platform(args, plat, ui)
     miloco_home = Path(
         os.environ.get("MILOCO_HOME") or _default_miloco_home(agent_platform)
     )
     miloco_home.mkdir(parents=True, exist_ok=True)
+    _warn_legacy_hermes_home(miloco_home, agent_platform)
     # 关键：导出到 environ，让所有子进程 (miloco-cli / supervisord / backend / 打包 wheel
     # 起的 miloco.main) 继承正确的 MILOCO_HOME，否则 backend fallback 到 ~/.openclaw/miloco。
     os.environ["MILOCO_HOME"] = str(miloco_home)
+    _write_runtime_pointer(miloco_home, agent_platform)
 
     # Agent mode: --agent-prepare or --agent-finish implies non-interactive agent flow
     if args.agent_prepare or args.agent_finish:
@@ -1958,10 +2163,6 @@ def main() -> None:
     if not plat.is_interactive:
         if not _try_tty_fallback():
             ui.fail(ui.i18n.t("error.non_interactive"))
-
-    if args.uninstall:
-        Uninstaller(ui, miloco_home).run()
-        return
 
     downloader = Downloader()
     installer = Installer(

@@ -64,7 +64,7 @@ info "受管 cron 由插件启动时自动 reconcile（标签 [miloco:home-profi
 info "启动 Hermes 后可用 'hermes cron list' 确认 4 个 miloco 任务。"
 
 # --- 4. 后续配置提示 ---
-MILOCO_HOME="${MILOCO_HOME:-$HOME/.openclaw/miloco}"
+MILOCO_HOME="${MILOCO_HOME:-$HERMES_HOME/miloco}"
 ADAPTER_PORT="${ADAPTER_PORT:-18789}"
 BEARER="${ADAPTER_AUTH_BEARER:-请自行生成一个随机串}"
 

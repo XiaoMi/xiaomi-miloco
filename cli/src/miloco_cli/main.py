@@ -142,5 +142,9 @@ def _debug_log_invocation() -> None:
 
 
 def main() -> None:
+    # Resolve the installed runtime before debug logging or any command loads config.
+    from miloco_cli.config import bootstrap_runtime_env
+
+    bootstrap_runtime_env()
     _debug_log_invocation()
     cli()

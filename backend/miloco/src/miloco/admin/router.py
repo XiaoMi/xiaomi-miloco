@@ -456,14 +456,9 @@ async def upgrade_run(current_user: str = Depends(verify_token)):
         #    可达），单看版本变更会误判完成。故脚本在**全部跑完 + 最后一次 service start 之后**
         #    才 echo AGENT_UPGRADE_DONE/FAILED 到日志——这是整个升级唯一可靠的终态信号，
         #    /upgrade/status 据此报 done/failed，前端只认这个标记才判完成，不看中途版本变更。
-        #  - `export MILOCO_HOME` + `--agent-platform`：安装器**不会**从已装环境反推这两者。
-        #    install.py 的 _decide_agent_platform 在非交互 agent 模式下不读已持久化的
-        #    agent.platform，缺参即 fallback "openclaw"；MILOCO_HOME 缺失时又按该平台推默认
-        #    路径（hermes 部署实际在 ~/.hermes/miloco）。两者都靠继承 backend 环境不可靠 →
-        #    hermes 部署会被当成 openclaw 升级：插件步走 openclaw 分支（主机多半无 openclaw
-        #    CLI → 整体失败），hermes 的 adapter 部署 / config set / plugins enable /
-        #    post-install 对账整段被跳过。故显式读本端平台透传、并把本端实际 MILOCO_HOME
-        #    钉进子进程环境。
+        #  - `export MILOCO_HOME` + `MILOCO_AGENT_PLATFORM` + `--agent-platform`：升级脚本
+        #    显式携带 backend 当前确认的平台和数据目录。安装器会优先读取该环境变量，平台
+        #    探测只作为诊断，不得因为 macOS、非默认 HERMES_HOME 或残留 runtime 阻断升级。
         q_url = shlex.quote(_INSTALL_SH_URL)
         q_sh = shlex.quote(str(tmp_sh))
         q_home = shlex.quote(str(home))
@@ -471,8 +466,13 @@ async def upgrade_run(current_user: str = Depends(verify_token)):
         # 传其它值 argparse 直接 exit(2)、整次升级失败。空/未知值不传，退回安装器默认。
         platform = (settings.agent.platform or "").strip()
         plat_flag = f" --agent-platform={platform}" if platform in ("openclaw", "hermes") else ""
+        platform_env = (
+            f" export MILOCO_AGENT_PLATFORM={shlex.quote(platform)};"
+            if platform in ("openclaw", "hermes")
+            else ""
+        )
         script = (
-            f"export MILOCO_HOME={q_home}; export MILOCO_LANG=zh; rc=0; "
+            f"export MILOCO_HOME={q_home};{platform_env} export MILOCO_LANG=zh; rc=0; "
             f"curl -fsSL {q_url} -o {q_sh} || rc=$?; "
             'if [ "$rc" = "0" ]; then '
             f"bash {q_sh} --agent-prepare{plat_flag} && "

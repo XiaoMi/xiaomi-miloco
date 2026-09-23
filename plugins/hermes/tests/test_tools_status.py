@@ -109,6 +109,20 @@ def test_status_state_json_target_set(tmp_path: Path):
     assert result["target"] == "feishu"
 
 
+def test_skills_installed_follows_hermes_home(monkeypatch, tmp_path: Path):
+    """自定义 HERMES_HOME 时，自检必须检查对应的 skills 目录。"""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    for index in range(16):
+        (skills_dir / f"miloco-skill-{index}").mkdir()
+
+    result = ts._check_skills_installed()
+
+    assert result["ok"] is True
+    assert result["installed"] == 16
+
+
 def test_gather_status_returns_9_checks(tmp_path: Path):
     ctx = _FakeCtx(tmp_path)
     out = ts.gather_status(ctx)

@@ -16,6 +16,14 @@ die()  { echo "FATAL: $1"; exit 1; }
 HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 HERMES="${HERMES_HOME}/hermes"
 MILOCO_CLI="$HOME/.local/bin/miloco-cli"
+# 优先复用安装器写入的 runtime pointer；没有 pointer 时跟随 Hermes 默认目录。
+RUNTIME_ENV_FILE="${MILOCO_RUNTIME_ENV:-$HOME/.config/miloco/default.env}"
+if [ -z "${MILOCO_HOME:-}" ] && [ -f "$RUNTIME_ENV_FILE" ]; then
+  # default.env 由安装器生成，只包含 KEY=VALUE runtime 配置。
+  # shellcheck disable=SC1090
+  . "$RUNTIME_ENV_FILE"
+fi
+MILOCO_HOME="${MILOCO_HOME:-${HERMES_HOME}/miloco}"
 BACKEND="http://127.0.0.1:1810"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 
@@ -26,7 +34,7 @@ section "A. 基础设施"
 command -v python3 >/dev/null 2>&1 && ok "python3" || die "python3 不在 PATH"
 command -v "$MILOCO_CLI" >/dev/null 2>&1 && ok "miloco-cli" || die "miloco-cli 未安装"
 command -v hermes >/dev/null 2>&1 && ok "hermes CLI" || die "hermes CLI 不在 PATH"
-[ -d "$HERMES_HOME" ] && ok "HERMES_HOME=~/.hermes" || die "HERMES_HOME 不存在"
+[ -d "$HERMES_HOME" ] && ok "HERMES_HOME=$HERMES_HOME" || die "HERMES_HOME 不存在"
 
 # ═══════════════════════════════════════════════════════════════════════
 section "B. Backend"
@@ -36,7 +44,7 @@ HEALTH=$(python3 -c "import urllib.request; print(urllib.request.urlopen('$BACKE
 [ "$HEALTH" = '{"status":"ok"}' ] && ok "backend /health" || no "backend /health: $HEALTH"
 
 # 感知引擎状态
-TOKEN=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('$HOME/.hermes/miloco/config.json')))['server']['token'])" 2>/dev/null || echo "")
+TOKEN=$(MILOCO_HOME="$MILOCO_HOME" python3 -c "import json,os; p=os.path.expanduser(os.path.join(os.environ['MILOCO_HOME'],'config.json')); print(json.load(open(p))['server']['token'])" 2>/dev/null || echo "")
 ENGINE=$(python3 -c "
 import urllib.request,json
 r=urllib.request.urlopen(urllib.request.Request('$BACKEND/api/perception/engine/status',headers={'Authorization':'Bearer $TOKEN'}))
@@ -67,7 +75,7 @@ echo "$CRON_OUT" | grep -iv "delivery failed\|rate limited" | grep -qi "error\|t
 } || ok "hermes cron list 无异常"
 
 # 检查：deliver 字段不是 None
-DELIVER_VALUES=$(echo "$CRON_OUT" | grep -A10 miloco | grep "Deliver:" | head -5)
+DELIVER_VALUES=$(echo "$CRON_OUT" | grep -A10 miloco | grep "Deliver:" | head -5 || true)
 if echo "$DELIVER_VALUES" | grep -q "null"; then
   no "cron deliver=null 残留 (author bug #6)"
 else
@@ -80,7 +88,7 @@ fi
 section "E. Adapter send_turn (author bug #1,2,14)"
 # ═══════════════════════════════════════════════════════════════════════
 
-ADAPTER_PY="$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('$HOME/.hermes/miloco/config.json')))['server']['python_bin'])" 2>/dev/null)"
+ADAPTER_PY="$(MILOCO_HOME="$MILOCO_HOME" python3 -c "import json,os; p=os.path.expanduser(os.path.join(os.environ['MILOCO_HOME'],'config.json')); print(json.load(open(p))['server']['python_bin'])" 2>/dev/null || echo "")"
 
 # send_turn 可能需要等 gateway 就绪，最多重试 3 次
 SEND_STATUS=""
@@ -96,7 +104,7 @@ async def t():
     r = await a.send_turn(ctx)
     print(r.status)
 asyncio.run(t())
-" 2>&1 | tail -1)
+" 2>&1 | tail -1) || SEND_STATUS=""
   [ "$SEND_STATUS" = "ok" ] && break
   sleep 5
 done
@@ -109,7 +117,7 @@ section "F. Trace 读写 (author bug #3,4,14)"
 
 sleep 10
 
-TRACE_META=$(find ~/.openclaw/miloco/trace ~/.hermes/miloco/trace -name "*.meta.json" -type f -mmin -5 2>/dev/null | head -1)
+TRACE_META=$(find "$MILOCO_HOME/trace" -name "*.meta.json" -type f -mmin -5 2>/dev/null | head -1 || true)
 
 if [ -n "$TRACE_META" ]; then
   ok "trace meta.json 存在"
@@ -138,7 +146,7 @@ import sys; sys.path.insert(0,'$HERMES_HOME/plugins/miloco/miloco-plugin')
 from tools_notify import _detect_im_platforms_simple
 r = _detect_im_platforms_simple()
 print(','.join(r) if r else 'EMPTY')
-" 2>/dev/null)
+" 2>/dev/null || echo "")
 
 if [ "$IM_RESULT" = "EMPTY" ]; then
   no "IM 探测返回空 (author bug #1: 读 bot_token 假字段)"
@@ -151,11 +159,11 @@ section "H. _resolve_owner_session (author bug #2)"
 # ═══════════════════════════════════════════════════════════════════════
 
 OWNER_RESULT=$(python3 -c "
-import sys; sys.path.insert(0,'$HOME/.hermes/miloco/agent_platform/hermes')
+import os,sys; sys.path.insert(0,os.path.expanduser('$MILOCO_HOME/agent_platform/hermes'))
 from adapter import _resolve_owner_session
 s,p = _resolve_owner_session()
 print(f'{s}|{p}' if s else 'NULL')
-" 2>/dev/null)
+" 2>/dev/null || echo "")
 
 [ "$OWNER_RESULT" != "NULL" ] && ok "owner session: $OWNER_RESULT" || no "owner session 返回 None (author bug #2)"
 
@@ -172,7 +180,7 @@ if os.path.exists(p):
     print(t if t else 'NULL')
 else:
     print('NOFILE')
-" 2>/dev/null)
+" 2>/dev/null || echo "")
 
 echo "  state.json::deliver.target = $STATE_NOW"
 # 不清算 FAIL：新环境本来就没有 target，合理
@@ -181,7 +189,7 @@ echo "  state.json::deliver.target = $STATE_NOW"
 section "J. Adapter 文件完整性 (author bug #9)"
 # ═══════════════════════════════════════════════════════════════════════
 
-ADAPTER_DIR="$HOME/.hermes/miloco/agent_platform/hermes"
+ADAPTER_DIR="$MILOCO_HOME/agent_platform/hermes"
 for f in __init__.py adapter.py context_injection.py catalog.py paths.py; do
   [ -f "$ADAPTER_DIR/$f" ] && ok "agent_platform/$f" || no "agent_platform/$f 缺失"
 done
