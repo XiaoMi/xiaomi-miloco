@@ -8,7 +8,7 @@ import logging
 import os
 import time
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -36,6 +36,15 @@ _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
 # 三元组变化触发的 fire-and-forget reset task 强引用集合;asyncio 只对 task 持弱引用,
 # 不持强引用短协程可能被 GC 提前回收。done_callback 里自动 discard。
 _RESET_TASKS: set[asyncio.Task] = set()
+
+
+class MalformedBodyError(Exception):
+    """Omni returned valid JSON whose top level is not an object."""
+
+    code = "bad_response"
+
+    def __init__(self, raw_cls: str) -> None:
+        super().__init__(f"omni response is not a dict (got {raw_cls})")
 
 
 class OmniError(Exception):
@@ -76,7 +85,32 @@ class OmniError(Exception):
                 return f"{name}:{self.original.response.status_code}"
             except Exception:
                 return name
+        explicit_code = getattr(self.original, "code", None)
+        if explicit_code:
+            return str(explicit_code)
         return name
+
+
+def _is_fallback_eligible(error: OmniError) -> bool:
+    """Return whether a failed request may safely move to the next provider."""
+    original = error.original
+    if original is None:
+        return False
+    if isinstance(original, CircuitOpenError):
+        code = str(original.code or "").split(":")[-1]
+        return code in {
+            "rate_limited",
+            "timeout",
+            "unreachable",
+            "http_error",
+            "bad_response",
+        }
+    classified = (
+        classify_response(original.response)
+        if isinstance(original, httpx.HTTPStatusError)
+        else classify_exception(original)
+    )
+    return classified is not None and classified.category is ErrorCategory.RECOVERABLE
 
 
 @dataclass(frozen=True)
@@ -171,6 +205,46 @@ def resolve_live_omni_config(base: OmniConfig) -> OmniConfig:
     return resolved
 
 
+def resolve_fallback_omni_configs(base: OmniConfig) -> list[OmniConfig]:
+    """Resolve configured fallback labels to usable OmniConfig values in order."""
+    from miloco.config import get_settings
+
+    model_settings = get_settings().model
+    profiles = {
+        profile.label: profile
+        for profile in getattr(model_settings, "omni_profiles", [])
+        if getattr(profile, "label", "")
+    }
+    active = (
+        base.model,
+        (base.base_url or "").strip().rstrip("/"),
+        resolve_omni_api_key(base.api_key),
+    )
+    seen = {active}
+    resolved: list[OmniConfig] = []
+    for label in getattr(model_settings, "omni_fallbacks", []):
+        profile = profiles.get(label)
+        if profile is None or not profile.api_key:
+            continue
+        triple = (
+            profile.model,
+            (profile.base_url or "").strip().rstrip("/"),
+            profile.api_key,
+        )
+        if triple in seen:
+            continue
+        seen.add(triple)
+        resolved.append(
+            replace(
+                base,
+                model=profile.model,
+                base_url=triple[1],
+                api_key=profile.api_key,
+            )
+        )
+    return resolved
+
+
 def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
     """检测 (model, base_url, api_key) 三元组变化,变了就清熔断。跨调用状态保存在
     函数属性 ``._last_triple`` 上——比 module-level global 更内聚。"""
@@ -188,8 +262,12 @@ def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
     _maybe_reset_breaker_on_config_change._last_triple = triple  # type: ignore[attr-defined]
 
 
-async def call_omni(
-    payload: dict, config: OmniConfig, type: str = "realtime"
+async def _call_omni_once(
+    payload: dict,
+    config: OmniConfig,
+    type: str = "realtime",
+    *,
+    use_circuit_breaker: bool = True,
 ) -> dict[str, Any]:
     """Call the omni model via MiMo API platform.
 
@@ -228,13 +306,15 @@ async def call_omni(
         "User-Agent": MILOCO_USER_AGENT,
     }
     try:
-        await cb.before_call()  # 熔断 OPEN → 直接抛 CircuitOpenError
+        if use_circuit_breaker:
+            await cb.before_call()  # 熔断 OPEN → 直接抛 CircuitOpenError
         async with httpx.AsyncClient(timeout=config.timeout) as client:
             if not forced_stream:
                 resp = await client.post(url, headers=headers, json=body)
                 classified = classify_response(resp)
                 if classified is not None:
-                    await cb.record_failure(classified)
+                    if use_circuit_breaker:
+                        await cb.record_failure(classified)
                     logger.error(
                         "Omni API error %d: %s", resp.status_code, resp.text[:500]
                     )
@@ -253,7 +333,8 @@ async def call_omni(
                 except httpx.HTTPStatusError as e:
                     classified = classify_response(e.response)
                     if classified is not None:
-                        await cb.record_failure(classified)
+                        if use_circuit_breaker:
+                            await cb.record_failure(classified)
                         logger.error(
                             "Omni API error %d (stream): %s",
                             e.response.status_code,
@@ -263,15 +344,19 @@ async def call_omni(
             if not isinstance(raw, dict):
                 # 用 __class__.__name__ 而非 type(...) 避免遮盖问题(参数名 type)
                 raw_cls = raw.__class__.__name__
-                await cb.record_failure(
-                    ClassifiedError(
-                        "bad_response",
-                        f"non-dict body ({raw_cls})",
-                        ErrorCategory.RECOVERABLE,
+                if use_circuit_breaker:
+                    await cb.record_failure(
+                        ClassifiedError(
+                            "bad_response",
+                            f"non-dict body ({raw_cls})",
+                            ErrorCategory.RECOVERABLE,
+                        )
                     )
-                )
-                raise OmniError(f"omni response is not a dict (got {raw_cls})")
-            await cb.record_success()
+                malformed = MalformedBodyError(raw_cls)
+                error = {"code": malformed.code, "msg": str(malformed)[:512]}
+                raise OmniError(str(malformed), original=malformed)
+            if use_circuit_breaker:
+                await cb.record_success()
             fire_record(config.model, config.base_url, raw.get("usage") or {}, type)
         return raw
     except CircuitOpenError as ce:
@@ -283,7 +368,8 @@ async def call_omni(
     except Exception as e:
         # HTTP 响应异常已在 record_failure 里记过;这里补记 exception 类。
         if not isinstance(e, httpx.HTTPStatusError):
-            await cb.record_failure(classify_exception(e))
+            if use_circuit_breaker:
+                await cb.record_failure(classify_exception(e))
         error = {"code": e.__class__.__name__, "msg": str(e)[:512]}
         raise OmniError(
             f"call_omni failed: {e.__class__.__name__}: {e}", original=e
@@ -303,6 +389,32 @@ async def call_omni(
                 "max_tokens": config.max_completion_tokens,
             },
         )
+
+
+async def call_omni(
+    payload: dict, config: OmniConfig, type: str = "realtime"
+) -> dict[str, Any]:
+    """Call the active model, then ordered fallbacks for recoverable failures."""
+    configs = [config, *resolve_fallback_omni_configs(config)]
+    for index, candidate in enumerate(configs):
+        try:
+            return await _call_omni_once(
+                payload,
+                candidate,
+                type,
+                use_circuit_breaker=index == 0,
+            )
+        except OmniError as error:
+            has_next = index + 1 < len(configs)
+            if not has_next or not _is_fallback_eligible(error):
+                raise
+            logger.warning(
+                "[omni] provider fallback: model=%s code=%s -> model=%s",
+                candidate.model,
+                error.code,
+                configs[index + 1].model,
+            )
+    raise OmniError("omni fallback chain exhausted")
 
 
 async def _iter_sse_chunks(resp) -> AsyncGenerator[dict, None]:
@@ -336,7 +448,10 @@ async def _collect_stream_response(
     content_parts: list[str] = []
     usage: dict[str, Any] = {}
     async with client.stream(
-        "POST", url, headers=headers, json=body,
+        "POST",
+        url,
+        headers=headers,
+        json=body,
     ) as resp:
         if resp.status_code != 200:
             await resp.aread()
@@ -345,6 +460,7 @@ async def _collect_stream_response(
                 from miloco.perception.engine.omni.omni import (
                     _summarize_multimodal_payload,
                 )
+
                 logger.error(
                     "[omni] stream 400 payload 摘要 | %s",
                     _summarize_multimodal_payload(body.get("messages", [])),
@@ -410,11 +526,13 @@ def extract_usage(raw_response: dict) -> dict[str, int]:
     }
 
 
-async def call_omni_stream(
+async def _call_omni_stream_once(
     payload: dict,
     config: OmniConfig,
     usage_out: dict | None = None,
     type: str = "realtime",
+    *,
+    use_circuit_breaker: bool = True,
 ) -> AsyncGenerator[str, None]:
     """Streaming call to omni model via MiMo API platform, yields content delta tokens.
 
@@ -456,7 +574,8 @@ async def call_omni_stream(
     cb = get_omni_circuit_breaker()
     t0 = time.monotonic()
     try:
-        await cb.before_call()
+        if use_circuit_breaker:
+            await cb.before_call()
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(config.timeout, connect=10.0)
         ) as client:
@@ -469,7 +588,8 @@ async def call_omni_stream(
                 classified = classify_response(resp)
                 if classified is not None:
                     await resp.aread()
-                    await cb.record_failure(classified)
+                    if use_circuit_breaker:
+                        await cb.record_failure(classified)
                     logger.error(
                         "Omni stream error %d: %s", resp.status_code, resp.text[:500]
                     )
@@ -483,7 +603,8 @@ async def call_omni_stream(
                     if delta:
                         response_chunks.append(delta)
                         yield delta
-        await cb.record_success()
+        if use_circuit_breaker:
+            await cb.record_success()
     except CircuitOpenError as ce:
         short_circuited = True
         error = {"code": ce.code, "msg": ce.message[:512]}
@@ -494,7 +615,8 @@ async def call_omni_stream(
         raise  # 不重复包装
     except Exception as e:
         if not isinstance(e, httpx.HTTPStatusError):
-            await cb.record_failure(classify_exception(e))
+            if use_circuit_breaker:
+                await cb.record_failure(classify_exception(e))
         error = {"code": e.__class__.__name__, "msg": str(e)[:512]}
         raise OmniError(
             f"call_omni_stream failed: {e.__class__.__name__}: {e}", original=e
@@ -524,3 +646,38 @@ async def call_omni_stream(
                 "max_tokens": config.max_completion_tokens,
             },
         )
+
+
+async def call_omni_stream(
+    payload: dict,
+    config: OmniConfig,
+    usage_out: dict | None = None,
+    type: str = "realtime",
+) -> AsyncGenerator[str, None]:
+    """Stream from the active model, falling back only before the first delta."""
+    configs = [config, *resolve_fallback_omni_configs(config)]
+    for index, candidate in enumerate(configs):
+        emitted = False
+        try:
+            async for delta in _call_omni_stream_once(
+                payload,
+                candidate,
+                usage_out=usage_out,
+                type=type,
+                use_circuit_breaker=index == 0,
+            ):
+                emitted = True
+                yield delta
+            return
+        except OmniError as error:
+            has_next = index + 1 < len(configs)
+            if emitted or not has_next or not _is_fallback_eligible(error):
+                raise
+            if usage_out is not None:
+                usage_out.clear()
+            logger.warning(
+                "[omni] streaming provider fallback: model=%s code=%s -> model=%s",
+                candidate.model,
+                error.code,
+                configs[index + 1].model,
+            )

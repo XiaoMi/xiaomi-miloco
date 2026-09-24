@@ -244,7 +244,9 @@ def _write_dismissed(version: str) -> None:
     try:
         _dismiss_file().write_text(version.strip(), encoding="utf-8")
     except Exception as e:
-        logger.warning("failed to persist dismissed version %s: %s", safe_log(version), e)
+        logger.warning(
+            "failed to persist dismissed version %s: %s", safe_log(version), e
+        )
 
 
 def _deploy_kind() -> str:
@@ -380,7 +382,9 @@ async def upgrade_check(
     response_model=NormalResponse,
 )
 async def upgrade_dismiss(
-    version: str = Query(..., description="要标记为已确认的版本号（一般传当前 latest）"),
+    version: str = Query(
+        ..., description="要标记为已确认的版本号（一般传当前 latest）"
+    ),
     current_user: str = Depends(verify_token),
 ):
     """用户关闭升级 banner 时调用：把该版本记为「已确认」并持久化到后端（MILOCO_HOME）。
@@ -470,7 +474,11 @@ async def upgrade_run(current_user: str = Depends(verify_token)):
         # 白名单：install.py 的 --agent-platform 是 choices=["", "openclaw", "hermes"]，
         # 传其它值 argparse 直接 exit(2)、整次升级失败。空/未知值不传，退回安装器默认。
         platform = (settings.agent.platform or "").strip()
-        plat_flag = f" --agent-platform={platform}" if platform in ("openclaw", "hermes") else ""
+        plat_flag = (
+            f" --agent-platform={platform}"
+            if platform in ("openclaw", "hermes")
+            else ""
+        )
         script = (
             f"export MILOCO_HOME={q_home}; export MILOCO_LANG=zh; rc=0; "
             f"curl -fsSL {q_url} -o {q_sh} || rc=$?; "
@@ -942,7 +950,9 @@ def _mask_api_key(key: str) -> str:
     return f"{key[:3]}…{key[-4:]}"
 
 
-def _key_by_label(label: str, provided: str | None, *, base_url: str | None = None) -> str:
+def _key_by_label(
+    label: str, provided: str | None, *, base_url: str | None = None
+) -> str:
     """provided 非空用它;否则取该 label 档案(或当前生效配置)已存的 key。
 
     base_url 非 None 时,还要求档案里存的 base_url 与传入一致,否则不沿用 key
@@ -985,7 +995,8 @@ def _active_display_label() -> str:
     """当前生效配置用于「列表展示 / 编辑 / 删除」的稳定 label。
 
     omni.label 可能为空(env 或手改 config.json 直填 key、未走 web 档案流程的态),此时
-    回退为 ``model @ base_url`` —— 与前端档案命名一致,保证合成的「当前生效行」label 非空,
+    回退为 ``model @ base_url``，仅用于 env / 手改 config 的未存档状态，保证合成的
+    「当前生效行」label 非空，
     可被编辑 / 测试 / 删除按 label 正确定位(否则空 label 会使 upsert 报 400、删除 was_active
     误判为 False 而静默无效)。仅在有 key 时有展示意义。
     """
@@ -1044,6 +1055,7 @@ def _full_omni_payload() -> dict:
             "health": health,
         },
         "profiles": profiles,
+        "fallback_labels": list(m.omni_fallbacks),
     }
 
 
@@ -1074,12 +1086,48 @@ class OmniSelectBody(BaseModel):
     label: str
 
 
+class OmniFallbacksBody(BaseModel):
+    """有序 fallback 档案名。"""
+
+    labels: list[str] = Field(default_factory=list)
+
+
 @router.get(
     "/omni-config",
     summary="读取 omni 配置(当前生效 active + 已存档案 profiles，api_key 打码)",
     response_model=NormalResponse,
 )
 def get_omni_config(current_user: str = Depends(verify_token)):
+    return NormalResponse(code=0, message="ok", data=_full_omni_payload())
+
+
+@router.put(
+    "/omni-config/fallbacks",
+    summary="保存有序 omni fallback 档案",
+    response_model=NormalResponse,
+)
+async def put_omni_fallbacks(
+    body: OmniFallbacksBody, current_user: str = Depends(verify_token)
+):
+    profiles = {p.label: p for p in get_settings().model.omni_profiles}
+    labels: list[str] = []
+    for raw_label in body.labels:
+        label = raw_label.strip()
+        if not label or label in labels:
+            continue
+        profile = profiles.get(label)
+        if profile is None:
+            raise HTTPException(status_code=404, detail=f"档案「{label}」不存在")
+        if not profile.api_key:
+            raise HTTPException(
+                status_code=400, detail=f"档案「{label}」未配置 API Key"
+            )
+        if _label_is_active(label):
+            raise HTTPException(
+                status_code=400, detail="当前生效模型不能同时作为 fallback"
+            )
+        labels.append(label)
+    update_shared_config(model={"omni_fallbacks": labels})
     return NormalResponse(code=0, message="ok", data=_full_omni_payload())
 
 
@@ -1138,7 +1186,13 @@ async def put_omni_config(
         profiles[profiles.index(target)] = entry
     else:
         profiles.append(entry)
-    update: dict = {"omni_profiles": profiles}
+    fallbacks = list(get_settings().model.omni_fallbacks)
+    if orig and orig != label:
+        fallbacks = [label if item == orig else item for item in fallbacks]
+    if will_activate or not key:
+        fallbacks = [item for item in fallbacks if item != label]
+    fallbacks = list(dict.fromkeys(fallbacks))
+    update: dict = {"omni_profiles": profiles, "omni_fallbacks": fallbacks}
     if will_activate:
         update["omni"] = entry
     update_shared_config(model=update)
@@ -1181,7 +1235,12 @@ async def activate_omni_config(
                         "model": p.model,
                         "base_url": p.base_url,
                         "api_key": p.api_key,
-                    }
+                    },
+                    "omni_fallbacks": [
+                        item
+                        for item in get_settings().model.omni_fallbacks
+                        if item != p.label
+                    ],
                 }
             )
             # 同 upsert 路径:preflight 通过后主动清熔断状态,避免 OPEN_CONFIG 卡死。
@@ -1231,7 +1290,12 @@ async def delete_omni_config(
     label = body.label.strip()
     was_active = _label_is_active(label)
     profiles = [p for p in _profiles_as_dicts() if p["label"] != label]
-    update: dict = {"omni_profiles": profiles}
+    update: dict = {
+        "omni_profiles": profiles,
+        "omni_fallbacks": [
+            item for item in get_settings().model.omni_fallbacks if item != label
+        ],
+    }
     if was_active:
         # 删当前生效模型 → 当前生效配置重置为出厂未配态(MiMo 默认 + 空 key)。
         update["omni"] = OmniModelSettings().model_dump()
@@ -1611,7 +1675,8 @@ def _perception_config_payload() -> dict:
     inp = s.perception.engine.get("input", {})
     if not isinstance(inp, dict):
         logger.warning(
-            "event=perception_config_bad field=input reason=not_mapping raw=%r 退默认", inp
+            "event=perception_config_bad field=input reason=not_mapping raw=%r 退默认",
+            inp,
         )
         inp = {}
     # 两个闸位不自己 bool(raw.get(...)),走运行时同一条读取路径:裸 bool() 会把
@@ -1624,7 +1689,8 @@ def _perception_config_payload() -> dict:
         ce = crop_enhance_config_from_settings()
     except Exception:  # noqa: BLE001
         logger.warning(
-            "event=perception_config_crop_enhance_read_failed 报 available=false", exc_info=True
+            "event=perception_config_crop_enhance_read_failed 报 available=false",
+            exc_info=True,
         )
         ce = CropEnhanceConfig()
     return {
@@ -1661,23 +1727,33 @@ def get_perception_config(current_user: str = Depends(verify_token)):
     summary="修改感知参数（写 config.json 并重启感知引擎使其生效）",
     response_model=NormalResponse,
 )
-async def put_perception_config(body: PerceptionConfigBody, current_user: str = Depends(verify_token)):
+async def put_perception_config(
+    body: PerceptionConfigBody, current_user: str = Depends(verify_token)
+):
     update: dict = {}
     if body.video_short_edge is not None:
-        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["video_short_edge"] = body.video_short_edge
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault(
+            "input", {}
+        )["video_short_edge"] = body.video_short_edge
     if body.omni_fps is not None:
-        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["omni_fps"] = body.omni_fps
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault(
+            "input", {}
+        )["omni_fps"] = body.omni_fps
     if body.window_size is not None:
-        update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+        update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = (
+            body.window_size
+        )
     if body.smart_crop_enabled is not None:
-        update.setdefault("perception", {}).setdefault("engine", {}).setdefault("crop_enhance", {})[
-            "user_enabled"
-        ] = body.smart_crop_enabled
+        update.setdefault("perception", {}).setdefault("engine", {}).setdefault(
+            "crop_enhance", {}
+        )["user_enabled"] = body.smart_crop_enabled
     if body.min_suggestion_urgency is not None:
         # 阈值热读:client.py 的 _filter_suggestions_by_min_urgency 每次 dispatch 前
         # get_settings() 现读,update_shared_config 已含 reset_settings,下个 cycle 即生效,
         # 不参与下方 restart_ok(不需要重启引擎)。
-        update.setdefault("perception", {})["min_suggestion_urgency"] = body.min_suggestion_urgency
+        update.setdefault("perception", {})["min_suggestion_urgency"] = (
+            body.min_suggestion_urgency
+        )
     payload = _perception_config_payload()
     if update:
         # 各参数生效路径不同，按「新值 != 旧值」判断（前端 drawer 多字段一起 PUT）：
@@ -1687,17 +1763,26 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         #     adjust_fps_for_omni 顶起的 tracker fps 有构造期派生缓存——走 apply_omni_fps_live
         #     运行时热更（原地刷 _config + 缓存），免重建引擎 / 免模型重载 / 不丢 track。
         #   - window_size：runner 构造时 cache，需 stop→start 重读（apply_config_restart）。
-        omni_fps_changed = body.omni_fps is not None and body.omni_fps != payload["omni_fps"]
-        window_changed = body.window_size is not None and body.window_size != payload["window_size"]
+        omni_fps_changed = (
+            body.omni_fps is not None and body.omni_fps != payload["omni_fps"]
+        )
+        window_changed = (
+            body.window_size is not None and body.window_size != payload["window_size"]
+        )
         update_shared_config(**update)
         payload = _perception_config_payload()
         # config 已写盘(不可回滚)；热更/重启失败仅带 restart_ok=False，不冒泡成 500——
         # 否则前端会把「已保存+失败」误报成「保存失败」，误导用户以为改动丢失。同步等完成再返回。
         restart_ok = True
         if omni_fps_changed:
-            restart_ok = await manager.perception_service.apply_omni_fps_live(body.omni_fps) and restart_ok
+            restart_ok = (
+                await manager.perception_service.apply_omni_fps_live(body.omni_fps)
+                and restart_ok
+            )
         if window_changed:
-            restart_ok = await manager.perception_service.apply_config_restart() and restart_ok
+            restart_ok = (
+                await manager.perception_service.apply_config_restart() and restart_ok
+            )
         if omni_fps_changed or window_changed:
             payload["restart_ok"] = restart_ok
     return NormalResponse(code=0, message="ok", data=payload)

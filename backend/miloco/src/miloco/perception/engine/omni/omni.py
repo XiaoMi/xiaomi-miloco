@@ -26,12 +26,15 @@ from miloco.perception.engine.omni.error_classifier import (
     classify_response,
 )
 from miloco.perception.engine.omni.omni_client import (
+    MalformedBodyError,
     OmniError,
     _collect_stream_response,
+    _is_fallback_eligible,
     call_omni,
     call_omni_stream,
     extract_usage,
     resolve_api_key,
+    resolve_fallback_omni_configs,
 )
 from miloco.perception.engine.omni.prompt_builder import (
     FusedPromptConfig,
@@ -178,19 +181,38 @@ async def run_omni_fused(
     # deliver_fused_failure，否则 mark_dispatched 已置 inflight=True 的 track
     # 永远不会被 GC（_gc_dead_tracks 跳过 inflight）也不会被重新派发
     # （needs_omni_call 返回 False）。
-    adapter = get_adapter(config.model)
     try:
-        payload = build_fused_payload(
-            packets=edge_packets,
-            context=context,
-            candidates=candidates,
-            gallery_snapshot=gallery_snapshot,
-            config=fused_prompt_config,
-            label_lookup=name_lookup,
-            adapter=adapter,
-            matching_moot=person_lib_empty,
-        )
-        raw_response = await _call_omni_messages(payload["messages"], config, adapter=adapter)
+        configs = [config, *resolve_fallback_omni_configs(config)]
+        for index, candidate_config in enumerate(configs):
+            adapter = get_adapter(candidate_config.model)
+            payload = build_fused_payload(
+                packets=edge_packets,
+                context=context,
+                candidates=candidates,
+                gallery_snapshot=gallery_snapshot,
+                config=fused_prompt_config,
+                label_lookup=name_lookup,
+                adapter=adapter,
+                matching_moot=person_lib_empty,
+            )
+            try:
+                raw_response = await _call_omni_messages(
+                    payload["messages"],
+                    candidate_config,
+                    adapter=adapter,
+                    use_circuit_breaker=index == 0,
+                )
+                break
+            except OmniError as error:
+                has_next = index + 1 < len(configs)
+                if not has_next or not _is_fallback_eligible(error):
+                    raise
+                logger.warning(
+                    "[omni] fused provider fallback: model=%s code=%s -> model=%s",
+                    candidate_config.model,
+                    error.code,
+                    configs[index + 1].model,
+                )
     except OmniError as e:
         # omni API / 网络错:_call_omni_messages 已在源头打日志(omni API 调用失败),
         # 这里只做 inflight track 清理 + 上抛,不重复打。
@@ -288,6 +310,8 @@ async def _call_omni_messages(
     config: OmniConfig,
     type: str = "realtime",
     adapter: "OmniProviderAdapter | None" = None,
+    *,
+    use_circuit_breaker: bool = True,
 ) -> dict[str, Any]:
     """调 omni——直接传 messages（fused 模式专用）。
 
@@ -327,12 +351,14 @@ async def _call_omni_messages(
         "User-Agent": MILOCO_USER_AGENT,
     }
     try:
-        await cb.before_call()
+        if use_circuit_breaker:
+            await cb.before_call()
         if not forced_stream:
             resp = await client.post(url, headers=headers, json=body)
             classified = classify_response(resp)
             if classified is not None:
-                await cb.record_failure(classified)
+                if use_circuit_breaker:
+                    await cb.record_failure(classified)
                 logger.error(
                     "[omni] omni API 调用失败，错误码=%d | %s",
                     resp.status_code,
@@ -358,7 +384,8 @@ async def _call_omni_messages(
             except httpx.HTTPStatusError as e:
                 classified = classify_response(e.response)
                 if classified is not None:
-                    await cb.record_failure(classified)
+                    if use_circuit_breaker:
+                        await cb.record_failure(classified)
                     logger.error(
                         "[omni] omni API 调用失败(stream)，错误码=%d | %s",
                         e.response.status_code,
@@ -373,15 +400,19 @@ async def _call_omni_messages(
             if not forced_stream:
                 detail = f"status={resp.status_code} {detail}"
             logger.error("[omni-fused] unexpected response shape | %s", detail)
-            await cb.record_failure(
-                ClassifiedError(
-                    "bad_response",
-                    f"non-dict body ({raw_cls})",
-                    ErrorCategory.RECOVERABLE,
+            if use_circuit_breaker:
+                await cb.record_failure(
+                    ClassifiedError(
+                        "bad_response",
+                        f"non-dict body ({raw_cls})",
+                        ErrorCategory.RECOVERABLE,
+                    )
                 )
-            )
-            raise OmniError(f"omni response is not a dict (got {raw_cls})")
-        await cb.record_success()
+            malformed = MalformedBodyError(raw_cls)
+            error = {"code": malformed.code, "msg": str(malformed)[:512]}
+            raise OmniError(str(malformed), original=malformed)
+        if use_circuit_breaker:
+            await cb.record_success()
         fire_record(config.model, config.base_url, raw.get("usage") or {}, type)
         return raw
     except CircuitOpenError as ce:
@@ -394,7 +425,8 @@ async def _call_omni_messages(
         raise
     except Exception as e:
         if not isinstance(e, httpx.HTTPStatusError):
-            await cb.record_failure(classify_exception(e))
+            if use_circuit_breaker:
+                await cb.record_failure(classify_exception(e))
         error = {"code": e.__class__.__name__, "msg": str(e)[:512]}
         raise OmniError(
             f"_call_omni_messages failed: {e.__class__.__name__}: {e}",

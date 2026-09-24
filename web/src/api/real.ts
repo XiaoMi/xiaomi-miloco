@@ -1995,6 +1995,17 @@ export async function realUpdateOmniConfig(
   return r.data;
 }
 
+// 保存有序 fallback 档案列表。
+export async function realUpdateOmniFallbacks(
+  labels: string[],
+): Promise<OmniConfigState> {
+  const r = await apiFetch<Normal<OmniConfigState>>(
+    "/api/admin/omni-config/fallbacks",
+    { method: "PUT", body: JSON.stringify({ labels }) },
+  );
+  return r.data;
+}
+
 // 切换当前生效配置为某套已存档案。
 export async function realActivateOmniConfig(
   ref: OmniProfileRef,

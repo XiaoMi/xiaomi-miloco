@@ -2,13 +2,16 @@
  * 「模型」页顶部的 omni 模型配置卡(可折叠,默认展开)。
  *
  * 两块:
- * - 上:**当前模型** —— 当前生效配置(model / Base URL / 打码 key);未配 key 给警告。
- * - 下:**模型列表** —— 每行 模型 | Base URL | API Key(打码),可「启用」/「删除」;
- *   「＋ 新增」展开表单(Base URL → API Key → 模型组合框 + 测试连接 + 保存)。
+ * - 上:**当前模型** —— 当前生效配置摘要;未配 key 给警告。
+ * - 下:**模型列表** —— 每行 名称 | 模型 | 调用顺位 | 操作 | 连接状态,
+ *   行序即实际调用链:当前生效 → fallback(按顺位) → 其余档案(派生排序,不动存储顺序);
+ *   模型列表不展示 Base URL 与 API Key;连接信息仅在必要的摘要、确认或编辑场景展示;
+ *   「＋ 新增」展开表单(自定义名称 → Base URL → API Key → 模型组合框 + 测试连接 + 保存)。
  *
- * 档案名对用户隐藏:内部用 `model @ base_url` 作为后端 label(唯一 id)。重复添加同
- * (model, base_url) = 更新该配置的 key(等价编辑)。后端按 label activate/delete/upsert。
- * 保存写 config.json,感知下个推理周期热生效(免重启);api_key 打码、留空=沿用原 key。
+ * 档案名(label)=用户自定义唯一 id。新增必填、编辑可改名,重名由后端返回 409。
+ * 相同 (model, base_url) 可保存多套具名档案,互不覆盖;调用顺位列维护有序 fallback。
+ * 保存写 config.json,感知下个推理周期热生效(免重启);api_key 打码、留空仅在 Base URL
+ * 不变时沿用原 key。
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -17,6 +20,7 @@ import {
   OMNI_CONFIG_STALE_EVENT,
   getOmniConfig,
   updateOmniConfig,
+  updateOmniFallbacks,
   activateOmniConfig,
   deactivateOmniConfig,
   deleteOmniConfig,
@@ -179,6 +183,7 @@ export function UsageOmniConfig() {
   // 新增 / 编辑表单(共用):editing 非空表示在编辑该 label 对应的已有配置
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
+  const [label, setLabel] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false); // API Key 明文/密文切换(末端眼睛图标)
@@ -201,6 +206,7 @@ export function UsageOmniConfig() {
   // 删除确认弹窗(web 风格,代替 window.confirm):待删项 + 删除中
   const [deleteTarget, setDeleteTarget] = useState<OmniProfile | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [fallbackSaving, setFallbackSaving] = useState(false);
 
   useEffect(() => {
     void load();
@@ -223,14 +229,28 @@ export function UsageOmniConfig() {
   const profiles = state?.profiles ?? [];
   const active = state?.active;
   const hasKey = active?.has_key ?? false;
-  // 新增表单里同 (model, base_url) 是否已存(→ 改为更新该条)
-  const existing = profiles.find(
-    (p) => p.base_url === baseUrl.trim() && p.model === model.trim(),
-  );
-
+  const fallbackLabels = state?.fallback_labels ?? [];
+  // 列表顺序即实际调用链：主模型 → 已配置的 fallback → 其余档案。
+  // 只改变派生展示顺序，不改 omni_profiles 的存储顺序。
+  const orderedProfiles = profiles
+    .map((profile, savedOrder) => ({
+      profile,
+      savedOrder,
+      fallbackOrder: fallbackLabels.indexOf(profile.label),
+    }))
+    .sort((a, b) => {
+      if (a.profile.active !== b.profile.active) return a.profile.active ? -1 : 1;
+      const aFallback = a.fallbackOrder >= 0;
+      const bFallback = b.fallbackOrder >= 0;
+      if (aFallback !== bFallback) return aFallback ? -1 : 1;
+      if (aFallback && bFallback) return a.fallbackOrder - b.fallbackOrder;
+      return a.savedOrder - b.savedOrder;
+    })
+    .map(({ profile }) => profile);
   function startAdd() {
     setAdding(true);
     setEditing(null);
+    setLabel("");
     setBaseUrl("");
     setApiKey("");
     setShowKey(false);
@@ -246,6 +266,7 @@ export function UsageOmniConfig() {
   function startEdit(p: OmniProfile) {
     setAdding(true);
     setEditing(p.label);
+    setLabel(p.label);
     setBaseUrl(p.base_url);
     setApiKey("");
     setShowKey(false);
@@ -293,15 +314,14 @@ export function UsageOmniConfig() {
   }
 
   async function onSave() {
+    const name = label.trim();
     const bu = baseUrl.trim();
     const m = model.trim();
-    if (!bu || !m) {
-      toast(t("usage.baseUrlModelRequired"), "warn");
+    if (!name || !bu || !m) {
+      toast(t("usage.profileNameRequired"), "warn");
       return;
     }
-    // 目标条目:编辑态用被编辑的 label;否则按 (model, base_url) 命中已有(隐式 upsert)。
-    // 用 ||(非 ??)让空串落空 → 当作新增并生成 label,绝不把空 original_label 发给后端。
-    const target = editing || existing?.label || undefined;
+    const target = editing || undefined;
     if (!apiKey.trim() && !editTarget(target)?.has_key) {
       toast(t("usage.apiKeyRequired"), "warn");
       return;
@@ -309,7 +329,7 @@ export function UsageOmniConfig() {
     setSaving(true);
     try {
       const s = await updateOmniConfig({
-        label: target ?? `${m} @ ${bu}`,
+        label: name,
         model: m,
         base_url: bu,
         api_key: apiKey.trim() || undefined,
@@ -346,7 +366,7 @@ export function UsageOmniConfig() {
       toast(t("usage.baseUrlModelRequired"), "warn");
       return;
     }
-    const target = editing || existing?.label || undefined;
+    const target = editing || undefined;
     if (!apiKey.trim() && !editTarget(target)?.has_key) {
       toast(t("usage.apiKeyRequiredBeforeTest"), "warn");
       return;
@@ -448,6 +468,34 @@ export function UsageOmniConfig() {
     }
   }
 
+  async function saveFallbackLabels(next: string[]) {
+    if (!state || fallbackSaving) return;
+    setFallbackSaving(true);
+    try {
+      setState(await updateOmniFallbacks(next));
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("usage.fallbackSaveFailed"), "danger");
+    } finally {
+      setFallbackSaving(false);
+    }
+  }
+
+  function toggleFallback(name: string) {
+    const current = state?.fallback_labels ?? [];
+    void saveFallbackLabels(
+      current.includes(name) ? current.filter((item) => item !== name) : [...current, name],
+    );
+  }
+
+  function moveFallback(name: string, direction: -1 | 1) {
+    const current = [...(state?.fallback_labels ?? [])];
+    const from = current.indexOf(name);
+    const to = from + direction;
+    if (from < 0 || to < 0 || to >= current.length) return;
+    [current[from], current[to]] = [current[to], current[from]];
+    void saveFallbackLabels(current);
+  }
+
   // 连接状态列被截断时的悬浮全文:锚定元素底部的 fixed 浮层(避开表格 overflow 裁剪、无原生 title 延迟)。
   function showTip(e: React.MouseEvent<HTMLElement>) {
     const el = e.currentTarget;
@@ -473,7 +521,7 @@ export function UsageOmniConfig() {
   }
 
   // 表单内拉模型/测试错误的就近显示:解析当前编辑/命中条目 + 错误归属字段。
-  const keyProfile = editTarget(editing) ?? existing;
+  const keyProfile = editTarget(editing);
   const errField = modelsErr ? errFieldOf(modelsErrCode) : null;
   const urlErrHere = errField === "url";
   const keyErrHere = errField === "key";
@@ -497,7 +545,7 @@ export function UsageOmniConfig() {
           {collapsed && active && (
             <span className="text-caption text-text-secondary num">
               {t("usage.currentPrefix")}
-              {hasKey ? `${active.model} · ${hostOf(active.base_url)}` : t("usage.noApiKeyConfigured")}
+              {hasKey ? `${active.label || active.model} · ${hostOf(active.base_url)}` : t("usage.noApiKeyConfigured")}
             </span>
           )}
         </span>
@@ -528,15 +576,18 @@ export function UsageOmniConfig() {
               )}
 
               {/* ── 模型列表 ── */}
+              <div className="text-caption text-text-tertiary mb-2">
+                {t("usage.fallbackHint")}
+              </div>
               <div className="overflow-x-auto -mx-5 md:-mx-6">
                 <table className="w-full text-caption whitespace-nowrap">
                   <thead>
                     <tr className="text-text-secondary border-b border-border">
-                      <th className="text-left px-5 md:px-6 py-2">{t("usage.colModel")}</th>
-                      <th className="text-left px-3 py-2">{t("usage.baseUrlLabel")}</th>
-                      <th className="text-left px-3 py-2">{t("usage.colApiKey")}</th>
-                      <th className="text-left px-3 py-2 w-44">{t("usage.colStatus")}</th>
-                      <th className="text-left px-5 md:px-6 py-2">{t("usage.colAction")}</th>
+                      <th className="text-left px-5 md:px-6 py-2">{t("usage.colName")}</th>
+                      <th className="text-left px-3 py-2">{t("usage.colModel")}</th>
+                      <th className="text-left px-3 py-2">{t("usage.fallbackColumn")}</th>
+                      <th className="text-left px-3 py-2">{t("usage.colAction")}</th>
+                      <th className="text-left px-5 md:px-6 py-2 w-44">{t("usage.colStatus")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -550,64 +601,73 @@ export function UsageOmniConfig() {
                         </td>
                       </tr>
                     ) : (
-                      profiles.map((p) => (
+                      orderedProfiles.map((p) => {
+                        const fallbackOrder = fallbackLabels.indexOf(p.label);
+                        return (
                         <tr
                           key={p.label}
                           className={`border-b border-border last:border-b-0 ${
                             p.active ? "bg-brand-soft" : ""
                           }`}
                         >
-                          <td className="px-5 md:px-6 py-2.5 num text-text-primary">
-                            {p.model}
+                          <td className="px-5 md:px-6 py-2.5 text-text-primary">
+                            {p.label}
                             {p.active && (
                               <span className="ml-2 align-middle inline-block rounded px-1.5 py-0.5 bg-brand-primary text-white text-caption">
                                 {t("usage.activeTag")}
                               </span>
                             )}
                           </td>
-                          <td className="px-3 py-2.5 num text-text-tertiary">{p.base_url}</td>
-                          <td className="px-3 py-2.5 num text-text-tertiary">
-                            {p.has_key ? p.api_key_masked : t("usage.notConfigured")}
-                          </td>
-                          {/* 连接状态列:默认「未测试」;点行内「测试」就地刷新;定宽截断,溢出 hover 看全文 */}
-                          {/* 固定宽 w-44 单行截断(列宽恒定不横向挤压);文字被截断时鼠标悬浮即时弹出
-                              锚定元素底部的 fixed 浮层显示全文(避开表格 overflow 裁剪、无原生 title 延迟) */}
+                          <td className="px-3 py-2.5 num text-text-primary">{p.model}</td>
                           <td className="px-3 py-2.5">
-                            {/* active 行且 health 非 ok:优先显实时熔断状态,覆盖手动测试结果
-                                (health 是真实运行时反映,手动测试是快照)。 */}
-                            {p.active && state.active.health && state.active.health.state !== "ok" ? (
-                              <span
-                                className={`block w-44 truncate ${SEV_CLASS[state.active.health.state === "error" ? "error" : "warn"]}`}
-                                onMouseEnter={showTip}
-                                onMouseLeave={hideTip}
-                              >
-                                {SEV_GLYPH[state.active.health.state === "error" ? "error" : "warn"]}{" "}
-                                {/* backend message 硬编码中文,英文界面走 codes i18n;
-                                    http_error 带动态状态码不走 codes,直接显 message。 */}
-                                {state.active.health.code && state.active.health.code !== "http_error"
-                                  ? t(`omniHealth.codes.${state.active.health.code}`, {
-                                      defaultValue: state.active.health.message,
-                                    })
-                                  : state.active.health.message}
-                                {state.active.health.consecutive_failures > 0 && (
-                                  <> · {t("omniHealth.failuresCount", { n: state.active.health.consecutive_failures })}</>
-                                )}
-                              </span>
-                            ) : rowTesting === p.label ? (
-                              <span className="block w-44 truncate text-text-tertiary">{t("usage.testing")}</span>
-                            ) : rowTestResults[p.label] ? (
-                              <span
-                                className={`block w-44 truncate ${SEV_CLASS[severityOf(rowTestResults[p.label])]}`}
-                                onMouseEnter={showTip}
-                                onMouseLeave={hideTip}
-                              >
-                                {testResultText(rowTestResults[p.label])}
-                              </span>
+                            {p.active ? (
+                              <span className="text-brand-primary">{t("usage.activeTag")}</span>
+                            ) : !p.has_key ? (
+                              <span className="text-text-tertiary">{t("usage.notConfigured")}</span>
                             ) : (
-                              <span className="block w-44 truncate text-text-tertiary">{t("usage.statusUntested")}</span>
+                              <div className="inline-flex items-center gap-2">
+                                <label className="inline-flex items-center gap-2 text-text-primary">
+                                  <input
+                                    type="checkbox"
+                                    checked={fallbackOrder >= 0}
+                                    disabled={fallbackSaving}
+                                    onChange={() => toggleFallback(p.label)}
+                                  />
+                                  <span>
+                                    {fallbackOrder >= 0
+                                      ? t("usage.fallbackOrder", { n: fallbackOrder + 1 })
+                                      : t("usage.fallbackUse")}
+                                  </span>
+                                </label>
+                                {fallbackOrder >= 0 && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={fallbackSaving || fallbackOrder === 0}
+                                      onClick={() => moveFallback(p.label, -1)}
+                                      aria-label={t("usage.fallbackMoveUp", { name: p.label })}
+                                      className="disabled:opacity-30 text-text-secondary hover:text-brand-primary"
+                                    >
+                                      <IconChevronUp width={16} height={16} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={
+                                        fallbackSaving ||
+                                        fallbackOrder === fallbackLabels.length - 1
+                                      }
+                                      onClick={() => moveFallback(p.label, 1)}
+                                      aria-label={t("usage.fallbackMoveDown", { name: p.label })}
+                                      className="disabled:opacity-30 text-text-secondary hover:text-brand-primary"
+                                    >
+                                      <IconChevronDown width={16} height={16} />
+                                    </button>
+                                  </>
+                                )}
+                              </div>
                             )}
                           </td>
-                          <td className="px-5 md:px-6 py-2.5 text-left whitespace-nowrap">
+                          <td className="px-3 py-2.5 text-left whitespace-nowrap">
                             <div className="inline-flex items-center gap-3 align-middle">
                               {p.active ? (
                                 <button
@@ -652,8 +712,47 @@ export function UsageOmniConfig() {
                               </button>
                             </div>
                           </td>
+                          {/* 连接状态列:默认「未测试」;点行内「测试」就地刷新;定宽截断,溢出 hover 看全文 */}
+                          {/* 固定宽 w-44 单行截断(列宽恒定不横向挤压);文字被截断时鼠标悬浮即时弹出
+                              锚定元素底部的 fixed 浮层显示全文(避开表格 overflow 裁剪、无原生 title 延迟) */}
+                          <td className="px-5 md:px-6 py-2.5">
+                            {/* active 行且 health 非 ok:优先显实时熔断状态,覆盖手动测试结果
+                                (health 是真实运行时反映,手动测试是快照)。 */}
+                            {p.active && state.active.health && state.active.health.state !== "ok" ? (
+                              <span
+                                className={`block w-44 truncate ${SEV_CLASS[state.active.health.state === "error" ? "error" : "warn"]}`}
+                                onMouseEnter={showTip}
+                                onMouseLeave={hideTip}
+                              >
+                                {SEV_GLYPH[state.active.health.state === "error" ? "error" : "warn"]}{" "}
+                                {/* backend message 硬编码中文,英文界面走 codes i18n;
+                                    http_error 带动态状态码不走 codes,直接显 message。 */}
+                                {state.active.health.code && state.active.health.code !== "http_error"
+                                  ? t(`omniHealth.codes.${state.active.health.code}`, {
+                                      defaultValue: state.active.health.message,
+                                    })
+                                  : state.active.health.message}
+                                {state.active.health.consecutive_failures > 0 && (
+                                  <> · {t("omniHealth.failuresCount", { n: state.active.health.consecutive_failures })}</>
+                                )}
+                              </span>
+                            ) : rowTesting === p.label ? (
+                              <span className="block w-44 truncate text-text-tertiary">{t("usage.testing")}</span>
+                            ) : rowTestResults[p.label] ? (
+                              <span
+                                className={`block w-44 truncate ${SEV_CLASS[severityOf(rowTestResults[p.label])]}`}
+                                onMouseEnter={showTip}
+                                onMouseLeave={hideTip}
+                              >
+                                {testResultText(rowTestResults[p.label])}
+                              </span>
+                            ) : (
+                              <span className="block w-44 truncate text-text-tertiary">{t("usage.statusUntested")}</span>
+                            )}
+                          </td>
                         </tr>
-                      ))
+                        );
+                      })
                     )}
                   </tbody>
                 </table>
@@ -676,6 +775,14 @@ export function UsageOmniConfig() {
                   <div className="md:col-span-2 text-caption text-text-secondary">
                     {editing ? t("usage.editFormHint") : t("usage.addFormHint")}
                   </div>
+                  <Field label={t("usage.profileNameLabel")} className="md:col-span-2">
+                    <input
+                      value={label}
+                      onChange={(e) => setLabel(e.target.value)}
+                      placeholder={t("usage.profileNamePlaceholder")}
+                      className={INPUT_CLS}
+                    />
+                  </Field>
                   <Field label={t("usage.baseUrlLabel")} className="md:col-span-2">
                     <input
                       value={baseUrl}
@@ -840,6 +947,7 @@ export function UsageOmniConfig() {
             </div>
             <p className="text-body text-text-secondary">
               {t("usage.deleteConfirm", {
+                name: deleteTarget.label,
                 model: deleteTarget.model,
                 host: hostOf(deleteTarget.base_url),
               })}

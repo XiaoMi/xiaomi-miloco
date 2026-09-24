@@ -916,17 +916,30 @@ def test_fetch_models_gemini_parses_name_and_goog_key(client, monkeypatch):
     from miloco.perception.engine.omni import probe as p
 
     calls: list = []
-    resp = _FakeResp(200, {"models": [
-        {"name": "models/gemini-3.5-flash"},
-        {"name": "models/gemini-3-flash-preview"},
-    ]})
-    monkeypatch.setattr(p.httpx, "AsyncClient", _recording_async_client(calls, get_resp=resp))
+    resp = _FakeResp(
+        200,
+        {
+            "models": [
+                {"name": "models/gemini-3.5-flash"},
+                {"name": "models/gemini-3-flash-preview"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        p.httpx, "AsyncClient", _recording_async_client(calls, get_resp=resp)
+    )
     data = client.post(
         "/api/admin/omni-config/models",
-        json={"base_url": "https://generativelanguage.googleapis.com/v1beta", "api_key": "k"},
+        json={
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": "k",
+        },
     ).json()["data"]
     assert data["ok"] is True
-    assert data["models"] == ["gemini-3-flash-preview", "gemini-3.5-flash"]  # 剥前缀 + sorted
+    assert data["models"] == [
+        "gemini-3-flash-preview",
+        "gemini-3.5-flash",
+    ]  # 剥前缀 + sorted
     get = next(c for c in calls if c[0] == "GET")
     assert "x-goog-api-key" in get[2] and "Authorization" not in get[2]
 
@@ -1062,7 +1075,9 @@ def test_test_connection_ok_not_matching_active_leaves_breaker(client):
     assert get_omni_circuit_breaker().snapshot().state == "error"
 
 
-def test_test_connection_failure_does_not_touch_breaker(client, monkeypatch, real_probe):
+def test_test_connection_failure_does_not_touch_breaker(
+    client, monkeypatch, real_probe
+):
     """测失败(不管测的是不是 active) → 不动熔断状态。测失败本就没有"已验可用"的语义。"""
     from miloco.perception.engine.omni import probe
     from miloco.perception.engine.omni.circuit_breaker import (
@@ -1100,3 +1115,110 @@ def test_test_connection_failure_does_not_touch_breaker(client, monkeypatch, rea
 
     # 熔断仍是 error
     assert get_omni_circuit_breaker().snapshot().state == "error"
+
+
+# ─── 有序 fallback 档案 ─────────────────────────────────────────────────────
+
+
+def _save_profile(client, label: str, *, activate: bool):
+    return client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": label,
+            "model": f"model-{label}",
+            "base_url": f"https://{label}.example/v1",
+            "api_key": f"sk-{label}-123456789",
+            "activate": activate,
+        },
+    )
+
+
+def test_fallback_profiles_are_ordered_and_maintained(client):
+    _save_profile(client, "主", activate=True)
+    _save_profile(client, "备二", activate=False)
+    _save_profile(client, "备一", activate=False)
+
+    response = client.put(
+        "/api/admin/omni-config/fallbacks",
+        json={"labels": ["备一", "备二", "备一"]},
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["fallback_labels"] == ["备一", "备二"]
+
+    renamed = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "备用一",
+            "original_label": "备一",
+            "model": "model-备一",
+            "base_url": "https://备一.example/v1",
+            "activate": False,
+        },
+    ).json()["data"]
+    assert renamed["fallback_labels"] == ["备用一", "备二"]
+
+    deleted = client.post(
+        "/api/admin/omni-config/delete", json={"label": "备二"}
+    ).json()["data"]
+    assert deleted["fallback_labels"] == ["备用一"]
+
+    activated = client.post(
+        "/api/admin/omni-config/activate", json={"label": "备用一"}
+    ).json()["data"]
+    assert activated["fallback_labels"] == []
+
+
+def test_editing_fallback_to_keyless_removes_it_from_chain(client):
+    _save_profile(client, "主", activate=True)
+    _save_profile(client, "备用", activate=False)
+    client.put("/api/admin/omni-config/fallbacks", json={"labels": ["备用"]})
+
+    edited = client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "备用",
+            "original_label": "备用",
+            "model": "model-备用",
+            "base_url": "https://new-backup.example/v1",
+            "activate": False,
+        },
+    )
+
+    assert edited.status_code == 200
+    assert edited.json()["data"]["fallback_labels"] == []
+    profile = next(
+        item for item in edited.json()["data"]["profiles"] if item["label"] == "备用"
+    )
+    assert profile["has_key"] is False
+
+
+def test_fallback_rejects_active_missing_and_keyless_profiles(client):
+    _save_profile(client, "主", activate=True)
+    assert (
+        client.put(
+            "/api/admin/omni-config/fallbacks", json={"labels": ["主"]}
+        ).status_code
+        == 400
+    )
+    assert (
+        client.put(
+            "/api/admin/omni-config/fallbacks", json={"labels": ["不存在"]}
+        ).status_code
+        == 404
+    )
+
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "无密钥",
+            "model": "m",
+            "base_url": "https://keyless.example/v1",
+            "activate": False,
+        },
+    )
+    assert (
+        client.put(
+            "/api/admin/omni-config/fallbacks", json={"labels": ["无密钥"]}
+        ).status_code
+        == 400
+    )

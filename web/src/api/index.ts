@@ -539,6 +539,12 @@ export async function updateOmniConfig(
   return impl.realUpdateOmniConfig(input);
 }
 
+export async function updateOmniFallbacks(
+  labels: string[],
+): Promise<OmniConfigState> {
+  return impl.realUpdateOmniFallbacks(labels);
+}
+
 export async function activateOmniConfig(
   ref: OmniProfileRef,
 ): Promise<OmniConfigState> {

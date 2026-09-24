@@ -178,6 +178,10 @@ class ModelSettings(BaseModel):
             "当前生效的那套即 omni（按 label 匹配）。"
         ),
     )
+    omni_fallbacks: list[str] = Field(
+        default_factory=list,
+        description="按顺序保存的 omni fallback 档案 label；仅在可恢复调用错误时依次尝试",
+    )
 
 
 class DatabaseSettings(BaseModel):
@@ -606,7 +610,7 @@ class MilocoSettings(BaseSettings):
         description=(
             "部署时区 (IANA 名,如 Asia/Shanghai / America/Los_Angeles);"
             "null = 跟随系统 /etc/timezone。影响业务侧"
-            "\"今天 / 本周 / rollover\"等部署概念,以及 API 出口 ISO 偏移后缀"
+            '"今天 / 本周 / rollover"等部署概念,以及 API 出口 ISO 偏移后缀'
             "(如 +08:00);DB 存储始终 INTEGER ms (UTC 绝对时刻)。"
         ),
     )

@@ -513,6 +513,8 @@ export interface OmniActiveConfig extends OmniModelConfig {
 export interface OmniConfigState {
   active: OmniActiveConfig;
   profiles: OmniProfile[];
+  /** 可恢复错误时按顺序尝试的档案 label。 */
+  fallback_labels: string[];
 }
 
 /** 定位一套档案(档案名 = 唯一 id)。 */
