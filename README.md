@@ -19,6 +19,7 @@ Miloco 2.0 perceives what happens at home, makes proactive decisions and control
 
 ## What's New
 
+- **2026-09-11** — Release v2026.9.11: adds a rule/task re-architecture where one task can carry several rules and entry and exit need not be opposites, a unified in-process state container kept current by device online/offline and property pushes, and Mi Home scene triggering directly from rule actions; plus the return of camera IP direct-connect on a fixed native library with a silent-stream watchdog, token usage accounted by model and endpoint, HEIC/HEIF upload, and a per-camera Smart Crop toggle.
 - **2026-08-06** — Release v2026.8.6: hotfix for v2026.8.5 — reverts camera IP direct-connect, whose bundled native library could crash the camera process with SIGSEGV on some older camera models; everything else from v2026.8.5 stays, plus Smart Crop scaling reworked to fit the same-tier panorama frame per axis.
 - **2026-08-05** — Release v2026.8.5: adds experimental pet recognition with a full registration and roster workflow, Smart Crop adaptive resolution that crops the active region before omni inference, and one-click self-upgrade from the dashboard; plus camera IP direct-connect with cross-NAT streaming diagnostics, an agent action ledger, process CPU / thread-count charts on the Perf page, and leaner default thread pools.
 - **2026-07-17** — Release v2026.7.17: adds a Hermes Agent compatibility layer for pluggable agent runtimes, dual-camera multi-channel dual-stream perception, and omni multi-model support with runtime FPS hot-reload; plus a dedicated Tasks tab, per-camera mic toggle, and timezone / version / install hardening.
@@ -43,7 +44,7 @@ Miloco 2.0 perceives what happens at home, makes proactive decisions and control
 - **Operating System**: macOS / Linux (run under WSL on Windows).
 - **OpenClaw** — Miloco runs as a plugin on top of it, so [install it](https://openclaw.ai) first with version ≥ 2026.5.2.
 - **Xiaomi account** + devices already added to Mi Home.
-- **Multimodal large model API key** — [Xiaomi MiMo](https://platform.xiaomimimo.com) is recommended: MiMo-v2.5 for perception, MiMo-v2.5-pro for the Agent (configured in OpenClaw).
+- **Multimodal large model API key** — [Xiaomi MiMo](https://platform.xiaomimimo.com) is recommended.
 
 > [!CAUTION]
 > **Cost note**: Miloco 2.0's perception and Agent rely primarily on cloud-based large models and will incur ongoing API usage costs—keep an eye on your usage. You can review token consumption on the "Models" page of the home dashboard.
@@ -173,5 +174,7 @@ Miloco stands on the shoulders of the following open-source projects:
 ## License
 
 See [LICENSE.md](LICENSE.md) for the full license terms.
+
+Xiaomi Miloco includes third-party components that are licensed under their respective licenses. Please refer to [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for details.
 
 **Important notice**: This project is for non-commercial use only. Without written authorization from Xiaomi Inc., it may not be used to develop applications (apps), web services, or other forms of software.

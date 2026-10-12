@@ -301,6 +301,10 @@ export interface ScopeCamera {
   // voiceInUse 正交：关着的相机也能预配，仅在被感知时注入生效。多通道相机按 channel 存取。
   perceptionPrompt: string;
   connected: boolean;
+  // 附加诊断信息（默认 undefined）。目前仅 "cross_subnet_nat"：跨网段 + 云端在线 +
+  // 探测可达 + 拉流长期卡在连接中——大概率是路由器 NAT 类型限制拉流，不是暂时抖动。
+  // 云端已离线时不给这条诊断：相机自己掉线了，问题不在路由器 NAT 上。
+  streamError?: "cross_subnet_nat";
 }
 
 // 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。
@@ -831,13 +835,19 @@ export interface TaskRecordSummary {
 // 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
 // 规则方向：条件成立时对 task 意味着什么。milestone 由服务端维护、后端已过滤，
 // 不会出现在这里。
-export type TaskRuleDirection = "enter" | "exit" | "session";
+export type TaskRuleDirection = "enter" | "exit" | "session" | "guard";
+
+// 触发源。omni 是摄像头视觉判定，iot 是设备属性变化，record 是累计量达标。
+export type TaskRuleSourceType = "omni" | "iot" | "record";
 
 export interface TaskRuleBrief {
   ruleId: string;
   // 规则的自然语言条件（"孩子在书桌前学习" 之类）
   query: string;
   direction: TaskRuleDirection;
+  // 触发源。omni 的条件是住户写的自然语言、可改；其余源的条件是服务端按谓词渲染
+  // 出来的一句描述，后端会拒绝对它的 PATCH，所以界面上必须是只读的。
+  sourceType: TaskRuleSourceType;
   // 命中后执行的动作人话摘要。多条规则的 task 动作不在这里，在 Task.actions 上
   actionsDesc: string[];
 }

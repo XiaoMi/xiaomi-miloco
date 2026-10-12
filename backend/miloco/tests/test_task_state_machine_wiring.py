@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from miloco.rule.condition import condition_to_dnf
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
     Rule,
@@ -45,7 +46,7 @@ def _rule(rule_id="r1", task_id="t1", mode=RuleMode.EVENT, **kw):
     )
 
 
-def _runner(rules, monkeypatch):
+def _runner(rules, monkeypatch, sample_interval_seconds=3.0):
     monkeypatch.setattr(
         "miloco.task_record.service.TaskRecordService.__init__", lambda self: None
     )
@@ -53,6 +54,7 @@ def _runner(rules, monkeypatch):
         rules=rules,
         miot_proxy=None,
         rule_log_repo=None,
+        sample_interval_seconds=sample_interval_seconds,
         task_record_service=object(),
     )
 
@@ -244,13 +246,36 @@ def test_condition_satisfied_is_none_when_state_exists_but_no_source(monkeypatch
     assert runner.is_condition_satisfied("r1") is None
 
 
-def test_condition_satisfied_reflects_last_rule_state(monkeypatch):
+def test_condition_satisfied_computes_from_sources(monkeypatch):
+    """现算三值 OR，不读 last_rule_state —— 后者只在聚合确定时更新。"""
     r = _rule()
     runner = _runner([r], monkeypatch)
     runner._ensure_source("r1", "cam1")
 
     assert runner.is_condition_satisfied("r1") is False
-    runner._state["r1"].last_rule_state = True
+    runner._ensure_source("r1", "cam1").last_bool = True
+    assert runner.is_condition_satisfied("r1") is True
+
+
+def test_condition_satisfied_is_none_after_source_marked_unknown(monkeypatch):
+    """置未知之后要报"不知道"，不是报假 —— None 与 False 都是 falsy，断 None。"""
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    runner._ensure_source("r1", "cam1").last_bool = True
+
+    runner.mark_source_unknown("r1", "cam1")
+
+    assert runner.is_condition_satisfied("r1") is None
+
+
+def test_condition_satisfied_ignores_unknown_when_another_source_is_true(monkeypatch):
+    """三值 OR：任一为真就是真，未知不把它拉下来。"""
+    r = _rule()
+    runner = _runner([r], monkeypatch)
+    runner._ensure_source("r1", "cam1").last_bool = True
+    runner._ensure_source("r1", "cam2")
+    runner.mark_source_unknown("r1", "cam2")
+
     assert runner.is_condition_satisfied("r1") is True
 
 
@@ -343,8 +368,7 @@ def test_entry_blocked_when_exit_condition_true_end_to_end(monkeypatch):
     exit_rule.direction = RuleDirection.EXIT
     runner = _runner([enter_rule, exit_rule], monkeypatch)
     sm = _attach(runner, "t1", [enter_rule, exit_rule], _TASK_DESC)
-    runner._ensure_source("r_exit", "cam1")
-    runner._state["r_exit"].last_rule_state = True
+    runner._ensure_source("r_exit", "cam1").last_bool = True
 
     assert runner._state_machine_allows(enter_rule, RuleEvent.ENTERED) is False
     assert sm.runtime_state("t1") is TaskRuntimeState.OFF
@@ -456,3 +480,210 @@ def test_attach_registers_direction_from_db(tmp_path, monkeypatch):
     assert rule.direction is RuleDirection.SESSION
     assert runner._state_machine_allows(rule, RuleEvent.ENTERED) is True
     assert runner._state_machine.runtime_state("t1") is TaskRuntimeState.ON
+
+
+# ── reconfigure: 配置变了、现实没变 ───────────────────────────────────
+
+
+async def _session_task_turned_on(monkeypatch, *, sample_interval=3.0, **rule_kw):
+    """把一个会话型 task 沿真实路径推到 ``on``, 返回 (runner, sm, 拓扑, 派发记录)。"""
+    rule = _rule("r-ses", mode=RuleMode.STATE, **rule_kw)
+    runner = _runner([rule], monkeypatch, sample_interval_seconds=sample_interval)
+    dispatched: list[tuple[str, ActionSlot]] = []
+    sm = TaskStateMachine(
+        is_condition_satisfied=runner.is_condition_satisfied,
+        dispatch_action=lambda tid, slot, _p: dispatched.append((tid, slot)),
+    )
+    runner.attach_state_machine(sm)
+    runner.set_task_actions("t1", {"on_enter_desc": "进", "on_exit_desc": "出"})
+    directions = derive_directions([("r-ses", RuleDirection.SESSION.value)])
+    sm.register_task("t1", directions)
+    runner._execute_dynamic = _never_dispatch  # ty:ignore[invalid-assignment]
+
+    for _ in range(3):
+        await runner.update_state("r-ses", "cam1", True, "")
+    await asyncio.sleep(0.05)
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+    dispatched.clear()
+    return runner, sm, directions, dispatched
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_keeps_a_task_on_while_its_iot_device_is_offline(monkeypatch):
+    """离线是"不知道", 不是"会话结束"。
+
+    误发的 on_exit 是真会对外下指令的, 而 runner 侧的边沿缓存没被清过 —— 设备回来时
+    属性没变就只产 STILL_IN, 这个 task 再也不会 enter。
+    """
+    runner, sm, directions, dispatched = await _session_task_turned_on(monkeypatch)
+
+    runner.mark_source_unknown("r-ses", "cam1")
+    assert runner.is_condition_satisfied("r-ses") is None
+
+    sm.reconfigure("t1", directions)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_turns_a_task_off_when_the_session_condition_is_false(
+    monkeypatch,
+):
+    """上一条的反向: 明确观测到不成立时照样退。
+
+    两条一起才把判据钉在"是不是明确的假"上, 而不是"是不是真"或者恒真。
+    """
+    runner, sm, directions, dispatched = await _session_task_turned_on(monkeypatch)
+
+    runner._ensure_source("r-ses", "cam1").last_bool = False
+    assert runner.is_condition_satisfied("r-ses") is False
+
+    sm.reconfigure("t1", directions)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert dispatched == [("t1", ActionSlot.ON_EXIT)]
+
+# ── 换条件形状: 运行态被丢掉, 但「已经进入」要带过去 ──────────────────
+
+
+def _edited(mode=RuleMode.STATE, **kw):
+    """同一条 rule 换了条件文本 —— PATCH 改条件后 add_rule 收到的形态。
+
+    改条件那条路会先把 DNF 那一列置空、再按新条件重建, 所以两列必然不等。
+    """
+    rule = _rule("r-ses", mode=mode, **kw)
+    rule.condition.query = "有猫"
+    rule.condition_dnf = condition_to_dnf(rule.condition)
+    return rule
+
+
+def _record_fires(monkeypatch) -> list[tuple[str, RuleEvent]]:
+    """记下真发出去的边沿。状态机的 dispatch_action 只覆盖它自己直接派发的那些,
+    走 runner 的进入 / 退出不经过那里。"""
+    fired: list[tuple[str, RuleEvent]] = []
+
+    async def capture(self, rule, event, *_a, **_kw):
+        fired.append((rule.id, event))
+
+    monkeypatch.setattr(RuleRunner, "_fire", capture)
+    return fired
+
+
+@pytest.mark.asyncio
+async def test_editing_a_session_rule_still_exits_on_the_first_false(monkeypatch):
+    """换条件不当场退出, 但第一次观测报假必须退。
+
+    后半句是「换配置不是一次观测」这条立论的另一半: 基线跟着运行态一起清成假的
+    话, 第一次报假与基线相等、退出边沿再也产不出来, 会话卡在 on。
+    """
+    runner, sm, directions, dispatched = await _session_task_turned_on(
+        monkeypatch, exit_debounce_seconds=0
+    )
+    fired = _record_fires(monkeypatch)
+
+    runner.add_rule(_edited(exit_debounce_seconds=0))
+    sm.reconfigure("t1", directions)
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert dispatched == []
+
+    await runner.update_state("r-ses", "cam1", False, "")
+    await asyncio.sleep(0.05)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert fired == [("r-ses", RuleEvent.EXITED)]
+
+
+@pytest.mark.asyncio
+async def test_editing_a_duration_session_rule_still_exits_on_the_first_false(
+    monkeypatch,
+):
+    """带时长的会话同上, 但拦它的是另一道闸。
+
+    退出边沿被「没配对的 ENTERED」那道闸挡着, 只拨回聚合基线不够 —— 「on_enter
+    派发过」这个标记也要带过去。
+    """
+    runner, sm, directions, _dispatched = await _session_task_turned_on(
+        monkeypatch,
+        sample_interval=1.0,
+        exit_debounce_seconds=0,
+        duration_seconds=1,
+        duration_ratio=1.0,
+    )
+    fired = _record_fires(monkeypatch)
+
+    runner.add_rule(
+        _edited(exit_debounce_seconds=0, duration_seconds=1, duration_ratio=1.0)
+    )
+    sm.reconfigure("t1", directions)
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+
+    await runner.update_state("r-ses", "cam1", False, "")
+    await asyncio.sleep(0.05)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert fired == [("r-ses", RuleEvent.EXITED)]
+
+
+@pytest.mark.asyncio
+async def test_editing_while_an_exit_debounce_is_pending_keeps_the_exit_reachable(
+    monkeypatch,
+):
+    """抗抖排着队时改条件: 退出边沿发过了、on_exit 还没落地, 状态机仍在 on。
+
+    这一次退出被 reset 撤掉了, 基线不拨回那次边沿之前的话它永远补不上。
+    """
+    runner, sm, directions, _dispatched = await _session_task_turned_on(
+        monkeypatch, exit_debounce_seconds=30
+    )
+    for _ in range(3):
+        await runner.update_state("r-ses", "cam1", False, "")
+    assert runner._state["r-ses"].exit_debounce_task is not None
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+    fired = _record_fires(monkeypatch)
+
+    runner.add_rule(_edited(exit_debounce_seconds=0))
+    sm.reconfigure("t1", directions)
+    assert sm.runtime_state("t1") is TaskRuntimeState.ON
+
+    for _ in range(3):
+        await runner.update_state("r-ses", "cam1", False, "")
+    await asyncio.sleep(0.05)
+
+    assert sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert fired == [("r-ses", RuleEvent.EXITED)]
+
+
+@pytest.mark.asyncio
+async def test_changing_direction_does_not_carry_the_old_baseline(monkeypatch):
+    """换方向 = 这份动作整体换了个家, 旧基线不该跟过去。
+
+    跟过去的话新家的第一次「条件成立」与基线相等, 进入动作一次都不发。
+    """
+    runner, sm, _directions, _dispatched = await _session_task_turned_on(monkeypatch)
+    fired = _record_fires(monkeypatch)
+
+    runner.add_rule(_edited(mode=RuleMode.EVENT, direction=RuleDirection.ENTER))
+    sm.reconfigure("t1", derive_directions([("r-ses", RuleDirection.ENTER.value)]))
+
+    await runner.update_state("r-ses", "cam1", True, "")
+    await asyncio.sleep(0.05)
+
+    assert fired == [("r-ses", RuleEvent.ENTERED)]
+
+
+@pytest.mark.asyncio
+async def test_re_enabling_a_rule_does_not_carry_the_old_baseline(monkeypatch):
+    """停用再启用要从零开始, 否则启用回来后第一次成立一个动作都不发。"""
+    runner, sm, directions, _dispatched = await _session_task_turned_on(monkeypatch)
+    fired = _record_fires(monkeypatch)
+
+    runner.add_rule(_rule("r-ses", mode=RuleMode.STATE, enabled=False))
+    runner.add_rule(_rule("r-ses", mode=RuleMode.STATE, enabled=True))
+    sm.suspend("t1")
+    sm.reconfigure("t1", directions)
+
+    await runner.update_state("r-ses", "cam1", True, "")
+    await asyncio.sleep(0.05)
+
+    assert fired == [("r-ses", RuleEvent.ENTERED)]

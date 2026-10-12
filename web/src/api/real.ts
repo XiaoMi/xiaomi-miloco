@@ -44,6 +44,8 @@ import type {
   OmniModelsResult,
   UpgradeCheck,
   UpgradeStatus,
+  TaskRuleDirection,
+  TaskRuleSourceType,
 } from "@/lib/types";
 
 // backend NormalResponse 包装：{ code, message, data }
@@ -1214,6 +1216,7 @@ interface BackendScopeCamera {
   connected: boolean;
   channel?: number;  // 通道号，用于多通道摄像头
   channel_count?: number;  // 通道总数；判多通道的权威信号（旧后端无则兜底 1）
+  stream_error?: "cross_subnet_nat" | null;
 }
 
 export async function realListScopeCameras(): Promise<ScopeCamera[]> {
@@ -1234,6 +1237,7 @@ export async function realListScopeCameras(): Promise<ScopeCamera[]> {
     connected: c.connected,
     channel: c.channel ?? 0,  // 传递通道号，默认为 0
     channelCount: c.channel_count ?? 1,  // 通道总数，判多通道用；旧后端兜底 1
+    streamError: c.stream_error ?? undefined,
   }));
 }
 
@@ -2207,7 +2211,8 @@ interface BackendTaskSummary {
   rule_briefs?: {
     rule_id: string;
     query: string;
-    direction?: "enter" | "exit" | "session";
+    direction?: TaskRuleDirection;
+    source_type?: TaskRuleSourceType;
     actions_desc?: string[];
   }[];
   actions?: {
@@ -2242,6 +2247,7 @@ export async function realListTasks(): Promise<Task[]> {
       ruleId: b.rule_id,
       query: b.query,
       direction: b.direction ?? "enter",
+      sourceType: b.source_type ?? "omni",
       actionsDesc: b.actions_desc ?? [],
     })),
     // 六个槽恒有。后端漏传时归一成"全空"而不是 null —— 调用方据此决定整个分区

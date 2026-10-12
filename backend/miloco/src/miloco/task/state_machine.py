@@ -43,6 +43,7 @@ class RuleDirection(str, Enum):
     EXIT = "exit"
     SESSION = "session"
     MILESTONE = "milestone"
+    GUARD = "guard"
 
 
 class TaskRuntimeState(str, Enum):
@@ -73,6 +74,7 @@ class TransitionOutcome(str, Enum):
     ALREADY_IN_STATE = "already_in_state"
     ALREADY_OFF = "already_off"
     BLOCKED_BY_EXIT_CONDITION = "blocked_by_exit_condition"
+    BLOCKED_BY_GUARD = "blocked_by_guard"
     STILL_HELD = "still_held"
     NOT_IN_SESSION = "not_in_session"
     SIGNAL_DROPPED = "signal_dropped"
@@ -133,6 +135,15 @@ class TaskTopology:
         }
 
     @property
+    def guard_rule_ids(self) -> set[str]:
+        """进入前要求成立的 rule。本身不产边沿, 只被回查。"""
+        return {
+            rid
+            for rid, d in self.directions.items()
+            if d is RuleDirection.GUARD
+        }
+
+    @property
     def is_session_type(self) -> bool:
         """有出路径才谈得上"模式开着" —— 否则是事件型, 恒 ``off``。"""
         return bool(
@@ -158,8 +169,12 @@ def slot_for_edge(direction: str, kind: SignalKind) -> ActionSlot | None:
     据此不产生信号。
 
     OR 聚合不在这里: 它不是一条映射逻辑, 是 task 层幂等消费的自然结果 —— 单 rule
-    恒等映射, 多 rule 坍缩成 OR。future 换 AND / guard 动 task 层, 不动本函数。
+    恒等映射, 多 rule 坍缩成 OR。
     """
+    if direction == RuleDirection.GUARD:
+        # 前提只被进入路径回查, 自己的边沿不表达对 task 的意图。漏在这里挡住就会
+        # 落进下面按方向选槽的分支, 而兜底返的是进入槽 —— 前提自己成了触发器。
+        return None
     if direction == RuleDirection.SESSION:
         return ActionSlot.ON_ENTER if kind is SignalKind.ENTERED else ActionSlot.ON_EXIT
     if kind is not SignalKind.ENTERED:
@@ -202,6 +217,7 @@ class TaskStateMachine:
         self._dispatching = True
         self._topologies: dict[str, TaskTopology] = {}
         self._states: dict[str, TaskRuntimeState] = {}
+        self._pending_enters: dict[str, dict[str, TaskSignal]] = {}
         self._queues: dict[str, deque[TaskSignal]] = {}
         self._wakeups: dict[str, asyncio.Event] = {}
         self._consumers: dict[str, asyncio.Task] = {}
@@ -228,12 +244,32 @@ class TaskStateMachine:
         topology = self._topologies.get(task_id)
         return topology is not None and topology.is_session_type
 
+    def reconcile_exit(self, task_id: str, rule_id: str) -> TransitionOutcome:
+        """同步校准 exit 方向规则，将 task 原子切到 ``off``。
+
+        session 校准必须走 runner 的退出防抖链，不能调用这个立即转换入口。
+        """
+        topology = self._topologies.get(task_id)
+        if topology is None:
+            return TransitionOutcome.UNKNOWN_RULE
+        direction = topology.directions.get(rule_id)
+        if direction is not RuleDirection.EXIT:
+            return TransitionOutcome.UNKNOWN_RULE
+        kind = SignalKind.ENTERED
+        slot = slot_for_edge(direction.value, kind)
+        if slot is not ActionSlot.ON_EXIT:
+            return TransitionOutcome.UNKNOWN_RULE
+        return self.handle(
+            TaskSignal(task_id, rule_id, kind, slot), dispatch=False
+        )
+
     # ── 拓扑维护 ──────────────────────────────────────────────────
 
     def register_task(self, task_id: str, directions: dict[str, RuleDirection]) -> None:
         """登记 / 重新登记一个 task。重启后从 ``off`` 起 (§7)。"""
         self._topologies[task_id] = TaskTopology(task_id, dict(directions))
         self._states.setdefault(task_id, TaskRuntimeState.OFF)
+        self._pending_enters.pop(task_id, None)
         self._queues.setdefault(task_id, deque(maxlen=SIGNAL_QUEUE_DEPTH))
         self._wakeups.setdefault(task_id, asyncio.Event())
 
@@ -243,6 +279,7 @@ class TaskStateMachine:
         self._stop_consumer(task_id)
         self._topologies.pop(task_id, None)
         self._states.pop(task_id, None)
+        self._pending_enters.pop(task_id, None)
         self._queues.pop(task_id, None)
         self._wakeups.pop(task_id, None)
         self._reconfiguring.discard(task_id)
@@ -336,14 +373,42 @@ class TaskStateMachine:
     def _handle_enter(
         self, signal: TaskSignal, topology: TaskTopology
     ) -> TransitionOutcome:
+        if topology.is_session_type and (
+            self.runtime_state(signal.task_id) is TaskRuntimeState.ON
+        ):
+            # 幂等: 多条路径同时进只执行一次边界动作。排在前提回查之前 —— 这次没有
+            # 进入可拦, 记成被前提拦下会让判定摘要和日志描述一次没发生的进入。
+            self._pending_enters.pop(signal.task_id, None)
+            return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
+
+        unmet = self._unmet_guards(topology)
+        if unmet:
+            # 条件层锁存后不会再产生同一条 false→true 边沿，因此先保存信号，等前提
+            # 满足后由上游释放。保存原始信号也意味着 session 的起点按主条件首次成立
+            # 计，而不是按前提恢复时刻计。
+            pending = self._pending_enters.setdefault(signal.task_id, {})
+            if signal.rule_id not in pending:
+                logger.info(
+                    "task %s 的进入被前提拦下 (rule=%s): %s",
+                    signal.task_id,
+                    signal.rule_id,
+                    ", ".join(f"{rid}={why}" for rid, why in unmet),
+                )
+            else:
+                logger.debug(
+                    "task %s 的进入仍被前提拦下 (rule=%s): %s",
+                    signal.task_id,
+                    signal.rule_id,
+                    ", ".join(f"{rid}={why}" for rid, why in unmet),
+                )
+            pending.setdefault(signal.rule_id, signal)
+            return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
+
         if not topology.is_session_type:
             # 事件型: runtime_state 恒 off, 每次进信号都执行 on_enter, 不卡死。
+            self.clear_pending_enters(signal.task_id, signal.rule_id)
             self._maybe_dispatch(signal.task_id, ActionSlot.ON_ENTER, signal.payload)
             return self._done(TransitionOutcome.EVENT_FIRED, signal)
-
-        if self.runtime_state(signal.task_id) is TaskRuntimeState.ON:
-            # 幂等: 多条路径同时进只执行一次边界动作。
-            return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
         if self._exit_condition_already_true(signal, topology):
             # §5.1: 进入时退出条件已为真 → 拒绝进入。让错误表现从"开了永远不关"
@@ -351,8 +416,74 @@ class TaskStateMachine:
             return self._done(TransitionOutcome.BLOCKED_BY_EXIT_CONDITION, signal)
 
         self._states[signal.task_id] = TaskRuntimeState.ON
+        self._pending_enters.pop(signal.task_id, None)
         self._maybe_dispatch(signal.task_id, ActionSlot.ON_ENTER, signal.payload)
         return self._done(TransitionOutcome.ENTERED, signal)
+
+    def release_pending_enters(self, task_id: str) -> list[TaskSignal]:
+        """释放当前仍有效、且全部 guard 已满足的进入请求。
+
+        只返回原始信号，由上游保留的执行上下文负责真正派发动作；状态机只完成
+        Task 级进入许可和状态转移。
+        """
+        topology = self._topologies.get(task_id)
+        pending = self._pending_enters.get(task_id)
+        if topology is None or not pending:
+            return []
+
+        if self.runtime_state(task_id) is TaskRuntimeState.ON:
+            pending.clear()
+            return []
+
+        releasable: list[TaskSignal] = []
+        for rule_id, signal in list(pending.items()):
+            direction = topology.directions.get(rule_id)
+            if direction not in (RuleDirection.ENTER, RuleDirection.SESSION):
+                pending.pop(rule_id, None)
+                continue
+            condition_state = self._is_condition_satisfied(rule_id)
+            if condition_state is False:
+                pending.pop(rule_id, None)
+                continue
+            if condition_state is None:
+                continue
+            if self._unmet_guards(topology):
+                continue
+            if self._exit_condition_already_true(signal, topology):
+                continue
+
+            if topology.is_session_type:
+                self._states[task_id] = TaskRuntimeState.ON
+            self._done(
+                TransitionOutcome.ENTERED
+                if topology.is_session_type
+                else TransitionOutcome.EVENT_FIRED,
+                signal,
+            )
+            releasable.append(signal)
+            if topology.is_session_type:
+                break
+
+        if topology.is_session_type:
+            if releasable:
+                pending.clear()
+        else:
+            for signal in releasable:
+                pending.pop(signal.rule_id, None)
+        if not pending:
+            self._pending_enters.pop(task_id, None)
+        return releasable
+
+    def clear_pending_enters(self, task_id: str, rule_id: str | None = None) -> None:
+        pending = self._pending_enters.get(task_id)
+        if pending is None:
+            return
+        if rule_id is None:
+            self._pending_enters.pop(task_id, None)
+            return
+        pending.pop(rule_id, None)
+        if not pending:
+            self._pending_enters.pop(task_id, None)
 
     def _handle_exit(
         self, signal: TaskSignal, topology: TaskTopology
@@ -414,6 +545,22 @@ class TaskStateMachine:
             topology.holding_rule_ids - {signal.rule_id}
         )
 
+    def _unmet_guards(self, topology: TaskTopology) -> list[tuple[str, str]]:
+        """没有明确成立的前提。全部成立 (或一条前提都没有) 时返回空表。
+
+        未就绪 (设备离线 / 属性还没求过值) 按不成立算: 放行的话前提在设备离线期间
+        静默失效, 而用户看不出来; 不放行的表现是规则完全不响, 当场能发现。
+
+        两者在返回值里分开, 因为修法不同 —— 一个查设备在不在线, 一个是条件真的不
+        满足。
+        """
+        unmet: list[tuple[str, str]] = []
+        for rule_id in sorted(topology.guard_rule_ids):
+            value = self._is_condition_satisfied(rule_id)
+            if value is not True:
+                unmet.append((rule_id, "未就绪" if value is None else "不成立"))
+        return unmet
+
     def _any_condition_true(self, rule_ids: set[str]) -> bool:
         return any(
             self._is_condition_satisfied(rid) is True for rid in rule_ids
@@ -450,8 +597,21 @@ class TaskStateMachine:
                     self._track(TransitionOutcome.SIGNAL_DROPPED, stale)
                 queue.clear()
 
-            was_on = self.runtime_state(task_id) is TaskRuntimeState.ON
             new_topology = TaskTopology(task_id, dict(directions))
+            pending = self._pending_enters.get(task_id)
+            if pending is not None:
+                pending = {
+                    rule_id: signal
+                    for rule_id, signal in pending.items()
+                    if new_topology.directions.get(rule_id)
+                    in (RuleDirection.ENTER, RuleDirection.SESSION)
+                }
+                if pending:
+                    self._pending_enters[task_id] = pending
+                else:
+                    self._pending_enters.pop(task_id, None)
+
+            was_on = self.runtime_state(task_id) is TaskRuntimeState.ON
             self._topologies[task_id] = new_topology
             self._queues.setdefault(task_id, deque(maxlen=SIGNAL_QUEUE_DEPTH))
             self._wakeups.setdefault(task_id, asyncio.Event())
@@ -472,6 +632,7 @@ class TaskStateMachine:
         if task_id not in self._topologies:
             return
         self._states[task_id] = TaskRuntimeState.OFF
+        self._pending_enters.pop(task_id, None)
         queue = self._queues.get(task_id)
         if queue:
             for stale in queue:
@@ -503,7 +664,7 @@ class TaskStateMachine:
 
         两种形态问的不是同一个问题, 不能共用一个判据:
 
-        - **session**: 有没有会话条件还成立。它的"条件成立"就等于"还在会话中"。
+        - **session**: 会话还撑着吗。它的"条件成立"就等于"还在会话中"。
         - **enter + exit**: 出口条件是不是都没成立。它压根没有会话条件, 拿"有没有
           条件撑着"去问答案恒为否 —— 改个防抖参数都会把 task 打成退出、白跑一次
           退出动作。
@@ -512,15 +673,21 @@ class TaskStateMachine:
         出去, 那次退出动作也永远不会发。
 
         ``_is_condition_satisfied`` 是三值: ``True`` 成立, ``False`` 观测到不成立,
-        ``None`` 还没喂过数据(新加进来的 rule 就是这种)。两条分支都只认 ``True``,
-        但导向相反的保守方向: session 全是 ``None`` 时无从确认还撑着, 宁可多发一次
-        退出也不要静默卡在 on; enter + exit 没观测到出口成立就不该退, 那次退出动作
-        是真会对外下指令的。
+        ``None`` 不知道 —— 来源有两个: 还没喂过数据(新加进来的 rule), 以及 iot 源在
+        设备离线时置的未知。两条分支都只认明确的观测, 都不让 ``None`` 导向退出:
+
+        - **session**: 只有观测到会话条件不成立才算会话结束。拿 ``None`` 当"没撑着"
+          会在设备离线期间的任意一次重算上误发一次 on_exit, 而 runner 侧的边沿缓存
+          没被清过, 设备回来时属性没变就只产 STILL_IN, 两层就此分叉且不自愈。
+        - **enter + exit**: 没观测到出口成立就不该退, 那次退出动作是真会对外下指令的。
         """
         # 按"有没有会话规则"分派, 不是按 is_session_type —— 后者的含义是"有出路径",
         # enter + exit 也满足, 走进会话分支就正好踩上面说的那个坑。
         if topology.holding_rule_ids:
-            return self._any_condition_true(topology.holding_rule_ids)
+            return not all(
+                self._is_condition_satisfied(rid) is False
+                for rid in topology.holding_rule_ids
+            )
         if not topology.exit_side_rule_ids:
             return False
         return not self._any_condition_true(topology.exit_side_rule_ids)
@@ -538,6 +705,7 @@ class TaskStateMachine:
         if task_id not in self._topologies:
             return TransitionOutcome.UNKNOWN_RULE
         if slot is ActionSlot.ON_ENTER:
+            self._pending_enters.pop(task_id, None)
             if self._topologies[task_id].is_session_type:
                 # 事件型没有出路径, 运行态恒 off 且永远收不到退信号。无条件置 on
                 # 会让它永久停在 on, 连带把达标的"不在会话中"闸放开。

@@ -613,11 +613,11 @@ def test_on_target_creates_milestone_rule(v2_db):
     conn.close()
 
 
-def test_milestone_legacy_condition_uses_unreachable_did(v2_db):
-    """补建的 milestone rule 在旧 condition 列上填一个不存在的 did。
+def test_milestone_legacy_condition_has_no_device(v2_db):
+    """补建的 milestone rule 在旧 condition 列上不填设备。
 
-    阶段 A 不删列, 万一退回旧代码, 旧代码只认 perceive_device_ids —— 留空会让
-    它把"累计达标"当视觉 query 塞进每台摄像头的 prompt。
+    达标不看摄像头。收口之后感知先按 resolved_source_type 过滤，这条 rule 根本
+    不进那个循环，那一列填什么都不影响它 —— 填一个假 did 只会误导下一个人。
     """
     _seed(
         v2_db,
@@ -634,7 +634,7 @@ def test_milestone_legacy_condition_uses_unreachable_did(v2_db):
         "SELECT condition FROM rule WHERE task_id='t1' AND direction='milestone'"
     ).fetchone()
     legacy = json.loads(milestone["condition"])
-    assert legacy["perceive_device_ids"] == ["__milestone_no_camera__"]
+    assert legacy["perceive_device_ids"] == []
     conn.close()
 
 
@@ -821,11 +821,14 @@ def test_a_v2_db_whose_version_number_was_lost_still_migrates(v2_db):
     光看"有没有 task_link"会把它判成当前基线: task_link 早在 v1→v2 就删了。钉死
     之后 v3→v4 永远不跑, 版本号说是最新而新列一个都没有。
     """
-    _seed(v2_db, lambda c: (
-        _add_task(c, "t1"),
-        _add_rule(c, "r1", "t1", mode="state", on_enter_desc="进来了"),
-        c.execute("PRAGMA user_version = 0"),
-    ))
+    _seed(
+        v2_db,
+        lambda c: (
+            _add_task(c, "t1"),
+            _add_rule(c, "r1", "t1", mode="state", on_enter_desc="进来了"),
+            c.execute("PRAGMA user_version = 0"),
+        ),
+    )
 
     _migrate(v2_db)
 
@@ -839,9 +842,10 @@ def test_a_v2_db_whose_version_number_was_lost_still_migrates(v2_db):
     assert conn.execute("SELECT direction FROM rule WHERE id='r1'").fetchone()[0] == (
         "session"
     )
-    assert conn.execute(
-        "SELECT on_enter_desc FROM task WHERE task_id='t1'"
-    ).fetchone()[0] == "进来了"
+    assert (
+        conn.execute("SELECT on_enter_desc FROM task WHERE task_id='t1'").fetchone()[0]
+        == "进来了"
+    )
     conn.close()
 
 
@@ -858,7 +862,7 @@ def test_a_v4_db_whose_version_number_was_lost_is_not_migrated_again(v2_db):
         "INSERT INTO rule (id, name, task_id, mode, direction, lifecycle, enabled, "
         "condition, actions, action_descriptions, created_at, updated_at) "
         "VALUES ('r_exit', 'r_exit', 't1', 'event', 'exit', 'permanent', 1, "
-        "'{\"perceive_device_ids\":[],\"query\":\"q\"}', '[]', '[\"走了\"]', 0, 0)"
+        '\'{"perceive_device_ids":[],"query":"q"}\', \'[]\', \'["走了"]\', 0, 0)'
     )
     conn.execute("PRAGMA user_version = 0")
     conn.commit()
@@ -871,9 +875,10 @@ def test_a_v4_db_whose_version_number_was_lost_is_not_migrated_again(v2_db):
 
     conn = _raw(v2_db)
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
-    assert conn.execute(
-        "SELECT direction FROM rule WHERE id='r_exit'"
-    ).fetchone()[0] == "exit"
+    assert (
+        conn.execute("SELECT direction FROM rule WHERE id='r_exit'").fetchone()[0]
+        == "exit"
+    )
     conn.close()
 
 
@@ -937,3 +942,42 @@ def test_a_v4_shaped_db_is_detected_as_v4(tmp_path):
     )
     assert _detect_schema_version(conn) == 4
     conn.close()
+
+
+# ── 旧 condition → DNF 的反推（迁移侧那层包装）────────────────────────
+
+
+def test_a_half_dirty_condition_keeps_the_field_that_is_fine():
+    """一个字段的脏值不能带走另一个。
+
+    存量脏数据在迁移里的处置是降级而不是抛，但降级要逐字段：设备列表是个字符串时
+    query 还是好的，整条降级会把它一起丢掉，而这条 rule 的 DNF 从此与 condition 列
+    对不上——之后任何一次全量 PUT 都会被 omni 一致性校验拒。
+    """
+    from miloco.database.connector import _condition_to_dnf
+
+    raw = json.dumps({"perceive_device_ids": "cam1", "query": "有人经过"})
+
+    item = json.loads(_condition_to_dnf(raw))["any_of"][0][0]
+
+    assert item["spec"] == {"perceive_device_ids": [], "query": "有人经过"}
+
+
+def test_a_non_string_query_does_not_take_the_device_list_with_it():
+    from miloco.database.connector import _condition_to_dnf
+
+    raw = json.dumps({"perceive_device_ids": ["cam1"], "query": 123})
+
+    item = json.loads(_condition_to_dnf(raw))["any_of"][0][0]
+
+    assert item["spec"] == {"perceive_device_ids": ["cam1"], "query": ""}
+
+
+def test_a_completely_unparsable_condition_degrades_to_an_empty_omni_item():
+    """完全脏（非 JSON）仍然降级、不抛 —— 存量脏数据不能卡住启动。"""
+    from miloco.database.connector import _condition_to_dnf
+
+    item = json.loads(_condition_to_dnf("not json at all"))["any_of"][0][0]
+
+    assert item["source_type"] == "omni"
+    assert item["spec"] == {"perceive_device_ids": [], "query": ""}

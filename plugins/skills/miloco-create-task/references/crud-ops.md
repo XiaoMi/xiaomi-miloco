@@ -92,13 +92,13 @@ miloco-cli task enable <task_id>    # 启用
 **步骤**:
 
 1. 解析 task_id 和改动语义
-2. **改底层载体(必跑)** —— 按改动维度逐一改 rule / cron / memory:
+2. **改底层载体(必跑)** —— 按改动维度逐一改 rule / cron / memory（涉及 rule 的行先看源：`task get` 的 `rule_briefs[].source_type`，omni 与 iot 的命令不同）:
 
 | 改什么 | 改哪 | 怎么做 |
 |---|---|---|
-| rule 条件 / 防抖 | rule | `miloco-cli rule update <rule_id> ...`（`rule_id` 从 `task get` 的 `rule_briefs[].rule_id` 拿） |
+| rule 条件 / 防抖 | rule | `miloco-cli rule update <rule_id> ...`（`rule_id` 从 `task get` 的 `rule_briefs[].rule_id` 拿）。防抖两源同写法 `--exit-debounce-seconds <N>`；改条件按源分支：`omni` 传 `--condition "<新命题>"`，`iot` 传 `--iot-did <did> --iot-iid <siid.piid> --iot-op <op> --iot-value <v>`（四个同时给，缺一个报错；iot 规则传 `--condition` 会被服务端拒）。iot 的四个现值从 `miloco-cli rule list --pretty` 里那条 rule 的 `condition_dnf.any_of[0][0].spec` 抄，只改要改的那一个 |
 | 动作（进入 / 退出 / 达标做什么） | task | `miloco-cli task set-actions <task_id> ...`（槽与 flag 见 SKILL.md §动作装在哪）。**同方向**多条 rule 争同一个槽时 `rule update` 改动作会被跳过并告警，必须走这里；一进一出各占各槽的组合仍可用 rule 侧动作 flag |
-| 持续时长门槛 | rule | `miloco-cli rule update <rule_id> --duration-seconds <N>`（单位换算见 SKILL.md §Rule.duration_seconds）；desc 含字面分钟/小时数时同步改 |
+| 持续时长门槛 | rule / record | 见 SKILL.md §Rule.duration_seconds。`omni`：`miloco-cli rule update <rule_id> --duration-seconds <N>`（单位换算同节）。`iot`：本字段禁配、传了会被拒，时长走 `miloco-cli task record update <task_id> --patch '{"target_minutes": <N>}'`。desc 含字面分钟/小时数时同步改 |
 | 触发时间 / cron 表达式 | schedule | `miloco-cli cron remove <cron_id>` + `cron add ...`（cron 无 update API）；`cron_id` 从 `task get` 的 `cron_refs[].ref` 拿；新 cron 通过 `task_id` 参数直接绑到 task，无需额外 link 步骤；新建 cron 必带独立 `tz="<家庭时区>"` 字段（见 SKILL.md §Schedule.时区）。`dispatch_owner=external` 的老 cron 属 openclaw 侧接管，agent 通过自然语言指令让 openclaw 内部 cron API 处理 |
 | 目标值 / 单位 / window / recurring_pattern / expires_at | record | `miloco-cli task record update <task_id> --patch '{...}'`（白名单按 kind：progress=target/unit/window/recurring_pattern/expires_at；duration=target_minutes/recurring_pattern/expires_at；event=recurring_pattern/expires_at）|
 | 到期时刻 / 长期↔限时 | task | `miloco-cli task update <task_id> --expires-at <ISO>`（改到期）/ `--lifecycle permanent --clear-expires-at`（限时改回长期）。**同一个 ISO 在 task / 销毁 cron / record 三处各存一份，改的时候三份都要改**：cron 走 remove + add，record 走 `task record update` |

@@ -31,11 +31,11 @@ const MILOCO_PLUGIN_CONFIG_SCHEMA = {
         type: "boolean",
         description: "调试模式：覆盖 config.json 顶层 debug",
       },
-      /** 多模态模型标识（provider/model）：覆盖 config.json model.omni.model */
+      /** 多模态模型标识（如 mimo-v2.6-flash）：覆盖 config.json model.omni.model */
       omni_model: {
         type: "string",
         description:
-          "多模态模型标识（provider/model）：覆盖 config.json model.omni.model",
+          "多模态模型标识（如 mimo-v2.6-flash）：覆盖 config.json model.omni.model",
       },
       /** 多模态模型服务 Base URL：覆盖 config.json model.omni.base_url */
       omni_base_url: {

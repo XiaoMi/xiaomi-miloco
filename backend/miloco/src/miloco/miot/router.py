@@ -22,7 +22,7 @@ from miloco.middleware import (
     verify_token,
     verify_websocket_token,
 )
-from miloco.middleware.exceptions import HTTPException
+from miloco.middleware.exceptions import BadRequestException, HTTPException
 from miloco.miot.schema import (
     AuthorizeRequest,
     CameraCropToggleRequest,
@@ -40,7 +40,7 @@ from miloco.miot.ws import (
     miot_video_stream_manager,
 )
 from miloco.schema.common_schema import NormalResponse
-from miloco.utils.common import escape_for_js_string
+from miloco.utils.common import escape_for_js_string, safe_log
 
 logger = logging.getLogger(name=__name__)
 
@@ -70,6 +70,26 @@ def _truncate_ws_reason(reason: str) -> str:
     return encoded[:120].decode("utf-8", errors="ignore")
 
 
+def _safe_log(value) -> str:
+    """去 CR/LF 防 log injection (CodeQL py/log-injection)。
+
+    **凡是来自请求的值都要过一遍,不分类型**:CodeQL 只看「值来自请求」,不信任
+    类型注解。实测踩过两次:
+      - ``channel`` / ``duration_ms`` 声明成 ``int`` 也照样被报(第一批 4 条 alert
+        全部指向 ``channel`` 而非 ``camera_id``);
+      - ``timeout_s`` 由 ``duration_ms`` 算出,污点会**传播**过来;
+      - ``current_user`` 来自 ``Depends(verify_token)``,一样算请求输入。
+    所以调用侧统一 ``%s`` + ``_safe_log()``,别看着是数字或已鉴权就跳过。数值想保
+    留格式就先格式化再消毒:``_safe_log(f"{timeout_s:.1f}")``。
+
+    注:本文件里未被本次改动碰到的历史日志点仍是裸值(CodeQL 在 PR 上只对改动行
+    报警),不在本次范围内;新增/修改日志时请一律走本函数。
+    """
+    if value is None:
+        return "None"
+    return str(value).replace("\r", "").replace("\n", " ")
+
+
 # 首帧看门狗:WS 注册成功(reg_id≥0)后,若摄像头在这么多秒内一帧都没出,判定为
 # "连不上"(典型:摄像头跟 backend 不在同一局域网且 PPCS 中继也没建起来 / 摄像头离线 /
 # 休眠)。给前端发一条明确的 error 信令再关,而不是让它永远停在"正在连接摄像头…"。
@@ -77,49 +97,131 @@ def _truncate_ws_reason(reason: str) -> str:
 # 真连不上的住户干等太久。
 _FIRST_FRAME_TIMEOUT_S = 12.0
 
+# 首帧超时后的续等窗口:摄像头会周期性静默(27s~7min 后自愈,见 memory/camera-periodic-
+# silence-watchdog)。静默检测 30s 触发 destroy+create 重拉(约 15s 出帧),续等盖住这
+# ~45s,期间出帧即解除,避免把「正在恢复的摄像头」误报成 unreachable 拆连接。
+_GRACE_EXTENSION_S = 60.0
+
+# reason 机器码 → 兜底文案的**单一映射**。前端（watch.html / hero.json）按 reason 查
+# 自己的本地译文，这里的 message 只在「客户端缓存了旧版 watch.html、不认识新 reason」
+# 时才显示——正因为它平时看不见，漂移最容易发生。整句文案在仓里共四处，收敛成
+# 「一份来源 + 三处引用」：hero.json 是来源，watch.html 由
+# web/tests/crossSubnetCopySync.test.ts 断言相等，本表由
+# tests/test_watchdog_cross_subnet.py 直接读 hero.json 断言相等。改措辞先改 hero.json。
+UNREACHABLE_MESSAGES = {
+    "camera_unreachable_cross_subnet": (
+        "跨网段拉流失败，建议将摄像头与主机接入同一网络，或把路由器设置为 全锥/开放 NAT"
+    ),
+    "camera_unreachable": "连不上摄像头(可能不在同一局域网,或摄像头离线)",
+}
+
+
+def _nat_blocked(camera_id: str) -> bool:
+    """会话是否已被判定为跨网段 NAT 阻断，口径与相机列表的 ``stream_error`` 完全一致。
+
+    缓存缺失/异常一律回退成「证据不足」（False）：宁可让看门狗照常续等，也不因一次
+    缓存抖动提前把住户的连接判死。
+
+    这是「是否跨 NAT 受阻」的**唯一判据入口**——第一道门就是缓存里的 ``cross_subnet``
+    （见 ``MIoTProxy.stream_nat_blocked``），所以调用方不需要、也不应该再自己取一份
+    跨网段标记去与本方法合取：那份快照会停在取值时刻，与本方法现取的结论错位。
+    """
+    try:
+        return bool(get_manager().miot_proxy.stream_nat_blocked(camera_id))
+    except Exception:  # noqa: BLE001
+        return False
+
 
 async def _first_frame_watchdog(
     websocket: WebSocket, camera_id: str, channel: int
 ) -> None:
-    """等首帧;超时仍无帧 → 发 error 信令 + 主动关闭,让前端能明确告知住户连不上。
+    """等首帧;超时仍无帧 → 续等一段再判,给静默检测+重连留时间。
 
     被 ``video_stream_websocket`` 当后台 task 起。正常出帧时这个 task 等满
     ``_FIRST_FRAME_TIMEOUT_S`` 后发现 ``has_emitted_frame`` 为真,啥也不做退出。
     取消安全:住户在超时前主动关页 → 主流程 finally 里 cancel 本 task,
     ``CancelledError`` 直接向上抛,不吞。
+
+    跨网段相机即便探测/注册成功也可能因路由器 NAT 类型限制拉流建不起来(首帧永不到),
+    此时给跨 NAT 专属提示,而不是笼统的「可能不在同一局域网/离线」——后者对已跨网段
+    的住户没有任何信息量。判据一律在**判定时刻现取** ``_nat_blocked``,不接受调用方
+    传进来的快照:跨网段标记要等局域网首次探到这台相机才从空翻真(探测周期 5~45s,
+    见 ``lan.py``),而住户往往在主机刚起、首包还没回来时就点开了播放页,那一刻的
+    快照恒为假 —— 拿它合取会让本该短路的那群永远走满续等,还会与列表接口的
+    ``stream_error`` 各说一套。
     """
     await asyncio.sleep(_FIRST_FRAME_TIMEOUT_S)
     if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
         return
+    # 已握有「跨网段 + 探测可达 + 原生会话卡在连接中超 60s」这组确定性证据时不再续等。
+    # 续等是为了容忍相机周期性静默(27s~7min 后自愈),而那条链上相机是**出过帧**的
+    # (状态 CONNECTED ⇒ _camera_connect_since 已被 pop ⇒ 这里恒 False),续等原样保留。
+    # 反过来,一帧没出且会话已卡满 60s 的跨网段相机,这 60s 里既不会出帧,也等不到自愈:
+    # 建连计时在原生管理器创建时就播种,通常远早于住户点开播放页,所以静默检测早已跑
+    # 过并进入 5min 重建冷却;即便重建了,走的还是同一条被 NAT 阻断的路径。纯空转。
+    if not _nat_blocked(camera_id):
+        # 12s 无首帧:续等,期间出帧即解除(静默自愈 / 静默检测重连完成)。
+        logger.info(
+            "First-frame delayed, %s.%s — no frame in %.0fs, extending grace %.0fs",
+            _safe_log(camera_id), _safe_log(channel),
+            _FIRST_FRAME_TIMEOUT_S, _GRACE_EXTENSION_S,
+        )
+        await asyncio.sleep(_GRACE_EXTENSION_S)
+        if miot_video_stream_manager.has_emitted_frame(camera_id, channel):
+            return
+        waited_s = _FIRST_FRAME_TIMEOUT_S + _GRACE_EXTENSION_S
+    else:
+        logger.warning(
+            "First-frame watchdog short-circuited, %s.%s — NAT-blocked evidence "
+            "already conclusive, skipping %.0fs grace",
+            _safe_log(camera_id), _safe_log(channel), _GRACE_EXTENSION_S,
+        )
+        waited_s = _FIRST_FRAME_TIMEOUT_S
+    # 实际等待时长按走过的出口算：短路那条只过了 12s，写死 72s 会让运维按 6 倍的
+    # 时长反推「是不是等得不够久」，还和上一行刚打的 "skipping 60s grace" 自相矛盾。
     logger.warning(
-        "First-frame watchdog fired, %s.%d — no frame in %.0fs, camera likely "
+        "First-frame watchdog fired, %s.%s — no frame in %.0fs, camera likely "
         "unreachable (cross-LAN / offline / PPCS relay not established)",
-        camera_id, channel, _FIRST_FRAME_TIMEOUT_S,
+        _safe_log(camera_id), _safe_log(channel), waited_s,
     )
+    # NAT 阻断判据在选文案时**重新取一次**：走续等那条路时又过了 60s，会话可能
+    # 刚跨过 _STREAM_NAT_TIMEOUT。与列表接口的 stream_error 共用 stream_nat_blocked
+    # 这个唯一入口（云端离线 / 局域网探不到 → 不给 NAT 提示），保证同一台相机在
+    # 播放页与「家里此刻」卡片上不会各说一套——相机只是断电时，通用文案里的
+    # 「或摄像头离线」才是对住户有用的线索，指向路由器 NAT 是错误方向。
+    reason = (
+        "camera_unreachable_cross_subnet"
+        if _nat_blocked(camera_id)
+        else "camera_unreachable"
+    )
+    message = UNREACHABLE_MESSAGES[reason]
     try:
-        # reason 是给将来按机器码分流预留的字段;前端 watch.html 当前只展示 message,
-        # 不读 reason。两个都发,前端按需取。
+        # reason 是给前端按机器码分流用的字段(camera_unreachable / 跨 NAT 专属);
+        # 前端按 reason 查本地译文,未知 reason 才回退 message。两个都发。
         await websocket.send_text(
             json.dumps({
                 "type": "error",
-                "reason": "camera_unreachable",
-                "message": "连不上摄像头(可能不在同一局域网,或摄像头离线)",
+                "reason": reason,
+                "message": message,
             })
         )
     except Exception as err:
         # send 失败基本意味着连接已被对端关掉——再 close 也是白搭,还会再抛一条
         # error 把"连接没了"这件正常事刷成两条 ERROR。直接收尾,主流程 finally 的
         # close_connection 负责清理。降到 info,不混进真 error。
-        logger.info("watchdog send skipped (conn likely gone), %s.%d: %s",
-                    camera_id, channel, err)
+        logger.info("watchdog send skipped (conn likely gone), %s.%s: %s",
+                    _safe_log(camera_id), _safe_log(channel), err)
         return
     try:
-        # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)
+        # 1011 + 短 reason(已被 _truncate_ws_reason 口径约束在 control frame 上限内)。
+        # 复用上面的 reason——与发信令的 reason 同源,保证 close 端与前端展示一致,
+        # 不会出现「改了信令忘了改 close」的分裂。
         await websocket.close(
-            code=1011, reason=_truncate_ws_reason("camera_unreachable")
+            code=1011, reason=_truncate_ws_reason(reason)
         )
     except Exception as err:
-        logger.info("watchdog close failed, %s.%d: %s", camera_id, channel, err)
+        logger.info("watchdog close failed, %s.%s: %s",
+                    _safe_log(camera_id), _safe_log(channel), err)
 
 
 router = APIRouter(prefix="/miot", tags=["Xiaomi IoT"])
@@ -258,6 +360,75 @@ async def get_device_spec(did: str, current_user: str = Depends(verify_token)):
     """Get spec for a single device (轻量，不拉全量 home_info)。"""
     logger.info("Get device spec API called, user=%s, did=%s", current_user, did)
     data = await manager.miot_service.get_device_spec(did)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+def build_state_stats(store, push_writer) -> dict:
+    """容器与推送写入器的计数。
+
+    **写入器缺席给空 dict，不抛。** 生产 HTTP 路径打不到这个分支：``_wire_iot_push()``
+    在 ``initialize()`` 里无条件跑，而 uvicorn 是 lifespan 启动段跑完才绑监听端口。留
+    着是为了这个函数能脱离 Manager 单测 —— 别照它给 ``initialize()`` 里赋的其它服务
+    也补一圈判空。
+    """
+    return {
+        "store": store.stats(),
+        "push": push_writer.stats() if push_writer is not None else {},
+    }
+
+
+def build_state_dump(store, pattern: str, limit: int) -> dict:
+    """按 pattern 取容器的文本转储，超长截断。
+
+    **截断而不是拒绝，但 ``total_lines`` 必须是截断前的真实行数、``truncated`` 必须
+    明说** —— 否则调用方会把截断后的 lines 当成整棵树。
+    """
+    lines = store.dump(pattern).splitlines()
+    total_lines = len(lines)
+    return {
+        "pattern": pattern,
+        "total_lines": total_lines,
+        "truncated": total_lines > limit,
+        "lines": lines[:limit],
+    }
+
+
+@router.get(
+    path="/state/stats",
+    summary="State container and push counters",
+    response_model=NormalResponse,
+)
+async def get_state_stats(current_user: str = Depends(verify_token)):
+    """容器与推送的计数。**debug 级日志**：这个端点天然会被轮询（判「推送通没通」就
+    是反复读它），一边 tail 日志排查一边轮询它，自己的轮询会刷进正在读的那份日志。"""
+    logger.debug("State stats API called, user=%s", safe_log(current_user))
+    data = build_state_stats(manager.state_store, manager.iot_push_writer)
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.get(
+    path="/state/dump",
+    summary="Dump the state container",
+    response_model=NormalResponse,
+)
+async def get_state_dump(
+    pattern: str = Query("**", description="路径 pattern，例如 iot/device/*/prop/*"),
+    limit: int = Query(500, ge=1, le=5000),
+    current_user: str = Depends(verify_token),
+):
+    """按 pattern 转储容器。比 stats 重、调用少，留一条 info 痕迹是合理的。"""
+    logger.info(
+        "State dump API called, user=%s, pattern=%s, limit=%d",
+        safe_log(current_user),
+        safe_log(pattern),
+        limit,
+    )
+    try:
+        data = build_state_dump(manager.state_store, pattern, limit)
+    except ValueError as e:
+        # 本模块的 HTTPException 是 miloco 自己那个 (message, status_code)，
+        # 不是 FastAPI 的 (status_code, detail) —— 传错会 TypeError 变 500。
+        raise BadRequestException(str(e)) from e
     return NormalResponse(code=0, message="ok", data=data)
 
 
@@ -628,8 +799,9 @@ async def record_clip(
     return 504; register failures (camera not bound) return 503.
     """
     logger.info(
-        "record_clip API called, user: %s, camera: %s.%d, dur=%dms",
-        current_user, camera_id, channel, duration_ms,
+        "record_clip API called, user: %s, camera: %s.%s, dur=%sms",
+        _safe_log(current_user), _safe_log(camera_id), _safe_log(channel),
+        _safe_log(duration_ms),
     )
     recorder = NalClipRecorder(duration_ms=duration_ms)
     try:
@@ -648,8 +820,11 @@ async def record_clip(
             mp4_bytes = await recorder.wait(timeout=timeout_s)
         except asyncio.TimeoutError:
             logger.warning(
-                "record_clip timeout, %s.%d — no keyframe within %.1fs",
-                camera_id, channel, timeout_s,
+                "record_clip timeout, %s.%s — no keyframe within %ss",
+                _safe_log(camera_id), _safe_log(channel),
+                # timeout_s 由 Query 参数 duration_ms 算出 → 污点传播过来,同样要消毒。
+                # 先格式化再消毒,保住原来的 1 位小数。
+                _safe_log(f"{timeout_s:.1f}"),
             )
             raise HTTPException(
                 message=(
@@ -665,8 +840,8 @@ async def record_clip(
         )
 
     logger.info(
-        "record_clip OK, %s.%d, %d bytes",
-        camera_id, channel, len(mp4_bytes),
+        "record_clip OK, %s.%s, %d bytes",
+        _safe_log(camera_id), _safe_log(channel), len(mp4_bytes),
     )
     return Response(
         content=mp4_bytes,
@@ -725,7 +900,8 @@ async def video_stream_websocket(
 ):
     """Video stream WebSocket."""
     logger.info(
-        "WebSocket connection request, %s, %s.%d", current_user, camera_id, channel
+        "WebSocket connection request, %s, %s.%s",
+        _safe_log(current_user), _safe_log(camera_id), _safe_log(channel),
     )
     start_time: datetime = datetime.now()
     token_hash: str = str(hash(websocket.cookies.get("access_token")))
@@ -754,6 +930,10 @@ async def video_stream_websocket(
         # 会让它 no-op 退出,无害。
         # (watchdog 已在 try 外声明为 None,供 accept/new_connection 早抛时 finally 安全读)
         if not miot_video_stream_manager.has_emitted_frame(camera_id, channel):
+            # 跨网段/NAT 阻断判据不在这里取:看门狗最长要睡 72s 才判定,而局域网首次
+            # 探到这台相机(探测周期 5~45s)才会把跨网段标记从空翻真——此刻取的快照
+            # 在「主机刚起、住户第一时间点开播放页」这个最典型入口下恒为假。判据
+            # 一律由看门狗在判定时刻现取 _nat_blocked。
             watchdog = asyncio.create_task(
                 _first_frame_watchdog(websocket, camera_id, channel)
             )
@@ -771,13 +951,15 @@ async def video_stream_websocket(
             except WebSocketDisconnect:
                 # 看门狗判定连不上后主动 close,或住户关页——recv 抛 disconnect 是
                 # 预期的正常收尾,不是异常。降到 info,别跟真 error 混淆刷 ERROR 噪音。
-                logger.info("Client closed, %s.%d", camera_id, channel)
+                logger.info("Client closed, %s.%s",
+                            _safe_log(camera_id), _safe_log(channel))
                 break
             except Exception as err:
                 logger.error("WebSocket error: %s", err)
                 break
     except WebSocketDisconnect:
-        logger.info("Client disconnected, %s.%d", camera_id, channel)
+        logger.info("Client disconnected, %s.%s",
+                    _safe_log(camera_id), _safe_log(channel))
     except Exception as err:
         logger.error("WebSocket error, %s", err)
         await websocket.close(
@@ -789,10 +971,10 @@ async def video_stream_websocket(
         if watchdog is not None:
             watchdog.cancel()
         logger.info(
-            "Websocket connect duration[%.2fs], %s.%d",
+            "Websocket connect duration[%.2fs], %s.%s",
             (datetime.now() - start_time).total_seconds(),
-            camera_id,
-            channel,
+            _safe_log(camera_id),
+            _safe_log(channel),
         )
         if cid:
             await miot_video_stream_manager.close_connection(
@@ -813,10 +995,10 @@ async def audio_stream_websocket(
 ):
     """Audio stream WebSocket."""
     logger.info(
-        "Audio WebSocket connection request, %s, %s.%d",
-        current_user,
-        camera_id,
-        channel,
+        "Audio WebSocket connection request, %s, %s.%s",
+        _safe_log(current_user),
+        _safe_log(camera_id),
+        _safe_log(channel),
     )
     start_time: datetime = datetime.now()
     token_hash: str = str(hash(websocket.cookies.get("access_token")))
@@ -837,13 +1019,15 @@ async def audio_stream_websocket(
             except WebSocketDisconnect:
                 # 住户关页是正常收尾,不是异常——跟 video 端点对齐,降到 info 避免
                 # 跟真 error 混淆刷 ERROR 噪音。
-                logger.info("Audio client closed, %s.%d", camera_id, channel)
+                logger.info("Audio client closed, %s.%s",
+                            _safe_log(camera_id), _safe_log(channel))
                 break
             except Exception as err:
                 logger.error("Audio WebSocket error: %s", err)
                 break
     except WebSocketDisconnect:
-        logger.info("Audio client disconnected, %s.%d", camera_id, channel)
+        logger.info("Audio client disconnected, %s.%s",
+                    _safe_log(camera_id), _safe_log(channel))
     except Exception as err:
         logger.error("Audio WebSocket error, %s", err)
         await websocket.close(
@@ -851,10 +1035,10 @@ async def audio_stream_websocket(
         )
     finally:
         logger.info(
-            "Audio WebSocket connect duration[%.2fs], %s.%d",
+            "Audio WebSocket connect duration[%.2fs], %s.%s",
             (datetime.now() - start_time).total_seconds(),
-            camera_id,
-            channel,
+            _safe_log(camera_id),
+            _safe_log(channel),
         )
         if cid:
             await miot_audio_stream_manager.close_connection(

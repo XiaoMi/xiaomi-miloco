@@ -184,7 +184,7 @@ def parse_args():
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--top-p", type=float, default=None)
-    parser.add_argument("--model", default="xiaomi/mimo-v2.5")
+    parser.add_argument("--model", default="mimo-v2.6-flash")
     parser.add_argument("--base-url", default="https://api.xiaomimimo.com/v1")
     return parser.parse_args()
 

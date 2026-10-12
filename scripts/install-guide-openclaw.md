@@ -47,7 +47,7 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
   },
   "model": {
     "configured": true,
-    "model": "xiaomi/mimo-v2.5",
+    "model": "mimo-v2.6-flash",
     "base_url": "https://api.xiaomimimo.com/v1",
     "api_key_masked": "sk-1****abcd"
   }
@@ -119,7 +119,7 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 >
 > 请提供：
 > 1. **API Key** — 从 https://platform.xiaomimimo.com 获取
-> 2. **Model 名称**（可选，默认 `xiaomi/mimo-v2.5`）
+> 2. **Model 名称**（可选，默认 `mimo-v2.6-flash`）
 > 3. **Base URL**（可选，默认 `https://api.xiaomimimo.com/v1`）
 >
 > 也支持其他兼容 OpenAI 接口的模型服务。
@@ -138,7 +138,7 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-finish \
   --account-auth "<授权码>" \
   --omni-api-key "<API Key>" \
-  --omni-model "xiaomi/mimo-v2.5" \
+  --omni-model "mimo-v2.6-flash" \
   --omni-base-url "https://api.xiaomimimo.com/v1"
 ```
 
@@ -148,7 +148,7 @@ curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/inst
 |------|------|------|
 | `--account-auth` | 仅新绑定时 | 用户提供的 base64 授权码 |
 | `--omni-api-key` | 仅需配置模型时 | API Key |
-| `--omni-model` | 否 | 模型名，默认 `xiaomi/mimo-v2.5` |
+| `--omni-model` | 否 | 模型名，默认 `mimo-v2.6-flash` |
 | `--omni-base-url` | 否 | Base URL，默认 `https://api.xiaomimimo.com/v1` |
 | `--skip-openclaw` | 否 | 跳过 OpenClaw 插件安装 |
 

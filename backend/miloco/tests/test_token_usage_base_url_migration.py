@@ -42,11 +42,11 @@ def _make_v2_db(path) -> None:
     c.execute(
         "INSERT INTO token_usage (timestamp, model, type, input_tokens, output_tokens,"
         " cache_tokens, video_tokens, audio_tokens, created_at)"
-        " VALUES (1000, 'mimo-v2.5', 'realtime', 111, 22, 3, 4, 5, 1000)"
+        " VALUES (1000, 'mimo-v2.6-flash', 'realtime', 111, 22, 3, 4, 5, 1000)"
     )
     for d, m, t, calls in (
-        ("2026-07-01", "mimo-v2.5", "realtime", 7),
-        ("2026-07-01", "mimo-v2.5", "on_demand", 2),
+        ("2026-07-01", "mimo-v2.6-flash", "realtime", 7),
+        ("2026-07-01", "mimo-v2.6-flash", "on_demand", 2),
         ("2026-07-02", "other-model", "realtime", 5),
     ):
         c.execute(
@@ -103,8 +103,8 @@ def test_migration_loses_no_rows_and_no_numbers(tmp_path):
         " ORDER BY date, model, type"
     ).fetchall()
     assert [tuple(r) for r in rows] == [
-        ("2026-07-01", "mimo-v2.5", "on_demand", 2, 100, 10, 1, 2, 3),
-        ("2026-07-01", "mimo-v2.5", "realtime", 7, 100, 10, 1, 2, 3),
+        ("2026-07-01", "mimo-v2.6-flash", "on_demand", 2, 100, 10, 1, 2, 3),
+        ("2026-07-01", "mimo-v2.6-flash", "realtime", 7, 100, 10, 1, 2, 3),
         ("2026-07-02", "other-model", "realtime", 5, 100, 10, 1, 2, 3),
     ]
     live = c.execute("SELECT * FROM token_usage").fetchone()
@@ -166,14 +166,14 @@ def test_rollup_never_merges_different_base_urls(repo):
     合并是不可恢复的：rollup 的 DELETE 紧接着就把原始行删了，而且不会报错。
     """
     old = date.today() - timedelta(days=10)
-    _raw(repo, _ts(old), "mimo-v2.5", "https://a.example/v1", 100)
-    _raw(repo, _ts(old), "mimo-v2.5", "https://b.example/v1", 200)
+    _raw(repo, _ts(old), "mimo-v2.6-flash", "https://a.example/v1", 100)
+    _raw(repo, _ts(old), "mimo-v2.6-flash", "https://b.example/v1", 200)
     repo._maybe_rollup(int(datetime.now().timestamp() * 1000))
 
     with repo.db.get_connection() as conn:
         rows = conn.execute(
             "SELECT base_url, calls, input_tokens FROM token_usage_daily"
-            " WHERE model='mimo-v2.5' ORDER BY base_url"
+            " WHERE model='mimo-v2.6-flash' ORDER BY base_url"
         ).fetchall()
     assert [(r[0], r[1], r[2]) for r in rows] == [
         ("https://a.example/v1", 1, 100),

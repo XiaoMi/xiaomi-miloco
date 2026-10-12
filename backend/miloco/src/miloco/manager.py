@@ -16,7 +16,7 @@ from miloco.home_profile.service import HomeProfileService
 from miloco.miot.client import MiotProxy
 from miloco.miot.mips_listeners import PropTopUpListener
 from miloco.miot.service import MiotService
-from miloco.miot.state_align import align_iot_state, read_missing_props
+from miloco.miot.state_align import align_iot_state, read_missing_props, read_props
 from miloco.miot.state_push import IotPushWriter
 from miloco.node_monitor import NodeKind, NodeName, get_monitor
 from miloco.perception import init_perception_module
@@ -26,6 +26,7 @@ from miloco.rule.service import RuleService, init_rule_service
 from miloco.rule.terminate_evaluator import TerminateEvaluator
 from miloco.state import StateStore
 from miloco.task.service import TaskService
+from miloco.utils.time_utils import now_ms
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,8 @@ class Manager:
             cls._instance._state_store = StateStore()
             cls._instance._iot_push_writer = None
             cls._instance._prop_top_up = None
+            # 重连回调在 _wire_iot_push 里就接上了，那时 rule_service 还没建。
+            cls._instance._rule_service = None
             # did → 本代已补拉次数。切作用域时清空（对齐也是一代跑一次，口径一致）
             cls._instance._top_up_attempts = {}
             # 对齐窗口里被早退掉的补拉需求。对齐完成后补一轮；切作用域时连同额度一起清
@@ -99,28 +102,29 @@ class Manager:
             self._iot_push_writer.on_device_props
         )
         self._miot_proxy.add_device_state_listener(self._prop_top_up.on_event)
+        self._miot_proxy.add_mips_connect_listener(self._on_mips_reconnected)
 
     async def _top_up_props(self, did: str) -> int:
         """设备转上线时补拉它在容器里缺的属性。返回写进去的条数。
 
-        **正确性不在这里，在写入器。** 写入的两道闸（本代已对齐 / 还在当前家庭）由
-        `IotPushWriter.write_pulled_props` 在写入的那一刻判，与推送共用一份 —— 补拉要打
-        一趟云端，往返期间设备可能搬出当前家庭（同一代之内、代号不变），在这里判是判不住
-        的。这个方法只做两件写入器管不了的事：
+        **正确性不在这里，在写入器。** 写入器在写入的那一刻复核作用域与在线状态，与推送
+        共用一份 —— 补拉要打一趟云端，往返期间设备可能搬出当前家庭或掉线，在这里判是判
+        不住的。这个方法只做两件写入器管不了的事：
 
         * **额度**：判据「容器里没有这条叶子」是代理指标，永久不可读的属性永远不会进
           容器，不限次的话反复掉线的设备每次上线都重新请求同一批（见
           TOP_UP_MAX_ATTEMPTS）。只在真打了云端时才算一次 —— 空跑消耗额度会把「留几次
           给瞬时不可读」这个用意吃掉；
-        * **在线检查**：离线设备云端给的是缓存里的最后一次上报、可能任意旧，写进去会把
-          `last_reported` 刷成当下而响应不带时间戳，消费方看不出来 —— 对齐当初跳过离线
-          设备就是这个理由。这一条写入器判不了（它不知道这批值是拉来的还是推来的）。
+        * **设备归属早退**：设备不在当前家庭时不发起无意义的云端请求；最终写入仍由写入器
+          再次校验当前家庭归属。
 
         「还在当前家庭」那道是纯**早退**，为的是省掉没必要的云端往返，不是闸 —— 真闸在
         写入器里，删掉只会变慢。**「本代已对齐」那道除了早退还负责把这次需求记下来**
         （对齐完成后由 `_drain_pending_top_ups` 补一轮）：对齐窗口里写进去的叶子会被对齐
         的整台替换直接删掉，所以此刻不能写；但删掉这道会让窗口里上线的设备整代拿不到属性。
-        **在线检查那道也不能删**，它就是上面那条写入器管不了的事。
+        **在线检查不应删**：离线设备返回的是云端缓存里的最后一次上报，可能任意旧；写入
+        会把 `last_reported` 刷成当下，而响应不带时间戳，消费方无法判断它已经过期。manager
+        侧的在线检查只是请求前早退，写入器侧的检查才是覆盖请求期间掉线竞态的最终闸门。
         """
         if not self.scope_is_aligned():
             # 记下来而不是丢掉：对齐要跑一阵，期间上线的设备当初离线、不在对齐的请求名单
@@ -150,6 +154,46 @@ class Manager:
         if not values:
             return 0
         return await self._iot_push_writer.write_pulled_props(did, values)
+
+    def _on_mips_reconnected(self) -> None:
+        """MQTT 重连 —— 通知 iot 源去拉它关心的那几条属性。
+
+        接线排在 rule_service 之前（``_wire_iot_push`` 在 ``initialize`` 里更早），
+        所以这里每次现取而不是构造时抓一份。
+        """
+        service = getattr(self, "_rule_service", None)
+        source = service.iot_source if service is not None else None
+        if source is not None:
+            source.on_mips_connect()
+
+    async def _pull_iot_props(self, did: str, iids: list[str]) -> int:
+        """MQTT 重连之后，把 iot 条件项引用的那几条属性从云端拉回来。
+
+        与上线补拉的区别是范围与覆盖判据：那个补容器里**缺**的叶子，这个按 iid 拉已
+        经在树上的那几条 —— 断连期间的变化推送丢了，而叶子还在（停在断连前的旧值），
+        按「缺不缺」算的话一条都不会拉。
+
+        能拉回来是因为断连和设备离线不是一回事：我们的 MQTT 断了，设备到云端那段没
+        断，云端缓存里是新值。
+
+        `keep_reported_since` 取本次拉取开始的时刻：往返期间到达的推送更新，不覆盖。
+        """
+        if self._iot_push_writer is None:
+            return 0
+        device = (await self._miot_proxy.devices_in_current_home()).get(did)
+        if device is None:
+            logger.debug("重连拉属性：设备不在当前家庭，跳过 did=%s", did)
+            return 0
+        if not getattr(device, "online", True):
+            logger.debug("重连拉属性：设备当前离线，跳过 did=%s", did)
+            return 0
+        started_ms = now_ms()
+        values = await read_props(self._miot_proxy, did, iids)
+        if not values:
+            return 0
+        return await self._iot_push_writer.write_pulled_props(
+            did, values, keep_reported_since=started_ms
+        )
 
     async def _drain_pending_top_ups(self) -> None:
         """把对齐窗口里记下的补拉补一轮。
@@ -293,7 +337,9 @@ class Manager:
 
         # Initialize rule module
         async with mon.track_async(NodeName.RULE_SERVICE, "init"):
-            self._rule_service = await init_rule_service(self._miot_proxy)
+            self._rule_service = await init_rule_service(
+                self._miot_proxy, self._state_store, self._pull_iot_props
+            )
 
         async with mon.track_async(NodeName.TERMINATE_EVALUATOR, "init"):
             self._terminate_evaluator = TerminateEvaluator(self._rule_service)
@@ -340,6 +386,11 @@ class Manager:
 
     @property
     def rule_service(self) -> RuleService:
+        """**类型标注是乐观的**：``initialize()`` 跑完之前实际是 None。
+
+        端点路径上取不到 None（启动段没跑完时端口还没 listen），但启动早期就接上的
+        回调（``_on_mips_reconnected``）必须自己判空。
+        """
         return self._rule_service
 
     @property

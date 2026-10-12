@@ -137,6 +137,27 @@ def test_exit_when_already_off_is_noop():
     assert h.dispatched == []
 
 
+def test_reconcile_exit_is_atomic_and_idempotent():
+    h = Harness()
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "x": RuleDirection.EXIT})
+    assert h.sm.handle(_entered(rule_id="a")) is TransitionOutcome.ENTERED
+    h.dispatched.clear()
+
+    assert h.sm.reconcile_exit("t1", "x") is TransitionOutcome.EXITED
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.sm.reconcile_exit("t1", "x") is TransitionOutcome.ALREADY_OFF
+    assert h.dispatched == []
+
+
+def test_reconcile_exit_rejects_session_direction():
+    h = Harness()
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION})
+
+    assert h.sm.reconcile_exit("t1", "s") is TransitionOutcome.UNKNOWN_RULE
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.dispatched == []
+
+
 # ── 非互反模式 + §5.1 稳态交叉判定 ────────────────────────────────────
 
 
@@ -434,8 +455,14 @@ def test_reconfigure_ignores_unseeded_rule_when_deciding():
     assert h.dispatched == []
 
 
-def test_reconfigure_exits_when_whole_exit_side_unseeded():
-    """整套 rule 被换掉 → 无从确认还撑着, 保守退出而不是静默卡在 on。"""
+def test_reconfigure_keeps_a_task_on_when_the_only_session_rule_is_unseeded():
+    """整套 rule 被换掉 —— 换配置不是一次观测, 不该由它决定退出。
+
+    on 态交给新 rule 的第一次观测重新裁决: 报假就退, 报真就本来该留着。强制退一次的
+    话, 新 rule 也成立的那些情形要白跑一次 on_exit。
+
+    出路径被整个改没了是另一回事, 由 ``exit_side_rule_ids`` 为空那条分支管。
+    """
     h = Harness(satisfied={"s": True, "new": None})
     h.sm.register_task("t1", {"s": RuleDirection.SESSION})
     h.sm.handle(_entered(rule_id="s"))
@@ -443,8 +470,8 @@ def test_reconfigure_exits_when_whole_exit_side_unseeded():
 
     h.sm.reconfigure("t1", {"new": RuleDirection.SESSION})
 
-    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
-    assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.ON
+    assert h.dispatched == []
 
 
 def test_suspend_clears_state_without_running_on_exit():
@@ -554,12 +581,16 @@ def test_unregister_clears_everything():
 
 
 def test_slot_for_edge_full_table():
-    """四个方向 × 两种边沿的全表。这是 ③→④ 的唯一契约, 写死不靠推导。"""
+    """③→④ 的全表。方向取自枚举, 不在这里抄第二份清单。
+
+    加了方向却没在 ``slot_for_edge`` 里给它分支时这条会红 —— 尾部兜底返的是进入
+    槽, 不红的话新方向会静默变成触发器。
+    """
     from miloco.task.state_machine import slot_for_edge
 
     table = {
-        (d, k.value): slot_for_edge(d, k)
-        for d in ("enter", "exit", "session", "milestone")
+        (d.value, k.value): slot_for_edge(d.value, k)
+        for d in RuleDirection
         for k in (SignalKind.ENTERED, SignalKind.EXITED)
     }
     assert table == {
@@ -571,6 +602,8 @@ def test_slot_for_edge_full_table():
         ("session", "exited"): ActionSlot.ON_EXIT,
         ("milestone", "entered"): ActionSlot.ON_TARGET,
         ("milestone", "exited"): None,
+        ("guard", "entered"): None,
+        ("guard", "exited"): None,
     }
 
 
@@ -622,3 +655,16 @@ def test_reconfigure_exits_an_enter_exit_task_whose_exit_condition_is_true():
 
     assert h.dispatched == [("t1", ActionSlot.ON_EXIT)]
     assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+def test_both_direction_enums_carry_the_same_members():
+    """task 层与 rule 层各有一份同名不同类的 ``RuleDirection``。
+
+    只给一边加成员时 ``slot_for_edge`` 收到的字符串匹配不上任何分支, 落进尾部兜底
+    当成进入信号 —— 新方向静默变成触发器。
+    """
+    from miloco.rule.schema import RuleDirection as RuleSideDirection
+
+    assert {d.value for d in RuleDirection} == {
+        d.value for d in RuleSideDirection
+    }

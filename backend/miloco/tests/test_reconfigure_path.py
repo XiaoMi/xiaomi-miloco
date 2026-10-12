@@ -1366,8 +1366,8 @@ async def test_full_update_clears_the_slot_it_left_behind(env, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_full_update_reconfigures_the_task_it_left(env, monkeypatch):
-    """PUT 改挂 task 后, 原 task 也要重算拓扑 —— 少了它原 task 还挂着这条 rule。"""
+async def test_full_update_rejects_moving_to_another_task(env, monkeypatch):
+    """PUT 改挂 task 一律拒 —— 旧 task 的退出动作会丢, 新 task 也进不去。"""
     from miloco.rule.service import RuleService
 
     TaskRepo().create_task("t2", "d2")
@@ -1380,10 +1380,10 @@ async def test_full_update_reconfigures_the_task_it_left(env, monkeypatch):
 
     moved = RuleRepo().get_by_id(ids[0])
     moved.task_id = "t2"
-    await service.update_rule(moved)
+    with pytest.raises(ValidationException, match="移到"):
+        await service.update_rule(moved)
 
-    assert not sm.owns("t1")
-    assert sm.owns("t2")
+    assert sm.owns("t1")
 
 
 @pytest.mark.asyncio

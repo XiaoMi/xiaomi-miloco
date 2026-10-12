@@ -62,7 +62,7 @@ describe("loadSharedConfig", () => {
     expect(cfg.server.token).toBe("");
     expect(cfg.agent.webhook_url).toBe("http://127.0.0.1:18789/miloco/webhook");
     expect(cfg.agent.auth_bearer).toBe("");
-    expect(cfg.model.omni.model).toBe("xiaomi/mimo-v2.5");
+    expect(cfg.model.omni.model).toBe("mimo-v2.6-flash");
     expect(cfg.model.omni.api_key).toBe("");
   });
 
@@ -81,7 +81,7 @@ describe("loadSharedConfig", () => {
     expect(cfg.server.url).toBe("http://127.0.0.1:1810");
     expect(cfg.server.python_bin).toBe("");
     expect(cfg.model.omni.api_key).toBe("user-key");
-    expect(cfg.model.omni.model).toBe("xiaomi/mimo-v2.5");
+    expect(cfg.model.omni.model).toBe("mimo-v2.6-flash");
   });
 
   it("plugin 非空字段覆盖 config.json", async () => {

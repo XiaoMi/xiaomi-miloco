@@ -20,11 +20,10 @@ import logging
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 
+from miloco.rule.schema import RECORD_SOURCE_TYPE
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
-
-RECORD_SOURCE_TYPE = "record"
 
 # 喂值时占的 source 位。record 源没有摄像头，用固定串占位；它不是设备 did，
 # 不会出现在感知的 device_rule_map 里，所以不会被「未命中喂 False」那条路推退。
@@ -33,12 +32,6 @@ RECORD_SOURCE_DID = "record"
 # 本次只支持累计时长的达标判断（spec §6.4）。别的 kind / 比较符等有用例再加。
 SUPPORTED_KIND = "duration"
 SUPPORTED_OP = ">="
-
-# milestone rule 在旧 ``condition.perceive_device_ids`` 列上填这个 did。达标不看
-# 摄像头，但那一列是必填的旧字段：填真实 did 或留空，都会让只认这一列的旧代码把
-# "累计达标"当成一句视觉 query 塞进摄像头 prompt。填一个不存在的 did，建
-# device_rule_map 时无摄像头认领，这条 rule 不参与任何视觉判定。
-MILESTONE_SENTINEL_DID = "__milestone_no_camera__"
 
 
 def milestone_rule_name(task_id: str) -> str:
@@ -73,9 +66,14 @@ def milestone_condition_dnf(task_id: str) -> dict:
 
 
 def milestone_legacy_condition(task_id: str) -> dict:
-    """旧 ``condition`` 列上那份。哨兵 did 的理由见 MILESTONE_SENTINEL_DID。"""
+    """旧 ``condition`` 列上那份。达标不看摄像头，所以设备列表留空。
+
+    从前这里填一个不存在的哨兵 did，为的是让只认这一列的感知筛选无人认领这条
+    rule。收口之后感知先按 ``resolved_source_type`` 过滤，哨兵没有用武之地了 ——
+    留着的危害是误导，下一个人会以为它还在挡什么。
+    """
     return {
-        "perceive_device_ids": [MILESTONE_SENTINEL_DID],
+        "perceive_device_ids": [],
         "query": f"[milestone] task {task_id} 累计达标",
     }
 
@@ -95,16 +93,19 @@ class RecordRef:
 def record_ref_of(rule) -> RecordRef | None:
     """rule 的条件项是不是 record 源，是就返回它引用的 record。
 
+    判源走 ``resolved_source_type``（唯一那份判据），本函数只负责取 spec。自己再扫
+    一遍 DNF 比 source_type 的话，「怎么判源」就有两份实现，改一处漏一处。
+
     kind / op 不认识时记日志返 None，不抛：建 rule 时已经校验过，跑到这里还不认识
     说明是库里的存量脏数据，让这条不触发就行，别把整条感知链带崩。
     """
+    if rule.resolved_source_type != RECORD_SOURCE_TYPE:
+        return None
     dnf = getattr(rule, "condition_dnf", None)
     if dnf is None or not dnf.any_of:
         return None
     for conjunction in dnf.any_of:
         for item in conjunction:
-            if item.source_type != RECORD_SOURCE_TYPE:
-                continue
             spec = item.spec or {}
             task_id = spec.get("task_id")
             kind, op = spec.get("kind"), spec.get("op")

@@ -394,7 +394,7 @@ def test_fire_record_persists_from_ephemeral_loop(repo):
 
     async def one_window() -> None:
         fire_record(
-            "mimo-v2.5",
+            "mimo-v2.6-flash",
             "https://api.example/v1",
             {"prompt_tokens": 3000, "completion_tokens": 200},
             "realtime",

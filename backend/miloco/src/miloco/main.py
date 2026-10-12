@@ -480,6 +480,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         except asyncio.CancelledError:
             # 这个 CancelledError 是上一行 cancel() 自己引发的，不是外面在取消我们
             pass
+    # iot 源排在停容器之前退订: 反了的话容器会往一个已停的消费方投递, 而 subscribe
+    # 的 docstring 提醒过「退订不保证返回之后不再被回调」。
+    service = get_manager().rule_service
+    iot_source = service.iot_source if service is not None else None
+    if iot_source is not None:
+        await iot_source.stop()
     get_manager().deinit_iot_push()
     get_manager().state_store.stop()
 

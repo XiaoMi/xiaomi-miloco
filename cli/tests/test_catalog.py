@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from miloco_cli.catalog import (
     SpecLine,
+    _build_spec_line,
+    _device_filtered_keys_in_order,
     _format_extra,
     _resolve_keys_for_device,
     _skeleton_signature,
@@ -390,3 +392,74 @@ def test_build_catalog_cap_downgrade_overflow_no_double_count():
     assert r.selected_count == 30
     # overflow_count 必须等于 100 - selected = 70
     assert r.overflow_count == 70
+
+
+# ─── access 位：notify ────────────────────────────────────────────────────────
+
+
+def test_spec_line_marks_notify_only_property():
+    """只有 notify 的属性标 ``n``，不与只读的 ``r`` 混成一个标记。"""
+    line = _build_spec_line(
+        "prop.5.1",
+        {"description": "门状态", "format": "uint8", "notify": True},
+        "door-status",
+    )
+    assert line.wr == "n"
+
+
+def test_spec_line_marks_readable_and_notify():
+    line = _build_spec_line(
+        "prop.5.1",
+        {"description": "门状态", "format": "uint8", "readable": True, "notify": True},
+        "door-status",
+    )
+    assert line.wr == "rn"
+
+
+def test_spec_line_read_only_property_has_no_notify_bit():
+    line = _build_spec_line(
+        "prop.4.1",
+        {"description": "电量", "format": "uint8", "readable": True},
+        "battery",
+    )
+    assert line.wr == "r"
+
+
+def test_spec_line_empty_access_is_not_reported_as_readable():
+    """access 三位全空的属性给 ``-``。标成 ``r`` 会让它与真能读的长得一样。"""
+    line = _build_spec_line(
+        "prop.5.2", {"description": "异常", "format": "uint8"}, "abnormal"
+    )
+    assert line.wr == "-"
+
+
+def test_catalog_keeps_notify_only_property():
+    """notify-only 属性是 iot 条件项唯一可用的那一类，catalog 不能把它跳掉。"""
+    spec = {
+        "prop.5.1": {
+            "description": "门状态",
+            "format": "uint8",
+            "notify": True,
+            "type_name": "door-status",
+            "service_type_name": "door",
+        }
+    }
+    keys = _device_filtered_keys_in_order(
+        spec, {("door", "prop", "door-status")}, {"prop.5.1": "door-status"}
+    )
+    assert keys == ["door-status"]
+
+
+def test_catalog_skips_property_with_empty_access():
+    spec = {
+        "prop.5.2": {
+            "description": "异常",
+            "format": "uint8",
+            "type_name": "abnormal",
+            "service_type_name": "door",
+        }
+    }
+    keys = _device_filtered_keys_in_order(
+        spec, {("door", "prop", "abnormal")}, {"prop.5.2": "abnormal"}
+    )
+    assert keys == []

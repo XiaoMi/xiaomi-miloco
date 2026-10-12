@@ -1119,7 +1119,7 @@ class Installer:
         )
 
         if provider == self.ui.i18n.t("model.provider_mimo"):
-            model_name = "xiaomi/mimo-v2.5"
+            model_name = "mimo-v2.6-flash"
             base_url = "https://api.xiaomimimo.com/v1"
         else:
             model_name = self.ui.prompt_input(
@@ -1152,7 +1152,7 @@ class Installer:
     def _quick_configure_mimo(self) -> None:
         self.ui.step(self.ui.i18n.t("model.mimo_quick"))
         self._write_model_config(
-            "xiaomi/mimo-v2.5",
+            "mimo-v2.6-flash",
             "https://api.xiaomimimo.com/v1",
             self.omni_api_key or "",
         )
@@ -1806,7 +1806,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--omni-model",
         dest="omni_model",
-        help="Omni model name (default: xiaomi/mimo-v2.5)",
+        help="Omni model name (default: mimo-v2.6-flash)",
     )
     parser.add_argument(
         "--omni-base-url",

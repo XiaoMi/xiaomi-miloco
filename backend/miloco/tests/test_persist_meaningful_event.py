@@ -790,3 +790,21 @@ class TestPersistMeaningfulEvent:
         assert len(rows) == 1
         assert rows[0]["device_ids"] == ["cam_entrance"]
         assert rows[0]["snapshot_count"] == 1
+
+    async def test_payload_excludes_timing(self, isolated_db, dao):
+        """timing 的正式消费方是 observability traces,落库这份 payload 不带它。"""
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")],
+            timing={"厨房/gate_video_1184458598_ms": 7.46},
+        )
+
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts(),
+        )
+
+        payload_json = dao.query()[0]["payload_json"]
+        assert "gate_video_1184458598_ms" not in payload_json
+        assert '"timing"' not in payload_json
+        assert "厨房在炒菜" in payload_json

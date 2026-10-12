@@ -136,7 +136,7 @@ miloco-cli config get model.omni.base_url
 **任一项为空，发：**
 > Miloco 感知引擎需要一个多模态大模型来看懂摄像头画面。
 > 默认推荐 **小米 MiMo**。
-> - Model: `xiaomi/mimo-v2.5`
+> - Model: `mimo-v2.6-flash`
 > - Base URL: `https://api.xiaomimimo.com/v1`
 > 
 > 你有 MiMo 的 API Key 吗？

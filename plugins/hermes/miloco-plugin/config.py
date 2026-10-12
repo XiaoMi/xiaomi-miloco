@@ -43,7 +43,7 @@ _DEFAULTS: Dict[str, Any] = {
     },
     "model": {
         "omni": {
-            "model": "xiaomi/mimo-v2.5",
+            "model": "mimo-v2.6-flash",
             "base_url": "https://api.xiaomimimo.com/v1",
             "api_key": "",
         }

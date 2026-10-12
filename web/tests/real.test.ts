@@ -430,7 +430,7 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
   ) {
     return {
       bucket_ms: t0,
-      model: "mimo-v2.5",
+      model: "mimo-v2.6-flash",
       base_url,
       type,
       calls,
@@ -552,7 +552,7 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
 
     // rows：model × type
     const rt = s.rows.find((r) => r.type === "realtime")!;
-    expect(rt.model).toBe("mimo-v2.5");
+    expect(rt.model).toBe("mimo-v2.6-flash");
     expect(rt.breakdown.video).toBe(2200);
     expect(rt.calls).toBe(2);
 
@@ -681,11 +681,11 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
     expect(fine.timeline.length).toBeGreaterThanOrEqual(hourly.timeline.length);
 
     // 明细行：只有 realtime 数据，也要给该模型补一行 on_demand 0
-    const od = hourly.rows.find((r) => r.model === "mimo-v2.5" && r.type === "on_demand");
+    const od = hourly.rows.find((r) => r.model === "mimo-v2.6-flash" && r.type === "on_demand");
     expect(od).toBeDefined();
     expect(od!.calls).toBe(0);
     expect(od!.tokens).toBe(0);
-    const rt = hourly.rows.find((r) => r.model === "mimo-v2.5" && r.type === "realtime");
+    const rt = hourly.rows.find((r) => r.model === "mimo-v2.6-flash" && r.type === "realtime");
     expect(rt!.calls).toBe(2);
     // 不得重复：单模型只 2 行（realtime + on_demand），realtime 恰 1 行
     expect(hourly.rows).toHaveLength(2);
@@ -730,8 +730,8 @@ describe("realGetUsageStats — week daily 折算契约", () => {
         message: "ok",
         data: {
           rows: [
-            { date, model: "mimo-v2.5", type: "realtime", calls: 100, input_tokens: 5000, output_tokens: 500, cache_tokens: 1500, video_tokens: 4000, audio_tokens: 200 },
-            { date, model: "mimo-v2.5", type: "on_demand", calls: 10, input_tokens: 2000, output_tokens: 800, cache_tokens: 800, video_tokens: 0, audio_tokens: 1200 },
+            { date, model: "mimo-v2.6-flash", type: "realtime", calls: 100, input_tokens: 5000, output_tokens: 500, cache_tokens: 1500, video_tokens: 4000, audio_tokens: 200 },
+            { date, model: "mimo-v2.6-flash", type: "on_demand", calls: 10, input_tokens: 2000, output_tokens: 800, cache_tokens: 800, video_tokens: 0, audio_tokens: 1200 },
           ],
           total: 2,
         },

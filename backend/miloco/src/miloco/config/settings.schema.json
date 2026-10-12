@@ -85,8 +85,8 @@
           "properties": {
             "model": {
               "type": "string",
-              "default": "xiaomi/mimo-v2.5",
-              "description": "多模态模型标识（provider/model）"
+              "default": "mimo-v2.6-flash",
+              "description": "多模态模型标识，如 mimo-v2.6-flash"
             },
             "base_url": {
               "type": "string",

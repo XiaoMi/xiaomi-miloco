@@ -23,7 +23,7 @@ _MESSAGES = [{"role": "user", "content": "test"}]
 
 class TestGetAdapter:
     def test_mimo_default(self):
-        assert isinstance(get_adapter("xiaomi/mimo-v2.5"), MiMoAdapter)
+        assert isinstance(get_adapter("mimo-v2.6-flash"), MiMoAdapter)
 
     def test_mimo_unknown(self):
         assert isinstance(get_adapter("some-unknown-model"), MiMoAdapter)
@@ -48,12 +48,12 @@ class TestGetAdapter:
 
     def test_openai_compat_family(self):
         # MiMo / Qwen 都归 OpenAI 兼容族；Gemini 不是。
-        assert isinstance(get_adapter("xiaomi/mimo-v2.5"), OpenAICompatAdapter)
+        assert isinstance(get_adapter("mimo-v2.6-flash"), OpenAICompatAdapter)
         assert isinstance(get_adapter("qwen3.5-omni-flash"), OpenAICompatAdapter)
         assert not isinstance(get_adapter("gemini-3-flash-preview"), OpenAICompatAdapter)
 
     def test_singleton(self):
-        assert get_adapter("xiaomi/mimo-v2.5") is get_adapter("xiaomi/mimo-v2.5")
+        assert get_adapter("mimo-v2.6-flash") is get_adapter("mimo-v2.6-flash")
         assert get_adapter("qwen3.5-omni-flash") is get_adapter("qwen3.5-omni-plus")
         assert get_adapter("gemini-3-flash") is get_adapter("gemini-3-pro")
 
@@ -75,7 +75,7 @@ class TestMiMoAdapter:
 
     def test_request_body_non_stream(self):
         body = self.adapter.build_request_body(
-            _MESSAGES, model="xiaomi/mimo-v2.5",
+            _MESSAGES, model="mimo-v2.6-flash",
             max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
         )
         assert body["stream"] is False
@@ -84,7 +84,7 @@ class TestMiMoAdapter:
 
     def test_request_body_stream(self):
         body = self.adapter.build_request_body(
-            _MESSAGES, model="xiaomi/mimo-v2.5",
+            _MESSAGES, model="mimo-v2.6-flash",
             max_tokens=512, temperature=0.1, top_p=0.95, stream=True,
         )
         assert body["stream"] is True

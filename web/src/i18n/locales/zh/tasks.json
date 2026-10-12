@@ -44,6 +44,7 @@
     "directionEnter": "进入",
     "directionExit": "退出",
     "directionSession": "会话",
+    "directionGuard": "前提",
     "noRules": "暂无关联规则（可能仍在等待 Agent 接线）",
     "rulesManagedHint": "触发条件可修改，保存后立即生效；执行动作与推送由 Agent 创建管理，如需调整可与 Agent 对话。",
     "editTitle": "编辑任务",
@@ -57,6 +58,8 @@
     "example1": "帮我盯着孩子每天练琴，满 30 分钟提醒我",
     "example2": "提醒家里老人每天量一次血压",
     "example3": "家里没人时如果窗户还开着就通知我",
-    "viewExamples": "如何新增任务"
+    "viewExamples": "如何新增任务",
+    "triggerNotEditable": "该条件由系统按设备属性生成，不能在这里修改。",
+    "rulesManagedHintReadOnly": "触发条件由系统按设备属性生成，不能修改；执行动作与推送由 Agent 创建管理，如需调整可与 Agent 对话。"
   }
 }

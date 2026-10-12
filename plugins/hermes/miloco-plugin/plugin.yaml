@@ -23,7 +23,7 @@ configSchema:
   omni_model:
     type: string
     default: ""
-    description: 多模态模型标识（provider/model），如 xiaomi/mimo-v2.5。留空则沿用 $MILOCO_HOME/config.json 里的值
+    description: 多模态模型标识，如 mimo-v2.6-flash。留空则沿用 $MILOCO_HOME/config.json 里的值
   omni_base_url:
     type: string
     default: ""

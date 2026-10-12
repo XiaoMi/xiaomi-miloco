@@ -211,7 +211,7 @@ class TestDiscoverDevicesOnlineConnected:
 
     @pytest.mark.asyncio
     async def test_require_lan_false_keeps_stale_lan_camera(self, adapter):
-        """A2 应连数判据(online_only=True, require_lan=False)放过 lan_online 陈旧
+        """A2 保留集判据(online_only=True, require_lan=False)放过 lan_online 陈旧
         成 false 的卡死态相机(云端 online=True)——它正是要靠 refresh 救活的。"""
         cam = _make_camera_info(did="cam1", online=True, lan_online=False).model_copy(
             update={"home_id": "H1"}
@@ -224,8 +224,11 @@ class TestDiscoverDevicesOnlineConnected:
 
     @pytest.mark.asyncio
     async def test_require_lan_false_still_excludes_offline_camera(self, adapter):
-        """A2 应连数判据仍排除云端离线相机(online=False)——它救不活，算进应连数
-        会让判据永真、refresh_cameras 每轮空转(MR review 指出的过度触发)。"""
+        """A2 保留集判据仍排除云端离线相机(online=False)——它救不活，算进保留集
+        会让判据永真、refresh_cameras 每轮空转(MR review 指出的过度触发)。
+
+        注:按需补建的判据已改成严格门(require_lan=True)，这条用例钉的是
+        ``require_lan=False`` 这个口径本身仍排除云端离线相机，保留集消费它。"""
         cam = _make_camera_info(did="cam1", online=False, lan_online=False).model_copy(
             update={"home_id": "H1"}
         )
@@ -234,6 +237,27 @@ class TestDiscoverDevicesOnlineConnected:
         result = await adapter.discover_devices(online_only=True, require_lan=False)
 
         assert "cam1" not in result
+
+    @pytest.mark.asyncio
+    async def test_connected_camera_reachable_despite_lan_offline(self, adapter):
+        """直连掐死同网段 OTU 保活令 lan_online=False，但 camera_status=CONNECTED
+        的相机必须仍被判可达——这正是 #420 被 #430 revert 的根因场景：全部现有
+        lan_online=False 用例都用默认 DISCONNECTED 状态断言「被过滤」，没有一个
+        覆盖「已连上但 lan_online 掉 False」这一组合，回归网无法拦住这条兜底被
+        误删。require_lan 走默认 True，与 toggle_camera/list_cameras_with_state
+        的门槛口径一致。"""
+        cam = _make_camera_info(
+            did="cam1",
+            online=True,
+            camera_status=MIoTCameraStatus.CONNECTED,
+            lan_online=False,
+        ).model_copy(update={"home_id": "H1"})
+        adapter._miot_proxy.get_cameras.return_value = {"cam1": cam}
+
+        result = await adapter.discover_devices(online_only=True)
+
+        assert "cam1" in result
+        assert result["cam1"].online is True
 
     @pytest.mark.asyncio
     async def test_filter_cameras_from_all(self, adapter):

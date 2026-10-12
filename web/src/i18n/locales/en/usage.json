@@ -68,7 +68,7 @@
     "hideKey": "Hide API Key",
     "modelLabel": "Model",
     "modelComboPlaceholderLoading": "Loading…",
-    "modelComboPlaceholder": "Select or type a model id (e.g. mimo-v2.5)",
+    "modelComboPlaceholder": "Select or type a model id (e.g. mimo-v2.6-flash)",
     "modelsFetching": "Fetching model list…",
     "modelsCount": "{{n}} available, search or type directly; please pick a multimodal (omni) model supporting video/audio",
     "modelsHint": "Auto-fetched after filling Base URL and API Key, or type a model id directly",

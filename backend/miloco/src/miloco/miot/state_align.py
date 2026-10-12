@@ -447,6 +447,44 @@ async def read_missing_props(
     return len(params), values
 
 
+async def read_props(miot_proxy: Any, did: str, iids: list[str]) -> dict[str, Any]:
+    """读这台设备上指定的那几条属性。**只读不写**，写归 `state_push` 的拉取入口。
+
+    与 `read_missing_props` 的区别是范围：那个只补容器里**缺**的叶子，这个按调用方
+    给的 iid 拉。MQTT 重连之后要的是后者 —— 断连期间的变化推送丢了，而叶子还在（停
+    在断连前的旧值），按「缺不缺」算的话一条都不会拉。
+
+    `iids` 形如 `"5.1"`。异常只记日志、不往外抛。
+    """
+    samples = _Samples()
+    if not _is_valid_segment(did):
+        return {}
+    params: list[MIoTGetPropertyParam] = []
+    for iid in iids:
+        parsed = try_parse_iid(f"prop.{iid}", "prop")
+        if parsed is None:
+            if samples.take("bad_iid"):
+                logger.warning("pull: unparsable iid did=%s iid=%s", did, iid)
+            continue
+        siid, piid = parsed
+        params.append(MIoTGetPropertyParam(did=did, siid=siid, piid=piid))
+    if not params:
+        return {}
+
+    meta = {did: _DeviceMeta(online=True, model=str(_model_of(miot_proxy, did)))}
+    unreadable: dict[str, int] = {}
+    by_device = await _read_values(miot_proxy, params, meta, unreadable, samples)
+    values = by_device.get(did) or {}
+    logger.info(
+        "pull: did=%s requested=%d read=%d unreadable=%s",
+        did,
+        len(params),
+        len(values),
+        unreadable or {},
+    )
+    return values
+
+
 def _model_of(miot_proxy: Any, did: str) -> str:
     """读失败分组要按型号计数；拿不到就给个占位。"""
     devices = getattr(miot_proxy, "_device_info_dict", None) or {}

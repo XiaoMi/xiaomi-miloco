@@ -65,12 +65,12 @@ describe("realClearUsageData 请求体", () => {
     const calls = captureFetch();
     await realClearUsageData({
       sinceMs: null,
-      model: "mimo-v2.5",
+      model: "mimo-v2.6-flash",
       baseUrl: "https://api.xiaomimimo.com/v1-test",
     });
     expect(calls[0].body).toEqual({
       since_ms: null,
-      model: "mimo-v2.5",
+      model: "mimo-v2.6-flash",
       base_url: "https://api.xiaomimimo.com/v1-test",
       from_date: null,
     });
@@ -78,13 +78,13 @@ describe("realClearUsageData 请求体", () => {
 
   it("base_url 空串是目标本身，不能退化成「不限 endpoint」", async () => {
     const calls = captureFetch();
-    await realClearUsageData({ model: "mimo-v2.5", baseUrl: "" });
-    expect(calls[0].body).toEqual({ since_ms: null, model: "mimo-v2.5", base_url: "", from_date: null });
+    await realClearUsageData({ model: "mimo-v2.6-flash", baseUrl: "" });
+    expect(calls[0].body).toEqual({ since_ms: null, model: "mimo-v2.6-flash", base_url: "", from_date: null });
   });
 
   it("只给一半时抛错且**不发请求**：半个目标绝不能退化成全模型清除", async () => {
     const calls = captureFetch();
-    await expect(realClearUsageData({ model: "mimo-v2.5" })).rejects.toThrow(/同时给/);
+    await expect(realClearUsageData({ model: "mimo-v2.6-flash" })).rejects.toThrow(/同时给/);
     await expect(realClearUsageData({ baseUrl: "https://api.x.com/v1" })).rejects.toThrow(
       /同时给/,
     );

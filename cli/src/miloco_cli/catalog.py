@@ -104,7 +104,7 @@ class SpecLine:
 
     key: str  # 含可能的 @ 后缀
     fmt: str  # prop: bool/uint8/.. 等值类型；action: 空串（无值类型）
-    wr: str  # access 字段，prop ∈ {wr, w, r}；action 恒为 ``x``（execute）
+    wr: str  # access 字段，prop 是 w/r/n 三位的组合（全空为 ``-``）；action 恒为 ``x``
     extra: str  # prop: constraint（范围/枚举）；action: in_params 入参列表；无则空
     unit: str  # 仅 prop 行；无单位为空
     is_action: bool
@@ -316,6 +316,29 @@ def _is_iid_action(iid: str) -> bool:
     return iid.startswith("action.")
 
 
+ACCESS_LEGEND = (
+    "w=可写 / r=可读 / n=设备主动推送 / x=动作（可组合，如 wrn；- = 都不是）"
+)
+"""access 位的含义。目录图例与 ``device spec`` 的表头共用这一份 —— 各写一份的话，
+放开 notify-only 属性之后目录里会出现图例没定义的标记，agent 只能猜。"""
+
+
+def _access_of(entry: dict) -> str:
+    """prop 的 access 位。空 access 给 ``-``，不给 ``r``。
+
+    notify 单独一位是必须的：只有 notify 的属性拿不到读取、只能靠推送，而它与真
+    只读在 iot 条件项上的可用性正好相反。合并成一个标记的话，挑属性只能靠猜。
+    """
+    bits = ""
+    if entry.get("writeable"):
+        bits += "w"
+    if entry.get("readable"):
+        bits += "r"
+    if entry.get("notify"):
+        bits += "n"
+    return bits or "-"
+
+
 def _build_spec_line(iid: str, entry: dict, key: str) -> SpecLine:
     is_action = _is_iid_action(iid)
     annotation = _build_annotation(iid, entry, key)
@@ -324,14 +347,7 @@ def _build_spec_line(iid: str, entry: dict, key: str) -> SpecLine:
         return SpecLine(key=key, fmt="", wr="x", extra=extra, unit="", is_action=True, annotation=annotation)
 
     fmt = str(entry.get("format", "") or "")
-    writeable = bool(entry.get("writeable"))
-    readable = bool(entry.get("readable"))
-    if writeable and readable:
-        wr = "wr"
-    elif writeable:
-        wr = "w"
-    else:
-        wr = "r"
+    wr = _access_of(entry)
     extra = _format_extra(entry)
     unit = ""
     if entry.get("unit"):
@@ -392,9 +408,11 @@ def _device_filtered_keys_in_order(
     whitelist: set[tuple[str, str, str]],
     iid_to_key: dict[str, str],
 ) -> list[str]:
-    """白名单过滤后的 key 列表，按 spec 原序。同时跳过双 false（writeable & readable
-    都为 false 的 prop，通常是只读 + notify-only 之类的幽灵字段，§2.1 规定塞尾段
-    或丢弃）。"""
+    """白名单过滤后的 key 列表，按 spec 原序。同时跳过 access 三位全空的 prop —— 那
+    种属性读不到、写不了、也不推，任何方向都用不上。
+
+    只有 notify 的属性**保留**：它拿不到读取，但推送会来，是 iot 条件项唯一可用的
+    那一类。"""
     out: list[str] = []
     seen: set[str] = set()
     for iid, entry in spec.items():
@@ -402,7 +420,7 @@ def _device_filtered_keys_in_order(
             continue
         kind = "action" if _is_iid_action(iid) else "prop"
         if kind == "prop":
-            if not entry.get("writeable") and not entry.get("readable"):
+            if _access_of(entry) == "-":
                 continue
         if not _is_whitelisted(entry, kind, whitelist):
             continue
@@ -578,7 +596,7 @@ _FORMAT_LEGEND = [
     "#   spec_name：prop / action 的名字，作为 miloco-cli device (control / props / action) 第二个参数；",
     "#     形如 on / brightness / play-text；同名冲突时自动带 @<子设备描述> 后缀消歧，如 on@左键",
     "#   行尾 ``  # 注释``（如有）：人类可读的中文说明，传入 cli 时忽略",
-    "#   access：权限，必选；只能取 wr=读写 / w=只写 / r=只读（不能 control）/ x=可执行（仅 action）四值",
+    f"#   access：权限，必选；{ACCESS_LEGEND}",
     "#   format：值的数据类型，可选；取值如 bool / uint8 / int8 / float 等",
     "#   constraint：数值约束；格式 1：范围 [min,max;step]；格式 2：枚举 Cool=2,Heat=5",
     "#   in_params：动作入参类型说明（name:format,..），CLI 调用时只按顺序传值，不传参数名",

@@ -42,7 +42,7 @@ def client(tmp_path, monkeypatch):
                 "model": {
                     "omni": {
                         "label": "",
-                        "model": "xiaomi/mimo-v2.5",
+                        "model": "mimo-v2.6-flash",
                         "base_url": "https://api.xiaomimimo.com/v1",
                         "api_key": "",
                     },

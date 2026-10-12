@@ -111,7 +111,9 @@ class FusedPromptConfig:
     # 家庭多 1-3 只覆盖 99%，仿人 gallery 上限保护；仅 has_pets（video route）时注入。
     # token 已实测（mimo-v2.5，composite 高 320px）：每只 ≈ +194 prompt tokens（3 只上限 ≈ +582），
     # 相对 fused 视频主体（数 K+）为小增量；注入形态 = 最多 3 只 × 每只 1 张 composite（≤3 姿态横拼）。
-    # 待补：端到端延迟 / 成本（需真视频跑完整 fused，随默认开启前的实机验收一起量）。
+    # 注意：默认模型已切 mimo-v2.6-flash，上述标定尚未在 v2.6-flash 复测；若新模型视觉 tokenization /
+    # 分辨率档位与 v2.5 不同，这里的预算换算会失真（上限是静态值不会报错，只会更快逼近 omni 上下文预算）。
+    # 待补：v2.6-flash 复测标定 + 端到端延迟 / 成本（需真视频跑完整 fused，随默认开启前的实机验收一起量）。
     max_pet_refs: int = 3
 
 

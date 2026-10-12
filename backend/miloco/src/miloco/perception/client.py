@@ -122,6 +122,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# timing 供 observability traces 使用,对外副本(日志 / meaningful_events payload)不带。
+_EXCLUDE_TIMING = {"timing"}
+
 # 模块级强引用持有 _persist_meaningful_event 后台任务,防 asyncio 只持弱引用导致
 # 任务运行中被 GC 回收(CPython 文档明确警告).done_callback 在任务结束时自动 discard.
 _PERSIST_BG_TASKS: set[asyncio.Task] = set()
@@ -172,6 +175,24 @@ def _ms_since(start: float) -> float:
     return (time.monotonic() - start) * 1000
 
 
+def omni_rules_only(rules: list) -> list:
+    """只有 omni rule 参与视觉判定。收 ``Rule`` 对象，不收 ``model_dump()`` 的 dict。
+
+    **调用点必须排在 dump 之前**: ``resolved_source_type`` 是普通 ``@property``,
+    不进 dump。dump 之后按键取拿到的是 ``None`` —— 判 ``== "omni"`` 会把所有规则都
+    滤掉, 而回退成 omni 又会让 iot rule 进摄像头 prompt, 两个方向都错。
+
+    **不下沉到 ``get_effectively_enabled_rules``**: 那里还有 GET /rules 和 admin 两
+    个调用方, 它们要的是"全部启用的规则", 不是"感知要判的规则"。
+
+    过滤掉的 rule 也不会被"未命中喂 False"推退: 那条路遍历的是
+    ``result.device_rule_map``, 非 omni rule 根本不进那张表。
+    """
+    from miloco.rule.schema import OMNI_SOURCE_TYPE
+
+    return [r for r in rules if r.resolved_source_type == OMNI_SOURCE_TYPE]
+
+
 def _is_enter_rule(rule: dict) -> bool:
     """下发闸的方向判据。
 
@@ -189,8 +210,28 @@ def _is_enter_rule(rule: dict) -> bool:
     return getattr(mode, "value", mode) == RuleMode.EVENT.value
 
 
+def _direction_value(rule: dict) -> str:
+    raw = rule.get("direction")
+    if raw:
+        return getattr(raw, "value", raw)
+    return ""
+
+
+def _is_session_rule(rule: dict) -> bool:
+    from miloco.rule.schema import RuleDirection
+
+    return _direction_value(rule) == RuleDirection.SESSION.value
+
+
+def _is_guard_rule(rule: dict) -> bool:
+    from miloco.rule.schema import RuleDirection
+
+    return _direction_value(rule) == RuleDirection.GUARD.value
+
+
 def _filter_completed_event_rules(
     rules: list[dict],
+    guard_needed_task_ids: set[str] | frozenset[str] = frozenset(),
 ) -> tuple[list[dict], list[str]]:
     """剔除 event mode 中关联 task 当前活跃期 record 已「本周期达标」的 rule。
 
@@ -205,7 +246,8 @@ def _filter_completed_event_rules(
     源, 本来就不走摄像头。无 record 的 rule 保留（维持现状）。
 
     返回 (kept_rules, skipped_task_ids)。skipped_task_ids 按 task 去重后排序，
-    供调用方做去重打印。
+    供调用方做去重打印。``guard_needed_task_ids`` 来自全量规则：即使非 omni
+    进入规则不在感知列表里，对应 task 的 omni guard 仍不能被剔除。
     """
     event_task_ids = {
         r["task_id"] for r in rules if _is_enter_rule(r) and r.get("task_id")
@@ -231,6 +273,19 @@ def _filter_completed_event_rules(
             skipped.add(tid)
             continue
         kept.append(r)
+
+    kept_task_ids_with_entry = {
+        r.get("task_id")
+        for r in kept
+        if r.get("task_id") and (_is_enter_rule(r) or _is_session_rule(r))
+    }
+    kept = [
+        r
+        for r in kept
+        if not _is_guard_rule(r)
+        or r.get("task_id") in kept_task_ids_with_entry
+        or r.get("task_id") in guard_needed_task_ids
+    ]
     return kept, sorted(skipped)
 
 
@@ -651,7 +706,7 @@ class PerceptionEngineProxy:
             if not result.skipped:
                 logger.info(
                     "✅ realtime_perceive: %s | skipped_task_ids=%s",
-                    result.model_dump_json(ensure_ascii=False),
+                    result.model_dump_json(ensure_ascii=False, exclude=_EXCLUDE_TIMING),
                     skipped_task_ids,
                 )
 
@@ -711,9 +766,21 @@ class PerceptionEngineProxy:
 
             from miloco.manager import get_manager
 
-            rules = await get_manager().rule_service.get_effectively_enabled_rules()
-            rules = [rule.model_dump() for rule in rules]
-            rules, skipped_task_ids = _filter_completed_event_rules(rules)
+            all_rules = await get_manager().rule_service.get_effectively_enabled_rules()
+            from miloco.rule.schema import OMNI_SOURCE_TYPE, RuleDirection
+
+            guard_needed_task_ids = {
+                rule.task_id
+                for rule in all_rules
+                if rule.task_id
+                and rule.resolved_direction
+                in (RuleDirection.ENTER, RuleDirection.SESSION)
+                and rule.resolved_source_type != OMNI_SOURCE_TYPE
+            }
+            rules = [rule.model_dump() for rule in omni_rules_only(all_rules)]
+            rules, skipped_task_ids = _filter_completed_event_rules(
+                rules, guard_needed_task_ids
+            )
 
             device_count = sum(1 for d in batch.devices.values() if d.has_data)
 
@@ -1109,9 +1176,7 @@ async def _persist_meaningful_event(
         dao = mgr.meaningful_events_dao
         event_id = str(uuid.uuid4())
         timestamp_ms = int(time.time() * 1000)
-        # timing 已被 observability traces 消费,DB 里这份是冗余副本
-        payload_dict = result.model_dump()
-        payload_dict.pop("timing", None)
+        payload_dict = result.model_dump(exclude=_EXCLUDE_TIMING)
         payload_json = json.dumps(payload_dict, ensure_ascii=False)
 
         # 反查 rule_names:让 DB.text 与 webhook 文本里 rule 段渲染为

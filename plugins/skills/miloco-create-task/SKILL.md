@@ -54,6 +54,7 @@ user-facing text 仅在两个时机出现：
 1. 含 on-target-desc 时 task → record → rule 顺序完成装配：Y / N / NA
 2. 终态 §响应动作 同时含「触发后做什么」+「记录什么」：Y / N
 3. 每条装配提示「怎么改」字段给出用户可直接复述的短语：Y / N
+4. iot 规则的 iid 抄自本轮 `device spec` 输出，did / value 抄自本轮真实输出：Y / N / NA
 ```
 
 ## 装配提示元规则
@@ -75,7 +76,7 @@ user-facing text 仅在两个时机出现：
 ## 输入硬约束
 
 - 多个独立 task → 拆成单 task 列表，各自走分类
-- AND 型规则（同一 task 内多触发必须同时成立）→ 拒建
+- 多个**触发事件**要求同时发生 → 拒建。一个触发 + 一个必须同时成立的**状态**不在此列，走前提规则（见 §Rule.direction=guard）
 
 ## 前置检查（早于第一层判定）
 
@@ -129,7 +130,7 @@ Rule/Schedule/Record 是子组件存在性（Y/N）；Lifecycle 是 task 整体�
 
 **Y** = 用户描述需要系统**持续观察现实世界**才能触发的场景，含以下任一语义：
 
-- **环境状态变化**：人在/不在、设备开关状态、温度湿度烟雾等环境量异常
+- **环境状态变化**：人在/不在、设备开关状态、温度湿度烟雾等环境量异常（源走 §Rule.source 判，不默认摄像头）
 - **人体可观测动作或行为**：任何能被摄像头或麦克风识别的人体动作或姿态（瞬时如吃药/咳嗽/按门铃，持续如看书/写作业/玩手机）
 - **人身安全异常**：摔倒、入侵、求救、火灾相关
 - **计数/累计数字目标**：N 次/杯/个 或 累计 N 小时/分钟
@@ -215,7 +216,7 @@ temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性�
 
 ## Rule=Y 时填 Rule
 
-### Rule.direction（enter / exit / session）
+### Rule.direction（enter / exit / session / guard）
 
 一条 rule 只有一个 `condition.query`，只能表达一个观测。direction 决定这个观测成立时如何映射到 task 的进 / 出：
 
@@ -224,8 +225,11 @@ temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性�
 | `enter` | 把 task 推进「进行中」 | on_enter |
 | `exit` | 把 task 推出「进行中」 | on_exit |
 | `session` | 成立 = 进，不成立 = 出 | 进 → on_enter，出 → on_exit |
+| `guard` | 不触发，只作为同 task 其它规则进入的前提 | 不配动作，见 §Rule.direction=guard |
 
 名下没有 exit / session 规则的 task 不停留在「进行中」，每次 enter 都执行一次动作。
+
+下面的第 0 步 / 第 1 步只判触发规则的方向。前提规则是另一条 rule，判据见 §Rule.direction=guard。
 
 **第 0 步**：进入和退出是不是同一个观测的有 / 无？
 
@@ -258,7 +262,61 @@ temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性�
    - **持续行为 + 一次性通知**（写作业的时候告诉我 / 久坐 N 分钟提醒 / 看电视 N 分钟提醒 等；行为持续但响应是一次性 desc 通知）
    - **触发条件含持续时长** → 用 `duration_seconds` 表达，不改 direction
 
+### Rule.direction=guard（前提规则）
+
+命题里除了触发观测，还有一个**必须同时成立的状态**时装：前提单独建一条 rule，挂同一个 task。
+
+识别：用户原话含「如果 / 并且 / 前提是 / 只有…才」，且那半句说的是一个**状态**（设备开着、屋里有人），不是另一个触发事件，也不是要做的动作——"有人进客厅就开空调"里的"开空调"是动作，这条命题没有前提。
+
+**会发生变化的那个观测当触发，作为背景状态的那个当前提。** "空调开着但屋里没人就关掉"是 omni 触发（屋里没人）+ iot 前提（空调开着）。
+
+装法：`miloco-cli rule create --direction guard`，条件参数与触发规则相同（`--condition` 或 `--iot-*` 四件套），**不传任何动作参数**；动作装在触发规则上。前提与触发规则的源可以不同。
+
+- 前提只管进入。要「条件不再成立就退出」用 `--direction exit`。
+- 前提条件未就绪（设备离线 / 属性还没对齐）时不允许进入。
+- 前提不支持 `--duration-seconds`。
+- 同 task 多条前提全部成立才允许进入。
+
+先建前提、再建触发规则。
+
+### Rule.source（omni / iot）
+
+**第 1 步 · 找候选属性。禁止凭常识填 did / iid，只用本轮真实拿到的输出。**
+
+先看 system context `## 设备目录` 段，按 access 含 `n` 筛候选设备与属性名。目录缺失或未覆盖 → `miloco-cli device list`（**不带 `--room`**：房间名只能来自用户原话，本步推出来的房间名不算，也不许带到 §Rule.感知设备）。
+
+**选定设备之后必须跑 `miloco-cli device spec <did>`**：`--iot-iid` 的值只能从 `device spec` 输出的行首列 `prop.<siid>.<piid>` 抄，去掉 `prop.` 前缀。设备目录只用来筛候选，不作为 iid 的来源。
+
+access 列：`w` 可写 / `r` 可读 / `n` 设备主动推送。**只有 `r` 没有 `n` 的属性不能当触发源**，用它建规则会被拒。
+
+**第 2 步 · 判定**。判「答不答得了」只看命题里的**瞬时观测**：持续时长、累计次数都不参与，它们由 `duration_seconds` 或 record 表达，不在条件里（source=iot 时只能用 record，装法见 §Rule.duration_seconds）。「空调开着超过两小时」的瞬时观测是「空调开着」。
+
+| 情况 | source |
+|---|---|
+| 找到含 `n` 的属性，且它答的就是本命题 | `iot` + 触发装配提示（告知装到了哪台设备的哪条属性）|
+| 找到属性但它答的不是本命题（命题问人或行为，属性答设备自身状态）| `omni` |
+| 没找到 | `omni` |
+
+第 2 步只在第 1 步真的拿到输出之后判。设备目录里没有那类设备 = 没找到，不追问用户、不假设它存在。
+
+### Rule.condition.iot
+
+source=iot 时填，与 `--condition` 互斥（同时给会被拒）。四个 flag 同时给：
+
+| flag | 取值 |
+|---|---|
+| `--iot-did` | 设备 did |
+| `--iot-iid` | **裸 `<siid>.<piid>`**。`device spec` 输出的键是 `prop.<siid>.<piid>`，去掉 `prop.` 前缀 |
+| `--iot-op` | `eq` / `ne` / `gt` / `gte` / `lt` / `lte` |
+| `--iot-value` | 按该属性的 format：枚举填 spec 里的**数字**、不是名字；bool 只收 `true` / `false`；整数族填整数；float 填小数 |
+
+谓词必须**既可能成立、也可能不成立**。取值范围或枚举内恒真、恒假的都会被拒（`[0,100]` 上 `gt -1`、枚举 `{1,2}` 上 `eq 9`）。
+
+字符串和 bool 属性只能用 `eq` / `ne`。
+
 ### Rule.condition.query
+
+**本节仅 source=omni 时走。**
 
 **condition.query 是「判定 X 在发生」的视觉命题**——主语 + 谓语，主语类型由命题语义决定（person / object / scene）。
 
@@ -369,7 +427,7 @@ session + duration record 三 desc 分工：
 
 ### Rule.duration_seconds
 
-**含义**：触发条件需要持续 N 秒才算成立。direction 无关修饰符（三个方向都可配）。
+**含义**：触发条件需要持续 N 秒才算成立。与 direction 无关，`guard` 除外。
 
 **单位**：CLI `--duration-seconds` 收**秒整数**。用户原话 N 分钟 → 装 `N×60`；N 小时 → 装 `N×3600`。同任务内 `record.target_minutes` 字段按分钟传，两者不混用。
 
@@ -377,7 +435,11 @@ session + duration record 三 desc 分工：
 
 **跨次累计场景**（Record.duration）：duration_seconds 退化为 rule 层姿态稳定窗（推荐值见下方推荐表），业务时长由 `record.target_minutes` 表达。
 
-何时配：
+**direction=guard 时本字段禁配**（传了会被拒）。
+
+**source=iot 时本字段禁配**（传了会被拒）。命题含持续时长时时长改由 `Record.kind=duration` + `target_minutes` 承担（见 §达标通知机制），rule 侧不传 `--duration-seconds`，direction 按 §Rule.direction 判据 1 取 `session`。
+
+何时配（以下仅 source=omni）：
 
 1. 人身安全/紧急 → 禁配
 2. 瞬时存在态 / 瞬时动作（< 10s，如喝水 / 咳嗽 / 按门铃 / 仰卧起坐 / 计数型离散动作）→ **不配**
@@ -563,6 +625,8 @@ session + duration record 三 desc 分工：
 
 ### 感知设备（`--source`，可选）
 
+**source=iot 时整节跳过，不传 `--source`。**
+
 消费 §前置检查 §感知设备清单 拿到的 N：
 
 1. 已锁 `source_did[]`（非空）→ 直接当 `--source`
@@ -576,7 +640,9 @@ session + duration record 三 desc 分工：
 
 ### 动作设备（`--action` JSON 的 did）
 
-优先看 system context `## 设备目录` 段。缺失或未覆盖 → `device list --room` + `device spec <did>` 拿 iid。iid 格式为 `prop.<siid>.<piid>`（属性直控）或 `action.<siid>.<aiid>`（method call，如 TTS），从 `device spec` 输出行首列直接复制真实数字。
+先看 system context `## 设备目录` 段筛设备。缺失或未覆盖 → `device list --room`。
+
+**选定设备之后必须跑 `device spec <did>` 拿 iid**：格式为 `prop.<siid>.<piid>`（属性直控）或 `action.<siid>.<aiid>`（method call，如 TTS），只能从 `device spec` 输出行首列直接复制真实数字。设备目录不作为 iid 的来源。
 
 **`cooldown_minutes` 取值**（`idempotent:false` 必配）：紧急报警 1-5 / 日常提醒 5-30 / 欢迎播报 30-60；类别内下限=低频触发，上限=高频重复触发。
 
@@ -653,7 +719,9 @@ session + duration record 三 desc 分工：
 | `direction=enter` | `--direction enter` |
 | `direction=exit` | `--direction exit` |
 | `direction=session` | `--direction session` |
-| `condition.query` | `--condition "<query>"` |
+| `direction=guard` | `--direction guard`（不传任何动作 flag、不传 `--duration-seconds`）|
+| `source=omni` + `condition.query` | `--condition "<query>"` |
+| `source=iot` | `--iot-did <did> --iot-iid <siid.piid> --iot-op <op> --iot-value <v>`（四个同时给，与 `--condition` 互斥）|
 | enter / exit + action JSON | `--action '<JSON>'`（落哪个槽由 direction 定，不用 `--on-exit-*`）|
 | enter / exit + desc | `--action-desc "<desc>"` |
 | 动作装在 task 上 / 出方向不做事 | 不传动作 flag |
@@ -666,6 +734,7 @@ session + duration record 三 desc 分工：
 | `exit_debounce_seconds=N` | `--exit-debounce-seconds N` |
 | 感知设备=`<DID>` | `--source <DID>` |
 | 感知设备=广播 | 不传 `--source` |
+| `source=iot` | 不传 `--source` |
 
 ## Record content JSON
 
@@ -995,3 +1064,73 @@ miloco-cli rule create --task-id movie_mode_gesture \
   --action '{"did":"<默认音箱 DID>","iid":"action.<siid>.<aiid>","params":["观影模式已就绪"],"idempotent":false,"cooldown_minutes":5}'
 ```
 
+### 例 13
+
+用户："客厅温度超过 28 度就开空调"
+
+推理：环境量异常 → §Rule?=Y；§Rule.source 第 1 步查设备目录，客厅温湿度传感器有 `temperature|rn|float|[-40,125;0.1]|℃` → 含 `n`，答的就是本命题 → 选定这台设备，跑 `miloco-cli device spec <客厅温湿度传感器 DID>` 从行首列抄 iid → source=iot + 触发装配提示；开空调是激活持续设备状态 → §Rule.direction 第 1 步判据 3=session + 默认补 on_exit 复位；命题无持续时长 → 不配 duration_seconds；无累计 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；§Rule.action 设备直控 → action JSON；source=iot → 不传 `--source`
+
+```
+Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
+Rule.source=iot · direction=session · on_enter/on_exit 均 action JSON
+iot 条件项：<客厅温湿度传感器 DID> · <siid>.<piid> · gt · 28.0
+```
+
+```bash
+miloco-cli task create --task-id living_room_cool --description "客厅超过 28 度自动开空调"
+miloco-cli rule create --task-id living_room_cool \
+  --name "[living_room_cool] 客厅高温开空调" \
+  --direction session \
+  --iot-did <客厅温湿度传感器 DID> --iot-iid <siid>.<piid> --iot-op gt --iot-value 28.0 \
+  --on-enter-action '{"did":"<客厅空调 DID>","iid":"prop.<siid>.<piid>","value":true,"idempotent":true}' \
+  --on-exit-action '{"did":"<客厅空调 DID>","iid":"prop.<siid>.<piid>","value":false,"idempotent":true}'
+```
+
+### 例 14
+
+用户："有人开门就告诉我"
+
+推理：§Rule.source 第 1 步查设备目录，无门锁 / 门窗传感器条目，跑 `device list` 全量仍无 → 没找到 → source=omni（**不假设家里有接进米家的门锁**）；用户原话没有房间词，第 1 步也没产生房间词 → §Rule.感知设备 不传 `--source`；「有人开门」是人的行为 → 走视觉命题；瞬时动作 → §Rule.direction 第 1 步判据 6=enter；无累计 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；通知类语义且未明示通道 → §通道反问；主语「有人」→ `任何人` + 触发装配提示；§Rule.感知设备 未指定房间 → 不传 `--source` + 触发装配提示
+
+```
+Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
+Rule.source=omni（设备目录里没有门相关的可推送属性）· direction=enter · action=desc
+感知设备：用户未指定房间 → 不传 --source
+```
+
+```bash
+miloco-cli task create --task-id door_open_alert --description "有人开门时通知"
+miloco-cli rule create --task-id door_open_alert \
+  --name "[door_open_alert] 有人开门" \
+  --direction enter \
+  --condition "任何人一只手握住门把手并向内或向外拉推，门扇与门框之间出现可见缝隙且缝隙持续增大；不含站在门前不接触门把手，不含手扶墙面或门框旁的开关面板" \
+  --action-desc "使用<通道>通知：有人开门"
+```
+
+### 例 15
+
+用户："有人进玄关而且门锁是开着的，就用音箱播报固定欢迎语"
+
+推理：「有人进玄关」到达/进入类瞬时事件 → §Rule?=Y；除触发观测外还有一个必须同时成立的状态「门锁是开着的」→ §Rule.direction=guard 拆出前提规则，会变化的观测（有人进玄关）当触发、背景状态（门锁开着）当前提；§Rule.source 第 1 步查设备目录，门锁的锁状态属性含 `n` 且答的就是「门锁开没开」→ 前提走 iot，跑 `miloco-cli device spec <门锁 DID>` 从行首列抄 iid；「进玄关」= 进 X，含强常识默认 → §Rule.direction 判据 4 = session + `on_exit` 留空；session + 瞬时进入事件 → §Rule.exit_debounce_seconds(瞬时事件防重复·长窗) = 1800 + 触发装配提示；无累计 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；「用音箱播报」已明示通道 → §通道反问 跳过；文案固定、不按上下文变 → §Rule.action(播固定文本) = action JSON（TTS 类：`iid` 走 `action.<siid>.<aiid>` 从 device spec 输出行首列复制，`params` 按 spec in_params 列填数组，`idempotent:false`，`cooldown_minutes=5`）；用户只说"固定欢迎语"没给文案 → 默认「欢迎回家」+ 触发装配提示；主语「有人」→ `任何人` + 触发装配提示；「玄关」有房间名且玄关摄像头按常识覆盖入户门 → §感知视角 路径 2 按常识默认装 + 触发装配提示 → 视角覆盖 → 含触发动作的命题；§Rule.感知设备 N 内按 room_name 匹配命中 1 台 → `--source <玄关摄像头 DID>`；前提不配动作、不配 duration_seconds，先建前提后建触发规则
+
+```
+Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
+触发规则：source=omni · direction=session · exit_debounce_seconds=1800 · on_enter=action JSON（TTS 类）· on_exit 留空
+前提规则：source=iot · direction=guard · 不配动作
+iot 条件项：<门锁 DID> · <siid>.<piid> · eq · <开启对应的枚举值>
+```
+
+```bash
+miloco-cli task create --task-id entry_welcome --description "有人进玄关且门锁开着时播报欢迎语"
+miloco-cli rule create --task-id entry_welcome \
+  --name "[entry_welcome] 门锁开着" \
+  --direction guard \
+  --iot-did <门锁 DID> --iot-iid <siid>.<piid> --iot-op eq --iot-value <开启对应的枚举值>
+miloco-cli rule create --task-id entry_welcome \
+  --name "[entry_welcome] 有人进玄关" \
+  --direction session \
+  --condition "任何人从门外向室内方向移动并越过门框；不含只在门外停留未进入，不含仅有门扇开合而无人出现" \
+  --source <玄关摄像头 DID> \
+  --exit-debounce-seconds 1800 \
+  --on-enter-action '{"did":"<玄关音箱 DID>","iid":"action.<siid>.<aiid>","params":["欢迎回家"],"idempotent":false,"cooldown_minutes":5}'
+```

@@ -244,7 +244,7 @@ def test_config_set_multi_pair_atomic(runner, isolated_config):
             "config",
             "set",
             "model.omni.model",
-            "xiaomi/mimo-v2.5",
+            "mimo-v2.6-flash",
             "model.omni.base_url",
             "https://api.xiaomimimo.com/v1",
             "model.omni.api_key",
@@ -264,7 +264,7 @@ def test_config_set_multi_pair_atomic(runner, isolated_config):
     from miloco_cli.config import load_config
 
     cfg = load_config()
-    assert cfg["model"]["omni"]["model"] == "xiaomi/mimo-v2.5"
+    assert cfg["model"]["omni"]["model"] == "mimo-v2.6-flash"
     assert cfg["model"]["omni"]["base_url"] == "https://api.xiaomimimo.com/v1"
     assert cfg["model"]["omni"]["api_key"] == "sk-xxxxx"
 

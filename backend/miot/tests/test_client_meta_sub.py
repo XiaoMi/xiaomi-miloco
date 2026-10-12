@@ -30,6 +30,9 @@ from miot.types import MipsConnectionError
 
 from miot import client as client_mod
 
+# 无真实网络/凭据/设备依赖 —— CI 的 `miot 单元测试` 步骤按 `-m unit` 选择。
+pytestmark = pytest.mark.unit
+
 
 class _FakeMips:
     def __init__(self, *, connected: bool = True, fail: bool = False) -> None:

@@ -72,7 +72,7 @@ def client(tmp_path, monkeypatch):
                 "model": {
                     "omni": {
                         "label": "",
-                        "model": "xiaomi/mimo-v2.5",
+                        "model": "mimo-v2.6-flash",
                         "base_url": "https://api.xiaomimimo.com/v1",
                         "api_key": "",
                     },
@@ -100,7 +100,7 @@ def test_get_default_active_no_key_not_synthesized(client):
     """出厂未配态:当前生效配置无 key(没有模型在跑),不合成进列表 —— 列表为空,
     前端据此给「未配 API Key」警告,清楚表达「没有模型在跑」。"""
     data = _get(client)
-    assert data["active"]["model"] == "xiaomi/mimo-v2.5"
+    assert data["active"]["model"] == "mimo-v2.6-flash"
     assert data["active"]["has_key"] is False
     assert data["profiles"] == []
 
@@ -425,7 +425,7 @@ def test_delete_active_resets_to_unconfigured(client):
     ]
     # 当前生效重置为出厂未配态(无 key)
     assert out["active"]["has_key"] is False
-    assert out["active"]["model"] == "xiaomi/mimo-v2.5"
+    assert out["active"]["model"] == "mimo-v2.6-flash"
     # 乙已移除;甲 仍在档案列表但非 active;无任何 active 行(无 key 不合成)
     assert not any(p["label"] == "乙" for p in out["profiles"])
     assert any(p["label"] == "甲" for p in out["profiles"])

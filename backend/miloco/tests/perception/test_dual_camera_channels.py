@@ -208,7 +208,7 @@ def test_each_channel_produces_distinct_meta_did():
     asyncio.run(adapter.connect_device("dual:ch1", source=object()))  # type: ignore[arg-type]
 
     for syn_did in ("dual:ch0", "dual:ch1"):
-        cb = adapter._make_decoded_video_callback(syn_did)
+        cb = adapter._make_decoded_video_callback(syn_did, adapter._devices[syn_did])
         asyncio.run(
             cb(syn_did, np.zeros((2, 2, 3), dtype=np.uint8), 1_000, 0, 0, 0)
         )

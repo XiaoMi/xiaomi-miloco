@@ -48,6 +48,7 @@ class RuleDirection(str, Enum):
     EXIT = "exit"
     SESSION = "session"
     MILESTONE = "milestone"
+    GUARD = "guard"
 
 
 _MODE_TO_DIRECTION: dict[str, RuleDirection] = {
@@ -55,13 +56,14 @@ _MODE_TO_DIRECTION: dict[str, RuleDirection] = {
     RuleMode.STATE.value: RuleDirection.SESSION,
 }
 
-# 反向: direction 是权威, mode 跟着它推。exit / milestone 在 mode 里没有对应项,
-# 存一个自洽的占位值。
+# 反向: direction 是权威, mode 跟着它推。exit / milestone / guard 在 mode 里没有
+# 对应项, 存一个自洽的占位值。
 _DIRECTION_TO_MODE: dict[RuleDirection, RuleMode] = {
     RuleDirection.ENTER: RuleMode.EVENT,
     RuleDirection.EXIT: RuleMode.EVENT,
     RuleDirection.SESSION: RuleMode.STATE,
     RuleDirection.MILESTONE: RuleMode.EVENT,
+    RuleDirection.GUARD: RuleMode.EVENT,
 }
 
 class RuleLifecycle(str, Enum):
@@ -221,6 +223,15 @@ class RuleCondition(BaseModel):
     query: str = Field(..., description="Natural language condition description")
 
 
+OMNI_SOURCE_TYPE = "omni"
+RECORD_SOURCE_TYPE = "record"
+IOT_SOURCE_TYPE = "iot"
+
+KNOWN_SOURCE_TYPES = frozenset({OMNI_SOURCE_TYPE, RECORD_SOURCE_TYPE, IOT_SOURCE_TYPE})
+"""已经实现了求值的源。不在里面的一律拒, 不静默当 omni ——
+一条 presence 条件项被塞进摄像头 prompt 时, 错误现象离根因很远。"""
+
+
 class ConditionItem(BaseModel):
     """一个触发源上的一个条件。
 
@@ -253,8 +264,15 @@ def task_rule_set_error(
     **达标规则不算数**: 它是服务端按 task 的达标配置维护的派生物, 不是用户建的
     规则。算进来的话"只挂一条达标规则"会被判成"没有进路径", 而每个配了达标通知的
     task 装配途中都会经过这个状态 —— 免责条款一放行, 这道闸对它们就永久失效了。
+
+    **前提规则同样不算数**: 它两个方向都不是, 留在集合里会让 session + 前提被判成
+    "session 没有独占"。
     """
-    directions = [d for d in directions if d is not RuleDirection.MILESTONE]
+    directions = [
+        d
+        for d in directions
+        if d not in (RuleDirection.MILESTONE, RuleDirection.GUARD)
+    ]
     if not directions:
         # 装配是分步的, task 可以暂时一条 rule 都没有。
         return None
@@ -372,6 +390,25 @@ class Rule(BaseModel):
     updated_at: str | None = Field(None, description="Last update time (ISO 8601)")
 
     @property
+    def resolved_source_type(self) -> str:
+        """这条 rule 归哪个源。判源的代码全部走它, 不许再有第二份。
+
+        与 ``resolved_direction`` 同构, 也同样是普通 ``@property`` —— 不进
+        ``model_dump()``。dump 之后再按键取会拿到 ``None``。
+
+        ``condition_dnf`` 为空时回退 omni。**这条回退只兜迁移前的存量行**: 创建
+        路径第一步会无条件补齐这一列 (``_prepare_condition``), 落库也写它
+        (``rule_repo``), 所以经服务端建出来的 rule 走不到这个分支。
+        """
+        dnf = self.condition_dnf
+        if dnf is None or not dnf.any_of:
+            return OMNI_SOURCE_TYPE
+        for conjunction in dnf.any_of:
+            for item in conjunction:
+                return item.source_type
+        return OMNI_SOURCE_TYPE
+
+    @property
     def resolved_direction(self) -> RuleDirection:
         """读侧唯一入口: 有 direction 用它, 没有按 mode 推。
 
@@ -428,6 +465,9 @@ class RuleUpdate(BaseModel):
     lifecycle: RuleLifecycle | None = Field(None)
     enabled: bool | None = Field(None)
     condition: RuleConditionUpdate | None = Field(None)
+    # 整项替换, 不做部分合并 —— ``condition`` 那个字段能部分合并是因为它是两个独立
+    # 标量, 而 DNF 是一个结构, 「合并到哪一层」答不上来。
+    condition_dnf: RuleConditionDNF | None = Field(None)
     actions: list[RuleAction] | None = Field(None)
     action_descriptions: list[str] | None = Field(None)
     on_enter_actions: list[RuleAction] | None = Field(None)
