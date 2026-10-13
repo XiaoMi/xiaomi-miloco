@@ -89,7 +89,9 @@ def scope_camera_list(pretty):
     (reason=no_activity,空房间最常见、属正常)、裁切区域面积超/不足上下限、区域退化、本窗无帧、
     编码或 JPEG 产物过短等**内容层**回退只在后端日志 event=adaptive_crop_fallback 的 reason=
     里可见(完整 11 项见 _maybe_encode_adaptive 的 docstring;注意 per_camera_off 是 debug 级、
-    默认级别下 grep 不到)。"""
+    默认级别下 grep 不到)。stream_error="cross_subnet_nat" 表示该相机跨网段、云端在线、局域网探测可达，
+    但拉流长期连不上，大概率是路由器 NAT 类型限制——需把相机与主机放同一局域网，或将路由器
+    NAT 改为宽松/全锥模式；云端已离线时不给这条诊断(问题不在路由器上)，null 表示无此诊断。"""
     print_result(_compose_channel_dids(api_get(_CAMERAS_PATH)), pretty)
 
 

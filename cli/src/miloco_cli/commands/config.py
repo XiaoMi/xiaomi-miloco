@@ -97,7 +97,7 @@ def config_set(ctx, items: tuple[str, ...], no_restart: bool, pretty: bool):
       miloco-cli config set server.url https://192.168.1.100:1810
       miloco-cli config set model.omni.api_key sk-xxxxx
       miloco-cli config set debug true --no-restart
-      miloco-cli config set model.omni.model xiaomi/mimo-v2.5 \\
+      miloco-cli config set model.omni.model mimo-v2.6-flash \\
                             model.omni.base_url https://api.xiaomimimo.com/v1 \\
                             model.omni.api_key sk-xxxxx --no-restart
     """

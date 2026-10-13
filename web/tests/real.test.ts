@@ -27,6 +27,7 @@ import {
   realEventCropMeta,
   realUpdateRuleQuery,
   realUpdateTaskDescription,
+  realListTasks,
   _resetUsageStatsCache,
 } from "@/api/real";
 
@@ -429,7 +430,7 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
   ) {
     return {
       bucket_ms: t0,
-      model: "mimo-v2.5",
+      model: "mimo-v2.6-flash",
       base_url,
       type,
       calls,
@@ -551,7 +552,7 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
 
     // rows：model × type
     const rt = s.rows.find((r) => r.type === "realtime")!;
-    expect(rt.model).toBe("mimo-v2.5");
+    expect(rt.model).toBe("mimo-v2.6-flash");
     expect(rt.breakdown.video).toBe(2200);
     expect(rt.calls).toBe(2);
 
@@ -680,11 +681,11 @@ describe("realGetUsageStats — today buckets 折算契约", () => {
     expect(fine.timeline.length).toBeGreaterThanOrEqual(hourly.timeline.length);
 
     // 明细行：只有 realtime 数据，也要给该模型补一行 on_demand 0
-    const od = hourly.rows.find((r) => r.model === "mimo-v2.5" && r.type === "on_demand");
+    const od = hourly.rows.find((r) => r.model === "mimo-v2.6-flash" && r.type === "on_demand");
     expect(od).toBeDefined();
     expect(od!.calls).toBe(0);
     expect(od!.tokens).toBe(0);
-    const rt = hourly.rows.find((r) => r.model === "mimo-v2.5" && r.type === "realtime");
+    const rt = hourly.rows.find((r) => r.model === "mimo-v2.6-flash" && r.type === "realtime");
     expect(rt!.calls).toBe(2);
     // 不得重复：单模型只 2 行（realtime + on_demand），realtime 恰 1 行
     expect(hourly.rows).toHaveLength(2);
@@ -729,8 +730,8 @@ describe("realGetUsageStats — week daily 折算契约", () => {
         message: "ok",
         data: {
           rows: [
-            { date, model: "mimo-v2.5", type: "realtime", calls: 100, input_tokens: 5000, output_tokens: 500, cache_tokens: 1500, video_tokens: 4000, audio_tokens: 200 },
-            { date, model: "mimo-v2.5", type: "on_demand", calls: 10, input_tokens: 2000, output_tokens: 800, cache_tokens: 800, video_tokens: 0, audio_tokens: 1200 },
+            { date, model: "mimo-v2.6-flash", type: "realtime", calls: 100, input_tokens: 5000, output_tokens: 500, cache_tokens: 1500, video_tokens: 4000, audio_tokens: 200 },
+            { date, model: "mimo-v2.6-flash", type: "on_demand", calls: 10, input_tokens: 2000, output_tokens: 800, cache_tokens: 800, video_tokens: 0, audio_tokens: 1200 },
           ],
           total: 2,
         },
@@ -941,5 +942,77 @@ describe("任务详情就地编辑 — 写接口契约", () => {
     await expect(realUpdateRuleQuery("nope", "x")).rejects.toThrow(
       "Rule 'nope' not found",
     );
+  });
+});
+
+describe("realListTasks — summary 契约", () => {
+  const summary = (over: Record<string, unknown> = {}) => ({
+    code: 0,
+    data: [
+      {
+        task_id: "focus",
+        description: "专注模式",
+        status: "active",
+        created_at: "2026-09-01T10:00:00+08:00",
+        runtime_state: "on",
+        rule_briefs: [
+          { rule_id: "r-in", query: "比出 V 手势", direction: "enter" },
+          { rule_id: "r-out", query: "挥手", direction: "exit" },
+        ],
+        actions: {
+          on_enter_desc: "推一条消息",
+          on_exit_desc: "推一条下线",
+          on_target_actions: [{ did: "d1", iid: "prop.2.1", value: true }],
+        },
+        record: null,
+        ...over,
+      },
+    ],
+  });
+
+  it("带上 direction / runtime_state / task 级动作", async () => {
+    mockFetchByUrl({ "/api/tasks/summary": summary() });
+
+    const [task] = await realListTasks();
+
+    expect(task.runtimeState).toBe("on");
+    expect(task.ruleBriefs.map((r) => r.direction)).toEqual(["enter", "exit"]);
+    expect(task.actions?.onEnterDesc).toBe("推一条消息");
+    expect(task.actions?.onExitDesc).toBe("推一条下线");
+    // *_actions 只留条数：住户界面不渲染设备指令的原始结构
+    expect(task.actions?.onTargetActionCount).toBe(1);
+    expect(task.actions?.onEnterActionCount).toBe(0);
+  });
+
+  it("旧 backend 不返这三样时给缺省值，不崩", async () => {
+    mockFetchByUrl({
+      "/api/tasks/summary": {
+        code: 0,
+        data: [
+          {
+            task_id: "old",
+            description: "旧任务",
+            status: "active",
+            created_at: "2026-09-01T10:00:00+08:00",
+            rule_briefs: [{ rule_id: "r1", query: "有人" }],
+            record: null,
+          },
+        ],
+      },
+    });
+
+    const [task] = await realListTasks();
+
+    expect(task.runtimeState).toBe("off");
+    expect(task.ruleBriefs[0].direction).toBe("enter");
+    // 归一成"六个槽全空"而不是 null —— 调用方据此隐藏整个动作分区
+    expect(task.actions).toEqual({
+      onEnterDesc: null,
+      onExitDesc: null,
+      onTargetDesc: null,
+      onEnterActionCount: 0,
+      onExitActionCount: 0,
+      onTargetActionCount: 0,
+    });
   });
 });

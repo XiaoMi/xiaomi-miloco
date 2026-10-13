@@ -25,6 +25,7 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot import filter as miot_filter
 from miloco.miot.service import MiotService
+from miot.types import MIoTCameraStatus
 
 
 class _FakeKV:
@@ -201,10 +202,23 @@ def test_select_active_require_lan_false_keeps_lan_stale():
     cameras = {"c1": _camera("c1", home_id="H1", online=True, lan_online=False)}
     # require_lan=True（默认连接口径）→ 排除
     assert miot_filter.select_active_camera_dids(kv, cameras) == []
-    # require_lan=False（应连数口径）→ 放过
+    # require_lan=False（保留集/断开判据的口径；**不是**按需补建的口径，那边用严格门）
+    # → 放过
     assert miot_filter.select_active_camera_dids(
         kv, cameras, require_lan=False
     ) == ["c1"]
+
+
+def test_select_active_connected_camera_reachable_despite_lan_offline():
+    """直连掐死同网段 OTU 保活令 lan_online=False，但 camera_status=CONNECTED
+    的相机仍必须被判定可达——这是 #420 被 #430 revert 的根因场景，
+    require_lan=True（默认，与 toggle_camera/list_cameras_with_state 同口径）
+    下必须靠 is_camera_connected 兜底放行，而不是被 lan_online=False 误杀。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    cam = _camera("c1", home_id="H1", online=True, lan_online=False)
+    cam.camera_status = MIoTCameraStatus.CONNECTED
+    cameras = {"c1": cam}
+    assert miot_filter.select_active_camera_dids(kv, cameras) == ["c1"]
 
 
 def test_select_active_caps_by_did(monkeypatch):
@@ -309,6 +323,9 @@ def _make_service(devices: dict | None = None, cameras: dict | None = None, kv: 
         # 默认：awake 缓存空（全部相机镜头态未知→None，不 gate）。需要构造镜头关闭的
         # 测试自行覆盖该 mock 返回 {did: False}。
         read_cameras_awake=AsyncMock(side_effect=lambda dids, **kw: {}),
+        # 默认无跨 NAT 诊断（list_cameras_with_state 逐相机调用）。需要断言
+        # stream_error 的测试自行覆盖成 lambda did: True。
+        stream_nat_blocked=lambda did: False,
     )
     svc = MiotService(miot_proxy=proxy)
 
@@ -346,6 +363,56 @@ async def test_list_homes_auto_selects_first_when_empty():
     by_id = {h["home_id"]: h for h in homes}
     assert by_id["H1"]["in_use"] is True
     assert by_id["H2"]["in_use"] is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_home_selected_picks_the_first_home_when_none_is_enabled():
+    kv = _FakeKV()
+    svc = _make_service(devices={"d1": _home("H2"), "d2": _home("H1")}, kv=kv)
+
+    homes, changed = await svc._ensure_home_selected()
+
+    assert changed is True
+    assert json.loads(kv.get(ScopeConfigKeys.HOME_WHITE_LIST_KEY)) == ["H1"]
+    assert {h["home_id"] for h in homes} == {"H1", "H2"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_home_selected_reports_no_change_when_one_is_already_enabled():
+    svc = _make_service(
+        devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_kv_with_home("H2")
+    )
+
+    _, changed = await svc._ensure_home_selected()
+
+    assert changed is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_home_selected_does_not_reset_sessions_by_itself():
+    """它的副作用只有写 KV。要不要因此重置会话是调用方的决定。"""
+    svc = _make_service(devices={"d1": _home("H1")}, kv=_FakeKV())
+    resets: list[int] = []
+    svc._schedule_agent_session_reset = lambda: resets.append(1)
+
+    await svc._ensure_home_selected()
+
+    assert resets == []
+
+
+@pytest.mark.asyncio
+async def test_switch_home_resets_sessions_once_when_no_home_was_enabled():
+    """用户点一次，不该先自动切到首个家庭再切到目标。
+
+    那样会重置两次会话，而且中间那段时间容器装的是用户没选的那个家。
+    """
+    svc = _make_service(devices={"d1": _home("H1"), "d2": _home("H2")}, kv=_FakeKV())
+    resets: list[int] = []
+    svc._schedule_agent_session_reset = lambda: resets.append(1)
+
+    await svc.switch_home("H2")
+
+    assert resets == [1]
 
 
 @pytest.mark.asyncio
@@ -522,6 +589,26 @@ async def test_list_cameras_with_state_flags():
     assert by_did["c4"]["in_use"] is True
     assert by_did["c4"]["awake"] is None
     assert by_did["c4"]["connected"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_cameras_with_state_stream_error_ignores_stale_connected_cache():
+    """stream_error 只看 stream_nat_blocked，不再叠一道读 _camera_info_dict 缓存的
+    device_connected 门——那份缓存只由完整刷新写入，CLI(scope camera list) 不走
+    /refresh_camera_online 那条刷新路径，缓存可能停在"曾经连上过"的旧值。旧代码在
+    这种陈旧态下会把 stream_error 恒判成 None，即便 stream_nat_blocked 判据本身
+    （已含"当下是否连着"这道实时门）已经成立。
+    """
+    cam = _camera("c1", home_id="H1")
+    cam.connected = True  # 缓存陈旧：曾经连上过，但原生会话早已断开
+    cameras = {"c1": cam}
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+    svc = _make_service(devices=dict(cameras), cameras=cameras, kv=kv)
+    svc._miot_proxy.stream_nat_blocked = lambda did: True  # type: ignore[assignment]
+
+    out = await svc.list_cameras_with_state()
+    by_did = {c["did"]: c for c in out}
+    assert by_did["c1"]["stream_error"] == "cross_subnet_nat"
 
 
 @pytest.mark.asyncio
@@ -851,6 +938,8 @@ async def test_authorize_with_code_clears_scope_before_token_exchange():
         deinit=AsyncMock(),
         init=AsyncMock(),
         refresh_cameras=AsyncMock(),
+        refresh_devices=AsyncMock(),
+        refresh_scenes=AsyncMock(),
         get_devices=AsyncMock(return_value={}),
         get_cameras=AsyncMock(return_value={}),
     )
@@ -930,6 +1019,10 @@ def _scope_proxy_env(tmp_path, monkeypatch):
     miot_client = MagicMock()
     miot_client.register_lan_device_changed_async = AsyncMock()
     miot_client.unregister_lan_device_changed_async = AsyncMock()
+    miot_client.register_camera_status_changed_async = AsyncMock()
+    miot_client.unregister_camera_status_changed_async = AsyncMock()
+    miot_client.set_camera_connected = MagicMock()
+    miot_client.set_camera_dids = MagicMock()
     miot_client.create_camera_instance_async = AsyncMock()
     miot_client.get_cameras_async = AsyncMock(return_value={})
     proxy._miot_client = miot_client  # type: ignore[assignment]
@@ -1124,6 +1217,32 @@ async def test_refresh_cameras_destroys_when_camera_removed_from_account(_scope_
 
 
 @pytest.mark.asyncio
+async def test_refresh_cameras_destroy_survives_status_unregister_error(_scope_proxy_env):
+    """销毁分支里 unregister_camera_status_changed 必须单独兜异常。
+
+    原生实例已不在册时这一步会抛（camera.py unregister_status_changed_async 对
+    `did not in _camera_map` 显式 raise），而原生销毁是先 pop 再 destroy——destroy
+    抛错时 pop 已生效，下一轮销毁序列第一步必然再抛。不兜住会让 destroy + del 全部
+    跳过：管理器永久留在字典里（注释承诺的「留 dict 待重试」永远推进不了），创建
+    分支又因 `not in _camera_img_managers` 永不重建 ⇒ 这台相机再也开不起来。
+    """
+    proxy, kv, miot_client = _scope_proxy_env
+
+    handler = MagicMock()
+    handler.destroy = AsyncMock()
+    proxy._camera_img_managers["c_gone"] = handler
+    miot_client.get_cameras_async = AsyncMock(return_value={})
+    miot_client.unregister_camera_status_changed_async = AsyncMock(
+        side_effect=RuntimeError("camera not found, c_gone")
+    )
+
+    await proxy.refresh_cameras()
+
+    handler.destroy.assert_awaited_once()
+    assert "c_gone" not in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
 async def test_refresh_cameras_no_destroy_when_scope_allows(_scope_proxy_env):
     """对照组：scope 不拒绝时，已有 manager 不应被销毁（防误删保险栓）。
 
@@ -1146,6 +1265,26 @@ async def test_refresh_cameras_no_destroy_when_scope_allows(_scope_proxy_env):
     handler.destroy.assert_not_awaited()
     miot_client.unregister_lan_device_changed_async.assert_not_awaited()
     assert "c1" in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_pushes_scoped_camera_dids_to_lan(_scope_proxy_env):
+    """refresh_cameras 必须把 select_active_camera_dids 算出的 scoped 集传给
+    MIoTLan.set_camera_dids，而不是账号下的全部相机——否则不在当前 scope 里的
+    相机（c_out，属于未启用的 H2）永远不会连上，MIoTLan 就永远判不出"全部相机
+    已连上"，探测暂停功能形同虚设。"""
+    proxy, kv, miot_client = _scope_proxy_env
+
+    cam_in = _camera("c_in", home_id="H1")
+    cam_out = _camera("c_out", home_id="H2")
+    miot_client.get_cameras_async = AsyncMock(
+        return_value={"c_in": cam_in, "c_out": cam_out}
+    )
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+
+    await proxy.refresh_cameras()
+
+    miot_client.set_camera_dids.assert_called_once_with({"c_in"})
 
 
 @pytest.mark.asyncio
@@ -1409,6 +1548,8 @@ async def test_authorize_with_code_auto_selects_first_home():
         ),
         get_miot_auth_info=AsyncMock(),
         refresh_cameras=AsyncMock(),
+        refresh_devices=AsyncMock(),
+        refresh_scenes=AsyncMock(),
         get_devices=AsyncMock(return_value={"d1": _home("H1"), "d2": _home("H2")}),
         get_cameras=AsyncMock(return_value={}),
     )
@@ -2398,3 +2539,16 @@ def test_devices_without_a_home_id_are_dropped():
     proxy = _proxy_with({"orphan": SimpleNamespace()}, kv)
 
     assert asyncio.run(proxy.devices_in_current_home()) == {}
+
+
+def test_has_enabled_home_is_false_on_an_empty_white_list():
+    proxy = _proxy_with({"mine": SimpleNamespace(home_id="H1")}, _FakeKV())
+
+    assert proxy.has_enabled_home() is False
+
+
+def test_has_enabled_home_does_not_look_at_the_devices():
+    """启用了家庭但里面一台设备都没有，作用域仍然是存在的 —— 对齐靠这个区分二者。"""
+    kv = _FakeKV({ScopeConfigKeys.HOME_WHITE_LIST_KEY: json.dumps(["H1"])})
+
+    assert _proxy_with({}, kv).has_enabled_home() is True

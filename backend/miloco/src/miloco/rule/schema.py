@@ -26,7 +26,7 @@ from collections.abc import Iterable
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RuleMode(str, Enum):
@@ -36,6 +36,35 @@ class RuleMode(str, Enum):
     EVENT = "event"
     STATE = "state"
 
+
+class RuleDirection(str, Enum):
+    """rule 的边沿如何映射成 task 的进/出 —— 取代 ``mode``。
+
+    expand-contract 阶段 A 期间两者并存: 本字段为空时按 ``mode`` 推导
+    (``_MODE_TO_DIRECTION``), 读侧一律走 ``Rule.resolved_direction``。
+    """
+
+    ENTER = "enter"
+    EXIT = "exit"
+    SESSION = "session"
+    MILESTONE = "milestone"
+    GUARD = "guard"
+
+
+_MODE_TO_DIRECTION: dict[str, RuleDirection] = {
+    RuleMode.EVENT.value: RuleDirection.ENTER,
+    RuleMode.STATE.value: RuleDirection.SESSION,
+}
+
+# 反向: direction 是权威, mode 跟着它推。exit / milestone / guard 在 mode 里没有
+# 对应项, 存一个自洽的占位值。
+_DIRECTION_TO_MODE: dict[RuleDirection, RuleMode] = {
+    RuleDirection.ENTER: RuleMode.EVENT,
+    RuleDirection.EXIT: RuleMode.EVENT,
+    RuleDirection.SESSION: RuleMode.STATE,
+    RuleDirection.MILESTONE: RuleMode.EVENT,
+    RuleDirection.GUARD: RuleMode.EVENT,
+}
 
 class RuleLifecycle(str, Enum):
     """permanent: until user deletes.
@@ -194,6 +223,84 @@ class RuleCondition(BaseModel):
     query: str = Field(..., description="Natural language condition description")
 
 
+OMNI_SOURCE_TYPE = "omni"
+RECORD_SOURCE_TYPE = "record"
+IOT_SOURCE_TYPE = "iot"
+
+KNOWN_SOURCE_TYPES = frozenset({OMNI_SOURCE_TYPE, RECORD_SOURCE_TYPE, IOT_SOURCE_TYPE})
+"""已经实现了求值的源。不在里面的一律拒, 不静默当 omni ——
+一条 presence 条件项被塞进摄像头 prompt 时, 错误现象离根因很远。"""
+
+
+class ConditionItem(BaseModel):
+    """一个触发源上的一个条件。
+
+    ``source_type`` 不叫 ``source``: CLI 现有 ``--source <DID>`` 指感知摄像头,
+    这个字段指触发源类型, 撞名会让 agent 把摄像头 did 写成类型串且不报错。
+
+    ``spec`` 按源多态, 本次不上多态模型 —— 求值未落地, 存进来只需原样round-trip。
+    """
+
+    source_type: str = Field("omni", description="omni / record / iot / presence")
+    spec: dict[str, Any] = Field(default_factory=dict)
+    negate: bool = Field(False, description="本次校验强制 false")
+
+
+class RuleConditionDNF(BaseModel):
+    """外层 OR、内层 AND。本次校验强制 1×1, 与旧 ``RuleCondition`` 完全等价。"""
+
+    any_of: list[list[ConditionItem]] = Field(default_factory=list)
+
+
+def task_rule_set_error(
+    directions: list[RuleDirection], has_target_action: bool = False
+) -> str | None:
+    """task 名下 rule 集合的合法性 (spec §9)。合法返 None, 非法返错误文案。
+
+    校验对象是集合不是单条 rule —— 这几条约束都只有把同一 task 的 rule 放到一起
+    看才成立。``has_target_action`` 是 task 配没配达标动作, 它决定第三条约束要不要
+    查 —— 达标动作存在 task 上而不在 rule 上, 所以只能由调用方带进来。
+
+    **达标规则不算数**: 它是服务端按 task 的达标配置维护的派生物, 不是用户建的
+    规则。算进来的话"只挂一条达标规则"会被判成"没有进路径", 而每个配了达标通知的
+    task 装配途中都会经过这个状态 —— 免责条款一放行, 这道闸对它们就永久失效了。
+
+    **前提规则同样不算数**: 它两个方向都不是, 留在集合里会让 session + 前提被判成
+    "session 没有独占"。
+    """
+    directions = [
+        d
+        for d in directions
+        if d not in (RuleDirection.MILESTONE, RuleDirection.GUARD)
+    ]
+    if not directions:
+        # 装配是分步的, task 可以暂时一条 rule 都没有。
+        return None
+
+    if RuleDirection.SESSION in directions and len(directions) > 1:
+        return (
+            "direction=session 的规则必须独占该 task: 与 enter / exit / 另一条 "
+            "session 混挂会让 task 永久卡住 (spec §19.7)。"
+        )
+
+    entry_directions = (RuleDirection.ENTER, RuleDirection.SESSION)
+    if not any(d in entry_directions for d in directions):
+        return (
+            "task 名下没有进路径: 只有 exit 规则的 task 永远进不了 on, 名下的动作"
+            "一条都不会执行。至少要有一条 direction=enter 或 session 的规则。"
+        )
+
+    exit_directions = (RuleDirection.EXIT, RuleDirection.SESSION)
+    if has_target_action and not any(d in exit_directions for d in directions):
+        return (
+            "配了达标动作的 task 需要一条 direction=exit 或 session 的规则: 没有出"
+            "路径的 task 运行态恒 off, 达标信号会被判成不在会话中、一次都不触发; "
+            "更根上的原因是累计时长靠 session-start / session-end 配对, 没有出路径"
+            "就永远发不出 session-end, 累计只增不减、达标恒超阈值。"
+        )
+    return None
+
+
 class Rule(BaseModel):
     """Rule data model (V3)."""
 
@@ -206,6 +313,11 @@ class Rule(BaseModel):
     )
     enabled: bool = Field(True, description="Whether the rule is enabled")
     condition: RuleCondition = Field(..., description="Trigger condition")
+
+    # expand-contract 阶段 A 新增, 与 mode / condition 并存。为空 = 该 rule 还没
+    # 迁移过 (存量库跑迁移前, 或内存里直接构造的), 读侧回退到旧字段。
+    direction: RuleDirection | None = Field(None, description="取代 mode, 见 §4.1")
+    condition_dnf: RuleConditionDNF | None = Field(None, description="DNF 结构")
 
     # event mode fields (mutually exclusive; one of the two must be non-empty)
     actions: list[RuleAction] = Field(
@@ -277,6 +389,55 @@ class Rule(BaseModel):
     created_at: str | None = Field(None, description="Creation time (ISO 8601)")
     updated_at: str | None = Field(None, description="Last update time (ISO 8601)")
 
+    @property
+    def resolved_source_type(self) -> str:
+        """这条 rule 归哪个源。判源的代码全部走它, 不许再有第二份。
+
+        与 ``resolved_direction`` 同构, 也同样是普通 ``@property`` —— 不进
+        ``model_dump()``。dump 之后再按键取会拿到 ``None``。
+
+        ``condition_dnf`` 为空时回退 omni。**这条回退只兜迁移前的存量行**: 创建
+        路径第一步会无条件补齐这一列 (``_prepare_condition``), 落库也写它
+        (``rule_repo``), 所以经服务端建出来的 rule 走不到这个分支。
+        """
+        dnf = self.condition_dnf
+        if dnf is None or not dnf.any_of:
+            return OMNI_SOURCE_TYPE
+        for conjunction in dnf.any_of:
+            for item in conjunction:
+                return item.source_type
+        return OMNI_SOURCE_TYPE
+
+    @property
+    def resolved_direction(self) -> RuleDirection:
+        """读侧唯一入口: 有 direction 用它, 没有按 mode 推。
+
+        阶段 A 期间两个字段并存, 直接读 ``direction`` 会在存量数据和内存构造的
+        Rule 上拿到 None; 直接读 ``mode`` 则表达不了 exit / milestone。
+        """
+        if self.direction is not None:
+            return self.direction
+        return _MODE_TO_DIRECTION.get(self.mode.value, RuleDirection.ENTER)
+
+    @model_validator(mode="after")
+    def _direction_decides_mode(self) -> "Rule":
+        """``direction`` 给了就由它定 ``mode``, 不一致直接拒。
+
+        阶段 A 期间 ``mode`` 还是存储字段, 但迁移与旧库回退都按它读。两者打架会让
+        rule 半边生效, 而现象离根因很远。CLI 自己保证自洽, API 是另一个入口 ——
+        拦在模型层两条路都覆盖。
+        """
+        if self.direction is None:
+            return self
+        expected = _DIRECTION_TO_MODE[self.direction]
+        if "mode" in self.model_fields_set and self.mode is not expected:
+            raise ValueError(
+                f"direction={self.direction.value} 对应 mode={expected.value}, "
+                f"收到 mode={self.mode.value}"
+            )
+        self.mode = expected
+        return self
+
 
 class RuleConditionUpdate(BaseModel):
     """Partial condition update -- both fields optional.
@@ -300,9 +461,13 @@ class RuleUpdate(BaseModel):
     name: str | None = Field(None)
     task_id: str | None = Field(None)
     mode: RuleMode | None = Field(None)
+    direction: RuleDirection | None = Field(None)
     lifecycle: RuleLifecycle | None = Field(None)
     enabled: bool | None = Field(None)
     condition: RuleConditionUpdate | None = Field(None)
+    # 整项替换, 不做部分合并 —— ``condition`` 那个字段能部分合并是因为它是两个独立
+    # 标量, 而 DNF 是一个结构, 「合并到哪一层」答不上来。
+    condition_dnf: RuleConditionDNF | None = Field(None)
     actions: list[RuleAction] | None = Field(None)
     action_descriptions: list[str] | None = Field(None)
     on_enter_actions: list[RuleAction] | None = Field(None)

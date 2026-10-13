@@ -75,7 +75,7 @@ def hermes_config_yaml(tmp_path: Path) -> Path:
     content = (
         "model:\n"
         "  provider: xiaomi\n"
-        "  model: mimo-v2.5\n"
+        "  model: mimo-v2.6-flash\n"
         "gateway:\n"
         "  port: 8642\n"
         "feishu:\n"

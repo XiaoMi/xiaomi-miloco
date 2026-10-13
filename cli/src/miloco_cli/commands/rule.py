@@ -36,6 +36,141 @@ def _save_rule_cursor(cursor_ms: int) -> None:
     atomic_write(_rule_cursor_file(), {"cursor_ms": cursor_ms})
 
 
+_IOT_OPS = ("eq", "ne", "gt", "gte", "lt", "lte")
+
+# MIoT 的 format 取值域。整数族全部按 int 解析；bool 只接受 true / false ——
+# 接受 1 / 0 会让「开关配了数值」这类错误在 CLI 层就溜过去。
+_IOT_INT_FORMATS = (
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+)
+
+
+def iot_condition_options(func):
+    """``--iot-did/-iid/-op/-value`` 四件套。create 与 update 共用一份。"""
+    options = (
+        click.option("--iot-did", "iot_did", default=None, help="设备 did"),
+        click.option(
+            "--iot-iid",
+            "iot_iid",
+            default=None,
+            help="属性 iid，形如 5.1（与状态容器的路径段一致）",
+        ),
+        click.option(
+            "--iot-op",
+            "iot_op",
+            default=None,
+            type=click.Choice(_IOT_OPS),
+            help="比较符",
+        ),
+        click.option(
+            "--iot-value",
+            "iot_value",
+            default=None,
+            help="阈值。类型按该属性 spec 的 format 解析",
+        ),
+    )
+    for option in reversed(options):
+        func = option(func)
+    return func
+
+
+def _reject_mixed_condition_args(query_text, perceive_devices, iot_given) -> None:
+    """视觉那组条件参数与 iot 四件套互斥。
+
+    ``--source`` 也算在这一组里：组装 payload 时它跟着 ``iot_given`` 一起被清空，
+    不拦的话用户显式给的设备列表静默消失，而同样的组合在服务端是报错。
+    """
+    if iot_given and (query_text is not None or perceive_devices):
+        raise click.UsageError(
+            "--condition / --source 与 iot 四件套不能一起给: 一条规则只有一个条件项"
+        )
+
+
+def _iot_args_given(iot_did, iot_iid, iot_op, iot_value) -> bool:
+    """四个同时给或同时不给。给了一部分直接报错 —— 半套参数建不出条件项。"""
+    given = [x is not None for x in (iot_did, iot_iid, iot_op, iot_value)]
+    if any(given) and not all(given):
+        raise click.UsageError(
+            "--iot-did / --iot-iid / --iot-op / --iot-value 要么四个都给, 要么都不给"
+        )
+    return all(given)
+
+
+def _fetch_prop_format(did: str, iid: str) -> str:
+    """去 ``device spec`` 拿这条属性的 format。
+
+    **拿不到就报错退出，不猜类型。** 猜错的后果是规则建得成功、运行期恒判类型不兼容、
+    条件恒未就绪 —— 一个查起来很远的失败。
+    """
+    from miloco_cli.client import api_get
+
+    resp = api_get(f"/api/miot/devices/{did}/spec")
+    spec = ((resp or {}).get("data") or {}).get("spec") or {}
+    if not spec:
+        raise click.UsageError(f"拿不到设备 {did} 的 spec, 无法解析 --iot-value")
+    # CLI 参数用裸 siid.piid（与容器路径段一致），spec 输出里的键是 prop.<siid>.<piid>
+    entry = spec.get(f"prop.{iid}")
+    if not isinstance(entry, dict):
+        raise click.UsageError(f"设备 {did} 的 spec 里没有属性 prop.{iid}")
+    return str(entry.get("format") or "")
+
+
+def _parse_iot_value(raw: str, fmt: str, iid: str):
+    if fmt == "bool":
+        if raw.lower() not in ("true", "false"):
+            raise click.UsageError(
+                f"属性 prop.{iid} 是布尔, --iot-value 只接受 true / false"
+            )
+        return raw.lower() == "true"
+    if fmt in _IOT_INT_FORMATS:
+        try:
+            return int(raw)
+        except ValueError as e:
+            raise click.UsageError(
+                f"属性 prop.{iid} 是整数, --iot-value 解析失败"
+            ) from e
+    if fmt == "float":
+        try:
+            return float(raw)
+        except ValueError as e:
+            raise click.UsageError(
+                f"属性 prop.{iid} 是浮点, --iot-value 解析失败"
+            ) from e
+    if fmt == "string":
+        return raw
+    raise click.UsageError(
+        f"属性 prop.{iid} 的 format={fmt!r} 不是标量, 不能当 iot 条件项"
+    )
+
+
+def _build_iot_dnf(iot_did, iot_iid, iot_op, iot_value) -> dict:
+    fmt = _fetch_prop_format(iot_did, iot_iid)
+    value = _parse_iot_value(iot_value, fmt, iot_iid)
+    return {
+        "any_of": [
+            [
+                {
+                    "source_type": "iot",
+                    "spec": {
+                        "did": iot_did,
+                        "iid": iot_iid,
+                        "op": iot_op,
+                        "value": value,
+                    },
+                    "negate": False,
+                }
+            ]
+        ]
+    }
+
+
 @click.group("rule")
 def rule_group():
     """规则操作：列表 / 创建 / 更新 / 启用 / 禁用 / 删除 / 触发 / 日志 / 日志清理。"""
@@ -47,17 +182,50 @@ def rule_group():
 
 
 @rule_group.command("list")
-@click.option("--enabled-only", is_flag=True, help="仅显示已启用的规则")
+@click.option(
+    "--enabled-only", is_flag=True, help="仅显示生效中的规则（task 停用的不算）"
+)
+@click.option(
+    "--show-milestone", "show_milestone", is_flag=True,
+    help="连服务端维护的达标规则一起显示（默认不显示）",
+)
 @click.option("--pretty", is_flag=True)
-def rule_list(enabled_only, pretty):
-    """列出所有规则。"""
+def rule_list(enabled_only, show_milestone, pretty):
+    """列出所有规则。
+
+    达标规则默认不显示：它由服务端按 task 的达标动作 + duration record 自动维护，
+    不是手工建的。
+    """
     from miloco_cli.client import api_get
 
     params = {}
     if enabled_only:
         params["enabled_only"] = "true"
+    if show_milestone:
+        params["include_milestone"] = "true"
     data = api_get(API_PREFIX, params or None)
     print_result(data, pretty)
+
+
+@rule_group.command("iot-diagnostics")
+@click.option("--pretty", is_flag=True)
+def rule_iot_diagnostics(pretty):
+    """iot 触发源的自述：每条条件项现在是真是假还是未就绪、为什么。
+
+    \b
+    reason 的取值：
+    - ok              正常求值
+    - device_offline  设备离线
+    - path_missing    容器里没有这条属性叶子
+    - eval_failed     类型不兼容，求值做不了
+    - not_seeded      还没算过
+
+    **consumer_alive 要单独看。** 消费协程一死，每条 rule 的 reason 都停在最后一次
+    求值时的 ok —— 而那正是最需要报警的时刻。
+    """
+    from miloco_cli.client import api_get
+
+    print_result(api_get(f"{API_PREFIX}/iot/diagnostics"), pretty=pretty)
 
 
 # ---------------------------------------------------------------------------
@@ -75,19 +243,37 @@ def rule_list(enabled_only, pretty):
     required=False,
     help=(
         "感知源 did，可重复，可不填。"
-        "不填 → 所有感知设备都跑该 rule（OR 聚合）；"
+        "不填 → 所有感知设备都跑该 rule；"
         "填 → 只在这些 did 上跑。"
         "用户未明确指定设备时优先不填。"
     ),
 )
-@click.option("--condition", "query_text", required=True, help="触发条件描述（自然语言）")
+@click.option(
+    "--condition",
+    "query_text",
+    required=False,
+    default=None,
+    help="触发条件描述（自然语言）—— 摄像头视觉判定走这个",
+)
+@iot_condition_options
 @click.option(
     "--mode",
     "mode_value",
     type=click.Choice(["event", "state"]),
-    default="event",
-    show_default=True,
-    help="响应模式：event 单点触发；state 进入/退出配对",
+    default=None,
+    help="旧入口，只能表达 enter / session 两种方向；新代码用 --direction",
+)
+@click.option(
+    "--direction",
+    "direction_value",
+    type=click.Choice(["enter", "exit", "session", "guard"]),
+    default=None,
+    help=(
+        "边沿如何映射成 task 的进/出：enter 条件成立就把 task 推进去；"
+        "exit 条件成立就把 task 推出来；session 进入/退出配对；"
+        "guard 只当前提，同 task 的规则要进入时它必须成立，自己不触发也不配动作。"
+        "不传等价于 enter"
+    ),
 )
 @click.option(
     "--lifecycle",
@@ -112,7 +298,8 @@ def rule_list(enabled_only, pretty):
     "actions_raw",
     multiple=True,
     help=(
-        "event 模式设备直控动作 JSON（可重复）。\n"
+        "enter / exit 方向的设备直控动作 JSON（可重复）。"
+        "落 on_enter 还是 on_exit 由 --direction 决定，不用 --on-exit-action。\n"
         "设备控制（幂等）："
         "{\"did\":\"<id>\",\"iid\":\"prop.<siid>.<piid>\",\"value\":<v>,\"idempotent\":true}\n"
         "通知/播报（必带冷却）："
@@ -127,38 +314,41 @@ def rule_list(enabled_only, pretty):
     "--action-desc",
     "action_descs",
     multiple=True,
-    help="event 模式 Agent 回调描述（可重复）",
+    help=(
+        "enter / exit 方向的 Agent 回调描述（可重复）。"
+        "落哪个方向由 --direction 决定"
+    ),
 )
 @click.option(
     "--on-enter-action",
     "on_enter_actions_raw",
     multiple=True,
-    help="state on_enter 设备直控动作 JSON（可重复，格式同 --action）",
+    help="session 方向的 on_enter 设备直控动作 JSON（可重复，格式同 --action）",
 )
 @click.option(
     "--on-enter-desc",
     "on_enter_desc",
     default=None,
-    help="state on_enter Agent 回调提示文本",
+    help="session 方向的 on_enter Agent 回调提示文本",
 )
 @click.option(
     "--on-exit-action",
     "on_exit_actions_raw",
     multiple=True,
-    help="state on_exit 设备直控动作 JSON（可重复，格式同 --action）",
+    help="session 方向的 on_exit 设备直控动作 JSON（可重复，格式同 --action）",
 )
 @click.option(
     "--on-exit-desc",
     "on_exit_desc",
     default=None,
-    help="state on_exit Agent 回调提示文本",
+    help="session 方向的 on_exit Agent 回调提示文本",
 )
 @click.option(
     "--on-target-desc",
     "on_target_desc",
     default=None,
     help=(
-        "state on_target Agent 回调提示文本（duration record 累计达标瞬间触发）。"
+        "session 方向的达标回调提示文本（duration record 累计达标瞬间触发）。"
         "仅在 task 配 duration record + target_minutes 时有效。"
     ),
 )
@@ -167,7 +357,7 @@ def rule_list(enabled_only, pretty):
     "exit_debounce_seconds",
     type=int,
     default=None,
-    help="state mode EXIT 防抖（秒），默认 60",
+    help="session 方向的 EXIT 防抖（秒），默认 60",
 )
 @click.option(
     "--duration-seconds",
@@ -175,8 +365,9 @@ def rule_list(enabled_only, pretty):
     type=int,
     default=None,
     help=(
-        "累计窗口（秒）。不填=立即 fire（现状）。EVENT：达标 fire 后清窗口周期 fire；"
-        "STATE：达标 fire on_enter 一次，STILL_IN 不重复，EXITED 走 exit_debounce"
+        "条件需持续该时长才算成立（秒）。不填=立即 fire。"
+        "enter / exit：达标 fire 后清窗口周期 fire；"
+        "session：达标 fire on_enter 一次，STILL_IN 不重复，EXITED 走 exit_debounce"
     ),
 )
 @click.option(
@@ -195,7 +386,12 @@ def rule_create(
     task_id,
     perceive_devices,
     query_text,
+    iot_did,
+    iot_iid,
+    iot_op,
+    iot_value,
     mode_value,
+    direction_value,
     lifecycle_value,
     terminate_when,
     actions_raw,
@@ -212,16 +408,50 @@ def rule_create(
 ):
     """创建规则。执行方式由填了哪个动作 flag 决定（--action → 设备直控，--action-desc → 走 Agent）。
 
-    mode/action 组合 example 与 condition 写法见 miloco-create-task SKILL。
+    动作也可以不填在这里 —— 多条同方向 rule 共用一份动作时装在 task 上
+    （task set-actions）。direction/action 组合 example 与 condition 写法见
+    miloco-create-task SKILL。
     """
     from miloco_cli.client import api_post
+
+    # ---- 0. 条件：--condition 与 iot 四件套恰好给一组 ----
+    # 这两条报的是**参数用法**，不是「条件不能为空」——真正拦住空条件的是服务端的
+    # 非空校验，那是必经处（API 直调绕过 CLI）。摘掉 required=True 之后有它在，
+    # 用户看到的是贴合 CLI 参数的错误，而不是一个从服务端回来的字段级报错。
+    iot_given = _iot_args_given(iot_did, iot_iid, iot_op, iot_value)
+    _reject_mixed_condition_args(query_text, perceive_devices, iot_given)
+    if query_text is None and not iot_given:
+        raise click.UsageError(
+            "要给 --condition（摄像头视觉判定）或那四个 --iot-* 参数（设备属性变化）"
+        )
 
     # ---- 1. lifecycle ----
     if lifecycle_value == "temporary" and not terminate_when:
         _exit_error("lifecycle=temporary requires --terminate-when")
 
-    # ---- 2. mode x action 矩阵 ----
-    if mode_value == "event":
+    # ---- 2. direction x action 矩阵 ----
+    direction = _resolve_direction(direction_value, mode_value)
+    if direction == "guard":
+        # 口径同服务端 _validate_guard。拦在这里只为省掉那次往返 —— 少了这一支,
+        # guard 会落进下面那支, 而它是按 enter / exit 写的、放行 --action。
+        if (
+            actions_raw
+            or action_descs
+            or on_enter_actions_raw
+            or on_enter_desc
+            or on_exit_actions_raw
+            or on_exit_desc
+            or on_target_desc
+        ):
+            _exit_error(
+                "direction=guard must not set any action; "
+                "put them on the enter rule of the same task"
+            )
+        if duration_seconds is not None:
+            _exit_error("direction=guard must not set --duration-seconds")
+    elif direction != "session":
+        # 单方向的 rule 只有一个边沿, 动作填在 --action / --action-desc 上;
+        # 落 on_enter 还是 on_exit 由 direction 决定, 不用另一套 flag。
         if (
             on_enter_actions_raw
             or on_enter_desc
@@ -230,19 +460,17 @@ def rule_create(
             or on_target_desc
         ):
             _exit_error(
-                "event mode must not set --on-enter-* / --on-exit-* / --on-target-desc"
-            )
-        if not actions_raw and not action_descs:
-            _exit_error(
-                "event mode requires --action or --action-desc"
+                f"direction={direction} must not set "
+                "--on-enter-* / --on-exit-* / --on-target-desc"
             )
         if actions_raw and action_descs:
             _exit_error(
-                "event mode: --action and --action-desc are mutually exclusive"
+                f"direction={direction}: --action and --action-desc are "
+                "mutually exclusive"
             )
-    else:  # state mode
+    else:
         if actions_raw or action_descs:
-            _exit_error("state mode must not set --action / --action-desc")
+            _exit_error("direction=session must not set --action / --action-desc")
 
         enter_static = bool(on_enter_actions_raw)
         enter_dynamic = bool(on_enter_desc)
@@ -251,15 +479,16 @@ def rule_create(
 
         if enter_static and enter_dynamic:
             _exit_error(
-                "state on_enter cannot have both --on-enter-action and --on-enter-desc"
+                "session on_enter cannot have both --on-enter-action "
+                "and --on-enter-desc"
             )
         if exit_static and exit_dynamic:
             _exit_error(
-                "state on_exit cannot have both --on-exit-action and --on-exit-desc"
+                "session on_exit cannot have both --on-exit-action and --on-exit-desc"
             )
         if not (enter_static or enter_dynamic or exit_static or exit_dynamic):
             _exit_error(
-                "state mode requires at least one of "
+                "direction=session requires at least one of "
                 "--on-enter-action / --on-enter-desc / --on-exit-action / --on-exit-desc"
             )
 
@@ -288,11 +517,15 @@ def rule_create(
     payload = {
         "name": name,
         "task_id": task_id,
-        "mode": mode_value,
+        # mode 与 direction 并存: 表里 mode 是 NOT NULL, 而它表达不了 exit ——
+        # 存一个自洽的占位值, 真实语义由 direction 承担。
+        "mode": _DIRECTION_TO_MODE[direction],
+        "direction": direction,
         "lifecycle": lifecycle_value,
+        # iot rule 的 condition 是占位: 设备列表留空、query 由服务端按谓词渲染。
         "condition": {
-            "perceive_device_ids": list(perceive_devices),
-            "query": query_text,
+            "perceive_device_ids": [] if iot_given else list(perceive_devices),
+            "query": "" if iot_given else query_text,
         },
         "actions": actions,
         "action_descriptions": list(action_descs),
@@ -303,6 +536,11 @@ def rule_create(
         "on_target_desc": on_target_desc,
         "terminate_when": terminate_when,
     }
+    if iot_given:
+        # iot rule 由 CLI 直接构造 condition_dnf —— 它没有旧字段要反推, DNF 就是它的
+        # 原始形态。omni rule 保持现状传 condition, 由服务端反推: 让 CLI 也构造的话,
+        # 「condition → DNF」会有第二份实现, 而 CLI 与 backend 跨进程没法共用函数。
+        payload["condition_dnf"] = _build_iot_dnf(iot_did, iot_iid, iot_op, iot_value)
     if exit_debounce_seconds is not None:
         payload["exit_debounce_seconds"] = exit_debounce_seconds
     if duration_seconds is not None:
@@ -314,16 +552,11 @@ def rule_create(
     print_result(data, pretty)
 
 
-# ---------------------------------------------------------------------------
-# update (partial)
-# ---------------------------------------------------------------------------
-
-
 @rule_group.command("update")
 @click.argument("rule_id")
 @click.option("--name", default=None, help="新规则名称")
-@click.option("--task-id", "task_id", default=None, help="新 task_id")
 @click.option("--condition", "query_text", default=None, help="新触发条件")
+@iot_condition_options
 @click.option(
     "--source",
     "perceive_devices",
@@ -335,7 +568,14 @@ def rule_create(
     "mode_value",
     type=click.Choice(["event", "state"]),
     default=None,
-    help="变更响应模式",
+    help="旧入口，只能表达 enter / session；新代码用 --direction",
+)
+@click.option(
+    "--direction",
+    "direction_value",
+    type=click.Choice(["enter", "exit", "session", "guard"]),
+    default=None,
+    help="变更方向：enter / exit / session / guard（guard 只当前提，不触发也不配动作）",
 )
 @click.option(
     "--lifecycle",
@@ -349,26 +589,26 @@ def rule_create(
     "--action",
     "actions_raw",
     multiple=True,
-    help="替换 event 模式设备直控 actions（可重复，全量替换；RuleAction JSON）",
+    help="替换 enter / exit 方向的设备直控 actions（可重复，全量替换；RuleAction JSON）",
 )
 @click.option(
     "--action-desc",
     "action_descs",
     multiple=True,
-    help="替换 event 模式 Agent 回调描述（可重复，全量替换）",
+    help="替换 enter / exit 方向的 Agent 回调描述（可重复，全量替换）",
 )
 @click.option(
     "--on-enter-action",
     "on_enter_actions_raw",
     multiple=True,
-    help="替换 state on_enter 设备直控 actions（可重复，全量替换）",
+    help="替换 session 方向的 on_enter 设备直控 actions（可重复，全量替换）",
 )
 @click.option("--on-enter-desc", "on_enter_desc", default=None)
 @click.option(
     "--on-exit-action",
     "on_exit_actions_raw",
     multiple=True,
-    help="替换 state on_exit 设备直控 actions（可重复，全量替换）",
+    help="替换 session 方向的 on_exit 设备直控 actions（可重复，全量替换）",
 )
 @click.option("--on-exit-desc", "on_exit_desc", default=None)
 @click.option("--on-target-desc", "on_target_desc", default=None)
@@ -383,7 +623,7 @@ def rule_create(
     "duration_seconds",
     type=int,
     default=None,
-    help="累计窗口（秒）。EVENT / STATE 都生效（语义见 rule create help）",
+    help="条件需持续该时长才算成立（秒）。guard 不支持（其余方向的语义见 rule create help）",
 )
 @click.option(
     "--duration-ratio",
@@ -411,17 +651,21 @@ def rule_create(
     ),
     help=(
         "把指定字段重置为空（list → []，str/int → null）；可重复。"
-        "用于 mode 切换等需要显式清空场景，例如 event→state 时 --clear actions"
+        "用于方向切换等需要显式清空场景，例如 enter→session 时 --clear actions"
     ),
 )
 @click.option("--pretty", is_flag=True)
 def rule_update(
     rule_id,
     name,
-    task_id,
     query_text,
+    iot_did,
+    iot_iid,
+    iot_op,
+    iot_value,
     perceive_devices,
     mode_value,
+    direction_value,
     lifecycle_value,
     terminate_when,
     actions_raw,
@@ -445,7 +689,7 @@ def rule_update(
     from miloco_cli.client import api_patch
 
     if actions_raw and action_descs:
-        _exit_error("event mode: --action and --action-desc are mutually exclusive")
+        _exit_error("--action and --action-desc are mutually exclusive")
 
     if duration_seconds is not None and (duration_seconds < 1 or duration_seconds > 86400):
         _exit_error(
@@ -455,13 +699,20 @@ def rule_update(
     if duration_ratio is not None and (duration_ratio <= 0 or duration_ratio > 1.0):
         _exit_error("--duration-ratio must be in (0, 1]")
 
+    iot_given = _iot_args_given(iot_did, iot_iid, iot_op, iot_value)
+    _reject_mixed_condition_args(query_text, perceive_devices, iot_given)
+
     payload: dict = {}
     if name is not None:
         payload["name"] = name
-    if task_id is not None:
-        payload["task_id"] = task_id
-    if mode_value is not None:
-        payload["mode"] = mode_value
+    if iot_given:
+        payload["condition_dnf"] = _build_iot_dnf(iot_did, iot_iid, iot_op, iot_value)
+    if mode_value is not None or direction_value is not None:
+        # 两个字段要一起改: mode 列 NOT NULL 且表达不了 exit, 只改一个会留下
+        # 「mode=state 而 direction=exit」这种自相矛盾的行。
+        direction = _resolve_direction(direction_value, mode_value)
+        payload["direction"] = direction
+        payload["mode"] = _DIRECTION_TO_MODE[direction]
     if lifecycle_value is not None:
         payload["lifecycle"] = lifecycle_value
     if terminate_when is not None:
@@ -718,6 +969,32 @@ def rule_logs_cleanup(keep_days, pretty):
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+
+
+_DIRECTION_TO_MODE = {
+    "enter": "event",
+    "exit": "event",
+    "session": "state",
+    "guard": "event",
+}
+_MODE_TO_DIRECTION = {"event": "enter", "state": "session"}
+
+
+def _resolve_direction(direction_value: str | None, mode_value: str | None) -> str:
+    """把 --direction / --mode 收敛成一个方向。
+
+    --mode 只能表达 enter 与 session，exit 表达不了，所以 --direction 是正路。
+    两个都传时必须自洽 —— 静默让一个赢，用户会以为另一个也生效了。
+    """
+    if direction_value is None:
+        return _MODE_TO_DIRECTION[mode_value or "event"]
+    expected = _DIRECTION_TO_MODE[direction_value]
+    if mode_value is not None and mode_value != expected:
+        _exit_error(
+            f"--direction {direction_value} 对应 --mode {expected}，"
+            f"不能同时传 --mode {mode_value}"
+        )
+    return direction_value
 
 
 def _parse_actions(raw_actions: tuple[str, ...], flag_name: str = "--action") -> list[dict]:

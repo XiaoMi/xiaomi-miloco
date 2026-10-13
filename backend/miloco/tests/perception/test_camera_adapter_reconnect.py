@@ -2,7 +2,8 @@
 
 覆盖 bug「登录瞬间相机 LAN 未就绪 → manager 没建成 → 永久不拉流」的两条修复：
 - connect_device：两路流都没订上（manager 缺失）时不保留 device，避免假象 + 阻塞重试。
-- sync_devices：scope 应连数 > 已连数时先 refresh_cameras 补建 manager。
+- sync_devices：scope 应连集合(严格门)里还有成员没连上时，先 refresh_cameras 补建
+  manager。判据是**集合差**而非数量比较（数量看不见「数量相等、成员不同」）。
 """
 
 from __future__ import annotations

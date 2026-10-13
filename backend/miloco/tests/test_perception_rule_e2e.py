@@ -35,8 +35,8 @@ def _make_state_rule(rule_id: str, device_ids: list[str]) -> Rule:
     miot_proxy.set_device_properties 计数 fire 次数。"""
     return Rule(
         id=rule_id,
-        name=f"[{TASK_ID}] {rule_id}",
-        task_id=TASK_ID,
+        name=f"[{TASK_ID}-{rule_id}] {rule_id}",
+        task_id=f"{TASK_ID}-{rule_id}",
         mode=RuleMode.STATE,
         lifecycle=RuleLifecycle.PERMANENT,
         enabled=True,
@@ -137,6 +137,7 @@ async def test_e2e_single_cam_unchanged(proxy_with_runner, mock_miot_proxy):
     改动后单摄像头行为等价(状态机第二维从 'perception' 变 'cam_A',但桶语义不变)。"""
     proxy, runner, mgr_ctx = proxy_with_runner
     runner.add_rule(_make_state_rule("rule_X", ["cam_A"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_X", {'on_enter_actions': [{'did': 'enter-rule_X', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_X', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
 
     with mgr_ctx():
         # cycle 1: 命中 → ENTERED
@@ -174,6 +175,7 @@ async def test_e2e_rule_statuses_snapshot_to_persist(proxy_with_runner, monkeypa
     透传给 persist。patch _persist_meaningful_event 只截获 rule_statuses,不拉起 DB/落盘。"""
     proxy, runner, mgr_ctx = proxy_with_runner
     runner.add_rule(_make_state_rule("rule_X", ["cam_A"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_X", {'on_enter_actions': [{'did': 'enter-rule_X', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_X', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
 
     captured: dict = {}
 
@@ -210,6 +212,7 @@ async def test_e2e_rule_statuses_multi_cam_aggregates_to_fired(
     （防退化成「取最后一个结论」→ 明明触发却写「未触发（持续中）」）。"""
     proxy, runner, mgr_ctx = proxy_with_runner
     runner.add_rule(_make_state_rule("rule_or", ["cam_A", "cam_B"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_or", {'on_enter_actions': [{'did': 'enter-rule_or', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_or', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
 
     captured: dict = {}
 
@@ -295,6 +298,7 @@ async def test_e2e_early_send_failure_marks_rule_incomplete(
     """
     proxy, runner, mgr_ctx = proxy_with_runner
     runner.add_rule(_make_state_rule("rule_or", ["cam_A", "cam_B"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_or", {'on_enter_actions': [{'did': 'enter-rule_or', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_or', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
 
     captured: dict = {}
 
@@ -372,6 +376,7 @@ async def test_stale_outcome_not_leaked_on_exception(proxy_with_runner, monkeypa
     本 cycle 处理到某规则之前抛异常时它自然缺席，而非回落到旧结论。）"""
     proxy, runner, mgr_ctx = proxy_with_runner
     runner.add_rule(_make_state_rule("rule_2", ["cam_A"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_2", {'on_enter_actions': [{'did': 'enter-rule_2', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_2', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
 
     # 上一 cycle：rule_2 ENTER 真 fire（rule_2 的状态机进入 ENTERED，模拟"上轮真触发过"）
     with mgr_ctx():
@@ -424,6 +429,7 @@ async def test_e2e_cam_a_offline_rule_state_preserved(
     旧行为会无差别广播 False 把 rule 错误推退。"""
     proxy, runner, mgr_ctx = proxy_with_runner
     runner.add_rule(_make_state_rule("rule_X", ["cam_A"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_X", {'on_enter_actions': [{'did': 'enter-rule_X', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_X', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
 
     with mgr_ctx():
         # cycle 1: cam_A 在线 + 命中 → ENTERED
@@ -462,6 +468,7 @@ async def test_e2e_multi_cam_or_aggregation(proxy_with_runner, mock_miot_proxy):
     两 cam 都不命中 ×2 才进 EXITED。"""
     proxy, runner, mgr_ctx = proxy_with_runner
     runner.add_rule(_make_state_rule("rule_or", ["cam_A", "cam_B"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_or", {'on_enter_actions': [{'did': 'enter-rule_or', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_or', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
 
     dm = {"cam_A": ["rule_or"], "cam_B": ["rule_or"]}
 
@@ -508,6 +515,7 @@ async def test_e2e_pending_exit_no_cross_pollution(
     本 case 走完整 perception client 入口 + 多 source matched_rules。"""
     proxy, runner, mgr_ctx = proxy_with_runner
     runner.add_rule(_make_state_rule("rule_pex", ["cam_A", "cam_B"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_pex", {'on_enter_actions': [{'did': 'enter-rule_pex', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_pex', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
 
     dm = {"cam_A": ["rule_pex"], "cam_B": ["rule_pex"]}
 
@@ -639,6 +647,7 @@ async def test_e2e_disabled_rule_during_cycle(proxy_with_runner, mock_miot_proxy
     不报错且不再 update_state 推进状态机。"""
     proxy, runner, mgr_ctx = proxy_with_runner
     runner.add_rule(_make_state_rule("rule_dis", ["cam_A"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_dis", {'on_enter_actions': [{'did': 'enter-rule_dis', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_dis', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
 
     with mgr_ctx():
         # cycle 1: 命中 → ENTERED

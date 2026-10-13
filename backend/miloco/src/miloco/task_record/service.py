@@ -128,6 +128,41 @@ def _is_task_paused(cursor: sqlite3.Cursor, task_id: str) -> bool:
     return row is not None and row["status"] == "paused"
 
 
+def _settle_session(
+    cursor: sqlite3.Cursor,
+    *,
+    task_id: str,
+    start_iso: str,
+    end_iso: str,
+    now: str,
+) -> int:
+    """把进行中的计时段落账、清掉起点、重算达标状态，返回这一段的秒数。
+
+    结束点不晚于起点就拒绝：起点是上报时带进来的时间戳，可以落在未来（上报方
+    时钟偏快，或手工补了一条未来时刻的 session-start），照落会写出一条时间倒挂
+    的区间，之后按时间窗口查明细的地方都会看到它。
+
+    非周期记录的 ``status`` 是"本期已落账累计 ≥ 目标"的派生量（判据见
+    ``_recompute_duration_status``）。落账改的是式子左边，所以同一笔事务里就得
+    重算：累计够了而状态没跟上，读状态的地方会一直说这一期没完成。
+    """
+    end_dt = _parse_iso(end_iso)
+    start_dt = _parse_iso(start_iso)
+    if end_dt <= start_dt:
+        raise RecordSchemaError(f"end_at {end_iso!r} <= start_at {start_iso!r}")
+    duration_seconds = max(int((end_dt - start_dt).total_seconds()), 0)
+    DurationRepo.insert_session(
+        cursor,
+        task_id=task_id,
+        start_at=start_iso,
+        end_at=end_iso,
+        duration_seconds=duration_seconds,
+    )
+    DurationRepo.clear_active_session_start(cursor, task_id=task_id, now=now)
+    _recompute_duration_status(cursor, task_id, now)
+    return duration_seconds
+
+
 _PROGRESS_WINDOW_VALID = {"day", "week", "month", "longterm"}
 
 
@@ -166,9 +201,9 @@ def _recompute_progress_status(
 ) -> None:
     """progress.target 变更后,按 current vs target 重算 status。
 
-    recurring task 永不翻 completed —— recurring 的语义是循环，没有"完成"
-    终点；本周期内达标的"防重复通知"由 rule engine `_target_fired` runtime
-    状态承担，跨周期 rollover 重置，不入 DB。
+    recurring task 永不翻 completed —— recurring 的语义是循环，没有"完成"终点。
+    progress 没有达标通知这条路（record 源本次只支持 duration），所以这里也没有
+    防重复要考虑。
     """
     row = ProgressRepo.get_active(cursor, task_id)
     if row is None:
@@ -198,8 +233,8 @@ def _recompute_duration_status(
 
     target=None 时 status 永远 active（无达标语义）。
     recurring task 永不翻 completed —— recurring 的语义是循环，没有"完成"
-    终点；本周期内达标的"防重复通知"由 rule engine `_target_fired` runtime
-    状态承担，跨周期 rollover 重置，不入 DB。
+    终点；本周期内达标的"防重复通知"由达标条件项自身的边沿承担（条件已为真就
+    产不出新边沿），跨周期归零把它翻假，不入 DB。
     """
     row = DurationRepo.get_active(cursor, task_id)
     if row is None:
@@ -627,8 +662,7 @@ class TaskRecordService:
                         "derived": _derive_progress(row).model_dump(),
                     }
 
-                # recurring task 永不翻 completed（循环没有终点；本周期"已达标"
-                # 防重复由 rule engine `_target_fired` runtime 承担）。
+                # recurring task 永不翻 completed（循环没有终点）。
                 is_recurring = row["recurring_pattern"] is not None
                 if delta >= 0:
                     new_current = min(current + delta, target)
@@ -785,7 +819,6 @@ class TaskRecordService:
         self, task_id: str, at: str | None = None
     ) -> dict[str, Any]:
         at_iso = at or _now_iso()
-        end_dt = _parse_iso(at_iso)
         now = _now_iso()
         with self.db.get_connection() as conn:
             cursor = conn.cursor()
@@ -821,43 +854,13 @@ class TaskRecordService:
                     raise RecordSchemaError(
                         "no active session to end"
                     )
-                start_dt = _parse_iso(start_iso)
-                if end_dt <= start_dt:
-                    raise RecordSchemaError(
-                        f"end_at {at_iso!r} <= start_at {start_iso!r}"
-                    )
-                duration_seconds = max(
-                    int((end_dt - start_dt).total_seconds()), 0
-                )
-                DurationRepo.insert_session(
+                duration_seconds = _settle_session(
                     cursor,
                     task_id=task_id,
-                    start_at=start_iso,
-                    end_at=at_iso,
-                    duration_seconds=duration_seconds,
+                    start_iso=start_iso,
+                    end_iso=at_iso,
+                    now=now,
                 )
-                DurationRepo.clear_active_session_start(
-                    cursor, task_id=task_id, now=now
-                )
-                accumulated_seconds = DurationRepo.sum_seconds_active_period(
-                    cursor, task_id=task_id
-                )
-                # recurring task 永不翻 completed（循环没有终点；本周期"已达标"
-                # 防重复由 rule engine `_target_fired` runtime 承担）。
-                is_recurring = row["recurring_pattern"] is not None
-                target_raw = row["target_minutes"]
-                if (
-                    not is_recurring
-                    and target_raw is not None
-                    and accumulated_seconds >= int(target_raw) * 60
-                    and row["status"] == RecordStatus.ACTIVE.value
-                ):
-                    DurationRepo.set_status(
-                        cursor,
-                        task_id=task_id,
-                        status=RecordStatus.COMPLETED.value,
-                        now=now,
-                    )
                 conn.commit()
                 refreshed = DurationRepo.get_active(cursor, task_id)
                 derived = (
@@ -872,6 +875,55 @@ class TaskRecordService:
                     "derived": derived.model_dump() if derived else None,
                 }
             except (RecordNotFoundError, RecordSchemaError, RecordWrongKindError):
+                conn.rollback()
+                raise
+
+    def close_active_session(self, task_id: str) -> int | None:
+        """停止观测这个 task —— 收尾进行中的计时段，返回落账的秒数。
+
+        没有进行中的段（含 task 没有 duration record）时返 None，不抛：调用方是
+        task 启停这类通用路径，走到 duration 这一支的只是一部分 task。
+
+        与 ``session_end`` 的分工：那条是"观测到退出了"，由 agent 报；这条是"不
+        再观测了"，服务端自己发起，所以它不看"task 已停用"那道守卫 —— 停用那一刻
+        正是要收段。段留着不收，``active_session_start_at`` 就还在，派生累计按
+        "到现在"算，会把停止观测之后的时间也算成在学。
+        """
+        now = _now_iso()
+        with self.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN")
+            try:
+                if _detect_kind(cursor, task_id) is not RecordKind.DURATION:
+                    conn.rollback()
+                    return None
+                row = DurationRepo.get_active(cursor, task_id)
+                start_iso = row["active_session_start_at"] if row else None
+                if start_iso is None:
+                    conn.rollback()
+                    return None
+                try:
+                    duration_seconds = _settle_session(
+                        cursor,
+                        task_id=task_id,
+                        start_iso=start_iso,
+                        end_iso=now,
+                        now=now,
+                    )
+                except RecordSchemaError:
+                    # 起点落在未来, 落账会写出倒挂区间。段留着比写脏数据好: 时钟
+                    # 追上来之后 agent 那条路仍能正常收尾。
+                    conn.rollback()
+                    logger.warning(
+                        "task %s 的计时起点 %s 不早于当前时刻 %s, 跳过收尾",
+                        task_id,
+                        start_iso,
+                        now,
+                    )
+                    return None
+                conn.commit()
+                return duration_seconds
+            except Exception:
                 conn.rollback()
                 raise
 

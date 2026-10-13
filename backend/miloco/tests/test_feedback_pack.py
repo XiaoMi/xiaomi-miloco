@@ -34,7 +34,11 @@ def test_sanitize_pii_preserves_short_numbers():
 
 
 def test_sanitize_pii_preserves_model_version():
+    # "mimo-v2.5.1.0模型" 的 2.5.1.0 是四段点分数字, 本该被 IPv4 模式命中,
+    # 全靠前置 lookbehind (?<![\d.a-zA-Z]) 的字母 v 挡住 —— 这条断言是该 lookbehind 的唯一回归防护,
+    # 不要跟随默认模型改名一起替换。
     assert _sanitize_pii("mimo-v2.5.1.0模型") == "mimo-v2.5.1.0模型"
+    assert _sanitize_pii("mimo-v2.6-flash模型") == "mimo-v2.6-flash模型"
 
 
 # ─── _ERROR_TYPE_LABELS 映射 ──────────────────────────────────────────

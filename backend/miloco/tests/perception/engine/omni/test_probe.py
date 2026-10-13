@@ -406,11 +406,11 @@ async def test_probe_chat_non_qwen_still_uses_post(monkeypatch):
         probe.httpx,
         "AsyncClient",
         _fake_async_client(
-            get_resp=_FakeResp(200, {"data": [{"id": "xiaomi/mimo-v2.5"}]}),
+            get_resp=_FakeResp(200, {"data": [{"id": "mimo-v2.6-flash"}]}),
             post_resp=_FakeResp(200, {"choices": [{"message": {"content": "pong"}}]}),
         ),
     )
-    r = await probe.probe_omni("xiaomi/mimo-v2.5", "https://mimo.example/v1", "sk-x")
+    r = await probe.probe_omni("mimo-v2.6-flash", "https://mimo.example/v1", "sk-x")
     assert r["ok"] is True
 
 

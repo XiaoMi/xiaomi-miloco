@@ -1,9 +1,10 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""MIPS push-event listeners (bind / device-meta / scene / camera-state).
+"""MIPS push-event listeners (bind / device-meta / scene / camera-state /
+prop-top-up).
 
-All four share one shape: a trailing-edge debounce that, once it settles,
+They all share one shape: a trailing-edge debounce that, once it settles,
 refreshes the authoritative cloud state and acts on it. They differ only in:
 
   * the debounce KEY — bind debounces per-did (independent timers); meta,
@@ -12,7 +13,8 @@ refreshes the authoritative cloud state and acts on it. They differ only in:
   * the settled ACTION — bind decides bind-vs-unbind and delegates the
     greeting; meta refreshes devices+cameras+scenes (and greets move-ins);
     scene refreshes the scene list; camera-state re-fetches the camera online
-    status.
+    status; prop-top-up fills in the container leaves a device was missing
+    while it was offline.
 
 The shared debounce skeleton lives in ``_TrailingDebounce``; each listener is
 a thin subclass. The welcome ACTION itself lives in
@@ -53,6 +55,9 @@ SCENE_DEBOUNCE_SEC: float = 5.0
 # cloud state once. 60s matches the maintainer's spec (re-set on every event
 # via _schedule).
 CAMERA_STATE_DEBOUNCE_SEC: float = 60.0
+# 设备上线时会连发几条推送，抖动期内反复补拉纯属浪费；补拉不像上下线那样有人等着看，
+# 晚几十秒没有影响
+PROP_TOPUP_DEBOUNCE_SEC: float = 20.0
 
 # Single key used by the global (non-per-did) debouncers (meta / scene /
 # camera-state).
@@ -404,3 +409,33 @@ class CameraStateEventListener(_TrailingDebounce):
             )
             return
         logger.info("camera-state debounce settled: cloud online status reconciled")
+
+
+class PropTopUpListener(_TrailingDebounce):
+    """设备转上线后，按 did 尾部防抖补齐容器里缺的属性。
+
+    只认上线边沿：离线设备的属性拉不到，对齐当初跳过它就是这个原因。按 did 各自计时
+    （与 bind 同款），一台设备抖动不该拖住另一台的补拉。
+    """
+
+    def __init__(
+        self,
+        top_up: Callable[[str], Awaitable[Any]],
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
+        super().__init__(loop)
+        self._top_up = top_up
+
+    def _window(self) -> float:
+        return PROP_TOPUP_DEBOUNCE_SEC
+
+    async def on_event(self, msg: MIoTDeviceStateEvent) -> None:
+        if msg.event != "online":
+            return
+        self._schedule(msg.did)
+
+    async def _fire(self, key: Any) -> None:
+        try:
+            await self._top_up(key)
+        except Exception as e:
+            logger.error("prop top-up failed did=%s: %s", key, e)

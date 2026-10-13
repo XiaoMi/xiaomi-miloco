@@ -78,7 +78,7 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "",
         "Agent 平台名(hermes/openclaw)；空=webhook 模式,非空则加载 Adapter",
     ),
-    "model.omni.model": (str, "xiaomi/mimo-v2.5", "多模态模型标识"),
+    "model.omni.model": (str, "mimo-v2.6-flash", "多模态模型标识"),
     "model.omni.base_url": (
         str,
         "https://api.xiaomimimo.com/v1",

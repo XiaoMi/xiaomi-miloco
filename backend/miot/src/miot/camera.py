@@ -81,7 +81,7 @@ _MIOT_CAMERA_ON_RAW_DATA = CFUNCTYPE(
 class _MIoTCameraInfoC(Structure):
     """MIoT Camera Info C."""
 
-    _fields_ = [("did", c_char_p), ("model", c_char_p), ("channel_count", c_uint8)]
+    _fields_ = [("did", c_char_p), ("model", c_char_p), ("ip", c_char_p), ("channel_count", c_uint8)]
 
 
 class _MIoTCameraConfigC(Structure):
@@ -157,11 +157,13 @@ class MIoTCameraInstance:
 
         model: str = camera_info.model
         channel_count: int = camera_info.channel_count
+        local_ip: Optional[str] = camera_info.local_ip
         self._c_instance = self._lib_miot_camera.miot_camera_new(
             byref(
                 _MIoTCameraInfoC(
                     camera_info.did.encode("utf-8"),
                     model.encode("utf-8"),
+                    local_ip.encode("utf-8") if local_ip else None,
                     channel_count,
                 )
             )

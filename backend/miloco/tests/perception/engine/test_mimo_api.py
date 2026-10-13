@@ -38,7 +38,7 @@ import httpx
 TESTDATA_PATH = Path(__file__).parent.parent / "testcases" / "mimo_api_testdata.json"
 RESULTS_PATH = Path(__file__).parent.parent / "testcases" / "mimo_api_results.json"
 
-DEFAULT_MODEL = "xiaomi/mimo-v2.5"
+DEFAULT_MODEL = "mimo-v2.6-flash"
 DEFAULT_BASE_URL = "https://api.xiaomimimo.com/v1"
 DEFAULT_MAX_TOKENS = 1024
 

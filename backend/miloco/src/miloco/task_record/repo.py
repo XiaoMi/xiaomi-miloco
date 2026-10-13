@@ -791,7 +791,7 @@ def fetch_active_record_satisfaction_by_task_ids(
     - event：无 target 概念，仅看 status
 
     场景：perception filter 装载 event mode rule 前剔除已达标的 task；让 event
-    mode 也享有等价于 state mode ``_target_fired`` 的「周期达标静默」机制。
+    mode 也享有等价于达标条件项边沿的「周期达标静默」机制。
 
     SQL UNION 三张主表；duration 用 LEFT JOIN 子表算累计秒数。未绑 record 的
     task_id 不在返回值里。

@@ -37,7 +37,7 @@ def test_load_config_returns_defaults_when_no_file():
     assert cfg["server"]["url"] == "http://127.0.0.1:1810"
     assert cfg["server"]["token"] == ""
     assert cfg["server"]["tls_verify"] is False
-    assert cfg["model"]["omni"]["model"] == "xiaomi/mimo-v2.5"
+    assert cfg["model"]["omni"]["model"] == "mimo-v2.6-flash"
     assert cfg["debug"] is False
     # 扁平兼容字段已移除：调用方必须使用嵌套 cfg["server"]["url"] 等路径
     assert "server_url" not in cfg
@@ -211,18 +211,18 @@ def test_load_config_accepts_missing_subtree(isolated_config):
 def test_set_values_writes_all_pairs(isolated_config):
     result = set_values(
         [
-            ("model.omni.model", "xiaomi/mimo-v2.5"),
+            ("model.omni.model", "mimo-v2.6-flash"),
             ("model.omni.base_url", "https://api.xiaomimimo.com/v1"),
             ("model.omni.api_key", "sk-abc"),
         ]
     )
     assert result == {
-        "model.omni.model": "xiaomi/mimo-v2.5",
+        "model.omni.model": "mimo-v2.6-flash",
         "model.omni.base_url": "https://api.xiaomimimo.com/v1",
         "model.omni.api_key": "sk-abc",
     }
     data = json.loads(isolated_config.read_text())
-    assert data["model"]["omni"]["model"] == "xiaomi/mimo-v2.5"
+    assert data["model"]["omni"]["model"] == "mimo-v2.6-flash"
     assert data["model"]["omni"]["base_url"] == "https://api.xiaomimimo.com/v1"
     assert data["model"]["omni"]["api_key"] == "sk-abc"
 

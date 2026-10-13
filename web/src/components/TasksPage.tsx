@@ -27,7 +27,14 @@ import {
 import { useEscClose } from "@/hooks/useEscClose";
 import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
-import type { Task, TaskRecordSummary, TaskRuleBrief } from "@/lib/types";
+import { ruleConditionIsEditable } from "@/lib/ruleBrief";
+import type {
+  Task,
+  TaskBoundaryActions,
+  TaskRecordSummary,
+  TaskRuleBrief,
+  TaskRuleDirection,
+} from "@/lib/types";
 import { AgentPromptDialog } from "./AgentPromptDialog";
 import { toast } from "./Toast";
 
@@ -76,6 +83,44 @@ function splitActions(actionsDesc: string[]): string[] {
     .flatMap((a) => a.split(/[；;]/))
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+const DIRECTION_LABEL_KEY: Record<TaskRuleDirection, string> = {
+  enter: "tasks.directionEnter",
+  exit: "tasks.directionExit",
+  session: "tasks.directionSession",
+  guard: "tasks.directionGuard",
+};
+
+// task 的动作槽 → 展示用的行。三个槽里 *_desc（交给 Agent）和 *_actions（设备直控）
+// 二者取其一，都空的槽不出现。
+function slotRows(
+  actions: TaskBoundaryActions,
+  t: TFn,
+): { key: string; label: string; text: string }[] {
+  const slots = [
+    [
+      "enter",
+      "tasks.slotEnter",
+      actions.onEnterDesc,
+      actions.onEnterActionCount,
+    ],
+    ["exit", "tasks.slotExit", actions.onExitDesc, actions.onExitActionCount],
+    [
+      "target",
+      "tasks.slotTarget",
+      actions.onTargetDesc,
+      actions.onTargetActionCount,
+    ],
+  ] as const;
+  return slots.flatMap(([key, labelKey, desc, count]) => {
+    const text = desc?.trim()
+      ? desc.trim()
+      : count > 0
+        ? t("tasks.slotDeviceActions", { count })
+        : "";
+    return text ? [{ key, label: t(labelKey), text }] : [];
+  });
 }
 
 // 轻量开关——on=品牌色 / off=中性边框色，无障碍 role="switch"。
@@ -266,13 +311,21 @@ function RuleBriefCard({
   onDraftChange: (value: string) => void;
 }) {
   const actions = splitActions(rule.actionsDesc);
+  const conditionIsReadOnly = !ruleConditionIsEditable(rule);
   return (
     <div className="rounded-xl bg-bg-primary border border-border overflow-hidden">
       <div className="px-3.5 py-3 border-b border-border">
-        <div className="text-caption text-text-tertiary mb-1.5">
-          {t("tasks.triggerCondition")}
+        <div className="flex items-center gap-2 mb-1.5">
+          {/* 方向标签：一个 task 可以挂多条规则，进出各走各的路，不带这个就分不出
+              哪条把任务推进去、哪条推出来。 */}
+          <span className="text-caption px-1.5 py-0.5 rounded bg-bg-secondary text-text-secondary shrink-0">
+            {t(DIRECTION_LABEL_KEY[rule.direction])}
+          </span>
+          <div className="text-caption text-text-tertiary">
+            {t("tasks.triggerCondition")}
+          </div>
         </div>
-        {editing ? (
+        {editing && !conditionIsReadOnly ? (
           <>
             <textarea
               value={draft}
@@ -290,16 +343,25 @@ function RuleBriefCard({
             </p>
           </>
         ) : (
-          <div className="text-body text-text-primary leading-relaxed break-words">
-            {rule.query}
-          </div>
+          <>
+            <div className="text-body text-text-primary leading-relaxed break-words">
+              {rule.query}
+            </div>
+            {editing && conditionIsReadOnly && (
+              <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">
+                {t("tasks.triggerNotEditable")}
+              </p>
+            )}
+          </>
         )}
       </div>
-      <div className="px-3.5 py-3">
-        <div className="text-caption text-text-tertiary mb-1.5">
-          {t("tasks.ruleActions")}
-        </div>
-        {actions.length > 0 ? (
+      {/* 动作只在 rule 自己带的时候显示。多条规则的 task 动作按设计不落在 rule 上,
+          由上方独立的动作块统一展示 —— 这里再写一句「无动作」是错的。 */}
+      {actions.length > 0 && (
+        <div className="px-3.5 py-3">
+          <div className="text-caption text-text-tertiary mb-1.5">
+            {t("tasks.ruleActions")}
+          </div>
           <ul className="space-y-1.5">
             {actions.map((a, i) => (
               <li
@@ -311,12 +373,31 @@ function RuleBriefCard({
               </li>
             ))}
           </ul>
-        ) : (
-          <div className="text-caption text-text-tertiary">
-            {t("tasks.ruleActionsEmpty")}
-          </div>
-        )}
-      </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// task 级动作：三个槽属于 task 而不属于任何单条规则, 所以独立成块放在规则列表上方。
+// 一个槽都没配时整个分区不渲染, 判断在调用处 —— 这里不再有空态分支
+function TaskActionsBlock({
+  rows,
+}: {
+  rows: { key: string; label: string; text: string }[];
+}) {
+  return (
+    <div className="rounded-xl bg-bg-primary border border-border divide-y divide-border">
+      {rows.map((row) => (
+        <div key={row.key} className="flex gap-3 px-3.5 py-2.5">
+          <span className="text-caption text-text-tertiary shrink-0 w-8 mt-[3px]">
+            {row.label}
+          </span>
+          <span className="text-body text-text-secondary leading-relaxed break-words">
+            {row.text}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -359,6 +440,7 @@ function TaskDetailSheet({
   });
 
   const paused = task.status === "paused";
+  const taskActionRows = slotRows(task.actions, t);
   const ruleDraft = (r: TaskRuleBrief) => ruleDrafts[r.ruleId] ?? r.query;
 
   // 一次保存整屉改动：描述 → PATCH /api/tasks/{id}；每条触发条件 → PATCH /api/rules/{id}
@@ -371,6 +453,10 @@ function TaskDetailSheet({
       jobs.push(() => updateTaskDescription(task.taskId, nextDesc));
     }
     for (const r of task.ruleBriefs) {
+      // 判据就是源本身。靠 `next !== r.query` 跳过只读 rule 的话，依赖的是服务端渲染
+      // 出的 query 首尾无空白——那是巧合不是保证，一旦带上空白就会对 iot rule 发一次
+      // 必被拒的 PATCH，而这里是串行保存，同屉别的改动会「部分成功」。
+      if (!ruleConditionIsEditable(r)) continue;
       const next = ruleDraft(r).trim();
       if (next && next !== r.query) {
         jobs.push(() => updateRuleQuery(r.ruleId, next));
@@ -467,6 +553,24 @@ function TaskDetailSheet({
                 >
                   {paused ? t("tasks.statusPaused") : t("tasks.statusActive")}
                 </span>
+                {/* 停用时运行态恒 off, 那句标签没有信息量; 启用而"未进行"才是
+                    排查「规则怎么没反应」要看的那一眼 */}
+                {!paused && (
+                  <span
+                    className={`ml-2 inline-block text-caption px-1.5 py-0.5 rounded ${
+                      task.runtimeState === "on"
+                        ? "bg-brand-soft text-brand-primary"
+                        : "bg-bg-secondary text-text-secondary"
+                    }`}
+                    title={t("tasks.runtimeStateHint")}
+                  >
+                    {t(
+                      task.runtimeState === "on"
+                        ? "tasks.runtimeOn"
+                        : "tasks.runtimeOff",
+                    )}
+                  </span>
+                )}
                 {paused && task.pausedAt && (
                   <span className="ml-2 text-caption text-text-tertiary num">
                     {t("tasks.pausedAtLabel", {
@@ -506,6 +610,12 @@ function TaskDetailSheet({
             </Section>
           )}
 
+          {taskActionRows.length > 0 && (
+            <Section title={t("tasks.taskActionsTitle")}>
+              <TaskActionsBlock rows={taskActionRows} />
+            </Section>
+          )}
+
           <Section title={t("tasks.rulesTitle")}>
             {task.ruleBriefs.length > 0 ? (
               <div className="space-y-3">
@@ -522,7 +632,9 @@ function TaskDetailSheet({
                   />
                 ))}
                 <p className="text-caption text-text-tertiary">
-                  {t("tasks.rulesManagedHint")}
+                  {task.ruleBriefs.some(ruleConditionIsEditable)
+                    ? t("tasks.rulesManagedHint")
+                    : t("tasks.rulesManagedHintReadOnly")}
                 </p>
               </div>
             ) : (

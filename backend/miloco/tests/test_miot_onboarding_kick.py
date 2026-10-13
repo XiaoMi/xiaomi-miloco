@@ -28,6 +28,8 @@ def _make_service() -> MiotService:
         ),
         get_miot_auth_info=AsyncMock(),
         refresh_cameras=AsyncMock(),
+        refresh_devices=AsyncMock(),
+        refresh_scenes=AsyncMock(),
     )
     return MiotService(miot_proxy=proxy)
 
@@ -40,11 +42,11 @@ async def test_authorize_with_code_kicks_onboarding_after_home_select(monkeypatc
     # 实例属性遮蔽绑定方法，逐步记录调用顺序。
     svc._clear_account_scope_state = lambda: order.append("clear_scope")
 
-    async def fake_list_homes():
-        order.append("list_homes")
-        return []
+    async def fake_ensure_home_selected():
+        order.append("ensure_home_selected")
+        return [], True
 
-    svc.list_homes = fake_list_homes
+    svc._ensure_home_selected = fake_ensure_home_selected
     svc._sync_camera_adapter = AsyncMock()
     svc._restart_perception_engine = AsyncMock()
     svc._kick_onboarding_trigger = lambda: order.append("kick_onboarding")
@@ -52,8 +54,8 @@ async def test_authorize_with_code_kicks_onboarding_after_home_select(monkeypatc
     await svc.authorize_with_code("code123", "state456")
 
     assert "kick_onboarding" in order, "授权成功路径必须触发 onboarding kick"
-    # 自动选家（list_homes 兜底写启用集）先于 kick，maybe_trigger 才能看到非空启用集。
-    assert order.index("list_homes") < order.index("kick_onboarding")
+    # 建立启用集先于 kick，maybe_trigger 才能看到非空启用集。
+    assert order.index("ensure_home_selected") < order.index("kick_onboarding")
 
 
 @pytest.mark.asyncio

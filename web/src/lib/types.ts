@@ -301,6 +301,10 @@ export interface ScopeCamera {
   // voiceInUse 正交：关着的相机也能预配，仅在被感知时注入生效。多通道相机按 channel 存取。
   perceptionPrompt: string;
   connected: boolean;
+  // 附加诊断信息（默认 undefined）。目前仅 "cross_subnet_nat"：跨网段 + 云端在线 +
+  // 探测可达 + 拉流长期卡在连接中——大概率是路由器 NAT 类型限制拉流，不是暂时抖动。
+  // 云端已离线时不给这条诊断：相机自己掉线了，问题不在路由器 NAT 上。
+  streamError?: "cross_subnet_nat";
 }
 
 // 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。
@@ -678,8 +682,9 @@ export interface PerfTraceRow {
   gate_video_pass: number;
   /** 1=audio gate 通过,0=被过滤掉。 */
   gate_audio_pass: number;
-  /** 1=hold 滞回拉起本窗 packet(visual 未变化但距上次通过 ≤ hold_duration_sec);
-   *  与 gate_video_pass 互斥,可与 gate_audio_pass 共存,omni 路由仍走 video。 */
+  /** 1=滞回真把本窗开出来了(此时 omni 路由走 video);与 gate_video_pass 互斥,可与
+   *  gate_audio_pass 共存。零帧窗口恒 0,故不能当「滞回发生频次」用。
+   *  语义约束见 knowledge/03-features/perception-pipeline.md 的 Gate 小节。 */
   gate_hold_pass: number;
   cycle_total_ms: number | null;
   pipeline_total_ms: number | null;
@@ -828,12 +833,33 @@ export interface TaskRecordSummary {
 // 驱动规则摘要：后端 summary 接口（GET /api/tasks/summary）返回的
 // TaskSummaryView 继承 TaskFullView，本就带 rule_briefs，故随列表一并
 // 加载、供详情抽屉直接复用，无需再单独拉 GET /api/tasks/{id}。
+// 规则方向：条件成立时对 task 意味着什么。milestone 由服务端维护、后端已过滤，
+// 不会出现在这里。
+export type TaskRuleDirection = "enter" | "exit" | "session" | "guard";
+
+// 触发源。omni 是摄像头视觉判定，iot 是设备属性变化，record 是累计量达标。
+export type TaskRuleSourceType = "omni" | "iot" | "record";
+
 export interface TaskRuleBrief {
   ruleId: string;
   // 规则的自然语言条件（"孩子在书桌前学习" 之类）
   query: string;
-  // 命中后执行的动作人话摘要
+  direction: TaskRuleDirection;
+  // 触发源。omni 的条件是住户写的自然语言、可改；其余源的条件是服务端按谓词渲染
+  // 出来的一句描述，后端会拒绝对它的 PATCH，所以界面上必须是只读的。
+  sourceType: TaskRuleSourceType;
+  // 命中后执行的动作人话摘要。多条规则的 task 动作不在这里，在 Task.actions 上
   actionsDesc: string[];
+}
+
+// task 的三个动作槽。*_actions 是设备直控，*_desc 交给 Agent。
+export interface TaskBoundaryActions {
+  onEnterDesc: string | null;
+  onExitDesc: string | null;
+  onTargetDesc: string | null;
+  onEnterActionCount: number;
+  onExitActionCount: number;
+  onTargetActionCount: number;
 }
 
 // 任务视图 = 基础字段 + record 进度摘要 + 驱动规则，一次 summary 请求全拿到。
@@ -846,6 +872,11 @@ export interface Task {
   record: TaskRecordSummary | null;
   // 详情抽屉「有价值的详情」：驱动规则，随 summary 一并返回。
   ruleBriefs: TaskRuleBrief[];
+  // 模式此刻开着还是关着。内存派生，重启一律从 off 起。
+  runtimeState: "off" | "on";
+  // 多条规则的 task 动作只在这里 —— 规则侧的动作 flag 按设计不透传，
+  // 那种 task 的 ruleBriefs.actionsDesc 是空的。
+  actions: TaskBoundaryActions;
 }
 
 // ── 升级检测 / 一键升级（对齐 backend /api/admin/upgrade/*、/version） ──

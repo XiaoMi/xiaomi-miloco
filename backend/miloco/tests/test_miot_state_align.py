@@ -42,7 +42,11 @@ class _FakeProxy:
     def __init__(self, devices: dict, rows: dict):
         self._devices = devices
         self._rows = rows
+        self.enabled_home = True
         self.requested: list[tuple[str, int, int]] = []
+
+    def has_enabled_home(self) -> bool:
+        return self.enabled_home
 
     async def get_devices(self) -> dict:
         return self._devices
@@ -64,6 +68,13 @@ class _FakeProxy:
         return out
 
 
+def _align(store, proxy, *, scope: int = 0, current_scope=None):
+    """代号默认恒定不变 —— 只有作用域那几条用例关心它。"""
+    return align_iot_state(
+        store, proxy, scope=scope, current_scope=current_scope or (lambda: scope)
+    )
+
+
 @pytest.fixture
 async def store():
     s = StateStore()
@@ -81,7 +92,7 @@ async def test_online_device_gets_flag_and_properties(store):
         {("d1", 2, 1): {"code": 0, "value": 21.5}},
     )
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.get("iot/device/d1/status/online") is True
     assert store.get("iot/device/d1/prop/2.1") == 21.5
@@ -95,7 +106,7 @@ async def test_offline_device_properties_are_not_requested(store):
         {("d1", 2, 1): {"code": 0, "value": 21.5}},
     )
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert proxy.requested == []
     assert store.get("iot/device/d1/prop/2.1") is MISSING
@@ -107,7 +118,7 @@ async def test_offline_device_still_gets_its_flag(store):
         {"d1": _device(online=False)}, {("d1", 2, 1): {"code": 0, "value": 1}}
     )
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.get("iot/device/d1/status/online") is False
 
@@ -118,7 +129,7 @@ async def test_offline_device_does_not_block_online_ones(store):
         {("off", 2, 1): {"code": 0, "value": 1}, ("on", 2, 1): {"code": 0, "value": 2}},
     )
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.get("iot/device/on/prop/2.1") == 2
     assert store.get("iot/device/off/prop/2.1") is MISSING
@@ -131,7 +142,7 @@ async def test_did_with_slash_gets_neither_flag_nor_properties(store):
         {"a/b": _device(online=True)}, {("a/b", 2, 1): {"code": 0, "value": 1}}
     )
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.snapshot("iot/**") == {}
     assert proxy.requested == []
@@ -144,7 +155,7 @@ async def test_known_failure_code_does_not_warn(store, caplog):
     proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": KNOWN_CODE}})
 
     with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert warnings == []
@@ -156,7 +167,7 @@ async def test_unknown_failure_code_warns(store, caplog):
     proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": UNKNOWN_CODE}})
 
     with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any(str(UNKNOWN_CODE) in m for m in warnings)
@@ -169,7 +180,7 @@ async def test_failure_line_carries_model(store, caplog):
     )
 
     with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     lines = [r.getMessage() for r in caplog.records]
     assert any("cgllc-b1" in m and "2.5" in m for m in lines)
@@ -186,7 +197,7 @@ async def test_summary_groups_failures_by_meaning_and_model(store, caplog):
     )
 
     with caplog.at_level(logging.INFO, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     summary = next(
         m for m in (r.getMessage() for r in caplog.records) if "align done" in m
@@ -201,7 +212,7 @@ async def test_summary_groups_failures_by_meaning_and_model(store, caplog):
 async def test_code_zero_without_value_is_not_written(store):
     proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0}})
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.get("iot/device/d1/prop/2.1") is MISSING
 
@@ -209,7 +220,7 @@ async def test_code_zero_without_value_is_not_written(store):
 async def test_none_is_written_because_it_is_a_legal_value(store):
     proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": None}})
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.get("iot/device/d1/prop/2.1") is None
 
@@ -224,7 +235,7 @@ async def test_one_bad_value_does_not_lose_the_whole_device(store):
         },
     )
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.get("iot/device/d1/prop/2.2") == 7
     assert store.get("iot/device/d1/prop/2.1") is MISSING
@@ -235,14 +246,14 @@ async def test_align_never_raises_when_the_proxy_explodes(store):
         async def get_devices(self):
             raise RuntimeError("boom")
 
-    await align_iot_state(store, _Boom())  # 不抛就算过
+    await _align(store, _Boom())  # 不抛就算过
 
 
 async def test_align_reports_when_nothing_is_readable(store, caplog):
     proxy = _FakeProxy({"d1": _device(online=False)}, {})
 
     with caplog.at_level(logging.INFO, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     assert any("no readable" in r.getMessage() for r in caplog.records)
     # 一条属性都读不到也要先把标志写下去，否则这台设备在容器里根本不存在
@@ -252,7 +263,7 @@ async def test_align_reports_when_nothing_is_readable(store, caplog):
 async def test_one_pattern_reaches_every_owner_of_a_device(store):
     """四段路径的意义就在这里：`*` 顶 owner 那一段，`**` 收剩下的。"""
     proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 21.5}})
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
     store.set("omni/device/d1/caption", "有人", source="omni")
 
     got = store.snapshot("*/device/d1/**")
@@ -307,7 +318,7 @@ async def test_an_online_flag_lost_to_the_leaf_limit_shows_up_in_the_summary(
     proxy = _FakeProxy({"d1": _device(), "d2": _device()}, {})
 
     with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     messages = [r.getMessage() for r in caplog.records]
     summary = next(m for m in messages if "wrote online flags only" in m)
@@ -326,7 +337,7 @@ async def test_bulk_writes_yield_instead_of_burning_the_pending_gate(
     )
 
     with caplog.at_level(logging.WARNING, logger="miloco.state.store"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     burned = [r for r in caplog.records if "pending state changes" in r.getMessage()]
     assert not burned
@@ -355,7 +366,7 @@ async def test_a_cached_row_for_an_offline_device_is_dropped(store):
         },
     )
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.get("iot/device/on1/prop/2.1") == 26
     assert store.get("iot/device/off1/prop/2.1") is MISSING
@@ -373,7 +384,7 @@ async def test_a_row_for_a_device_whose_spec_failed_is_dropped(store):
         failing="d2",
     )
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.get("iot/device/d1/prop/2.1") == 26
     assert store.get("iot/device/d2/prop/2.1") is MISSING
@@ -391,7 +402,7 @@ async def test_a_wellformed_did_outside_the_home_is_dropped(store, caplog):
     )
 
     with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     assert store.get("iot/device/d1/prop/2.1") == 26
     assert store.snapshot("iot/device/d9/**") == {}
@@ -413,7 +424,7 @@ async def test_a_bridged_did_from_the_response_is_not_blamed_on_the_home_filter(
     )
 
     with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("bad_did_received row did=bridge/0" in m for m in warnings)
@@ -432,7 +443,7 @@ async def test_bridged_dids_do_not_eat_the_out_of_home_sample_budget(store, capl
     proxy = _EchoProxy({"d1": _device()}, rows)
 
     with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("out_of_home row did=d9 iid=prop.2.1" in m for m in warnings)
@@ -449,7 +460,7 @@ async def test_dict_value_is_dropped_instead_of_becoming_a_subtree(store, caplog
     )
 
     with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     # 两条都要：只查子树的话，把 dict 转成字符串塞进去也能过
     assert store.snapshot("iot/device/d1/prop/2.1/**") == {}
@@ -466,7 +477,7 @@ async def test_array_value_is_one_leaf_and_not_worth_a_warning(store, caplog):
     )
 
     with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     assert store.get("iot/device/d1/prop/2.1") == (1, 2, 3)
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
@@ -497,7 +508,7 @@ async def test_summary_counts_only_devices_that_got_something_written(store, cap
     )
 
     with caplog.at_level(logging.INFO, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     summary = next(
         m for m in (r.getMessage() for r in caplog.records) if "align done" in m
@@ -519,7 +530,7 @@ async def test_a_rejected_property_name_does_not_read_like_a_rejected_value(
 async def test_no_field_of_a_device_is_a_bare_leaf(store):
     """字段那一层全是子树，`*` 就不会被某一片叶子骗过去、静默少还给一半。"""
     proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 21.5}})
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     with pytest.raises(ValueError):
         store.snapshot("iot/device/*/*")
@@ -540,7 +551,7 @@ async def test_align_only_walks_the_current_home(store):
         },
     )
 
-    await align_iot_state(store, proxy)
+    await _align(store, proxy)
 
     assert store.get("iot/device/d_mine/prop/2.1") == 26
     assert store.snapshot("iot/device/d_parents/**") == {}
@@ -557,7 +568,7 @@ async def test_a_success_code_keeps_its_value(store, caplog, code):
     proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": code, "value": 26}})
 
     with caplog.at_level(logging.DEBUG, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     assert store.get("iot/device/d1/prop/2.1") == 26
     warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
@@ -599,7 +610,7 @@ async def test_online_flags_are_reported_when_no_property_is_readable(store, cap
     proxy = _FakeProxy({"d1": _device(online=False), "d2": _device(online=False)}, {})
 
     with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     line = next(
         m for m in (r.getMessage() for r in caplog.records) if "no readable" in m
@@ -628,7 +639,7 @@ async def test_row_without_value_reports_the_actual_code(store, caplog):
     proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": -702000000}})
 
     with caplog.at_level(logging.WARNING, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     line = next(m for m in (r.getMessage() for r in caplog.records) if "no value" in m)
     assert "-702000000" in line
@@ -646,7 +657,7 @@ async def test_summary_keeps_devices_and_offline_on_the_same_denominator(store, 
     )
 
     with caplog.at_level(logging.INFO, logger="miloco.miot.state_align"):
-        await align_iot_state(store, proxy)
+        await _align(store, proxy)
 
     summary = next(
         m for m in (r.getMessage() for r in caplog.records) if "align done" in m
@@ -684,3 +695,170 @@ async def test_batch_rejection_warnings_are_rate_limited(store, caplog):
         if "batch write rejected" in m
     ]
     assert len(lines) == SAMPLE_LIMIT
+
+
+# ── 对齐给出「这一轮跑没跑完」的判定 ───────────────────────────────────
+
+
+async def test_a_finished_round_reports_success(store):
+    proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 1}})
+
+    assert await _align(store, proxy) is True
+
+
+async def test_a_home_without_any_readable_property_still_counts_as_aligned(store):
+    """零可读属性是合法终态。判成失败会让属性订阅那道门永远打不开。"""
+    proxy = _FakeProxy({"d1": _device()}, {})
+
+    assert await _align(store, proxy) is True
+
+
+async def test_a_device_that_fails_to_read_does_not_fail_the_round(store):
+    """对齐从来不保证全读到，一台坏设备卡死整条链路是更坏的结果。"""
+    proxy = _FakeProxy(
+        {"ok": _device(), "bad": _device()},
+        {("ok", 2, 1): {"code": 0, "value": 1}, ("bad", 2, 1): {"code": KNOWN_CODE}},
+    )
+
+    assert await _align(store, proxy) is True
+
+
+async def test_an_unreachable_device_list_fails_the_round(store):
+    class _Boom(_FakeProxy):
+        async def devices_in_current_home(self) -> dict:
+            raise RuntimeError("boom")
+
+    assert await _align(store, _Boom({}, {})) is False
+
+
+async def test_no_enabled_home_fails_the_round(store):
+    """空作用域没有「对齐完成」可言，这条兜住把对齐排在建立启用集之前的顺序错误。"""
+    proxy = _FakeProxy({}, {})
+    proxy.enabled_home = False
+
+    assert await _align(store, proxy) is False
+
+
+async def test_an_enabled_home_with_no_device_counts_as_aligned(store):
+    """判据是启用集空不空，不是家庭里有几台设备。
+
+    家庭是空的时候容器本来就该是空的，这已经对齐了。判成失败会让这一代的属性订阅
+    门一直关着，之后往这个家庭里加设备也订不上。
+    """
+    proxy = _FakeProxy({}, {})
+
+    assert await _align(store, proxy) is True
+
+
+# ── 作用域代号：对的是上一代，一条都不该落地 ───────────────────────────
+
+
+class _CountingProxy(_FakeProxy):
+    """记下拉过几次 spec —— 用来验证代号已经变了就不该再打云端。"""
+
+    def __init__(self, devices: dict, rows: dict):
+        super().__init__(devices, rows)
+        self.spec_calls = 0
+
+    async def get_readable_prop_iids(self, did: str) -> list[str]:
+        self.spec_calls += 1
+        return await super().get_readable_prop_iids(did)
+
+
+async def test_a_round_that_starts_in_a_stale_scope_does_not_touch_the_cloud(store):
+    """代号进来就不对，整轮云端请求都是白打的。"""
+    proxy = _CountingProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 1}})
+
+    landed = await align_iot_state(store, proxy, scope=0, current_scope=lambda: 1)
+
+    assert landed is False
+    assert proxy.spec_calls == 0
+    assert store.stats()["leaves"] == 0
+
+
+async def test_a_scope_switch_halfway_through_the_flags_stops_the_rest(store):
+    """写在线标志之间也有让出点，切换落在这里同样要停手。"""
+    proxy = _FakeProxy(
+        {"d1": _device(), "d2": _device()},
+        {("d1", 2, 1): {"code": 0, "value": 1}, ("d2", 2, 1): {"code": 0, "value": 2}},
+    )
+
+    def current_scope() -> int:
+        # 拿容器里的痕迹当触发条件，不数闸被读了几次 —— 读几次是实现细节
+        return 1 if store.get("iot/device/d1/status/online", None) is True else 0
+
+    landed = await align_iot_state(store, proxy, scope=0, current_scope=current_scope)
+
+    assert landed is False
+    assert store.get("iot/device/d1/status/online") is True
+    assert store.get("iot/device/d2/status/online") is MISSING
+
+
+async def test_a_scope_switch_during_the_read_drops_every_property(store):
+    """读属性要几秒，切换最可能落在这里；半轮旧数据比没有数据更难查。"""
+    scope = {"now": 0}
+
+    class _SwitchesWhileReading(_FakeProxy):
+        async def get_device_properties(self, params: list) -> list[dict]:
+            scope["now"] = 1
+            return await super().get_device_properties(params)
+
+    proxy = _SwitchesWhileReading(
+        {"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 1}}
+    )
+
+    landed = await align_iot_state(
+        store, proxy, scope=0, current_scope=lambda: scope["now"]
+    )
+
+    assert landed is False
+    assert store.snapshot("iot/device/d1/prop/**") == {}
+
+
+async def test_a_round_that_keeps_its_scope_finishes_normally(store):
+    proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 1}})
+
+    landed = await align_iot_state(store, proxy, scope=7, current_scope=lambda: 7)
+
+    assert landed is True
+    assert store.get("iot/device/d1/prop/2.1") == 1
+
+
+# ── 采集期到的上下线推送不该被采集起点的快照打回去 ─────────────────────
+
+
+async def test_the_online_flag_is_reread_at_write_time(store):
+    """采集期每台设备都要问一次 spec，冷缓存时是逐台云端往返；这段时间到的上下线推送
+    已经把新值写进容器了（那条链只设家庭闸），拿采集起点的快照写就是把实时值打回去。"""
+    device = _device()
+    proxy = _FakeProxy({"d1": device}, {("d1", 2, 1): {"code": 0, "value": 26}})
+    original = proxy.get_readable_prop_iids
+
+    async def flip_offline_then_return(did):
+        # 模拟采集期到的一条 offline 推送：它先改设备缓存，再写容器
+        device.online = False
+        return await original(did)
+
+    proxy.get_readable_prop_iids = flip_offline_then_return
+
+    await _align(store, proxy)
+
+    assert store.get("iot/device/d1/status/online") is False
+
+
+async def test_the_snapshot_is_the_fallback_when_the_reread_fails(store):
+    """重读失败时写个几秒前的值，也好过一台设备在容器里连痕迹都没有。"""
+    proxy = _FakeProxy({"d1": _device()}, {("d1", 2, 1): {"code": 0, "value": 26}})
+    collected: dict[str, bool] = {}
+
+    async def devices_then_break():
+        if collected:
+            raise RuntimeError("设备集取不到了")
+        collected["done"] = True
+        return {"d1": _device()}
+
+    proxy.devices_in_current_home = devices_then_break
+
+    await _align(store, proxy)
+
+    assert store.get("iot/device/d1/status/online") is True

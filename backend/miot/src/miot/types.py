@@ -126,6 +126,10 @@ class MIoTDeviceInfo(BaseModel):
         default=None, description="LAN device online status"
     )
     local_ip: Optional[str] = Field(default=None, description="Device local ip")
+    cross_subnet: Optional[bool] = Field(
+        default=None,
+        description="Whether device local_ip is on a different subnet (cross-NAT)",
+    )
     ssid: Optional[str] = Field(default=None, description="Device ssid")
     bssid: Optional[str] = Field(default=None, description="Device bssid")
     icon: Optional[str] = Field(default=None, description="Device icon")
@@ -161,6 +165,9 @@ class MIoTLanDeviceInfo(BaseModel):
     did: str = Field(description="Device id")
     online: bool = Field(description="Device online status")
     ip: Optional[str] = Field(default=None, description="Device ip")
+    cross_subnet: Optional[bool] = Field(
+        default=None, description="Whether ip is on a different subnet (cross-NAT)"
+    )
 
 
 class MIoTManualSceneInfoCore(BaseModel):
@@ -427,6 +434,33 @@ class MIoTDeviceStateEvent(BaseModel):
         description="Raw decoded payload (broker schema is undocumented)",
     )
     timestamp_ms: int = Field(default=0)
+
+
+class MIoTPropChange(BaseModel):
+    """One property entry inside a `properties_changed` push."""
+
+    siid: int = Field(description="Service instance id")
+    piid: int = Field(description="Property instance id")
+    value: Any = Field(default=None, description="New value (scalar or scalar list)")
+
+
+class MIoTDevicePropsEvent(BaseModel):
+    """Decoded `device/{did}/up/properties_changed/{siid}/{piid}` payload.
+
+    `did` comes from the topic; the payload repeats did/siid/piid, which the
+    decoder uses as a free cross-check. One message normally carries a single
+    change, but `params` is undocumented (a bare dict in practice, a list by
+    the HA convention), so the shape here is always a list. The broker
+    publishes no timestamp — `timestamp_ms` is when we received it.
+    """
+
+    did: str = Field(description="Device id")
+    changes: List[MIoTPropChange] = Field(description="Property changes, at least one")
+    timestamp_ms: int = Field(description="Local receive time (ms)")
+    raw: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Raw decoded payload (broker schema is undocumented)",
+    )
 
 
 class MipsConnectionError(Exception):

@@ -199,19 +199,19 @@ def test_per_target_delete_touches_nothing_else(repo):
     """删一个 (模型, endpoint) 不能碰到别的模型，也不能碰到同名的另一个 endpoint。"""
     today = date.today()
     ts = _ts_ms(today)
-    _raw_at(repo, ts, "mimo-v2.5", "https://a/v1")
-    _raw_at(repo, ts, "mimo-v2.5", "https://a/v1-test")   # 同名、不同 endpoint
+    _raw_at(repo, ts, "mimo-v2.6-flash", "https://a/v1")
+    _raw_at(repo, ts, "mimo-v2.6-flash", "https://a/v1-test")   # 同名、不同 endpoint
     _raw_at(repo, ts, "other", "https://a/v1")            # 同 endpoint、不同模型
-    _daily_at(repo, today, "mimo-v2.5", "https://a/v1")
-    _daily_at(repo, today, "mimo-v2.5", "https://a/v1-test")
+    _daily_at(repo, today, "mimo-v2.6-flash", "https://a/v1")
+    _daily_at(repo, today, "mimo-v2.6-flash", "https://a/v1-test")
 
-    out = repo.clear_since(None, model="mimo-v2.5", base_url="https://a/v1")
+    out = repo.clear_since(None, model="mimo-v2.6-flash", base_url="https://a/v1")
     assert out["token_usage"] == 1
     assert out["token_usage_daily"] == 1
 
     live, daily = _left(repo)
-    assert live == [("mimo-v2.5", "https://a/v1-test"), ("other", "https://a/v1")]
-    assert daily == [("mimo-v2.5", "https://a/v1-test")]
+    assert live == [("mimo-v2.6-flash", "https://a/v1-test"), ("other", "https://a/v1")]
+    assert daily == [("mimo-v2.6-flash", "https://a/v1-test")]
 
 
 def test_empty_base_url_is_targeted_by_value_not_by_truthiness(repo):
@@ -222,18 +222,18 @@ def test_empty_base_url_is_targeted_by_value_not_by_truthiness(repo):
     """
     today = date.today()
     ts = _ts_ms(today)
-    _raw_at(repo, ts, "mimo-v2.5", "")                 # 老数据
-    _raw_at(repo, ts, "mimo-v2.5", "https://a/v1")     # 新数据，必须留下
-    _daily_at(repo, today, "mimo-v2.5", "")
-    _daily_at(repo, today, "mimo-v2.5", "https://a/v1")
+    _raw_at(repo, ts, "mimo-v2.6-flash", "")                 # 老数据
+    _raw_at(repo, ts, "mimo-v2.6-flash", "https://a/v1")     # 新数据，必须留下
+    _daily_at(repo, today, "mimo-v2.6-flash", "")
+    _daily_at(repo, today, "mimo-v2.6-flash", "https://a/v1")
 
-    out = repo.clear_since(None, model="mimo-v2.5", base_url="")
+    out = repo.clear_since(None, model="mimo-v2.6-flash", base_url="")
     assert out["token_usage"] == 1
     assert out["token_usage_daily"] == 1
 
     live, daily = _left(repo)
-    assert live == [("mimo-v2.5", "https://a/v1")]
-    assert daily == [("mimo-v2.5", "https://a/v1")]
+    assert live == [("mimo-v2.6-flash", "https://a/v1")]
+    assert daily == [("mimo-v2.6-flash", "https://a/v1")]
 
 
 def test_target_and_range_combine(repo):
@@ -282,13 +282,13 @@ def test_empty_model_name_is_also_targeted_by_value(repo):
     """
     ts = _ts_ms(date.today())
     _raw_at(repo, ts, "", "")                       # 空模型名 + 空 endpoint
-    _raw_at(repo, ts, "mimo-v2.5", "https://a/v1")  # 必须留下
-    _raw_at(repo, ts, "mimo-v2.5", "")              # 必须留下
+    _raw_at(repo, ts, "mimo-v2.6-flash", "https://a/v1")  # 必须留下
+    _raw_at(repo, ts, "mimo-v2.6-flash", "")              # 必须留下
 
     out = repo.clear_since(None, model="", base_url="")
     assert out["token_usage"] == 1
     live, _ = _left(repo)
-    assert live == [("mimo-v2.5", ""), ("mimo-v2.5", "https://a/v1")]
+    assert live == [("mimo-v2.6-flash", ""), ("mimo-v2.6-flash", "https://a/v1")]
 
 
 # ── from_date：界面承诺的那一天，必须就是真被删的那一天 ──────────────────

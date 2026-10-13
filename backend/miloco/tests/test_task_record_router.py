@@ -360,3 +360,54 @@ class TestCompute:
         data = r.json()["data"]
         assert data["kind"] == "progress"
         assert data["derived"]["remaining"] == 5
+
+
+# ── record 变更后达标规则要跟上 (spec §6.4) ──────────────────────────────
+
+
+class TestMilestoneSync:
+    """达标规则是 record + 达标动作的派生物, record 侧一变就得重算。"""
+
+    @staticmethod
+    def _spy(monkeypatch):
+        import miloco.manager as manager_module
+
+        calls = []
+        spy = type(
+            "RuleServiceSpy", (), {"notify_record_changed": lambda self, t: calls.append(t)}
+        )()
+        monkeypatch.setattr(
+            manager_module.Manager, "rule_service", property(lambda self: spy)
+        )
+        return calls
+
+    def test_init_record_triggers_a_recompute(self, client, monkeypatch):
+        calls = self._spy(monkeypatch)
+        _create_task_minimal(client, "t_ms_init")
+        client.post(
+            "/api/tasks/t_ms_init/record",
+            json={"kind": "duration", "content": {"target_minutes": 30}},
+        )
+        assert calls == ["t_ms_init"]
+
+    def test_patching_the_threshold_triggers_a_recompute(self, client, monkeypatch):
+        _create_task_minimal(client, "t_ms_patch")
+        client.post(
+            "/api/tasks/t_ms_patch/record",
+            json={"kind": "duration", "content": {"target_minutes": 30}},
+        )
+        calls = self._spy(monkeypatch)
+        client.patch(
+            "/api/tasks/t_ms_patch/record", json={"target_minutes": 45}
+        )
+        assert calls == ["t_ms_patch"]
+
+    def test_a_failed_init_does_not_trigger_a_recompute(self, client, monkeypatch):
+        """没写进去就没什么要跟上的。"""
+        calls = self._spy(monkeypatch)
+        resp = client.post(
+            "/api/tasks/no_such_task/record",
+            json={"kind": "duration", "content": {"target_minutes": 30}},
+        )
+        assert resp.json()["code"] == 2001  # task_not_found
+        assert calls == []
