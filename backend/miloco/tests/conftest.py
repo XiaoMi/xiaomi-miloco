@@ -11,12 +11,15 @@ Authorization 头而 401 假红（CI 干净环境反而全绿）。
 在 conftest **import 期**（早于任何测试模块的收集/导入，防止模块级
 ``get_settings()`` 把真实配置烧进 lru_cache）：
 
-1. 把 ``MILOCO_HOME`` 指到本次会话的临时目录（空 config）；
-2. 清掉继承自 shell 的 ``MILOCO_*`` 环境变量（例如 ``MILOCO_SERVER__TOKEN``）；
-3. ``reset_settings()`` 清缓存，保证后续解析用隔离后的环境。
+1. 按 Settings 的大小写不敏感语义清掉继承自 shell 的 ``MILOCO_*`` 环境变量；
+2. 再把 ``MILOCO_HOME`` 指到本次会话的临时目录（空 config）。必须先清后设，
+   因为 ``MILOCO_HOME`` 本身也会被第 1 步清掉；
+3. 设置 ``PYTHON_DOTENV_DISABLED=1``，防止导入应用时自动加载 .env 再次污染环境；
+4. ``reset_settings()`` 清缓存，保证后续解析用隔离后的环境。
 
 单测仍可用 ``monkeypatch.setenv("MILOCO_HOME", ...)`` 或
-``MilocoSettings(...)`` init 覆盖，各自作用域退出后回到这里的隔离基线。
+``MilocoSettings(...)`` init 覆盖。测试 dotenv 时可局部解除禁用并使用临时文件。
+保留逐用例的环境隔离与 reset；此处只负责收集期基线，不替代用例之间的状态管理。
 """
 
 from __future__ import annotations
@@ -30,9 +33,10 @@ _ISOLATED_HOME = tempfile.mkdtemp(prefix="miloco-test-home-")
 # 进程正常退出时删掉：macOS 的 /var/folders 不随重启清空，频繁跑测试会积累一堆空目录。
 atexit.register(shutil.rmtree, _ISOLATED_HOME, ignore_errors=True)
 
-for _key in [k for k in os.environ if k.startswith("MILOCO_")]:
+for _key in [k for k in os.environ if k.upper().startswith("MILOCO_")]:
     del os.environ[_key]
 os.environ["MILOCO_HOME"] = _ISOLATED_HOME
+os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 
 from miloco.config import reset_settings  # noqa: E402
 
