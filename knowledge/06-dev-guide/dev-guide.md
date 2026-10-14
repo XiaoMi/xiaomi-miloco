@@ -219,6 +219,8 @@ pnpm typecheck                 # 类型检查
 
 感知流水线参数集中在 `$MILOCO_HOME/config.json` 的 `perception` 段（覆盖 `settings.yaml::perception`），字段定义见 `settings.py` 的 `PerceptionSettings`。
 
+常用的几项（分辨率 / omni 帧率 / 窗口长度 / Smart Crop 用户开关 / 建议紧急度下限）另有一对读写端点（`admin/router.py` 的 `/perception-config`），写盘后由后端按各项的生效路径自行热更或只重启感知引擎，不必重启整个服务；返回体会带上这次热更 / 重启成没成，因为配置已写盘、失败的只是让它当场生效那一步。下面这套「改配置 + 重启服务」是所有 `perception` 参数都通用的兜底做法。
+
 ```bash
 # 查看当前感知配置
 miloco-cli config show | grep perception
@@ -406,6 +408,7 @@ bash scripts/install.sh --dev
 | `miloco.db`                       | SQLite 业务数据库                                                                                           |
 | `observability.db`                | 性能追踪数据库（`perf.enabled=true` 时建）                                                                  |
 | `data/identity_lib/persons/<id>/` | 身份库（tier_a / tier_c / meta.json）                                                                       |
+| `data/identity_lib/pets/<id>/`    | 宠物花名册（meta.json / 参考图；头像另落 `avatars/pets/`，实验性功能）                                      |
 | `models/`                         | ONNX 模型（必需 det_4C / human_body_reid_v2，另有可选模型；清单见 `resource_validator.py`）                 |
 | `home-profile/`                   | 家庭档案（candidates.json / profile.json / profile.md）                                                     |
 | `static/`                         | 家庭面板前端静态资源（由 `install.sh` 从 `web/dist/` 同步）                                                 |

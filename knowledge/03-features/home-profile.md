@@ -101,6 +101,8 @@ profile.md（$MILOCO_HOME/home-profile/profile.md）
 
 **Cron reconcile 意图**：`scheduler.ts` 不直接 add/delete cron，而是先 diff 已有受管任务与代码中 `kCronTasks` 的差异，再增/改/删对齐。插件重启、升级后自动收敛，避免孤儿 cron 积累。
 
+**受管 cron 的自动管理可关**：`scheduler.enabled`（CLI / Web 面板可改，backend 侧读写端点在 `admin/router.py`）关掉后，网关启动时清除已建的受管 cron 并跳过重建——否则用户在后台手动删掉的内置任务会被下次网关重启重新拉起。生效方是插件而非 backend，所以改开关要等网关下次启动才落地。
+
 ### 如果我要修改家庭记忆相关功能
 
 | 修改目标                          | 去看哪个文件                                                                                                                               |

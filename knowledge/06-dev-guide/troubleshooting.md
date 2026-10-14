@@ -47,13 +47,13 @@
 
 ## 规则
 
-| 现象                     | 解决                                                                                                                                                  |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 规则不触发               | `rule list --pretty` 看 `enabled=true`；`perceive_device_ids` 是有效感知设备（`perceive devices` 确认）                                               |
-| 日志显示 `skipped=true`  | STATIC：幂等检查发现已达目标；非幂等：冷却期内                                                                                                        |
-| DYNAMIC 规则不回调 Agent | 检查 `agent.webhook_url`（默认值见 `settings.schema.json::agent.webhook_url`）；确认 OpenClaw 进程运行且插件已加载；查 `agent.auth_bearer` 是否已写入 |
-| 创建规则返回 code=2002   | 规则名重复（`ConflictException`），改用唯一名称                                                                                                       |
-| `rule create` 报 422     | condition.query 措辞被拒绝：不能以"检测到/识别到/感知到"等断言性词汇开头；改为进行时状态描述                                                          |
+| 现象                     | 解决                                                                                                                                                                                               |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 规则不触发               | `rule list --enabled-only --pretty` 看它还在不在（默认列表里的 `enabled` 只是这条规则自己的意图，所属 task 被暂停时它一样不生效）；`perceive_device_ids` 是有效感知设备（`perceive devices` 确认） |
+| 日志显示 `skipped=true`  | STATIC：幂等检查发现已达目标；非幂等：冷却期内                                                                                                                                                     |
+| DYNAMIC 规则不回调 Agent | 检查 `agent.webhook_url`（默认值见 `settings.schema.json::agent.webhook_url`）；确认 OpenClaw 进程运行且插件已加载；查 `agent.auth_bearer` 是否已写入                                              |
+| 创建规则返回 code=2002   | 规则名重复（`ConflictException`），改用唯一名称                                                                                                                                                    |
+| `rule create` 报 422     | condition.query 措辞被拒绝：不能以"检测到/识别到/感知到"等断言性词汇开头；改为进行时状态描述                                                                                                       |
 
 排查规则日志：`miloco-cli rule logs --since 1h --rule <id> --pretty`
 

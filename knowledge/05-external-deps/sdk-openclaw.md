@@ -18,7 +18,7 @@ Miloco 的 OpenClaw 插件（`plugins/openclaw/src/index.ts`）注册五类扩�
 | ---------------- | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Services**     | 1    | `backend.ts` 管理 Python 后端进程生命周期（`catalog.ts` 非注册 Service，是 before_prompt_build 内调用的辅助模块）                                     |
 | **Hooks**        | 2    | 唯一的 before_prompt_build（同处装配系统上下文 + 设备目录 + 家庭档案 + 待回应建议）；trace hook（7 个 agent 事件监听）                                |
-| **Webhooks**     | 2    | agent（接收后端事件回调，触发 Agent subagent turn）；get_trace（backend 反向轮询 agent run 元数据）                                                   |
+| **Webhooks**     | 3    | agent（接收后端事件回调，触发 Agent subagent turn）；get_trace（backend 反向轮询 agent run 元数据）；reset_sessions（切换家庭时批量重置 miloco 会话） |
 | **Tools**        | 3    | `miloco_im_push`（通知分发）、`miloco_notify_bind`（通知渠道绑定）、`miloco_notify_unbind`（通知渠道解绑）（习惯建议状态机已移入 `miloco-cli habit`） |
 | **Home Profile** | —    | 家庭档案注入 + 4 个受管 Cron 任务调度                                                                                                                 |
 
