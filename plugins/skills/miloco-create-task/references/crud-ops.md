@@ -96,7 +96,7 @@ miloco-cli task enable <task_id>    # 启用
 
 | 改什么 | 改哪 | 怎么做 |
 |---|---|---|
-| rule 条件 / 防抖 | rule | `miloco-cli rule update <rule_id> ...`（`rule_id` 从 `task get` 的 `rule_briefs[].rule_id` 拿）。防抖两源同写法 `--exit-debounce-seconds <N>`；改条件按源分支：`omni` 传 `--condition "<新命题>"`，`iot` 传 `--iot-did <did> --iot-iid <siid.piid> --iot-op <op> --iot-value <v>`（四个同时给，缺一个报错；iot 规则传 `--condition` 会被服务端拒）。iot 的四个现值从 `miloco-cli rule list --pretty` 里那条 rule 的 `condition_dnf.any_of[0][0].spec` 抄，只改要改的那一个 |
+| rule 条件 / 防抖 | rule | `miloco-cli rule update <rule_id> ...`（`rule_id` 从 `task get` 的 `rule_briefs[].rule_id` 拿）。防抖两源同写法 `--exit-debounce-seconds <N>`；改条件按源分支：`omni` 传 `--condition "<新命题>"`，`iot` 传 `--iot-did <did> --iot-iid <iid> --iot-op <op> --iot-value <v>`（四个同时给，缺一个报错；iot 规则传 `--condition` 会被服务端拒。`<iid>` 是属性 `prop.<siid>.<piid>` 去掉前缀，或事件参数 `event.<siid>.<eiid>.<argname>` 整串）。iot 的四个现值从 `miloco-cli rule list --pretty` 里那条 rule 的 `condition_dnf.any_of[0][0].spec` 抄，只改要改的那一个 |
 | 动作（进入 / 退出 / 达标做什么） | task | `miloco-cli task set-actions <task_id> ...`（槽与 flag 见 SKILL.md §动作装在哪）。**同方向**多条 rule 争同一个槽时 `rule update` 改动作会被跳过并告警，必须走这里；一进一出各占各槽的组合仍可用 rule 侧动作 flag |
 | 持续时长门槛 | rule / record | 见 SKILL.md §Rule.duration_seconds。`omni`：`miloco-cli rule update <rule_id> --duration-seconds <N>`（单位换算同节）。`iot`：本字段禁配、传了会被拒，时长走 `miloco-cli task record update <task_id> --patch '{"target_minutes": <N>}'`。desc 含字面分钟/小时数时同步改 |
 | 触发时间 / cron 表达式 | schedule | `miloco-cli cron remove <cron_id>` + `cron add ...`（cron 无 update API）；`cron_id` 从 `task get` 的 `cron_refs[].ref` 拿；新 cron 通过 `task_id` 参数直接绑到 task，无需额外 link 步骤；新建 cron 必带独立 `tz="<家庭时区>"` 字段（见 SKILL.md §Schedule.时区）。`dispatch_owner=external` 的老 cron 属 openclaw 侧接管，agent 通过自然语言指令让 openclaw 内部 cron API 处理 |

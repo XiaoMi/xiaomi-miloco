@@ -33,6 +33,7 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot.client import MiotProxy, is_subscribable_did
 from miloco.miot.filter import allowed_home_ids, filter_by_home
+from miloco.miot.iid import is_event_iid
 from miloco.rule.condition import (
     condition_to_dnf,
     dnf_structure_error,
@@ -123,27 +124,39 @@ _SCALAR_FORMAT_FAMILY = {
 }
 
 
-def _validate_iot_value(entry: dict, op: str, value: Any, iid: str) -> None:
-    """iot 条件项的 format / 取值域校验。
+def _iot_label(iid: str) -> str:
+    """条件项在报错里的自称。事件参数带上前缀，属性沿用历史形态。
+
+    校验函数只拿得到 iid，而每条报错都要用它自称 —— 让它们各自拼一遍的话，
+    事件一进来就会报成「属性 prop.event.2.1020.x」，指向一个不存在的键。
+    """
+    if is_event_iid(iid):
+        return f"事件参数 {iid}"
+    return f"属性 prop.{iid}"
+
+
+def _validate_iot_value(entry: dict, op: str, value: Any, label: str) -> None:
+    """iot 条件项的 format / 取值域校验。``label`` 见 ``_iot_label``。
 
     配错的后果分两种，都看不出来：``eq`` 恒假是永远不触发，``ne`` 恒真是持续误
     触发 —— 后者比前者更糟。
+
+    属性与事件共用这一份：两条路的 ``entry`` 同形（都来自 spec 的 format /
+    value_list / value_range），能配错的方式也同形。
     """
     fmt = str(entry.get("format") or "")
     family = _SCALAR_FORMAT_FAMILY.get(fmt)
     if family is None:
         raise ValidationException(
-            f"属性 prop.{iid} 的 format={fmt!r} 不是标量, 不能当 iot 条件项"
+            f"{label} 的 format={fmt!r} 不是标量, 不能当 iot 条件项"
         )
     if family != value_family(value):
         raise ValidationException(
-            f"属性 prop.{iid} 的 format={fmt!r} 与 value={value!r} 类型不兼容"
+            f"{label} 的 format={fmt!r} 与 value={value!r} 类型不兼容"
         )
     if family is not NUMBER_FAMILY and op in ORDERING_OPS:
         kind = "字符串" if family is STR_FAMILY else "开关"
-        raise ValidationException(
-            f"属性 prop.{iid} 是{kind}, 不支持 op={op!r} 这种大小比较"
-        )
+        raise ValidationException(f"{label} 是{kind}, 不支持 op={op!r} 这种大小比较")
 
     choices = entry.get("value_list") or []
     if choices:
@@ -151,22 +164,22 @@ def _validate_iot_value(entry: dict, op: str, value: Any, iid: str) -> None:
         if op in ("eq", "ne"):
             if value not in allowed:
                 raise ValidationException(
-                    f"value={value!r} 不在属性 prop.{iid} 的取值列表里: "
+                    f"value={value!r} 不在{label}的取值列表里: "
                     f"{sorted(allowed, key=repr)}"
                 )
             return
         # 枚举上的大小比较按它实际的取值域判，判据与 value_range 同一条
         numeric = sorted(v for v in allowed if isinstance(v, (int, float)))
         if numeric:
-            _validate_satisfiable(numeric[0], numeric[-1], op, value, iid)
+            _validate_satisfiable(numeric[0], numeric[-1], op, value, label)
         return
 
     value_range = entry.get("value_range")
     if isinstance(value_range, (list, tuple)) and len(value_range) >= 2:
-        _validate_against_range(value_range, op, value, iid)
+        _validate_against_range(value_range, op, value, label)
 
 
-def _validate_satisfiable(low, high, op: str, value: Any, iid: str) -> None:
+def _validate_satisfiable(low, high, op: str, value: Any, label: str) -> None:
     """大小比较必须**既可能成立、也可能不成立**。端点含在内（MIoT 的区间是闭区间）。
 
     只判一个方向的话另一个方向的配置错误会溜过去：区间 ``[-40,125]`` 上 ``gt -100``
@@ -184,7 +197,7 @@ def _validate_satisfiable(low, high, op: str, value: Any, iid: str) -> None:
     }[op]
     if not can_be_true:
         raise ValidationException(
-            f"属性 prop.{iid} 的取值范围是 [{low}, {high}], "
+            f"{label} 的取值范围是 [{low}, {high}], "
             f"没有任何取值满足 {op} {value!r}"
         )
     can_be_false = {
@@ -195,7 +208,7 @@ def _validate_satisfiable(low, high, op: str, value: Any, iid: str) -> None:
     }[op]
     if not can_be_false:
         raise ValidationException(
-            f"属性 prop.{iid} 的取值范围是 [{low}, {high}], "
+            f"{label} 的取值范围是 [{low}, {high}], "
             f"每个取值都满足 {op} {value!r} —— 这个条件恒成立"
         )
 
@@ -225,7 +238,7 @@ def _reachable_high(low, high, step) -> Any:
     return low + math.floor((high - low) / step) * step
 
 
-def _validate_against_range(value_range, op: str, value: Any, iid: str) -> None:
+def _validate_against_range(value_range, op: str, value: Any, label: str) -> None:
     """校验的是「这个谓词有没有可能成立」，不是「这个值本身可达」。
 
     ``eq`` / ``ne`` 要求值**可达**（闭区间内且满足步长）：range ``[0,100,5]`` 上
@@ -239,19 +252,18 @@ def _validate_against_range(value_range, op: str, value: Any, iid: str) -> None:
     if op in ORDERING_OPS:
         # 拿声明的上界判会把恒假的 `gt 99` 与恒真的 `lte 99` 一起放行 —— 正是本函数
         # 要拦的那两种，而设备根本报不出 100。
-        _validate_satisfiable(low, _reachable_high(low, high, step), op, value, iid)
+        _validate_satisfiable(low, _reachable_high(low, high, step), op, value, label)
         return
 
     if not (low <= value <= high):
         raise ValidationException(
-            f"value={value!r} 不在属性 prop.{iid} 的取值范围 [{low}, {high}] 内"
+            f"value={value!r} 不在{label}的取值范围 [{low}, {high}] 内"
         )
     if not step:
         return
     if not _is_on_step_grid(low, value, step):
         raise ValidationException(
-            f"value={value!r} 落不到属性 prop.{iid} 的步长上 "
-            f"(从 {low} 起每 {step} 一档)"
+            f"value={value!r} 落不到{label}的步长上 (从 {low} 起每 {step} 一档)"
         )
 
 
@@ -937,10 +949,10 @@ class RuleService:
 
         if is_server_rendered(source_type):
             assert iot_context is not None
-            device_name, prop_entry = iot_context
+            device_name, entry = iot_context
             item = single_item_of(rule.condition_dnf)
             rule.condition.query = render_iot_condition(
-                device_name, prop_entry, item.spec["op"], item.spec["value"]
+                device_name, entry, item.spec["op"], item.spec["value"]
             )
 
         _validate_query_not_empty(rule.condition.query)
@@ -991,10 +1003,14 @@ class RuleService:
             )
 
     async def _validate_iot_item(self, rule: Rule) -> tuple[str, dict]:
-        """iot 条件项的静态校验。返回 ``(设备名, 属性 entry)`` 供渲染复用。
+        """iot 条件项的静态校验。返回 ``(设备名, spec entry)`` 供渲染复用。
 
         全部可在创建时查完 —— 抄错一位的话规则建得成功、永远不触发，用户和 agent
         都拿不到反馈。
+
+        **两个命名空间在这里分叉**：``iid`` 带 ``event.`` 前缀的是事件参数，走事件
+        spec；其余一律当属性（属性的历史形态是裸 ``<siid>.<piid>``，不带前缀）。两边的
+        format / 取值域校验共用一份，见 ``_validate_iot_value``。
         """
         item = single_item_of(rule.condition_dnf)
         spec_item = item.spec or {}
@@ -1012,7 +1028,7 @@ class RuleService:
             )
         if not is_subscribable_did(did):
             raise ValidationException(
-                f"did {did!r} 含 '/', 拿不到属性推送 —— 桥接子设备不能当 iot 触发源"
+                f"did {did!r} 含 '/', 拿不到推送 —— 桥接子设备不能当 iot 触发源"
             )
 
         from miloco.manager import get_manager
@@ -1027,26 +1043,45 @@ class RuleService:
         # 产 iot 条件项), 所以这道闸放在写入时。
         if did not in await manager.miot_proxy.devices_in_current_home():
             raise ValidationException(
-                f"设备 {did!r} 不在当前启用的家庭里, 它的属性不会进状态容器"
+                f"设备 {did!r} 不在当前启用的家庭里, 它不会进状态容器"
             )
-        device = await manager.miot_service.get_device_spec(did)
-        spec = device.get("spec") or {}
-        if not spec:
-            # 拿不到 spec 与「这台设备真没属性」在调用侧长得一模一样, 不区分 ——
-            # 几种情形对建规则的结论相同（校验做不了）。
-            raise ValidationException(
-                f"拿不到设备 {did!r} 的 spec, 无法校验 iot 条件项"
-            )
-        entry = spec.get(f"prop.{iid}")
-        if not isinstance(entry, dict):
-            raise ValidationException(f"属性 prop.{iid} 不在设备 {did!r} 的 spec 里")
-        if not entry.get("notify"):
-            raise ValidationException(
-                f"属性 prop.{iid} 的 access 不含 notify, 拿不到推送: "
-                "规则只会在启动那一刻算一次, 之后永远没有输入"
-            )
+        # 命名空间从 iid 自带的信息读，不另开一个字段 —— 容器叶、spec 键、渲染都用
+        # 同一个串，多一个字段就有第二个真相。
+        if is_event_iid(iid):
+            device = await manager.miot_service.get_device_event_spec(did)
+            spec = device.get("spec") or {}
+            if not spec:
+                raise ValidationException(
+                    f"拿不到设备 {did!r} 的事件 spec, 无法校验 iot 条件项"
+                )
+            entry = spec.get(iid)
+            if not isinstance(entry, dict):
+                raise ValidationException(
+                    f"事件参数 {iid} 不在设备 {did!r} 的事件 spec 里"
+                )
+            # 属性那道 notify 闸在这里没有对应物: 事件参数只推不读也不写, access 是
+            # 给属性用的。**「拿得到推送」这件事仍然成立** —— 事件订阅的判据是
+            # is_subscribable_did + 当前家庭（见 MiotProxy._sync_event_subscriptions）,
+            # 两者上面都已判过。
+        else:
+            device = await manager.miot_service.get_device_spec(did)
+            spec = device.get("spec") or {}
+            if not spec:
+                # 拿不到 spec 与「这台设备真没属性」在调用侧长得一模一样, 不区分 ——
+                # 几种情形对建规则的结论相同（校验做不了）。
+                raise ValidationException(
+                    f"拿不到设备 {did!r} 的 spec, 无法校验 iot 条件项"
+                )
+            entry = spec.get(f"prop.{iid}")
+            if not isinstance(entry, dict):
+                raise ValidationException(f"属性 prop.{iid} 不在设备 {did!r} 的 spec 里")
+            if not entry.get("notify"):
+                raise ValidationException(
+                    f"属性 prop.{iid} 的 access 不含 notify, 拿不到推送: "
+                    "规则只会在启动那一刻算一次, 之后永远没有输入"
+                )
 
-        _validate_iot_value(entry, op, spec_item["value"], iid)
+        _validate_iot_value(entry, op, spec_item["value"], _iot_label(iid))
         return str(device.get("name") or did), entry
 
     async def _validate_perceive_devices_of(self, rule: Rule) -> None:

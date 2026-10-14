@@ -342,6 +342,134 @@ def test_missing_spec_errors_instead_of_guessing_the_type(runner):
     assert not post.called
 
 
+# ── 事件参数：另一张表、另一条通道 ────────────────────────────────────
+
+_EVENT_IID = "event.2.1020.unlock-operation-position"
+
+# 事件请求的响应比属性那次多一张 event_spec；属性请求里没有它。
+_EVENT_SPEC = {
+    "code": 0,
+    "data": {
+        "spec": _SPEC["data"]["spec"],
+        "event_spec": {
+            _EVENT_IID: {"format": "uint8", "description": "开锁操作"},
+            "event.2.1020.other": {"format": "iids", "description": "预设"},
+        },
+    },
+}
+
+
+def _create_with_spec(runner, response, *args):
+    """返回 (result, post, get)。get 要看一眼请求的是哪条 URL。"""
+    with (
+        patch("miloco_cli.client.api_get", return_value=response) as get,
+        patch("miloco_cli.client.api_post", return_value=_OK) as post,
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "rule",
+                "create",
+                "--name",
+                "门开了",
+                "--task-id",
+                "door_alert",
+                "--action-desc",
+                "播报",
+                *args,
+            ],
+        )
+    return result, post, get
+
+
+def _event_args(*extra):
+    return ("--iot-did", "d1", "--iot-iid", _EVENT_IID, "--iot-op", "eq", *extra)
+
+
+def test_an_event_arg_is_fetched_from_the_event_table(runner):
+    """问服务端要 `include_events=true` 才会带上事件表。
+
+    不带这个参数的话拿到的是空表，于是每一种事件 iid 都会被报成「事件 spec 里没有
+    这一项」—— 一个取数缺陷伪装成用户写错了 iid。
+    """
+    _result, post, get = _create_with_spec(
+        runner, _EVENT_SPEC, *_event_args("--iot-value", "2")
+    )
+
+    assert get.call_args[0][0] == "/api/miot/devices/d1/spec"
+    assert get.call_args[1]["params"] == {"include_events": "true"}
+    item = _payload(post)["condition_dnf"]["any_of"][0][0]
+    assert item["spec"] == {"did": "d1", "iid": _EVENT_IID, "op": "eq", "value": 2}
+
+
+def test_a_property_does_not_ask_for_the_event_table(runner):
+    """事件表要走另一个解析器，默认不取是路由那边定死的。属性也带上这个参数，
+    每次建规则都白解析一份事件表。
+    """
+    _result, _post, get = _create_with_spec(
+        runner, _SPEC, "--iot-did", "d1", "--iot-iid", "5.1", "--iot-op", "eq",
+        "--iot-value", "1",
+    )
+
+    assert get.call_args[0][0] == "/api/miot/devices/d1/spec"
+    assert get.call_args[1]["params"] is None
+
+
+def test_an_event_value_is_parsed_by_the_arg_format(runner):
+    """事件参数与属性共用一套解析 —— 但 format 得来自事件表那一份。"""
+    _result, post, _get = _create_with_spec(
+        runner, _EVENT_SPEC, *_event_args("--iot-value", "2")
+    )
+
+    value = _payload(post)["condition_dnf"]["any_of"][0][0]["spec"]["value"]
+    assert isinstance(value, int)
+
+
+def test_an_unknown_event_arg_errors_with_the_event_wording(runner):
+    """**断文案里的命名空间。** 说成「spec 里没有属性 prop.event.…」会把人指到
+    一个根本不存在的键上 —— 属性表里既没有 `event.…` 也没有 `prop.event.…`。
+    """
+    result, post, _get = _create_with_spec(
+        runner,
+        _EVENT_SPEC,
+        "--iot-did", "d1", "--iot-iid", "event.2.1020.nope", "--iot-op", "eq",
+        "--iot-value", "1",
+    )
+
+    assert "事件 spec 里没有" in result.output
+    assert "prop.event." not in result.output
+    assert not post.called
+
+
+def test_a_missing_event_table_errors_with_the_event_wording(runner):
+    """两张表都不在时报错要各说各的，否则「服务端没给事件表」会被读成
+    「这台设备没有事件」。
+    """
+    result, post, _get = _create_with_spec(
+        runner,
+        {"code": 0, "data": {}},
+        *_event_args("--iot-value", "1"),
+    )
+
+    assert "事件 spec" in result.output
+    assert not post.called
+
+
+def test_the_value_error_names_the_event_namespace(runner):
+    """非标量那条出口也要带上命名空间 —— 报「属性 prop.event.…」同样指错地方。"""
+    result, post, _get = _create_with_spec(
+        runner,
+        _EVENT_SPEC,
+        "--iot-did", "d1", "--iot-iid", "event.2.1020.other", "--iot-op", "eq",
+        "--iot-value", "1",
+    )
+
+    assert "不是标量" in result.output
+    assert "事件参数" in result.output
+    assert "属性 prop." not in result.output
+    assert not post.called
+
+
 # ── 诊断出口 ──────────────────────────────────────────────────────────
 
 

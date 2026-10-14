@@ -13,6 +13,9 @@ API_PREFIX = "/api/rules"
 # 故复刻字面量；改动时两处同步。
 SCENE_IID = "scene"
 
+# 与 backend miloco/miot/iid.py 的 EVENT_IID_PREFIX 对齐，同 SCENE_IID 的理由。
+EVENT_IID_PREFIX = "event."
+
 
 def _rule_cursor_file():
     from miloco_cli.config import miloco_home
@@ -60,7 +63,11 @@ def iot_condition_options(func):
             "--iot-iid",
             "iot_iid",
             default=None,
-            help="属性 iid，形如 5.1（与状态容器的路径段一致）",
+            help=(
+                "属性 iid，形如 5.1（与状态容器的路径段一致）；"
+                f"或事件参数 iid，形如 {EVENT_IID_PREFIX}2.1020.operation-position"
+                "（末段是 spec 里的参数原名，不能自己拼）"
+            ),
         ),
         click.option(
             "--iot-op",
@@ -73,7 +80,7 @@ def iot_condition_options(func):
             "--iot-value",
             "iot_value",
             default=None,
-            help="阈值。类型按该属性 spec 的 format 解析",
+            help="阈值。类型按该项 spec 的 format 解析",
         ),
     )
     for option in reversed(options):
@@ -103,16 +110,39 @@ def _iot_args_given(iot_did, iot_iid, iot_op, iot_value) -> bool:
     return all(given)
 
 
+def _iot_label(iid: str) -> str:
+    """--iot-iid 指的那一项在报错里的自称。与后端 ``rule/service._iot_label`` 同一条
+    规矩：事件参数带前缀，属性是历史形态的裸 `<siid>.<piid>`。"""
+    if iid.startswith(EVENT_IID_PREFIX):
+        return f"事件参数 {iid}"
+    return f"属性 prop.{iid}"
+
+
 def _fetch_prop_format(did: str, iid: str) -> str:
-    """去 ``device spec`` 拿这条属性的 format。
+    """去 ``device spec`` 拿这一项的 format。属性与事件参数都走这里。
 
     **拿不到就报错退出，不猜类型。** 猜错的后果是规则建得成功、运行期恒判类型不兼容、
     条件恒未就绪 —— 一个查起来很远的失败。
+
+    事件参数在另一张表里（``event_spec``），要显式问服务端要 —— 它得走另一个解析器，
+    默认不取。两张表都不在时给各自的报错文案：说成「没有属性 prop.event.…」会把
+    人指到一个根本不存在的键上。
     """
     from miloco_cli.client import api_get
 
-    resp = api_get(f"/api/miot/devices/{did}/spec")
-    spec = ((resp or {}).get("data") or {}).get("spec") or {}
+    is_event = iid.startswith(EVENT_IID_PREFIX)
+    params = {"include_events": "true"} if is_event else None
+    resp = api_get(f"/api/miot/devices/{did}/spec", params=params)
+    data = (resp or {}).get("data") or {}
+    if is_event:
+        spec = data.get("event_spec") or {}
+        if not spec:
+            raise click.UsageError(f"拿不到设备 {did} 的事件 spec, 无法解析 --iot-value")
+        entry = spec.get(iid)
+        if not isinstance(entry, dict):
+            raise click.UsageError(f"设备 {did} 的事件 spec 里没有 {iid}")
+        return str(entry.get("format") or "")
+    spec = data.get("spec") or {}
     if not spec:
         raise click.UsageError(f"拿不到设备 {did} 的 spec, 无法解析 --iot-value")
     # CLI 参数用裸 siid.piid（与容器路径段一致），spec 输出里的键是 prop.<siid>.<piid>
@@ -122,37 +152,29 @@ def _fetch_prop_format(did: str, iid: str) -> str:
     return str(entry.get("format") or "")
 
 
-def _parse_iot_value(raw: str, fmt: str, iid: str):
+def _parse_iot_value(raw: str, fmt: str, label: str):
     if fmt == "bool":
         if raw.lower() not in ("true", "false"):
-            raise click.UsageError(
-                f"属性 prop.{iid} 是布尔, --iot-value 只接受 true / false"
-            )
+            raise click.UsageError(f"{label} 是布尔, --iot-value 只接受 true / false")
         return raw.lower() == "true"
     if fmt in _IOT_INT_FORMATS:
         try:
             return int(raw)
         except ValueError as e:
-            raise click.UsageError(
-                f"属性 prop.{iid} 是整数, --iot-value 解析失败"
-            ) from e
+            raise click.UsageError(f"{label} 是整数, --iot-value 解析失败") from e
     if fmt == "float":
         try:
             return float(raw)
         except ValueError as e:
-            raise click.UsageError(
-                f"属性 prop.{iid} 是浮点, --iot-value 解析失败"
-            ) from e
+            raise click.UsageError(f"{label} 是浮点, --iot-value 解析失败") from e
     if fmt == "string":
         return raw
-    raise click.UsageError(
-        f"属性 prop.{iid} 的 format={fmt!r} 不是标量, 不能当 iot 条件项"
-    )
+    raise click.UsageError(f"{label} 的 format={fmt!r} 不是标量, 不能当 iot 条件项")
 
 
 def _build_iot_dnf(iot_did, iot_iid, iot_op, iot_value) -> dict:
     fmt = _fetch_prop_format(iot_did, iot_iid)
-    value = _parse_iot_value(iot_value, fmt, iot_iid)
+    value = _parse_iot_value(iot_value, fmt, _iot_label(iot_iid))
     return {
         "any_of": [
             [
@@ -216,7 +238,9 @@ def rule_iot_diagnostics(pretty):
     reason 的取值：
     - ok              正常求值
     - device_offline  设备离线
-    - path_missing    容器里没有这条属性叶子
+    - path_missing    容器里没有这条叶子。属性叶是没对齐到；事件叶多半是这台设备还没
+                      上报过 —— 事件没有回拉通道，进程重启后事件叶一律为空，按设计
+                      如此，别当成 iid 抄错去改规则
     - eval_failed     类型不兼容，求值做不了
     - not_seeded      还没算过
 

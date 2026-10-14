@@ -1,10 +1,16 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""iot 源：把一条 MIoT 属性的当前值判成条件项的 bool。
+"""iot 源：把一条 MIoT 属性 / 事件参数的当前值判成条件项的 bool。
 
 设计见 docs/superpowers/specs/2026-09-08-iot-trigger-source-design.md。本文件先放
 条件项的读取与求值这两件纯粹的事 —— 它们同时被手动触发、创建校验和源层用到。
+
+**两条命名空间共用这一条求值路径。** 属性叶与事件叶在容器里是两棵子树
+（`/prop/` 与 `/event/`），读值/订阅/索引全按 iid 自带的 `event.` 前缀分流，判据只有
+`miloco.miot.iid` 那一份。事件与属性最大的行为差异是**事件没有回拉通道**：重连补拉只
+拉属性（云端没有「读最近一次事件」的接口），所以事件叶在重启后为空，引用它的条件项按
+`PATH_MISSING` 保守拦截。
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from miloco.miot.iid import EVENT_IID_PREFIX, is_event_iid, leaf_path
 from miloco.rule.schema import IOT_SOURCE_TYPE
 from miloco.state.types import MISSING
 from miloco.utils.time_utils import now_ms
@@ -154,6 +161,12 @@ def compare(current: Any, op: str, expected: Any) -> bool:
 
 _PROP_PATTERN = "iot/device/*/prop/*"
 _ONLINE_PATTERN = "iot/device/*/status/online"
+# 事件叶是第三条来源。`match_pattern` 是全长相等匹配、`*` 恰吃一段，所以叶必须
+# 正好 5 段 —— 与属性叶同形，只有命名空间那一段不同。
+_EVENT_PATTERN = "iot/device/*/event/*"
+
+_PROP_NAMESPACE = "prop"
+_EVENT_NAMESPACE = "event"
 
 # 重连之后等多久再去拉属性。等一等有三个作用：网络抖动连着触发的多次重连合并成一
 # 次、避开刚重连时订阅对账抢同一条连接的在飞额度、让断连期间积压的推送先落地（拉回
@@ -321,6 +334,9 @@ class IotSource:
         self._unsubscribes.append(
             self._store.subscribe(_ONLINE_PATTERN, self._on_online_change)
         )
+        self._unsubscribes.append(
+            self._store.subscribe(_EVENT_PATTERN, self._on_event_change)
+        )
         self._consumer = asyncio.create_task(self._consume())
         self._reconcile_task = asyncio.create_task(self._reconcile_loop())
         self.seed_all()
@@ -414,6 +430,31 @@ class IotSource:
             )
         # 唤醒用 Event.set()，在同步回调里直接调：回调跑在 loop 线程（_dispatch 就是
         # loop 上的回调），不需要 call_soon_threadsafe。
+        self.seed(rule_ids)
+
+    def _on_event_change(self, change) -> None:
+        """事件叶一变就重算引用它的条件项。形状与 `_on_prop_change` 逐条相同。
+
+        事件没有回拉通道，所以这条订阅是事件叶**唯一**的更新来源 —— 它断了不会有人
+        来补，叶子就停在旧值上（不报错、不缺失，只是旧）。
+
+        **事件叶上存的是「最近一次发生」，不是「刚刚发生」。** 求值一律按电平读叶子，
+        而这条命名空间里没有第二样东西可读，所以 seed 那条路（建规则 / 改条件 / 重新
+        启用任务 / 每轮全量调和）会把几小时前那次上报当现在判一次：相符就在落地那一刻
+        产生进入沿、真的派发动作。这是这条通道的语义边界，不是接线漏了 —— 面向用户的
+        技能文档里写着同一条，改语义要一起改（属性叶另有启动对齐 / 上线补拉 / 重连补拉
+        三条保鲜通道，它没有，所以两者不等价）。
+        """
+        did, iid = _split_event_path(change.path)
+        if did is None:
+            return
+        rule_ids = self._index.get((did, iid))
+        if not rule_ids:
+            return
+        for rule_id in rule_ids:
+            self._last_change[rule_id] = (
+                f"{change.path} {change.old!r} → {change.new!r}"
+            )
         self.seed(rule_ids)
 
     def _on_online_change(self, change) -> None:
@@ -525,7 +566,7 @@ class IotSource:
             return None, DiagnosticReason.PATH_MISSING
         if online is not True:
             return None, DiagnosticReason.DEVICE_OFFLINE
-        current = self._store.get(f"iot/device/{ref.did}/prop/{ref.iid}", MISSING)
+        current = self._store.get(leaf_path(ref.did, ref.iid), MISSING)
         if current is MISSING:
             return None, DiagnosticReason.PATH_MISSING
         try:
@@ -635,9 +676,15 @@ class IotSource:
 
         不是整台设备 —— 整台重拉会用云端缓存里的旧值盖掉刚推来的新值，而容器没有时
         间戳可仲裁。写进去产生变更，走正常路径求值，不需要单独的 seed 动作。
+
+        **事件引用在这里剔除。** 云端没有「读最近一次事件」的接口，喂给 `read_props`
+        的每条事件 iid 都解析不成属性、按设备组刷一条采样告警 —— 拉不回来任何东西，
+        只污染日志。
         """
         by_device: dict[str, list[str]] = {}
         for did, iid in self._index:
+            if is_event_iid(iid):
+                continue
             by_device.setdefault(did, []).append(iid)
         for did, iids in by_device.items():
             try:
@@ -646,12 +693,28 @@ class IotSource:
                 logger.exception("iot 源拉 %s 的属性失败", did)
 
 
-def _split_prop_path(path: str) -> tuple[str | None, str]:
-    """``iot/device/<did>/prop/<iid>`` → ``(did, iid)``。形状不对给 ``(None, "")``。"""
+def _split_leaf_path(path: str, namespace: str) -> tuple[str | None, str]:
+    """``iot/device/<did>/<namespace>/<iid>`` → ``(did, iid)``，形状不对给 ``(None, "")``。"""
     parts = path.split("/")
-    if len(parts) != 5 or parts[0] != "iot" or parts[3] != "prop":
+    if len(parts) != 5 or parts[0] != "iot" or parts[3] != namespace:
         return None, ""
     return parts[2], parts[4]
+
+
+def _split_prop_path(path: str) -> tuple[str | None, str]:
+    """``iot/device/<did>/prop/<iid>`` → ``(did, iid)``。形状不对给 ``(None, "")``。"""
+    return _split_leaf_path(path, _PROP_NAMESPACE)
+
+
+def _split_event_path(path: str) -> tuple[str | None, str]:
+    """``iot/device/<did>/event/<iid>`` → ``(did, iid)``。形状不对给 ``(None, "")``。
+
+    **回来的 iid 补回 ``event.`` 前缀**，即规则侧那串 —— 路径段里没有前缀（它由
+    ``/event/`` 那一段承载），而反查索引的键是规则条件项里的 iid。不补的话这里永远
+    查不到条目，事件到达时一条规则都不会重算，且是静默的：值照样落进容器。
+    """
+    did, iid = _split_leaf_path(path, _EVENT_NAMESPACE)
+    return did, f"{EVENT_IID_PREFIX}{iid}" if did is not None else iid
 
 
 def _split_online_path(path: str) -> str | None:

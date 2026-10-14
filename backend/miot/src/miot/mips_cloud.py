@@ -47,8 +47,10 @@ from .const import (
 )
 from .types import (
     MIoTDeviceBindEvent,
+    MIoTDeviceEvent,
     MIoTDevicePropsEvent,
     MIoTDeviceStateEvent,
+    MIoTEventArg,
     MIoTPropChange,
     MIoTSceneChangedEvent,
     MipsConnectionError,
@@ -121,6 +123,18 @@ _TOPIC_DEVICE_PROPS = re.compile(
     r"^device/([^/]+)/up/properties_changed(?:/(\d+)/(\d+))?$"
 )
 
+# Device-level event push:
+# `device/{did}/up/event_occured/{siid}/{eiid}`.
+# Same wildcard reasoning as properties_changed above: the leaves are the
+# (siid, eiid) cartesian product, so per-leaf subscribes are unbounded and the
+# leaf-only filter is rejected by the broker ACL with 0x87. The trailing ids
+# are informational — the payload repeats them, and the decoder cross-checks.
+# The `did` group is `[^/]+`, not `\d+`: gateway children carry `blt.*` /
+# `proxy.*` ids and are subscribed like any other device.
+_TOPIC_DEVICE_EVENT = re.compile(
+    r"^device/([^/]+)/up/event_occured(?:/(\d+)/(\d+))?$"
+)
+
 
 # Handler signatures accepted by sub_*_async methods. They receive a fully
 # decoded message object and may be sync or async — both are dispatched on the
@@ -129,6 +143,7 @@ BindHandler = Callable[[MIoTDeviceBindEvent], Union[None, Awaitable[None]]]
 SceneChangedHandler = Callable[[MIoTSceneChangedEvent], Union[None, Awaitable[None]]]
 DeviceStateHandler = Callable[[MIoTDeviceStateEvent], Union[None, Awaitable[None]]]
 PropsChangedHandler = Callable[[MIoTDevicePropsEvent], Union[None, Awaitable[None]]]
+DeviceEventHandler = Callable[[MIoTDeviceEvent], Union[None, Awaitable[None]]]
 MipsStateHandler = Callable[[bool], Union[None, Awaitable[None]]]
 # Fired when an unattended subscribe (no awaiter, e.g. the reconnect-time
 # re-issue in _on_connect) fails. Arg tuple = (topic, reason_code,
@@ -513,6 +528,23 @@ class MIoTMipsCloud:
 
     async def unsub_device_props_async(self, did: str) -> None:
         await self._unsubscribe_async(f"device/{did}/up/properties_changed/#")
+
+    async def sub_device_events_async(
+        self, did: str, handler: DeviceEventHandler
+    ) -> None:
+        """订阅一台设备的事件推送子树 `device/{did}/up/event_occured/#`。
+
+        通配的理由与属性推送同一条(见 _TOPIC_DEVICE_PROPS):事件叶子是
+        (siid, eiid) 的笛卡尔积,逐叶订阅无界;leaf-only 的 filter 会被
+        broker ACL 拒。
+        """
+        decoder = self._make_device_event_decoder()
+        await self._subscribe_async(
+            f"device/{did}/up/event_occured/#", handler, decoder
+        )
+
+    async def unsub_device_events_async(self, did: str) -> None:
+        await self._unsubscribe_async(f"device/{did}/up/event_occured/#")
 
     # ------------------------------------------------------- subscribe core
 
@@ -987,6 +1019,122 @@ class MIoTMipsCloud:
                 )
             return MIoTDevicePropsEvent(
                 did=did, changes=changes, timestamp_ms=_now_ms(), raw=raw
+            )
+
+        return decode
+
+    @staticmethod
+    def _make_device_event_decoder() -> Callable[
+        [str, bytes], Optional[MIoTDeviceEvent]
+    ]:
+        # 与属性解码器同一套白名单思路(见 _make_device_props_decoder):订的是
+        # `event_occured/#` 通配,同层将来出现别的 leaf 也会落进来。
+        #
+        # 与属性侧的一处形制差异:属性帧的 params 可以是一批变化,事件帧一次只承载
+        # 一个 (siid, eiid) —— 那是 spec 里事件的键。所以 topic 那一对永远能对上,
+        # 且对不上就是真矛盾(属性侧只在单条时才敢比)。
+        def decode(topic: str, payload: bytes) -> Optional[MIoTDeviceEvent]:
+            m = _TOPIC_DEVICE_EVENT.match(topic)
+            if not m:
+                return None
+            did = m.group(1)
+            topic_iid = (
+                (int(m.group(2)), int(m.group(3))) if m.group(2) is not None else None
+            )
+            raw = _parse_json_payload(payload)
+            if not isinstance(raw, dict):
+                return None
+            if raw.get("method") != "event_occured":
+                return None
+            params = raw.get("params")
+            if isinstance(params, dict):
+                entry = params
+            elif isinstance(params, list):
+                dicts = [item for item in params if isinstance(item, dict)]
+                if len(dicts) != 1:
+                    # 多条时无从对应 topic 那一对,也违背 spec 里事件的键 ——
+                    # 猜一条写下去会把 A 事件的值挂到 B 事件的路径上
+                    return None
+                entry = dicts[0]
+            else:
+                return None
+            if entry.get("did") is not None and str(entry.get("did")) != did:
+                _LOGGER.warning(
+                    "event_occured payload did contradicts topic did=%s", did
+                )
+                return None
+            try:
+                siid = int(entry["siid"])
+                eiid = int(entry["eiid"])
+            except (KeyError, TypeError, ValueError):
+                return None
+            if topic_iid is not None and (siid, eiid) != topic_iid:
+                _LOGGER.warning(
+                    "event_occured payload iid contradicts topic did=%s", did
+                )
+                return None
+            args: list[MIoTEventArg] = []
+            raw_args = entry.get("arguments")
+            if raw_args is None:
+                # 无参事件:spec 允许,字段缺失与显式 null 都算
+                raw_args = []
+            elif not isinstance(raw_args, list):
+                # arguments 本身不是列表(数字/true/字符串/对象)。这道闸在循环**外面**,
+                # 因为拦不住它的是循环头:不可迭代的值在 `for` 那一行就抛 TypeError,
+                # 越过了下面逐条告警,整帧落进 _on_message 的通用解码失败 —— 那里没有
+                # did/iid,排障时看不出是哪台设备的哪个事件。给成对象/字符串时倒是能
+                # 迭代,但逐项取到的是键或字符,同样不是参数,一并在这里说清楚。
+                # **判据是 `is not None` 而不是 `or []`**:写成后者时 0/false/空串这些
+                # 假值会静默变成「无参事件」,与真无参再分不开 —— 正是本段要拦的形态。
+                _LOGGER.warning(
+                    "event_occured arguments is not a list did=%s iid=event.%s.%s "
+                    "type=%s",
+                    did,
+                    siid,
+                    eiid,
+                    type(raw_args).__name__,
+                )
+                raw_args = []
+            for item in raw_args:
+                try:
+                    piid = int(item["piid"])
+                except (KeyError, TypeError, ValueError):
+                    # 与缺 value 那条同口径:认不出 piid 的参数落不到任何地方 —— 叶子的
+                    # 键要按 piid 反查参数名。静默 continue 的话整帧会在上层退化成一个
+                    # 「无参事件」,而值是真丢了,两种成因从此分不开。
+                    # **列表里的非对象参数也走这条**:null、字符串取 piid 直接抛
+                    # TypeError,不需要在它前面单加一道 type 闸 —— 加了就等于把这种形态
+                    # 从本告警里漏出去,而那正是本条要能看见的东西。
+                    _LOGGER.warning(
+                        "event_occured argument carries no usable piid did=%s "
+                        "iid=event.%s.%s type=%s",
+                        did,
+                        siid,
+                        eiid,
+                        type(item).__name__,
+                    )
+                    continue
+                if "value" not in item:
+                    # 与属性侧同口径:没有 value 的不是「值为 None」,是一条残缺的
+                    # 推送。当成 None 落进容器会把真实值盖掉,而容器没有时间戳可
+                    # 仲裁、盖完 last_reported 是当下。
+                    _LOGGER.warning(
+                        "event_occured argument carries no value did=%s iid=event.%s.%s",
+                        did,
+                        siid,
+                        eiid,
+                    )
+                    continue
+                args.append(MIoTEventArg(piid=piid, value=item["value"]))
+            # args 可以为空:spec 允许无参事件。在这里丢掉的话它的到达就完全不可
+            # 观测了,交给上层按「本次没有参数可落」计数。
+            return MIoTDeviceEvent(
+                did=did,
+                siid=siid,
+                eiid=eiid,
+                args=args,
+                timestamp_ms=_now_ms(),
+                raw=raw,
             )
 
         return decode
