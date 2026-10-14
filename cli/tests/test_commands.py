@@ -830,6 +830,9 @@ def test_device_spec_events_are_opt_in(runner, fake_home_info):
     text = result.output
     # 第一列就是能直接抄给 --iot-iid 的那个串，顶格、不被 @ 后缀改写
     assert "\nevent.2.1020.unlock-operation-position  " in text
+    # iid 一行里只出现一次：渲染器的输出也以 key 打头，不切掉前缀就是同一串两遍，
+    # 表头那列说明（第一段是空的，别名在行首列里）也对不上
+    assert text.count("event.2.1020.unlock-operation-position") == 1
     # 描述落在行尾注释里；access 列没有可写的位（事件只推不读也不写）
     assert "|-|uint8|Inside=2  # 门锁 最近一次开锁操作" in text
     # 事件小节在属性小节之后

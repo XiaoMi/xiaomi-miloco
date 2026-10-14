@@ -313,6 +313,12 @@ def _render_event_spec_section(event_spec: dict) -> list[str]:
     第一列就是能直接抄给 ``--iot-iid`` 的那个串 —— 事件的参数名是 spec 原名、没有别名，
     拼不出来、只能从这里发现。access 那一列恒为 ``-``（事件只推不读也不写），留着是为了
     与上面的 prop 行同列宽、同形制。
+
+    **行首列与管道行的第一段不会重复。** 渲染器以传进去的 key 打头，而这里传的正是 iid
+    （`_build_spec_line` 只在 ``key == iid`` 时才走「裸 iid + 完整描述注释」那条路，中文
+    描述才出得来），所以拼行前要把这段前缀切掉 —— 不切的话同一个 iid 一行里出现两遍，
+    长的一个就能占掉 39 字符，而表头若照抄 prop 那边把第一段说成 ``spec_name`` 也对不上：
+    事件没有别名那一列，它在行首列里。
     """
     from miloco_cli.catalog import _build_spec_line
 
@@ -321,7 +327,7 @@ def _render_event_spec_section(event_spec: dict) -> list[str]:
         out.append("# 本设备 spec 里没有事件参数")
         return out
 
-    out.append("# event.iid  spec_name|-|format|constraint|unit")
+    out.append("# event.iid  |access|format|constraint|unit")
     services: dict[str, list[tuple[str, str]]] = {}
     for iid, entry in event_spec.items():
         if not isinstance(entry, dict):
@@ -336,7 +342,9 @@ def _render_event_spec_section(event_spec: dict) -> list[str]:
         out.append(f"[service {siid}]")
         width = max(len(iid) for iid, _ in rows)
         for iid, rendered in rows:
-            out.append(f"{iid:<{width}}  {rendered}")
+            # rendered 以 key 打头，而这里传进去的 key 就是 iid —— 行首列已经占了这个
+            # 位置，切掉重复的那一段再拼（理由见上面 docstring）
+            out.append(f"{iid:<{width}}  {rendered[len(iid):]}")
     return out
 
 

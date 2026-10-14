@@ -234,8 +234,11 @@ async def test_an_untranslated_argument_falls_back_to_the_spec_name():
 
 @pytest.mark.asyncio
 async def test_an_argument_without_a_name_is_skipped():
-    """空名字会让整条路径非法（容器拒空段），落不了叶 —— 进来了只会制造一条永远
-    写不进去的条目。"""
+    """空名字落不了叶：写入侧收表时按名判空（`_event_arg_names`），这条参数永远写不
+    进去 —— 入了表只会放行一条校验过得去、运行期恒 path_missing 的规则。
+
+    注意**不是**段校验挡下的：空名拼出来的段是 ``2.1020.``，非空、也不含非法字符，
+    `validate_segment` 反而放行。判空得自己判。"""
     proxy = _proxy_with_spec(
         _device(_event(arguments=[_arg(iid=1, name=""), _arg(iid=2, name="kept")]))
     )
@@ -243,6 +246,46 @@ async def test_an_argument_without_a_name_is_skipped():
     spec = await proxy._fetch_device_events("urn:test:lock")
 
     assert list(spec) == ["event.2.1020.kept"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param("a/b", id="含斜杠"),
+        pytest.param("a*b", id="含星号"),
+        # 名字自己没超 128，超的是拼上 `2.1020.` 之后的**整段** —— 判据量的是段不是名字，
+        # 这一条专钉那个差（与下面 120 字符那条配对，边界正好落在两段限制之间）
+        pytest.param("x" * 125, id="整段超长"),
+    ],
+)
+async def test_an_argument_whose_name_is_not_a_path_segment_is_skipped(name):
+    """段名非法的参数同样落不了叶 —— 写入侧拿 ``{siid}.{eiid}.{名字}`` 去 validate_segment
+    会被拒（含 '/' 会劈出多一层路径，含 '*' 会被 pattern 语法占用，整段超长被段长上限拒）。
+
+    这几条与空名同类：**入表的判据是「真能落成叶」，不是「像不像个名字」**。放进去的
+    后果不对称 —— 校验过、规则建得成，运行期却永远 path_missing，而含 '*' 的那种还会让
+    规则侧按路径读叶时每次求值抛一次 ValueError，被 reconcile 每 4 秒刷一条日志。"""
+    proxy = _proxy_with_spec(
+        _device(_event(arguments=[_arg(iid=1, name=name), _arg(iid=2, name="kept")]))
+    )
+
+    spec = await proxy._fetch_device_events("urn:test:lock")
+
+    assert list(spec) == ["event.2.1020.kept"]
+
+
+@pytest.mark.asyncio
+async def test_a_long_name_still_lands_when_the_whole_segment_fits():
+    """判据量的是**整段**（siid + eiid + 名字）而不是名字本身：名字 120 字符、加上
+    ``2.1020.`` 是 127，还在 128 的上限里，就该照常入表 —— 多拦一条等于凭空少一个
+    可用的事件参数，而写入侧本来是收的（上一条钉的是反面：125 字符时整段 132，拦）。"""
+    name = "x" * 120
+    proxy = _proxy_with_spec(_device(_event(arguments=[_arg(iid=1, name=name)])))
+
+    spec = await proxy._fetch_device_events("urn:test:lock")
+
+    assert list(spec) == [f"event.2.1020.{name}"]
 
 
 @pytest.mark.asyncio

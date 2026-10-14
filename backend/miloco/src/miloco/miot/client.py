@@ -63,6 +63,7 @@ from miloco.miot.mips_listeners import (
 from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.state_push import write_online
 from miloco.miot.welcome_service import DeviceWelcomeService
+from miloco.state.path import validate_segment
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,30 @@ def _event_arg_description(service, event, arg) -> str:
             parts.append(text)
         last = text
     return " ".join(parts)
+
+
+def _event_arg_lands(siid: int, eiid: int, argname: Any) -> bool:
+    """这个事件参数落不落得了叶 —— 写入侧那两道判据的前置。
+
+    写入侧先按名取表（``state_push._event_arg_names`` 收表时判空），再按
+    ``{siid}.{eiid}.{参数名}`` 拼出容器叶的末段交给 `validate_segment`。两条都过，
+    这一笔才进得了树；这里是同一个串、同一条规则的前置校验。
+
+    **入表的条目必须真能落成叶。** 落不了的条目一旦进表，规则创建时那道
+    ``spec.get(iid)`` 校验会放行，运行期却永远 ``path_missing`` —— 正是
+    ``_validate_iot_item`` 说要在创建时拦掉的那类「建得成功、永不触发、用户和 agent
+    都拿不到反馈」的配置错误。
+
+    名字为空要单独判，**不能指望 `validate_segment` 兜住**：空名拼出来的段是
+    ``2.1020.`` 这种尾巴上多一个点、非空也不含非法字符的形态，段校验反而放行。
+    """
+    if not argname:
+        return False
+    try:
+        validate_segment(f"{siid}.{eiid}.{argname}")
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def build_sub_device_names(device: MIoTDeviceInfo) -> dict[str, str]:
@@ -2484,8 +2509,9 @@ class MiotProxy:
         for service in spec.services or []:
             for event in service.events or []:
                 for arg in event.arguments or []:
-                    if not arg.name:
-                        # 空名字会让整条路径非法（validate_segment 拒空段），落不了叶
+                    # 落不了叶的参数不进表：这类条目入了表只会放行一条「建得成功、永不
+                    # 触发」的规则 —— 判据见 _event_arg_lands
+                    if not _event_arg_lands(service.iid, event.iid, arg.name):
                         continue
                     entry: dict = {
                         "name": arg.name,
