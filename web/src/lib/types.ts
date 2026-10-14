@@ -187,6 +187,23 @@ export interface ActivityEvent {
   feedback_pack_size?: number | null;
 }
 
+// ── 原始感知记录(perception_log)────────────────────────────
+// 与 meaningful_events 分开：这里展示每次视觉推理的场景描述，不代表规则命中，
+// 也不会触发 Agent 通知。WebUI 历史查询只读，不使用或推进 CLI 消费 cursor。
+export interface PerceptionLogEntry {
+  id: string;
+  timestamp: number; // Unix ms
+  descriptions: Record<string, string>; // device / room key → scene description
+}
+
+export interface PerceptionLogResult {
+  logs: PerceptionLogEntry[];
+  /** 达到后端单次查询上限时，提示用户当前窗口内可能还有更多记录。 */
+  hasMore: boolean;
+  /** 用户未设起点时实际采用的兜底下界，供界面明确提示截断范围。 */
+  clampedSince?: number;
+}
+
 // ── 主动查询日志(on_demand_log)─────────────────────────────
 export interface OnDemandLogEntry {
   id: string;
