@@ -578,7 +578,8 @@ class IdentityLibrary:
         """只写一张 face_*.png + sidecar, 绕过 add_tier_a_sample 的"必须有 body"约束。
 
         web 批量注册里用户可能只勾 face(纯人脸); add_tier_a_sample 以 body_crop 必填, 直接调
-        会被迫多写一张冗余 body。本方法保持与正常 face 样本同格式(omni gallery 仍能识别)。
+        会被迫多写一张冗余 body。本方法保持与正常 face 样本同格式；当前 omni gallery
+        仍要求 body composite，仅有 face 样本的成员不会进入 gallery。
         face 容量(tier_a_max // 2)已满返 False。
         """
         tier_a_dir = self.persons_dir / person_id / "tier_a"
@@ -607,7 +608,7 @@ class IdentityLibrary:
           - Tier A 优先；不足时补 Tier C 最近样本
           - body_attr_text 字段当前永远 None（功能未实施）
 
-        ⚠️  ``prompt_builder._build_fused_user_content`` 已切到 ``get_gallery_composites_for_omni``
+        ⚠️  ``prompt_builder._prepare_gallery_entries`` 已切到 ``get_gallery_composites_for_omni``
         新出口（带缓存）。本方法仅保留给那些显式需要 ``body_crops`` / ``face_crops``
         ndarray 的调用方（例如离线分析脚本）；正常 omni 派发路径**不再走**这里。
         """
