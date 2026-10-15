@@ -469,6 +469,18 @@ export interface OmniModelConfig {
 /** 已保存的配置档案（label 为唯一标识），active 标记是否为当前生效。 */
 export interface OmniProfile extends OmniModelConfig {
   active: boolean;
+  last_verified: OmniLastVerified | null;
+}
+
+/** 最近一次连通性验证结论(手动测试或启用前探测都会写入)；null=从未验证过,
+ *  或配置改动导致旧结论作废。 */
+export interface OmniLastVerified {
+  at_ms: number;
+  ok: boolean;
+  /** 失败机器码,与 OmniTestResult.code 同一套;ok=true 时可能为 null。 */
+  code: string | null;
+  message: string;
+  latency_ms: number | null;
 }
 
 /** omni 熔断器实时健康度（对齐后端 HealthSnapshot）。 */
@@ -507,6 +519,9 @@ export interface OmniHealth {
 /** active 字段扩展:附带熔断器的 health snapshot。 */
 export interface OmniActiveConfig extends OmniModelConfig {
   health: OmniHealth;
+  /** 与 profiles 里当前生效那行的 last_verified 同源同值;本前端不读,
+   *  保留供外部 API 消费方(CLI / 脚本)直接取当前生效配置的验证结论。 */
+  last_verified: OmniLastVerified | null;
 }
 
 /** GET /omni-config 返回：当前生效 active + 已存档案 profiles。 */

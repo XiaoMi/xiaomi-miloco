@@ -53,6 +53,11 @@ def client(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     reset_settings()
+
+    from tests.conftest import inject_test_kv_repo
+
+    inject_test_kv_repo(monkeypatch)
+
     app = FastAPI()
     app.include_router(router, prefix="/api")
     yield TestClient(app)
