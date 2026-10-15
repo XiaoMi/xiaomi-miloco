@@ -66,7 +66,7 @@ class IotRef:
 
 
 def iot_ref_of(rule) -> IotRef | None:
-    """rule 的条件项是不是 iot 源，是就返回它引用的那条属性。
+    """rule 的条件项是不是 iot 源，是就返回它引用的那条属性 / 事件参数。
 
     判源走 ``resolved_source_type``（唯一那份判据），本函数只负责取 spec。
 
