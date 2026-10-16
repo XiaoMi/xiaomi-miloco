@@ -26,6 +26,7 @@ import {
   type BackendPropSpec,
 } from "@/api";
 import {
+  collapsedSectionText,
   humanizeRulesInText,
   splitHumanizedSections,
   type TriggerStatusKind,
@@ -1399,7 +1400,11 @@ function ActivityRow({
                 }}
               >
                 {s.status && <TriggerStatusBadge kind={s.status} />}
-                {s.text}
+                {collapsedSectionText(
+                  s,
+                  t("activity.ruleObservationPending"),
+                  t("activity.ruleObservationStillIn"),
+                )}
               </span>
             ))
           )}

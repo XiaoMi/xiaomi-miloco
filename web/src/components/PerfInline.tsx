@@ -24,7 +24,7 @@ import { CollapsibleCard } from "./CollapsibleCard";
 import { RefreshIntervalInput } from "./RefreshIntervalInput";
 import { Switch } from "./Switch";
 import { useRefreshInterval } from "@/hooks/useRefreshInterval";
-import { PerfKpiCards } from "./PerfKpiCards";
+import { formatRelativeDuration, PerfKpiCards } from "./PerfKpiCards";
 import { PerfRtfChart } from "./PerfRtfChart";
 import { PerfGateChart } from "./PerfGateChart";
 
@@ -130,7 +130,7 @@ export function PerfInline() {
       <span className="text-text-secondary">
         {t("perf.kpiOmniRtfP95")}{" "}
         <span className={`num ${omniP95 > 1 ? "text-error font-semibold" : ""}`}>
-          {omniP95.toFixed(2)}
+          {formatRelativeDuration(omniP95)}
         </span>
       </span>
     );

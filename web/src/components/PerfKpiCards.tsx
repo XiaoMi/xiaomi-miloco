@@ -1,6 +1,6 @@
 /**
- * 7 张 KPI 卡:轮次(含应处理) / Gate 过滤率 / 窗口丢弃率 / Omni 错误率 / 实时率 P95 /
- * omni 实时率 P95 / Agent 调用。
+ * 7 张 KPI 卡。主标题使用用户语言，说明中保留 Gate / 窗口丢弃率 / Omni / RTF P95
+ * 等技术口径，兼顾快速理解和精确排查。
  *
  * 阈值颜色:>5% drop / >5% omni error / RTF>1 → 红字提醒,其余中性。
  *
@@ -65,6 +65,11 @@ function KpiCard({ label, hint, value, warn, sub, embedded }: KpiCardProps & { e
 
 function pct(v: number): string {
   return `${(v * 100).toFixed(1)}%`;
+}
+
+/** RTF 是耗时与输入时长的比值；没有成功样本时后端返回 0，此时显示为无数据。 */
+export function formatRelativeDuration(v: number): string {
+  return v > 0 ? `${v.toFixed(2)}×` : "—";
 }
 
 export function PerfKpiCards({ state, embedded = false }: Props) {
@@ -133,14 +138,14 @@ export function PerfKpiCards({ state, embedded = false }: Props) {
       <KpiCard
         embedded={embedded}
         label={t("perf.kpiRtfP95")}
-        value={s.p95_rtf_e2e.toFixed(2)}
+        value={formatRelativeDuration(s.p95_rtf_e2e)}
         hint={t("perf.kpiRtfP95Hint")}
         warn={s.p95_rtf_e2e > 1}
       />
       <KpiCard
         embedded={embedded}
         label={t("perf.kpiOmniRtfP95")}
-        value={s.p95_rtf_omni.toFixed(2)}
+        value={formatRelativeDuration(s.p95_rtf_omni)}
         hint={t("perf.kpiOmniRtfP95Hint")}
         warn={s.p95_rtf_omni > 1}
       />

@@ -6,7 +6,11 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { humanizeRulesInText, splitHumanizedSections } from "@/lib/eventText";
+import {
+  collapsedSectionText,
+  humanizeRulesInText,
+  splitHumanizedSections,
+} from "@/lib/eventText";
 
 describe("humanizeRulesInText", () => {
   it("新格式：任务 + 规则[短名] 原样保留（方括号短名不被误 strip）", () => {
@@ -127,7 +131,82 @@ describe("splitHumanizedSections（折叠态「触发状态」→ badge）", () 
     const text = block("已触发") + "\n\n═══\n\n" + block("未触发（持续中）").replace("[感知引擎]规则提醒：\n", "");
     const secs = splitHumanizedSections(text);
     const statuses = secs.map((s) => s.status).filter(Boolean);
+    expect(secs).toHaveLength(2);
+    expect(secs.every((s) => s.text.trim() !== "═══")).toBe(true);
     expect(statuses).toEqual(["fired", "stillIn"]);
+  });
+});
+
+describe("collapsedSectionText（折叠态区分观察与异常）", () => {
+  const section = (status: string) =>
+    splitHumanizedSections(
+      "[感知引擎]规则提醒：\n" +
+        "任务：阳台开放式猫砂盆：连续停留过长\n" +
+        "规则：[开放盆占用状态] 当前猫在盆内\n" +
+        `触发状态：${status}\n` +
+        "画面描述：猫刚进入猫砂盆\n" +
+        "触发原因：当前画面符合占用条件",
+    )[0];
+
+  it.each(["未触发（计时中）", "未触发"])(
+    "%s 在折叠态显示尚未达到条件",
+    (status) => {
+      const parsed = section(status);
+      expect(
+        collapsedSectionText(
+          parsed,
+          "规则正在观察，尚未达到触发条件",
+          "条件仍在持续；进入时已触发过，本次不重复触发",
+        ),
+      ).toBe(
+        "规则：[开放盆占用状态] 当前猫在盆内\n规则正在观察，尚未达到触发条件",
+      );
+      // 原始证据仍留在 section.text，展开态可以完整显示。
+      expect(parsed.text).toContain("阳台开放式猫砂盆：连续停留过长");
+      expect(parsed.text).toContain("猫刚进入猫砂盆");
+    },
+  );
+
+  it("持续中说明条件仍满足且不重复提醒", () => {
+    const parsed = section("未触发（持续中）");
+    expect(
+      collapsedSectionText(
+        parsed,
+        "规则正在观察，尚未达到触发条件",
+        "条件仍在持续；进入时已触发过，本次不重复触发",
+      ),
+    ).toBe(
+      "规则：[开放盆占用状态] 当前猫在盆内\n条件仍在持续；进入时已触发过，本次不重复触发",
+    );
+  });
+
+  it("多个未触发规则保留各自短名，不折叠成相同摘要", () => {
+    const occupancy = section("未触发（计时中）");
+    const repeatedEntry = {
+      ...occupancy,
+      text: occupancy.text.replace("[开放盆占用状态]", "[开放盆频繁进出]"),
+    };
+    const summarize = (parsed: typeof occupancy) =>
+      collapsedSectionText(
+        parsed,
+        "规则正在观察，尚未达到触发条件",
+        "条件仍在持续；进入时已触发过，本次不重复触发",
+      );
+
+    expect(summarize(occupancy)).toContain("规则：[开放盆占用状态]");
+    expect(summarize(repeatedEntry)).toContain("规则：[开放盆频繁进出]");
+    expect(summarize(occupancy)).not.toBe(summarize(repeatedEntry));
+  });
+
+  it.each(["已触发", "未知"])("%s 仍显示原始正文", (status) => {
+    const parsed = section(status);
+    expect(
+      collapsedSectionText(
+        parsed,
+        "规则正在观察，尚未达到触发条件",
+        "条件仍在持续；进入时已触发过，本次不重复触发",
+      ),
+    ).toBe(parsed.text);
   });
 });
 

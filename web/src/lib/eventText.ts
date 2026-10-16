@@ -59,6 +59,15 @@ export interface HumanizedSection {
 }
 
 /**
+ * 非触发摘要仍保留规则短名，避免同一事件里的多个规则折叠后显示成完全相同的文案。
+ * 老数据没有当前格式的 `规则：` 行时，保持原来的通用摘要。
+ */
+function withRuleAnchor(sectionText: string, summary: string): string {
+  const ruleLine = sectionText.split("\n").find((line) => line.startsWith("规则："));
+  return ruleLine ? `${ruleLine}\n${summary}` : summary;
+}
+
+/**
  * 把 humanize 后的文本切成折叠态要渲染的段，并抽出每段的「触发状态」。
  *
  * 为什么要抽出来：折叠态每段被裁到 2 视觉行且**没有** `pre-wrap`（块内换行塌成空格），
@@ -72,7 +81,10 @@ export function splitHumanizedSections(humanized: string): HumanizedSection[] {
   if (!humanized) return [];
   return humanized
     .split(/\n\n/)
-    .filter((s) => s.trim())
+    .filter((s) => {
+      const trimmed = s.trim();
+      return trimmed.length > 0 && !/^═+$/.test(trimmed);
+    })
     .map((section) => {
       const lines = section.split("\n");
       const idx = lines.findIndex((l) => l.startsWith("触发状态："));
@@ -89,6 +101,25 @@ export function splitHumanizedSections(humanized: string): HumanizedSection[] {
       if (!kind) return { text: section }; // 认不出：保留原行，不出 badge
       return { text: lines.filter((_, i) => i !== idx).join("\n"), status: kind };
     });
+}
+
+/**
+ * 折叠态的住户摘要：尚未触发的状态只说明“正在观察”，避免把任务名称和
+ * 模型给出的触发原因误读成已经发生异常。持续中表示条件仍满足且进入时
+ * 已经触发过，需要单独说明。完整原文仍由展开态显示。
+ */
+export function collapsedSectionText(
+  section: HumanizedSection,
+  observationText: string,
+  stillInText: string,
+): string {
+  if (section.status === "stillIn") {
+    return withRuleAnchor(section.text, stillInText);
+  }
+  if (section.status === "counting" || section.status === "notFired") {
+    return withRuleAnchor(section.text, observationText);
+  }
+  return section.text;
 }
 
 export function humanizeRulesInText(
