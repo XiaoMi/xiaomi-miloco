@@ -35,18 +35,21 @@ ensure_uv() {
     UV_CMD="uv"
 }
 
-# ── Step 2: Ensure Python >=3.11 (prefer 3.14) ───────────
+# ── Step 2: Ensure Python >=3.11 ──────────────────────────
+# 优先 3.13 / 3.12 / 3.11(均有完整 wheel 生态,含 onnxruntime-openvino
+# cp311/312/313 manylinux wheel);3.14 兜底但缺 onnxruntime-openvino wheel
+# (感知推理失去 OpenVINO 加速,业务功能不受影响),故放最后。
 ensure_python() {
     local py_path
-    for ver in 3.14 3.13 3.12 3.11; do
+    for ver in 3.13 3.12 3.11 3.14; do
         py_path=$("$UV_CMD" python find "$ver" 2>/dev/null) && {
             info "Python $ver found: $py_path"
             return
         }
     done
-    info "Installing Python 3.14 via uv..."
-    "$UV_CMD" python install 3.14
-    "$UV_CMD" python find 3.14 >/dev/null 2>&1 || fail "Python installation failed"
+    info "Installing Python 3.13 via uv..."
+    "$UV_CMD" python install 3.13
+    "$UV_CMD" python find 3.13 >/dev/null 2>&1 || fail "Python installation failed"
 }
 
 # ── Step 3: Ensure ~/.local/bin is on PATH ────────────────
