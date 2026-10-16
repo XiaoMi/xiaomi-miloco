@@ -358,7 +358,7 @@ class MiotProxy:
         # 在锁内递增;对账提交不递增、只校验代次,防止把飞行期间的改写覆盖掉
         # (见 _reconcile_subscriptions)。
         self._sub_intent_generation = 0
-        # 四类对账共用一个并发闸:同时刻对同一条 broker 连接的在飞 SUBSCRIBE
+        # 各条对账车道共用一个并发闸:同时刻对同一条 broker 连接的在飞 SUBSCRIBE
         # 总数不超过 _RECONCILE_CONCURRENCY(每类自建会把上限按类数翻倍)
         self._sub_semaphore = asyncio.Semaphore(_RECONCILE_CONCURRENCY)
         # 相机清单是否至少成功拉取过一次（区分"真没相机"与"还没加载"）

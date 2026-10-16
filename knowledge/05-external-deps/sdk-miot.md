@@ -13,7 +13,7 @@
 - **媒体解码**：基于 PyAV 将原始码流解码为视频帧与音频 PCM 采样
 - **mDNS 发现**：纯 Python legacy-unicast 子网定向广播发现局域网中枢网关（`mdns.py`），**不依赖 zeroconf**——macOS 上系统 mDNSResponder 独占 5353 端口，第三方库绑不上也收不到应答；改为从临时端口发查询、按 RFC 6762 legacy-unicast 规则让网关单播回应答，并逐块网卡把 socket 钉在指定网卡上（macOS `IP_BOUND_IF` / Linux `SO_BINDTODEVICE`），避免多网卡机器漏掉整个网段。发现结果用于建立本地 mTLS MQTT 连接
 - **本地中枢控制（MIPS）**：与中枢网关建 mTLS MQTT（:8883）后走 MIPS TLV RPC 做属性读写 / 动作调用，是设备控制的首选通道，云端 HTTP 退居兜底（`central_hub.py` / `mips_local.py` / `cert.py`）。属性推送也已接线：`mips_local.sub_device_props_async` 订本网关下某台设备的属性转发（**向网关注册转发是真实动作，且要等 SUBACK 确认才算订上**，不是白收），解码成与云端同形的 `MIoTDevicePropsEvent`；事件推送的接口（`sub_event`）仍未接。**注册挂在那条 MQTT 会话上**（换会话即失效，重连要重放），且设备可能改嫁到另一台网关——所以「哪台实例持有某台设备的注册」是这一层的独立状态，不能拿设备归属推出来
-- **MQTT**：通过 `MIoTMipsCloud`（`mips_cloud.py`）订阅五类推送事件——用户设备绑定 / 解绑、设备 meta 变更（含跨家庭移入）、家庭场景变更（改 / 删 / 重命名）、设备云端上线 / 离线状态、设备属性变更（`device/{did}/up/properties_changed/#`）。绑定与移入驱动设备欢迎，场景变更驱动场景列表刷新，上线 / 离线事件驱动缓存的摄像头在线状态刷新（事件化替代轮询），与米家保持同步。**属性推送这一条不再独走云端**：`MIoTClient` 按设备选源（网关报 `pushAvailable` 就走本地中枢），每台设备任一时刻只有一个源，见 [设备控制](../03-features/device-control.md#属性推送同样选路但按每台设备只有一个源)
+- **MQTT**：通过 `MIoTMipsCloud`（`mips_cloud.py`）订阅六类推送事件——用户设备绑定 / 解绑、设备 meta 变更（含跨家庭移入）、家庭场景变更（改 / 删 / 重命名）、设备云端上线 / 离线状态、设备属性变更（`device/{did}/up/properties_changed/#`）、设备事件（`device/{did}/up/event_occured/#`）。绑定与移入驱动设备欢迎，场景变更驱动场景列表刷新，上线 / 离线事件驱动缓存的摄像头在线状态刷新（事件化替代轮询），设备事件的参数则以「最近一次的值」落进状态容器、供规则条件引用（见 [设备状态容器](../03-features/device-state-store.md)），与米家保持同步。**属性推送这一条不再独走云端**：`MIoTClient` 按设备选源（网关报 `pushAvailable` 就走本地中枢），每台设备任一时刻只有一个源，见 [设备控制](../03-features/device-control.md#属性推送同样选路但按每台设备只有一个源)
 
 ---
 
