@@ -830,6 +830,26 @@ class TestBuildMessagesContentBlocks:
         assert "video_url" in types
         assert "input_audio" not in types
 
+    def test_kimi_rejects_static_frame_audio_window(self):
+        from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import KimiAdapter
+
+        payload = build_prompt(_audio_only_packet(), OmniContext())
+
+        with pytest.raises(ValueError, match="Kimi.*does not support audio"):
+            _build_messages(payload, KimiAdapter())
+
+    def test_kimi_rejects_zero_frame_audio_window(self):
+        from miloco.perception.engine.omni.omni_client import _build_messages
+        from miloco.perception.engine.omni.provider import KimiAdapter
+
+        ep = _audio_only_packet()
+        ep.all_frames = []
+        payload = build_prompt(ep, OmniContext())
+
+        with pytest.raises(ValueError, match="Kimi.*does not support audio"):
+            _build_messages(payload, KimiAdapter())
+
 
 class TestFusedAudioRoute:
     """build_fused_payload 在 audio route 下的降级行为。"""
