@@ -22,8 +22,15 @@ import {
   deleteOmniConfig,
   listOmniModels,
   testOmniConfig,
+  testOmniImageInput,
 } from "@/api";
-import type { OmniConfigState, OmniProfile, OmniTestResult } from "@/lib/types";
+import type {
+  OmniConfigState,
+  OmniImageProbeResult,
+  OmniImageProbeStatus,
+  OmniProfile,
+  OmniTestResult,
+} from "@/lib/types";
 import { IconX, IconEye, IconEyeOff, IconChevronDown, IconChevronUp } from "@/lib/icons";
 import { toast } from "./Toast";
 
@@ -64,6 +71,38 @@ function severityOf(res: OmniTestResult): Severity {
   if (res.code && TEST_WARN_CODES.has(res.code)) return "warn";
   return res.ok ? "ok" : "error";
 }
+// 图片输入探测:status → 严重度 / 文案 key;reason 机器码 → 文案 key(未命中回退 reason 本身)。
+const IMG_STATUS_SEV: Record<OmniImageProbeStatus, Severity> = {
+  supported: "ok",
+  unsupported: "error",
+  inconclusive: "warn",
+  failed: "error",
+};
+const IMG_STATUS_KEY: Record<OmniImageProbeStatus, string> = {
+  supported: "usage.imgSupported",
+  unsupported: "usage.imgUnsupported",
+  inconclusive: "usage.imgInconclusive",
+  failed: "usage.imgFailed",
+};
+const IMG_REASON_KEY: Record<string, string> = {
+  answer_correct: "usage.imgReasonAnswerCorrect",
+  image_rejected: "usage.imgReasonImageRejected",
+  image_invalid: "usage.imgReasonImageInvalid",
+  wrong_answer: "usage.imgReasonWrongAnswer",
+  empty_answer: "usage.imgReasonEmptyAnswer",
+  answer_truncated: "usage.imgReasonAnswerTruncated",
+  bad_response: "usage.imgReasonBadResponse",
+  rejected_unknown: "usage.imgReasonRejectedUnknown",
+  bad_key: "usage.imgReasonBadKey",
+  not_found: "usage.imgReasonNotFound",
+  rate_limited: "usage.imgReasonRateLimited",
+  http_error: "usage.imgReasonHttpError",
+  timeout: "usage.imgReasonTimeout",
+  unreachable: "usage.imgReasonUnreachable",
+  invalid_url: "usage.imgReasonInvalidUrl",
+  no_key: "usage.imgReasonNoKey",
+  not_saved: "usage.imgReasonNotSaved",
+};
 const SEV_GLYPH: Record<Severity, string> = { ok: "✓", warn: "⚠", error: "✗" };
 const SEV_CLASS: Record<Severity, string> = {
   ok: "text-success",
@@ -199,6 +238,9 @@ export function UsageOmniConfig() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<OmniTestResult | null>(null);
+  // 可选的「测试图片输入」:仅用户点按钮时触发(会发一次带图请求,消耗少量额度),绝不自动调用
+  const [imageTesting, setImageTesting] = useState(false);
+  const [imageResult, setImageResult] = useState<OmniImageProbeResult | null>(null);
   // 列表行内「测试」:正在测的 label + 各行结果
   const [rowTesting, setRowTesting] = useState<string | null>(null);
   const [rowTestResults, setRowTestResults] = useState<Record<string, OmniTestResult>>({});
@@ -248,6 +290,7 @@ export function UsageOmniConfig() {
     setModelsErr(false);
     setModelsErrCode(null);
     setTestResult(null);
+    setImageResult(null);
   }
 
   // 编辑已有配置:预填 base_url / model,key 留空(占位提示「留空则不修改」),复用同一表单与 onSave 的 upsert。
@@ -263,6 +306,7 @@ export function UsageOmniConfig() {
     setModelsErr(false);
     setModelsErrCode(null);
     setTestResult(null);
+    setImageResult(null);
     void fetchModels(p.base_url, "", p.label);
   }
 
@@ -375,6 +419,51 @@ export function UsageOmniConfig() {
     } finally {
       setTesting(false);
     }
+  }
+
+  // 可选:发一张内置合成小图验证**已保存**的配置是否真的接受图片输入。后端只按 label
+  // 取已存配置(不接受表单里未保存的地址/模型/key),故表单有未保存改动时先提示保存。
+  // 与连通性测试互不影响(不改 testResult)。
+  async function onTestImage() {
+    const bu = baseUrl.trim();
+    const m = model.trim();
+    if (!bu || !m) {
+      toast(t("usage.baseUrlModelRequired"), "warn");
+      return;
+    }
+    const target = editing || existing?.label || undefined;
+    const saved = editTarget(target);
+    if (
+      !saved ||
+      apiKey.trim() ||
+      saved.model !== m ||
+      saved.base_url.replace(/\/+$/, "") !== bu.replace(/\/+$/, "")
+    ) {
+      toast(t("usage.imgSaveFirst"), "warn");
+      return;
+    }
+    if (!saved.has_key) {
+      toast(t("usage.apiKeyRequiredBeforeTest"), "warn");
+      return;
+    }
+    setImageTesting(true);
+    setImageResult(null);
+    try {
+      const res = await testOmniImageInput(saved.label);
+      setImageResult(res);
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t("usage.testFailed"), "danger");
+    } finally {
+      setImageTesting(false);
+    }
+  }
+
+  function imageResultText(res: OmniImageProbeResult): string {
+    const reasonKey = IMG_REASON_KEY[res.reason];
+    const reason = reasonKey ? t(reasonKey) : res.reason;
+    const lat = res.latency_ms != null ? ` · ${res.latency_ms}ms` : "";
+    const reqs = res.challenges ? ` · ${t("usage.imgRequests", { count: res.challenges })}` : "";
+    return `${SEV_GLYPH[IMG_STATUS_SEV[res.status] ?? "warn"]} ${t(IMG_STATUS_KEY[res.status] ?? "usage.imgInconclusive")}: ${reason}${lat}${reqs}`;
   }
 
   // 列表行内「测试」:对已存档的该条按 label 测(用存档 key,无需带 key),结果就地显示。
@@ -691,6 +780,7 @@ export function UsageOmniConfig() {
                       onChange={(e) => {
                         setBaseUrl(e.target.value);
                         setTestResult(null);
+                        setImageResult(null);
                       }}
                       onBlur={() => fetchModels(baseUrl, apiKey, editing)}
                       placeholder={t("usage.baseUrlPlaceholder")}
@@ -708,6 +798,7 @@ export function UsageOmniConfig() {
                         onChange={(e) => {
                           setApiKey(e.target.value);
                           setTestResult(null);
+                          setImageResult(null);
                         }}
                         onBlur={() => fetchModels(baseUrl, apiKey, editing)}
                         placeholder={
@@ -742,6 +833,7 @@ export function UsageOmniConfig() {
                       onChange={(v) => {
                         setModel(v);
                         setTestResult(null);
+                        setImageResult(null);
                       }}
                       options={models}
                       placeholder={
@@ -771,7 +863,7 @@ export function UsageOmniConfig() {
                     <button
                       type="button"
                       onClick={onSave}
-                      disabled={saving || testing}
+                      disabled={saving || testing || imageTesting}
                       className="text-caption px-3 py-1.5 rounded-lg bg-brand-primary text-white hover:opacity-90 disabled:opacity-60"
                     >
                       {saving ? t("usage.saving") : t("usage.save")}
@@ -779,10 +871,19 @@ export function UsageOmniConfig() {
                     <button
                       type="button"
                       onClick={onTest}
-                      disabled={saving || testing}
+                      disabled={saving || testing || imageTesting}
                       className="text-caption px-3 py-1.5 rounded-lg bg-bg-secondary border border-border text-text-primary hover:border-brand-primary disabled:opacity-60"
                     >
                       {testing ? t("usage.testing") : t("usage.testConnection")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={onTestImage}
+                      disabled={saving || testing || imageTesting}
+                      title={t("usage.testImageHint")}
+                      className="text-caption px-3 py-1.5 rounded-lg bg-bg-secondary border border-border text-text-primary hover:border-brand-primary disabled:opacity-60"
+                    >
+                      {imageTesting ? t("usage.testing") : t("usage.testImage")}
                     </button>
                     <button
                       type="button"
@@ -790,8 +891,9 @@ export function UsageOmniConfig() {
                         setAdding(false);
                         setEditing(null);
                         setTestResult(null);
+                        setImageResult(null);
                       }}
-                      disabled={saving || testing}
+                      disabled={saving || testing || imageTesting}
                       className="text-caption px-3 py-1.5 rounded-lg text-text-tertiary hover:text-text-primary"
                     >
                       {t("usage.cancel")}
@@ -801,7 +903,18 @@ export function UsageOmniConfig() {
                         {testResultText(testResult)}
                       </span>
                     )}
+                    {imageResult && (
+                      <span
+                        className={`text-caption ${SEV_CLASS[IMG_STATUS_SEV[imageResult.status] ?? "warn"]}`}
+                      >
+                        {imageResultText(imageResult)}
+                      </span>
+                    )}
                   </div>
+                  {/* 图片探测会发一次真实带图请求,需明示可能消耗额度(按钮只在用户点击时才触发) */}
+                  <p className="md:col-span-2 text-caption text-text-tertiary -mt-1">
+                    {t("usage.testImageHint")}
+                  </p>
                 </div>
               )}
             </>
