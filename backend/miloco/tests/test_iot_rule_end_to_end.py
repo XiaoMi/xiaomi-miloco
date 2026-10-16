@@ -27,6 +27,14 @@ _SPEC = {
         "value_list": [{"name": "开", "value": 1}, {"name": "关", "value": 2}],
     }
 }
+EVENT_IID = "event.2.1020.unlock-operation-position"
+_EVENT_SPEC = {
+    EVENT_IID: {
+        "description": "门锁 开锁方向",
+        "format": "uint8",
+        "value_list": [{"name": "室内", "value": 1}, {"name": "室外", "value": 2}],
+    }
+}
 
 
 @pytest.fixture
@@ -80,6 +88,10 @@ async def wired(monkeypatch):
     manager.miot_service.get_device_spec = AsyncMock(
         return_value={"did": DID, "name": "玄关门锁", "spec": dict(_SPEC)}
     )
+    # 事件条件项走另一份表（属性表不认识 event. 键），校验入口也不同
+    manager.miot_service.get_device_event_spec = AsyncMock(
+        return_value={"did": DID, "name": "玄关门锁", "spec": dict(_EVENT_SPEC)}
+    )
     manager.miot_proxy.devices_in_current_home = AsyncMock(return_value={DID: object()})
     monkeypatch.setattr("miloco.manager.get_manager", lambda: manager)
 
@@ -96,7 +108,7 @@ async def wired(monkeypatch):
     store.stop()
 
 
-def _iot_rule(value=1) -> Rule:
+def _iot_rule(value=1, iid="5.1") -> Rule:
     from miloco.rule.schema import ConditionItem, RuleConditionDNF
 
     return Rule(
@@ -110,7 +122,7 @@ def _iot_rule(value=1) -> Rule:
                 [
                     ConditionItem(
                         source_type="iot",
-                        spec={"did": DID, "iid": "5.1", "op": "eq", "value": value},
+                        spec={"did": DID, "iid": iid, "op": "eq", "value": value},
                     )
                 ]
             ]
@@ -152,6 +164,29 @@ async def test_a_rule_created_on_an_already_true_condition_fires_at_once(wired):
     store.set(f"iot/device/{DID}/prop/5.1", 1, source="iot_align")
 
     await service.create_rule(_iot_rule())
+    await _settle()
+
+    assert fired == ["ENTERED"]
+
+
+@pytest.mark.asyncio
+async def test_a_rule_created_on_the_last_event_fires_at_once(wired):
+    """事件叶存的是「最近一次发生」：建规则那一刻会拿那次的值判一次，相符就派发动作。
+
+    这是这条命名空间的语义边界，不是接线漏了 —— 面向 agent 的技能文档里写着同一句
+    （「建规则、改条件、重新启用任务时会先拿这个旧值判一次」）。这条用例钉住它：真要
+    改成「只认下一次上报」时，这里会红，提醒同时改文档与事件车道的那段注释。
+
+    与上面那条属性用例同形，差别在属性叶有三条保鲜通道把值拉向真实，事件叶一条都
+    没有：这里那个值可能是几小时前的。
+    """
+    store, service, _runner, fired = wired
+    store.set(f"iot/device/{DID}/status/online", True, source="iot_align")
+    store.set(
+        f"iot/device/{DID}/event/2.1020.unlock-operation-position", 1, source="iot_push"
+    )
+
+    await service.create_rule(_iot_rule(value=1, iid=EVENT_IID))
     await _settle()
 
     assert fired == ["ENTERED"]

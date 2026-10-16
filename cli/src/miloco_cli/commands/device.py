@@ -174,8 +174,14 @@ def _render_device_row(d: dict) -> str:
 
 @device_group.command("spec")
 @click.argument("dids", nargs=-1, required=True)
-def device_spec(dids):
-    """查看一台或多台设备的属性和动作规格。
+@click.option(
+    "--events",
+    is_flag=True,
+    default=False,
+    help="额外输出事件参数表（建规则时 --iot-iid 的来源）",
+)
+def device_spec(dids, events):
+    """查看一台或多台设备的属性、动作和事件规格。
 
     \b
     单台：device spec <did>
@@ -183,18 +189,28 @@ def device_spec(dids):
 
     按 service 分组：每个 service 一个标题行（服务类型 + 中文描述），其下平铺
     该服务的 prop / action 行（prop 在前），列宽自适应。
+
+    带 --events 时末尾追加事件参数小节 —— 事件参数的 iid 末段是 spec 原名，
+    拼不出来，只能从这里抄。默认不取：事件表要走一次单独的 spec 解析。
     """
     from miloco_cli.client import api_get
 
     blocks: list[str] = []
     for did in dids:
-        resp = api_get(f"/api/miot/devices/{did}/spec")
+        path = f"/api/miot/devices/{did}/spec"
+        # 只在要的时候带这个参数：不取事件表是后端定的默认，那边有用例钉着，这里再补一个
+        # 常数只是把同一个决定写两遍 —— 而写两遍就会有一天只改一处
+        resp = api_get(path, params={"include_events": "true"} if events else None)
         data = resp.get("data", {})
-        if not data or not data.get("spec"):
-            # 单条错误打到 stderr，不中断其余 did（批量时部分失败仍返回成功的）
-            print(json.dumps({"error": f"did '{did}' not found or spec empty"}), file=sys.stderr)
+        if not data:
+            # 单条错误打到 stderr，不中断其余 did（批量时部分失败仍返回成功的）。
+            # 判据只认「响应里没有这台设备」：属性表与事件表是两次独立解析，属性表空
+            # 不等于没东西可给 —— 事件表可能是有值的，一起吞掉等于把 --events 唯一的
+            # 发现路径关掉（参数名是 spec 原名，别处抄不到）。属性表空由渲染那层
+            # 降级成一行提示，不再当成「设备不存在」。
+            print(json.dumps({"error": f"did '{did}' not found"}), file=sys.stderr)
             continue
-        blocks.append(_render_device_spec(data))
+        blocks.append(_render_device_spec(data, with_events=events))
 
     if blocks:
         click.echo("\n\n\n".join(blocks))
@@ -202,18 +218,19 @@ def device_spec(dids):
         sys.exit(1)
 
 
-def _render_device_spec(dev: dict) -> str:
-    """DEVICE 头 + 按 service 分组的 properties / actions。
+def _render_device_spec(dev: dict, *, with_events: bool = False) -> str:
+    """DEVICE 头 + 按 service 分组的 properties / actions（+ 事件参数表）。
 
     每个 service 一个小节，标题行给出 ``service_type_name（service_description）``；
     组内 spec 行与 catalog 同款 pipe 形式，spec_name 可直接复制给 device control。
-    """
-    from miloco_cli.catalog import (
-        ACCESS_LEGEND,
-        _build_spec_line,
-        _resolve_keys_for_device,
-    )
 
+    事件参数单独一节、同样按 service 分组：它们的条目里没有 access 那几个键（事件只推
+    不读也不写），但 ``_build_spec_line`` 在 ``key == iid`` 时走的正是「裸 iid + 完整描述
+    注释」那条路，与事件条目正好对得上，所以两节共用同一个渲染器。
+
+    属性表空只降级属性那一节，两节各判各的：两张表在服务端是两次独立解析，一份取不到
+    不牵连另一份。
+    """
     spec = dev.get("spec", {}) or {}
     head_parts = [f"did={dev.get('did')}", f"device_name={dev.get('name') or '-'}"]
     if dev.get("home"):
@@ -227,11 +244,27 @@ def _render_device_spec(dev: dict) -> str:
     out: list[str] = ["  ".join(head_parts)]
 
     if not spec:
+        # 降级成一行提示，**不 return**：属性表与事件表是两次独立解析，属性表空不代表
+        # 事件表也空，在这里提前收尾会让 --events 恰好在该给的时候什么都不给。
         out.append("  (spec 为空，请运行 `device refresh` 刷新缓存)")
-        return "\n".join(out)
+    else:
+        out.extend(_render_prop_sections(spec))
 
-    out.append("")
-    out.append("# 按 service 分组")
+    if with_events:
+        out.extend(_render_event_spec_section(dev.get("event_spec") or {}))
+
+    return "\n".join(out)
+
+
+def _render_prop_sections(spec: dict) -> list[str]:
+    """属性 / 动作那些行：表头 + 每个 service 一节（props 在前、actions 在后）。"""
+    from miloco_cli.catalog import (
+        ACCESS_LEGEND,
+        _build_spec_line,
+        _resolve_keys_for_device,
+    )
+
+    out: list[str] = ["", "# 按 service 分组"]
     out.append("# prop.iid    spec_name|access|format|constraint|unit")
     out.append("# action.iid  spec_name|x|in_params")
     out.append(f"# access：{ACCESS_LEGEND}")
@@ -271,7 +304,48 @@ def _render_device_spec(dev: dict) -> str:
         for iid, rendered in rows:
             out.append(f"{iid:<{width}}  {rendered}")
 
-    return "\n".join(out)
+    return out
+
+
+def _render_event_spec_section(event_spec: dict) -> list[str]:
+    """事件参数小节：``event.<siid>.<eiid>.<argname>`` 一行一个，按 service 分组。
+
+    第一列就是能直接抄给 ``--iot-iid`` 的那个串 —— 事件的参数名是 spec 原名、没有别名，
+    拼不出来、只能从这里发现。access 那一列恒为 ``-``（事件只推不读也不写），留着是为了
+    与上面的 prop 行同列宽、同形制。
+
+    **行首列与管道行的第一段不会重复。** 渲染器以传进去的 key 打头，而这里传的正是 iid
+    （`_build_spec_line` 只在 ``key == iid`` 时才走「裸 iid + 完整描述注释」那条路，中文
+    描述才出得来），所以拼行前要把这段前缀切掉 —— 不切的话同一个 iid 一行里出现两遍，
+    长的一个就能占掉 39 字符，而表头若照抄 prop 那边把第一段说成 ``spec_name`` 也对不上：
+    事件没有别名那一列，它在行首列里。
+    """
+    from miloco_cli.catalog import _build_spec_line
+
+    out: list[str] = ["", "# 事件参数（--iot-iid 用；只在设备上报时更新，规则判的是最近一次的值）"]
+    if not event_spec:
+        out.append("# 本设备 spec 里没有事件参数")
+        return out
+
+    out.append("# event.iid  |access|format|constraint|unit")
+    services: dict[str, list[tuple[str, str]]] = {}
+    for iid, entry in event_spec.items():
+        if not isinstance(entry, dict):
+            continue
+        siid = str(entry.get("siid", "?"))
+        services.setdefault(siid, []).append(
+            (iid, _build_spec_line(iid, entry, iid).render())
+        )
+
+    for siid, rows in services.items():
+        out.append("")
+        out.append(f"[service {siid}]")
+        width = max(len(iid) for iid, _ in rows)
+        for iid, rendered in rows:
+            # rendered 以 key 打头，而这里传进去的 key 就是 iid —— 行首列已经占了这个
+            # 位置，切掉重复的那一段再拼（理由见上面 docstring）
+            out.append(f"{iid:<{width}}  {rendered[len(iid):]}")
+    return out
 
 
 # ─── device catalog ──────────────────────────────────────────────────────────

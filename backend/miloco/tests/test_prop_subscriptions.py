@@ -40,12 +40,15 @@ def _proxy(devices):
         did: SimpleNamespace(home_id=home) for did, home in devices.items()
     }
     proxy._subscribed_props_dids = set()
+    proxy._subscribed_event_dids = set()
     proxy._sub_intent_lock = asyncio.Lock()
     proxy._sub_intent_generation = 0
     proxy._sub_semaphore = asyncio.Semaphore(_RECONCILE_CONCURRENCY)
     proxy._miot_client = SimpleNamespace(
         sub_device_props_async=AsyncMock(),
         unsub_device_props_async=AsyncMock(),
+        sub_device_events_async=AsyncMock(),
+        unsub_device_events_async=AsyncMock(),
     )
     return proxy
 
@@ -103,10 +106,12 @@ async def test_the_mirror_is_rebuilt_from_the_sdk_after_a_mips_restart():
     proxy._subscribed_device_state_dids = set()
     proxy._subscribed_scene_home_ids = set()
     proxy._subscribed_props_dids = {"stale"}
+    proxy._subscribed_event_dids = {"stale"}
 
-    await proxy._on_subscription_reset(set(), set(), set(), {"d1"})
+    await proxy._on_subscription_reset(set(), set(), set(), {"d1"}, {"e1"})
 
     assert proxy._subscribed_props_dids == {"d1"}
+    assert proxy._subscribed_event_dids == {"e1"}
 
 
 async def test_the_lifecycle_reset_clears_the_props_mirror():
@@ -116,10 +121,12 @@ async def test_the_lifecycle_reset_clears_the_props_mirror():
     proxy._subscribed_device_state_dids = {"s"}
     proxy._subscribed_scene_home_ids = {"h"}
     proxy._subscribed_props_dids = {"d1"}
+    proxy._subscribed_event_dids = {"d1"}
 
     proxy._reset_subscription_mirrors()
 
     assert proxy._subscribed_props_dids == set()
+    assert proxy._subscribed_event_dids == set()
 
 
 async def test_props_events_reach_every_listener():
@@ -142,9 +149,74 @@ async def test_the_reconcile_loop_covers_the_props_lane():
         "_sync_meta_subscriptions",
         "_sync_device_state_subscriptions",
         "_sync_scene_subscriptions",
+        "_sync_event_subscriptions",
     ):
         setattr(proxy, name, AsyncMock())
 
     await proxy._subscription_sync_loop()
 
     assert proxy._subscribed_props_dids == {"d1"}
+
+
+# ── 事件推送订阅：与属性同形，镜像与通道各一份 ────────────────────────
+
+
+async def test_a_device_outside_the_current_home_is_still_subscribed_for_events():
+    """判据与属性那条逐条相同：事件历史同样不只对当前家庭有用。"""
+    proxy = _proxy({"d1": HOME, "d-other": "H2"})
+
+    await proxy._sync_event_subscriptions()
+
+    assert proxy._subscribed_event_dids == {"d1", "d-other"}
+
+
+async def test_a_bridged_did_is_skipped_for_events():
+    proxy = _proxy(["d1", "blt/1"])
+
+    await proxy._sync_event_subscriptions()
+
+    assert proxy._subscribed_event_dids == {"d1"}
+
+
+async def test_event_subscriptions_reconcile_on_their_own_channel():
+    """**两条车道各有各的镜像。** 合成一个的话，一台设备只在事件这条订上时，属性
+    那条也会以为订上了 —— 一条通道的失败被另一条盖掉，静默少一半输入。
+    """
+    proxy = _proxy(["d1"])
+    await proxy._sync_event_subscriptions()
+    proxy._device_info_dict = {}
+
+    await proxy._sync_event_subscriptions()
+
+    assert proxy._subscribed_event_dids == set()
+    proxy._miot_client.unsub_device_events_async.assert_awaited_once_with("d1")
+    proxy._miot_client.unsub_device_props_async.assert_not_awaited()
+
+
+async def test_event_events_reach_every_listener():
+    proxy = object.__new__(MiotProxy)
+    proxy._events_listeners = []
+    seen = AsyncMock()
+    proxy.add_device_events_listener(seen)
+
+    await proxy._on_device_event("event")
+
+    seen.assert_awaited_once_with("event")
+
+
+async def test_the_reconcile_loop_covers_the_event_lane():
+    """这条通道断了不会有人来补（云端没有再读一次事件的接口），对账是唯一的修复路径。"""
+    proxy = _proxy(["d1"])
+    proxy._sub_sync_rerun_requested = False
+    proxy._sub_sync_running = True
+    for name in (
+        "_sync_meta_subscriptions",
+        "_sync_device_state_subscriptions",
+        "_sync_scene_subscriptions",
+        "_sync_props_subscriptions",
+    ):
+        setattr(proxy, name, AsyncMock())
+
+    await proxy._subscription_sync_loop()
+
+    assert proxy._subscribed_event_dids == {"d1"}

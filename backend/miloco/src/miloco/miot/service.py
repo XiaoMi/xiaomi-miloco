@@ -1401,14 +1401,20 @@ class MiotService:
             logger.error("Failed to get home info: %s", e)
             raise MiotServiceException(f"Failed to get home info: {str(e)}") from e
 
-    async def get_device_spec(self, did: str) -> dict:
-        """Get single device spec (轻量，不刷新云端数据)。"""
+    async def get_device_spec(self, did: str, include_events: bool = False) -> dict:
+        """Get single device spec (轻量，不刷新云端数据)。
+
+        ``include_events`` 追加一份 ``event_spec``（键 `event.<siid>.<eiid>.<argname>`），
+        给需要在客户端就解出事件参数类型的调用方（CLI 的 iot 值预检）。**默认关**：事件表
+        要走另一个解析器（``parse_lite_async`` 不遍历 events），常规的读属性表那几条路
+        （设备目录、控制前参数校验）不该为它多打一趟解析。
+        """
         dev = (await self._miot_proxy.get_devices()).get(did)
         if dev is None:
             raise ValidationException(f"did '{did}' not found")
         sub_names = build_sub_device_names(dev)
         spec = await self._miot_proxy._fetch_device_spec(dev.urn, sub_names) or {}
-        return {
+        out = {
             "did": dev.did,
             "name": dev.name,
             "home": dev.home_name,
@@ -1416,6 +1422,37 @@ class MiotService:
             "room": dev.room_name,
             "online": dev.online,
             "category": dev.urn.split(":")[3] if ":" in dev.urn else None,
+            "spec": spec,
+        }
+        if include_events:
+            out["event_spec"] = await self._miot_proxy._fetch_device_events(dev.urn) or {}
+        return out
+
+    async def get_device_event_spec(self, did: str) -> dict:
+        """Get single device **event** spec (轻量，不刷新云端数据)。
+
+        形状是 ``get_device_spec`` 的子集：装表那个键同名（``spec``）、标识设备的 ``did``
+        / ``name`` 同名，省掉的是与事件无关的那几个（``home``/``model``/``room``/
+        ``online``/``category``）。共用键名是为了让「按 iid 属于哪个命名空间取哪份表」
+        在调用侧只是一次赋值，不是两套分支 —— 只有 ``spec`` 的来源不同：那份是属性表
+        （键 `prop.<siid>.<piid>`），这份是事件参数表（键
+        `event.<siid>.<eiid>.<argname>`）。
+
+        分开而不是并进 ``get_device_spec``：属性表有三个既有消费方（设备目录、控制前
+        参数校验、规则校验），它们都不认识事件键，并进去等于给每个消费方都发一批要
+        跳过的条目；而事件表还得走另一个解析器才拿得到（``parse_lite_async`` 不遍历
+        events），并进去会把它拖成热路径上的第二次解析。
+
+        与 ``get_device_spec`` 一样**答不了作用域**：走的是账号全量 ``get_devices()``，
+        当前家庭过滤由调用方自己做。
+        """
+        dev = (await self._miot_proxy.get_devices()).get(did)
+        if dev is None:
+            raise ValidationException(f"did '{did}' not found")
+        spec = await self._miot_proxy._fetch_device_events(dev.urn) or {}
+        return {
+            "did": dev.did,
+            "name": dev.name,
             "spec": spec,
         }
 

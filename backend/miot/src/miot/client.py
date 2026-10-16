@@ -45,6 +45,7 @@ from .types import (
     MIoTCameraInfo,
     MIoTCameraStatus,
     MIoTDeviceBindEvent,
+    MIoTDeviceEvent,
     MIoTDeviceInfo,
     MIoTDevicePropsEvent,
     MIoTDeviceStateEvent,
@@ -231,6 +232,10 @@ class MIoTClient:
     # not in lockstep with `_props_sub_dids`: that set is the intent, this is the fact.
     _props_sub_sources: Dict[str, str]
     _props_source_lock: asyncio.Lock
+    # Dids whose `device/{did}/up/event_occured/#` topic is (intended to be)
+    # subscribed. Same ownership/replay model as _meta_sub_dids.
+    _event_sub_dids: set
+    _callback_device_event: Optional[Callable[[MIoTDeviceEvent], Any]]
     _callback_scene_changed: Optional[Callable[[MIoTSceneChangedEvent], Any]]
     # Business-layer consumer of the central hub's device-list changes. The hub
     # carries a single callback slot and the SDK owns it (it re-routes property
@@ -316,6 +321,7 @@ class MIoTClient:
         self._callback_device_meta_changed = None
         self._callback_device_state_changed = None
         self._callback_device_props_changed = None
+        self._callback_device_event = None
         self._meta_sub_dids = set()
         self._state_sub_dids = set()
         self._scene_sub_home_ids = set()
@@ -326,11 +332,12 @@ class MIoTClient:
         # 对同一台设备重复订/重复退——transport 侧幂等所以不会坏，但日志和镜像
         # 的中间态没法看。锁只覆盖「算差集 → 订新 → 退旧」这段。
         self._props_source_lock = asyncio.Lock()
+        self._event_sub_dids = set()
         self._callback_scene_changed = None
         self._callback_dev_list_changed = None
         self._callback_mips_connect: Optional[Callable[[], Any]] = None
         self._callback_subscription_reset: Optional[
-            Callable[[set[str], set[str], set[str], set[str]], Any]
+            Callable[[set[str], set[str], set[str], set[str], set[str]], Any]
         ] = None
 
         # Pre-declare sub-client slots so deinit_async can safely walk them
@@ -1075,11 +1082,13 @@ class MIoTClient:
             self._callback_device_meta_changed = None
             self._callback_device_state_changed = None
             self._callback_device_props_changed = None
+            self._callback_device_event = None
             self._meta_sub_dids = set()
             self._state_sub_dids = set()
             self._scene_sub_home_ids = set()
             self._props_sub_dids = set()
             self._props_sub_sources = {}
+            self._event_sub_dids = set()
             self._callback_scene_changed = None
             self._callback_dev_list_changed = None
             self._callback_mips_connect = None
@@ -1651,6 +1660,7 @@ class MIoTClient:
                 self._state_sub_dids,
                 self._scene_sub_home_ids,
                 self._props_sub_dids,
+                self._event_sub_dids,
             )
             if asyncio.iscoroutine(ret):
                 await ret
@@ -1805,7 +1815,7 @@ class MIoTClient:
             )
             self._mips_cloud = None
             self._mips_user_sub_error = f"connect failed: {e}"
-            # 旧实例已在上面拆掉,broker 上一个订阅都不剩。若把三个 tracked 集合
+            # 旧实例已在上面拆掉,broker 上一个订阅都不剩。若把 tracked 集合
             # 原样留着,上层对账会算出 to_add = ∅、SDK 侧 `did in set` 短路也会
             # 吞掉重试,推送要等到下一次 token 刷新重跑本方法才可能恢复(小时级)。
             # 清空并通知上层重建镜像,下一轮 refresh_* 就能重新下发全量订阅
@@ -1816,6 +1826,7 @@ class MIoTClient:
             self._scene_sub_home_ids = set()
             self._props_sub_dids = set()
             self._props_sub_sources = {}
+            self._event_sub_dids = set()
             await self._fire_subscription_reset()
             return
         self._mips_cloud = mips
@@ -1927,10 +1938,23 @@ class MIoTClient:
                     len(replay_dids),
                 )
 
+        # Same replay for per-device event push subs.
+        if self._event_sub_dids:
+            dids = sorted(self._event_sub_dids)
+            self._event_sub_dids = set()
+            ok = await _replay_subscriptions(
+                dids, self.sub_device_events_async, "device-events"
+            )
+            _LOGGER.info(
+                "mips_cloud re-subscribed device-events for %d/%d devices",
+                ok,
+                len(dids),
+            )
+
         # mips 实例被重建 → 上层的订阅意图镜像必须重建为 SDK 重放后的真相:
         # 若镜像里留着"重放失败的 did"(SDK 集合已无它),下次对账算不出重订;
-        # 若镜像丢了"重放重订上的已解绑 did",下次对账算不出退订。这里在三个
-        # 重放块**之后**把 post-replay 集合交给上层,让镜像成为它们的忠实副本。
+        # 若镜像丢了"重放重订上的已解绑 did",下次对账算不出退订。这里在全部重放
+        # 块**之后**把 post-replay 集合交给上层,让镜像成为它们的忠实副本。
         await self._fire_subscription_reset()
 
         # 新实例的首次 CONNACK 发生在 register_mips_state_handler 之前
@@ -2372,6 +2396,45 @@ class MIoTClient:
         except Exception as e:
             _LOGGER.error("props source re-route after transport reset failed: %s", e)
 
+    def register_device_event_callback(
+        self, callback: Optional[Callable[[MIoTDeviceEvent], Any]]
+    ) -> None:
+        """Register the single device-event handler.
+
+        Fires for every subscribed device's `event_occured` push. Pass None to
+        clear. Several consumers fan out one layer up (MiotProxy) — this slot
+        stays single so the SDK contract matches the other four.
+        """
+        self._callback_device_event = callback
+
+    def _on_device_event_msg(self, msg: MIoTDeviceEvent) -> None:
+        cb = self._callback_device_event
+        if cb is None:
+            return
+        ret = cb(msg)
+        if asyncio.iscoroutine(ret):
+            asyncio.ensure_future(ret)
+
+    async def sub_device_events_async(self, did: str) -> None:
+        """订阅一台设备的事件推送(幂等);契约同 sub_device_state_async。"""
+        if did in self._event_sub_dids:
+            return
+        mips = self._mips_cloud
+        if mips is None or not mips.is_connected:
+            raise MipsConnectionError(
+                f"mips_cloud unavailable; device-events subscribe not issued did={did}"
+            )
+        await mips.sub_device_events_async(did, self._on_device_event_msg)
+        self._event_sub_dids.add(did)
+
+    async def unsub_device_events_async(self, did: str) -> None:
+        """Unsubscribe one device's event push subtree."""
+        self._event_sub_dids.discard(did)
+        mips = self._mips_cloud
+        if mips is None:
+            return
+        await mips.unsub_device_events_async(did)
+
     def register_scene_changed_callback(
         self, callback: Optional[Callable[[MIoTSceneChangedEvent], Any]]
     ) -> None:
@@ -2425,10 +2488,12 @@ class MIoTClient:
 
     def register_subscription_reset_callback(
         self,
-        callback: Optional[Callable[[set[str], set[str], set[str], set[str]], Any]],
+        callback: Optional[
+            Callable[[set[str], set[str], set[str], set[str], set[str]], Any]
+        ],
     ) -> None:
-        """mips 重放后回调上层,把四个重放后的 tracked 集合交回
-        (meta / state / scene / props)。
+        """mips 重放后回调上层,把五个重放后的 tracked 集合交回
+        (meta / state / scene / props / events)。
 
         参数个数要与 _fire_subscription_reset 的实参一致:少一个的话调用时抛
         TypeError,而那边的 except Exception 会把它吞掉 —— 表现是上层的订阅镜像

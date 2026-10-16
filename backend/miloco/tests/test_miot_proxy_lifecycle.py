@@ -259,6 +259,7 @@ async def test_subscription_reset_rebuilds_intent_sets(proxy_env):
     state_set = p._subscribed_device_state_dids
     scene_set = p._subscribed_scene_home_ids
     props_set = p._subscribed_props_dids
+    event_set = p._subscribed_event_dids
     meta_set.clear()
     meta_set.update({"stale-1"})
     state_set.clear()
@@ -267,18 +268,24 @@ async def test_subscription_reset_rebuilds_intent_sets(proxy_env):
     scene_set.update({"stale-home"})
     props_set.clear()
     props_set.update({"stale-1"})
+    event_set.clear()
+    event_set.update({"stale-1"})
 
-    await reset_cb({"did-1"}, {"did-1"}, {"home-9"}, {"did-2"})
+    # 事件那条车道单独传:它与属性各订各的,合成一个集合的话一条通道的失败会被
+    # 另一条盖掉。
+    await reset_cb({"did-1"}, {"did-1"}, {"home-9"}, {"did-2"}, {"did-3"})
 
     assert p._subscribed_meta_dids == {"did-1"}
     assert p._subscribed_device_state_dids == {"did-1"}
     assert p._subscribed_scene_home_ids == {"home-9"}
     assert p._subscribed_props_dids == {"did-2"}
+    assert p._subscribed_event_dids == {"did-3"}
     # 原地改写不变式的真正断言:重建必须原地改,不能换新集合对象。
     assert p._subscribed_meta_dids is meta_set
     assert p._subscribed_device_state_dids is state_set
     assert p._subscribed_scene_home_ids is scene_set
     assert p._subscribed_props_dids is props_set
+    assert p._subscribed_event_dids is event_set
 
     await p.deinit()
 
@@ -310,6 +317,19 @@ async def test_init_registers_the_central_hub_dev_list_callback(proxy_env):
     cb = client.register_dev_list_changed_callback.call_args.args[0]
     assert cb.__self__ is p
     assert cb.__func__.__name__ == "_on_central_hub_dev_list_changed"
+
+    await p.deinit()
+
+
+@pytest.mark.asyncio
+async def test_init_registers_the_event_push_callback(proxy_env):
+    """漏了这一行，事件推送一条都到不了本层的消费方，且到处都不报错。"""
+    p, client = proxy_env
+    await p.init()
+
+    cb = client.register_device_event_callback.call_args.args[0]
+    assert cb.__self__ is p
+    assert cb.__func__.__name__ == "_on_device_event"
 
     await p.deinit()
 

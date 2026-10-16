@@ -9,6 +9,7 @@ import asyncio
 import logging
 
 import pytest
+from miloco.miot.iid import leaf_path
 from miloco.rule.iot_source import DiagnosticReason, IotRef, IotSource
 from miloco.state import StateStore
 
@@ -169,6 +170,83 @@ async def test_one_batch_write_is_evaluated_once(store):
     await h.settle()
 
     assert h.fed == [("r1", True)]
+
+
+# ── 事件参数：第二条命名空间 ──────────────────────────────────────────
+
+_EVENT_IID = "event.2.1020.unlock-operation-position"
+
+
+def _event_leaf(store, value, did="d1", iid=_EVENT_IID):
+    store.set(f"iot/device/{did}/event/{iid[len('event.'):]}", value, source="test")
+
+
+@pytest.mark.asyncio
+async def test_an_event_leaf_change_re_evaluates_the_rule(store):
+    """事件叶是这条规则**唯一**的更新来源（没有回拉通道）—— 断这条订阅。
+
+    路径段里没有 `event.` 前缀（由 `/event/` 那一段承载），而反查索引的键是规则侧带
+    前缀的 iid：不在两者之间补一次转换的话，这里一次都不会喂，而且是静默的。
+    """
+    _online(store)
+    h = _Harness(store, [_ref(iid=_EVENT_IID, value=2)])
+    h.source.start()
+    await h.settle()
+    h.fed.clear()
+
+    _event_leaf(store, 2)
+    await h.settle()
+
+    assert h.fed == [("r1", True)]
+
+
+@pytest.mark.asyncio
+async def test_the_prop_subtree_does_not_wake_an_event_rule(store):
+    """两棵子树互不串门：同尾段的属性叶变了，引用事件参数的那条规则不该动。"""
+    _online(store)
+    h = _Harness(store, [_ref(iid=_EVENT_IID, value=2)])
+    h.source.start()
+    await h.settle()
+    h.fed.clear()
+
+    store.set("iot/device/d1/prop/2.1020.unlock-operation-position", 2, source="test")
+    await h.settle()
+
+    assert h.fed == []
+
+
+@pytest.mark.asyncio
+async def test_a_missing_event_leaf_diagnoses_as_path_missing(store):
+    """重启后事件叶为空，引用它的规则按 path_missing 保守拦截 —— 这是设计不是缺陷。
+
+    钉住它，免得验收时把这条当回归去「修」成未就绪以外的东西。
+    """
+    _online(store)
+    h = _Harness(store, [_ref(iid=_EVENT_IID, value=2)])
+    h.source.start()
+    await h.settle()
+
+    assert h.fed == []
+    assert h.unknown == [("r1", "d1")]
+    assert h.source.diagnostics()["by_reason"] == {"path_missing": 1}
+
+
+def test_the_leaf_path_and_the_change_path_round_trip():
+    """``leaf_path`` 写出去的路径，``_split_event_path`` 要原样还原成规则侧的 iid。
+
+    两头各自单测都过、拼起来错位，正是这条命名空间最可能的坏法。属性那侧顺带一起钉，
+    免得以后给事件补前缀时把它也改了。
+    """
+    from miloco.rule.iot_source import _split_event_path, _split_prop_path
+
+    # 桥接子设备的 did 自带点（`blt.1`），切回来靠的是位置不是点数
+    for did in ("d1", "blt.1"):
+        for iid in ("5.1", "2.1020.0"):
+            path = leaf_path(did, iid)
+            assert _split_prop_path(path) == (did, iid)
+        for iid in (_EVENT_IID, "event.2.1020.a.b"):
+            path = leaf_path(did, iid)
+            assert _split_event_path(path) == (did, iid)
 
 
 # ── 未就绪 ────────────────────────────────────────────────────────────
@@ -543,6 +621,30 @@ async def test_reconnect_pulls_only_the_referenced_props(store):
     """
     _online(store)
     h = _Harness(store, [_ref(), _ref("r2", iid="4.1", value=80)])
+    h.source.start()
+
+    h.source.on_mips_connect()
+    await asyncio.sleep(0.05)
+
+    assert h.pulls == [("d1", ["4.1", "5.1"])]
+
+
+@pytest.mark.asyncio
+async def test_reconnect_does_not_pull_event_iids(store):
+    """事件没有可拉取的读接口。混进去的每一条都解析不成属性，只刷一条采样告警。
+
+    **同一个 did 上只留属性**：按设备剔除会把整台设备一起跳过，那样连属性都不拉了 ——
+    这条同时钉住剔除的粒度。
+    """
+    _online(store)
+    h = _Harness(
+        store,
+        [
+            _ref(),
+            _ref("r2", iid="4.1", value=80),
+            _ref("r3", iid=_EVENT_IID, value=2),
+        ],
+    )
     h.source.start()
 
     h.source.on_mips_connect()

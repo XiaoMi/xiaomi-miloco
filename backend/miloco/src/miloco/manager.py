@@ -79,7 +79,7 @@ class Manager:
         pass
 
     def _wire_iot_push(self) -> None:
-        """把两条推送接进状态容器。
+        """把三条推送（上下线 / 属性 / 事件）接进状态容器。
 
         写入器挂在 Manager 上是因为它要同时够得着容器和 proxy，别处都够不着其中一个；
         订阅归 proxy，容器只是消费方之一。
@@ -100,6 +100,11 @@ class Manager:
         )
         self._miot_proxy.add_device_props_listener(
             self._iot_push_writer.on_device_props
+        )
+        # 事件推送没有补拉那一路 —— 云端没有「读最近一次事件」的接口，所以只有
+        # 写入器一个消费方
+        self._miot_proxy.add_device_events_listener(
+            self._iot_push_writer.on_device_event
         )
         self._miot_proxy.add_device_state_listener(self._prop_top_up.on_event)
         self._miot_proxy.add_mips_connect_listener(self._on_mips_reconnected)
