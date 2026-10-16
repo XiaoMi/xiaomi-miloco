@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import plistlib
 import subprocess
+import sys
 import time
 
 import pytest
@@ -827,6 +828,7 @@ def test_stop_waits_for_unload_before_checking_port(monkeypatch, capsys):
     """bootout 后必须等 job 真正卸载,才能查端口残留 —— 否则 backend 优雅退出期间
     早释放了监听 socket,_find_pid_by_port 提前返回 None,会把"job 还没卸完"误判成
     "stopped"(调用方紧接着 start 会撞见旧 job 仍在)。"""
+    monkeypatch.setattr(service, "_backend_ready", lambda cfg: True)
     loaded_calls = {"n": 0}
 
     def _fake_is_loaded():
@@ -852,6 +854,7 @@ def test_stop_waits_for_unload_before_checking_port(monkeypatch, capsys):
 def test_stop_gives_up_waiting_but_still_falls_back_to_port_cleanup(monkeypatch):
     """job 一直卸不掉也不能卡死或跳过残留清理:超时后继续走端口兜底(与 reload 的
     "直接失败"不同 —— stop 没有后续 bootstrap 步骤需要"卸载完成"这个前提)。"""
+    monkeypatch.setattr(service, "_backend_ready", lambda cfg: True)
     monkeypatch.setattr(service, "_launchd_backend_pid", lambda: None)
     monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
     monkeypatch.setattr(service, "_launchd_is_loaded", lambda: True)  # 永不消失
@@ -876,6 +879,7 @@ def test_stop_gives_up_waiting_but_still_falls_back_to_port_cleanup(monkeypatch)
 def test_stop_skips_trim_when_job_never_unloads(monkeypatch):
     """job 超时仍未卸载时,launchd 可能仍持着 launchd-stdio.log 的 fd,不能裁剪
     (_trim_launchd_stdio 自己的前置条件是"没人持有该 fd"),否则会留一段 NUL 空洞。"""
+    monkeypatch.setattr(service, "_backend_ready", lambda cfg: True)
     monkeypatch.setattr(service, "_launchd_backend_pid", lambda: None)
     monkeypatch.setattr(service, "_find_pid_by_port", lambda url: None)
     monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
@@ -893,6 +897,7 @@ def test_stop_skips_trim_when_job_never_unloads(monkeypatch):
 
 def test_stop_trims_when_job_unloads_in_time(monkeypatch):
     """job 正常卸载完的路径必须仍然裁剪 —— 前一条测试只钉住"超时不裁"这一半。"""
+    monkeypatch.setattr(service, "_backend_ready", lambda cfg: True)
     monkeypatch.setattr(service, "_launchd_backend_pid", lambda: None)
     monkeypatch.setattr(service, "_find_pid_by_port", lambda url: None)
     monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
@@ -929,6 +934,7 @@ def test_cleanup_stale_port_holder_uses_30s_grace_by_default(monkeypatch):
 def test_launchd_stop_reuses_same_grace_constant_as_cleanup(monkeypatch):
     """_launchd_stop 和 _cleanup_stale_port_holder 必须共用同一个 grace 常量,
     不能各写一份字面量(否则将来改一处会漏改另一处,重新制造这次修的不对称问题)。"""
+    monkeypatch.setattr(service, "_backend_ready", lambda cfg: True)
     monkeypatch.setattr(service, "_launchd_backend_pid", lambda: None)
     monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
     monkeypatch.setattr(service, "_launchd_is_loaded", lambda: False)
@@ -964,3 +970,207 @@ def test_install_script_launchd_label_matches_service():
     )
     assert m, "scripts/install.py 里找不到 LAUNCHD_LABEL"
     assert m.group(1) == service._LAUNCHD_LABEL
+
+
+# ─── stop 的等待预算按「就绪」分档（宿主给 stop 的预算只有 5s）────────────────
+
+
+def test_backend_ready_false_when_health_unreachable():
+    """端口没人听 → 未就绪。不能抛异常，也不能在那里耗满超时。"""
+    assert service._backend_ready({"server": {"url": "http://127.0.0.1:1"}}) is False
+
+
+def test_backend_ready_true_on_200(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(
+        httpx, "get", lambda *a, **k: type("_R", (), {"status_code": 200})()
+    )
+    assert service._backend_ready(_cfg()) is True
+
+
+def test_launchd_stop_not_ready_escalates_to_sigkill(monkeypatch):
+    """未就绪（正在启动/已坏）时不许等它初始化完：到点 SIGKILL 掉 job 的进程，且整段
+    收尾共享 _STOP_BUDGET_S（端口兜底的 grace 只能花剩余部分）。
+
+    实测「掐断在飞的 restart 之后立刻 stop」原来是 5.28s —— 正好压过宿主的 5s stop
+    预算，超时算服务失败并连累同批其它插件（device-pair-notifier 一起超时）。
+    本例端口是「已绑定但 /health 不通」那一档（忙/卡），保留观察窗口后再杀。
+    """
+    monkeypatch.setattr(service, "_backend_ready", lambda cfg: False)
+    monkeypatch.setattr(service, "_STOP_BUDGET_S", 0.05)
+    monkeypatch.setattr(service.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(service, "_launchd_backend_pid", lambda: 111)
+    monkeypatch.setattr(service, "_find_miloco_backend_pids", lambda: [111, 333])
+    monkeypatch.setattr(service, "_find_pid_by_port", lambda url: 222)
+    monkeypatch.setattr(service, "_is_miloco_backend_proc", lambda pid: True)
+    monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
+    monkeypatch.setattr(service, "_launchd_is_loaded", lambda: True)  # 永不消失
+    monkeypatch.setattr(service, "_launchctl", lambda *a: _cp(0))
+    monkeypatch.setattr(service, "_is_port_in_use", lambda url: False)
+    monkeypatch.setattr(service, "_trim_launchd_stdio", lambda: None)
+
+    killed: list[int] = []
+    monkeypatch.setattr(service, "_kill_now", lambda pid: killed.append(pid))
+    graces: list[float] = []
+    monkeypatch.setattr(
+        service, "_terminate", lambda pid, grace=6.0: graces.append(grace)
+    )
+
+    service._launchd_stop(_cfg(), pretty=False)
+
+    # 全扫到的 launcher(111) + python(333)，加端口(222) 兜底，去重后逐个 SIGKILL
+    assert killed == [111, 333, 222]
+    # 端口兜底只花总预算的剩余部分，不能另起一份 grace
+    assert len(graces) == 1 and 0.0 <= graces[0] <= service._STOP_BUDGET_S
+
+
+def test_launchd_stop_not_ready_unbound_port_kills_without_waiting(monkeypatch):
+    """(i) 端口还没监听 = 已证它还没进 serve 阶段（uvicorn 先跑完 lifespan 再 bind），
+    没有可收的尾 —— 不许先把预算浪费在等它，必须直接 SIGKILL（实测那一等就是 2.26s，
+    而杀完 0.05s 就卸载）。"""
+    monkeypatch.setattr(service, "_backend_ready", lambda cfg: False)
+    monkeypatch.setattr(service, "_STOP_BUDGET_S", 0.05)
+    monkeypatch.setattr(service, "_launchd_backend_pid", lambda: 111)
+    monkeypatch.setattr(service, "_find_miloco_backend_pids", lambda: [111, 333])
+    monkeypatch.setattr(service, "_find_pid_by_port", lambda url: None)  # 端口未绑定
+    monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
+    monkeypatch.setattr(service, "_launchd_is_loaded", lambda: True)  # 永不消失
+    monkeypatch.setattr(service, "_launchctl", lambda *a: _cp(0))
+    monkeypatch.setattr(service, "_is_port_in_use", lambda url: False)
+    monkeypatch.setattr(service, "_trim_launchd_stdio", lambda: None)
+
+    events: list[str] = []
+    monkeypatch.setattr(service.time, "sleep", lambda *_: events.append("sleep"))
+    monkeypatch.setattr(
+        service, "_kill_now", lambda pid: events.append(f"kill {pid}")
+    )
+    monkeypatch.setattr(service, "_terminate", lambda pid, grace=6.0: None)
+
+    service._launchd_stop(_cfg(), pretty=False)
+
+    # 关键断言：第一个动作就是杀，中间不许有 sleep（即没有"等它优雅退出"那一段）
+    assert events[0] == "kill 111"
+    assert "kill 333" in events
+
+
+def test_launchd_stop_ready_keeps_grace_and_never_sigkills(monkeypatch):
+    """就绪的后端完全不受影响：预算与 grace 保持原值、也不许 SIGKILL —— 它的关停
+    序列可能真的花十几秒（见 _MILOCO_STOP_GRACE_S），压成 2s 会丢半截清理和最后
+    一段 trace。"""
+    monkeypatch.setattr(service, "_backend_ready", lambda cfg: True)
+    monkeypatch.setattr(service, "_launchd_backend_pid", lambda: 111)
+    monkeypatch.setattr(service, "_find_pid_by_port", lambda url: 222)
+    monkeypatch.setattr(service, "_is_miloco_backend_proc", lambda pid: True)
+    monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
+    monkeypatch.setattr(service, "_launchd_is_loaded", lambda: True)
+    monkeypatch.setattr(service, "_LAUNCHD_BOOTOUT_WAIT_S", 0.05)
+    monkeypatch.setattr(service, "_launchctl", lambda *a: _cp(0))
+    monkeypatch.setattr(service, "_is_port_in_use", lambda url: False)
+    monkeypatch.setattr(service, "_trim_launchd_stdio", lambda: None)
+
+    killed: list[int] = []
+    monkeypatch.setattr(service, "_kill_now", lambda pid: killed.append(pid))
+    graces: list[float] = []
+    monkeypatch.setattr(
+        service, "_terminate", lambda pid, grace=6.0: graces.append(grace)
+    )
+
+    service._launchd_stop(_cfg(), pretty=False)
+
+    assert killed == []
+    assert graces == [service._MILOCO_STOP_GRACE_S]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="僵尸判定读 /proc，只有 Linux 有")
+def test_is_running_treats_zombie_as_dead():
+    """僵尸 kill(pid,0) 也成功，但必须判为已死 —— 否则不收尸的环境（容器里 PID 1
+    是 sleep infinity、docker run 不带 init）会让 _terminate 白等满 grace，实测把
+    stop 拖到 40s。"""
+    pid = os.fork()
+    if pid == 0:
+        os._exit(0)  # 子进程立刻退出；父进程不 wait → 变僵尸
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                with open(f"/proc/{pid}/stat", "rb") as f:
+                    if f.read().rsplit(b")", 1)[-1].split(None, 1)[0] == b"Z":
+                        break
+            except OSError:
+                pass
+            time.sleep(0.02)
+        assert service._is_running(pid) is False
+    finally:
+        os.waitpid(pid, 0)
+
+
+
+def test_kill_miloco_backends_never_kills_foreign_port_holder(monkeypatch):
+    """端口反查 / fallback 来的 PID 必须先证明属于 miloco 才允许 SIGKILL —— 用户其它
+    服务（比如 dev server）占用了 miloco 的端口时，绝不能把它误杀；本文件对「按端口
+    收尾」的这道验证在 _cleanup_stale_port_holder / _launchd_stop 都钉着，升级路径
+    同样不能例外。"""
+    monkeypatch.setattr(service, "_find_miloco_backend_pids", lambda: [111])
+    monkeypatch.setattr(service, "_find_pid_by_port", lambda url: 999)  # 别人的服务
+    monkeypatch.setattr(service, "_is_miloco_backend_proc", lambda pid: pid == 111)
+    killed: list[int] = []
+    monkeypatch.setattr(service, "_kill_now", lambda pid: killed.append(pid))
+
+    service._kill_miloco_backends("http://127.0.0.1:1810", 999)
+
+    assert killed == [111]
+
+    # 反向:能证明是 miloco 的端口占用者/fallback 仍然要杀
+    killed.clear()
+    monkeypatch.setattr(service, "_is_miloco_backend_proc", lambda pid: True)
+    service._kill_miloco_backends("http://127.0.0.1:1810", 999)
+
+    assert sorted(killed) == [111, 999]
+
+
+def test_miloco_backend_predicate_requires_word_boundary():
+    """枚举扫描与单 PID 验证必须用同一个词边界谓词：substring 会命中
+    ``python -m miloco.main_v2`` 这类无关进程，而这个谓词的输出直通 SIGKILL。"""
+    assert service._MILOCO_BACKEND_RE.search("/x/python -m miloco.main")
+    assert not service._MILOCO_BACKEND_RE.search("/x/python -m miloco.main_v2")
+    assert not service._MILOCO_BACKEND_RE.search("vim miloco/main.py")
+
+
+def test_launchd_stop_budget_anchored_before_probe(monkeypatch):
+    """未就绪预算必须从函数入口起算：探活(≤1s)/查 job PID/扫描/bootout 都要折进去。
+    锚在它们之后，这段开销就骑在预算之上 —— 未就绪最坏端到端成了 5s，正好贴住调用方
+    的硬失败线（那条档恰好是探活必然吃满 1s 的「端口已绑但 /health 不通」）。"""
+    monkeypatch.setattr(service, "_STOP_BUDGET_S", 0.05)
+
+    def _slow_probe(cfg):
+        time.sleep(0.03)  # 假装探活阻塞
+        return False
+
+    monkeypatch.setattr(service, "_backend_ready", _slow_probe)
+    monkeypatch.setattr(service, "_launchd_backend_pid", lambda: None)
+    monkeypatch.setattr(service, "_find_miloco_backend_pids", lambda: [])
+    monkeypatch.setattr(service, "_find_pid_by_port", lambda url: 222)
+    monkeypatch.setattr(service, "_is_miloco_backend_proc", lambda pid: True)
+    monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
+    monkeypatch.setattr(service, "_launchd_is_loaded", lambda: True)
+    monkeypatch.setattr(service, "_launchctl", lambda *a: _cp(0))
+    monkeypatch.setattr(service, "_is_port_in_use", lambda url: False)
+    monkeypatch.setattr(service, "_trim_launchd_stdio", lambda: None)
+    monkeypatch.setattr(service, "_kill_now", lambda pid: None)
+    monkeypatch.setattr(service, "_terminate", lambda pid, grace=6.0: None)
+
+    seen: list[float] = []
+
+    def _fake_wait(deadline: float) -> bool:
+        seen.append(deadline)
+        return True
+
+    monkeypatch.setattr(service, "_wait_launchd_unload", _fake_wait)
+
+    t_start = time.time()
+    service._launchd_stop(_cfg(), pretty=False)
+
+    assert seen, "未就绪 + 端口已绑必须走「等卸载」"
+    # 锚点在入口：deadline 距调用开始不超过预算（+容差），说明探活的 0.03s 已折进去
+    assert seen[0] - t_start <= service._STOP_BUDGET_S + 0.01, seen[0] - t_start

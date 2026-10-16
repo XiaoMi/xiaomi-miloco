@@ -97,6 +97,7 @@ async def run_gate(
         hold_opened_window=hold_opens_window,
         video_intra_score=visual.intra_max,
         video_cross_score=visual.cross_max,
+        checked_frame_count=visual.checked_frame_count,
     )
 
     if not any_pass and not hold_opens_window:

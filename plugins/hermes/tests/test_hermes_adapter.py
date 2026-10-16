@@ -488,3 +488,163 @@ def _fake_ctx(text: str, trace_id: str = "tr-test", lane: str = "miloco-interact
     ctx.profile = "minimal"
     ctx.extra = {}
     return ctx
+
+# ---------------------------------------------------------------------------
+# read_trace_meta
+# ---------------------------------------------------------------------------
+
+
+def _write_meta(trace_dir: Path, day: str, query: str) -> None:
+    day_dir = trace_dir / day
+    day_dir.mkdir(parents=True, exist_ok=True)
+    (day_dir / f"run__{query}.meta.json").write_text(
+        json.dumps({"query": query, "duration_ms": 1, "llm_call_count": 1}), encoding="utf-8",
+    )
+
+
+@pytest.mark.anyio
+async def test_read_trace_meta_matches_today_and_yesterday(tmp_path: Path, monkeypatch):
+    """UTC 当天与昨天的 meta 都要能反查到。"""
+    import datetime as dt
+
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter
+
+    now = dt.datetime(2026, 10, 15, 2, tzinfo=dt.timezone.utc)
+
+    class FixedDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    monkeypatch.setattr(dt, "datetime", FixedDateTime)
+    _write_meta(tmp_path, "20261015", "今天的问题")
+    _write_meta(tmp_path, "20261014", "昨天的问题")
+
+    a = Adapter(trace_dir=tmp_path)
+    a._pending_texts["run-today"] = "今天的问题"
+    a._pending_texts["run-yesterday"] = "昨天的问题"
+
+    assert (await a.read_trace_meta("run-today")).query == "今天的问题"
+    assert (await a.read_trace_meta("run-yesterday")).query == "昨天的问题"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "instant,reader_zone,writer_zone,expected_day",
+    [
+        ("2026-10-15T16:30:00+00:00", "UTC", "Asia/Shanghai", "20261016"),
+        ("2026-10-15T10:30:00+00:00", "Etc/GMT+12", "Pacific/Kiritimati", "20261016"),
+        ("2026-10-15T10:30:00+00:00", "Pacific/Kiritimati", "Etc/GMT+12", "20261014"),
+    ],
+)
+async def test_read_trace_meta_across_process_timezones(
+    tmp_path: Path, monkeypatch, instant, reader_zone, writer_zone, expected_day,
+):
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from miloco_plugin_pkg import trace
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter
+
+    now = dt.datetime.fromisoformat(instant)
+
+    class ReaderDate(dt.date):
+        @classmethod
+        def today(cls):
+            return now.astimezone(ZoneInfo(reader_zone)).date()
+
+    class ReaderDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return now.astimezone(tz)
+            return now.astimezone(ZoneInfo(reader_zone)).replace(tzinfo=None)
+
+    class WriterDateTime(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not None:
+                return now.astimezone(tz)
+            return now.astimezone(ZoneInfo(writer_zone)).replace(tzinfo=None)
+
+    monkeypatch.setenv("MILOCO_HOME", str(tmp_path))
+    monkeypatch.setattr(dt, "date", ReaderDate)
+    monkeypatch.setattr(dt, "datetime", ReaderDateTime)
+    monkeypatch.setattr(trace, "datetime", WriterDateTime)
+    state = trace._TurnState(int(now.timestamp() * 1000))
+    state.query = "timezone probe"
+    trace._flush_to_disk("miloco:timezone:rule", state, True)
+    trace_dir = tmp_path / "trace" / "agent"
+    assert list((trace_dir / expected_day).glob("*.meta.json"))
+
+    adapter = Adapter(trace_dir=trace_dir)
+    adapter._pending_texts["run-timezone"] = state.query
+    meta = await adapter.read_trace_meta("run-timezone")
+    assert meta is not None
+    assert meta.query == "timezone probe"
+    assert meta.success is True
+    assert "run-timezone" not in adapter._pending_texts
+
+
+@pytest.mark.anyio
+async def test_read_trace_meta_ignores_old_day_dirs(tmp_path: Path):
+    """历史目录不参与高频轮询。"""
+    from datetime import datetime, timedelta
+
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter
+
+    _write_meta(tmp_path, (datetime.now() - timedelta(days=30)).strftime("%Y%m%d"), "上个月的问题")
+
+    a = Adapter(trace_dir=tmp_path)
+    a._pending_texts["run-old"] = "上个月的问题"
+    assert await a.read_trace_meta("run-old") is None
+
+
+# ---------------------------------------------------------------------------
+# suggest 车道会话策略
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_suggest_lane_reuses_persistent_session(monkeypatch):
+    """suggest 车道与其他车道一样复用持久会话——同 (session_key, lane) 恒定 session id。"""
+    from miloco_plugin_pkg.hermes_adapter.adapter import Adapter
+    import httpx
+
+    seen: list[str] = []
+
+    async def fake_post(self, url, headers=None, **kw):
+        seen.append((headers or {}).get("X-Hermes-Session-Id"))
+        resp = mock.MagicMock()
+        resp.status_code = 200
+        return resp
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "aclose", mock.AsyncMock())
+
+    a = Adapter()
+    for _ in range(2):
+        ctx = _fake_ctx("有个建议", lane="miloco-suggest")
+        ctx.session_key = "agent:main:miloco-suggest"
+        await a.send_turn(ctx)
+
+    assert seen == ["miloco:agent:main:miloco-suggest:miloco-suggest"] * 2
+
+
+@pytest.mark.anyio
+async def test_reset_sessions_covers_suggest_lane(monkeypatch):
+    """切家庭要能清掉 suggest 会话，否则上一个家的对话历史留在里面。"""
+    from miloco_plugin_pkg.hermes_adapter import adapter as ad
+
+    deleted: list[str] = []
+    monkeypatch.setattr(
+        ad, "_delete_hermes_session", lambda sid, timeout=15.0: deleted.append(sid) or True,
+    )
+
+    a = ad.Adapter()
+    out = await a.reset_sessions([
+        ("agent:main:miloco-rule", "miloco-rule"),
+        ("agent:main:miloco-suggest", "miloco-suggest"),
+    ])
+    assert "miloco:agent:main:miloco-suggest:miloco-suggest" in deleted
+    assert len(out["reset"]) == 2

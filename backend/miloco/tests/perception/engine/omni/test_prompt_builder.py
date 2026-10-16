@@ -284,6 +284,156 @@ class TestBuildQueryPrompt:
         assert "study-room" not in payload["system_prompt"]
 
 
+class TestQueryPersonGrounding:
+    """查询的人名、定位与历史线索须服从实际提供的画面。"""
+
+    @staticmethod
+    def _packet(pid="member", bbox=(100, 100, 400, 900), *, verify=False, suppress=False, color=60):
+        ep = _mock_edge_packet()
+        ep.targets = [IdentityTarget(
+            type=ObjectType.HUMAN_WITH_FACE, person_id=pid, track_id=7,
+            needs_omni_verify=verify, suppress_as_prior=suppress,
+            box_info=[], bbox_xyxy_norm=bbox,
+        )]
+        ep.all_frames = [np.full((100, 100, 3), color, dtype=np.uint8)]
+        return ep
+
+    @staticmethod
+    def _assert_policy(payload):
+        sp = payload["system_prompt"]
+        assert "直接输出自然语言答案" in sp
+        policy = sp.split("# 人物在场与称呼\n", 1)[1].split("# 通用常识", 1)[0]
+        assert "名册姓名 / bbox 是定位线索，不代表当前有人" in policy
+        assert "椅子、家具、衣物及人体误检框均不算人" in policy
+        assert "只据本轮提供的视频判断" in policy
+        assert "家庭档案和问题里的人名都不证明本轮有人" in policy
+        assert "只有画面确认给出的 bbox 对应真人、且该条为已确认成员线索时，才可沿用对应姓名" in policy
+        assert "视频最后一帧的位置，坐标归一化到 [0, 1000]" in policy
+        assert "确认有人但无法对应姓名时用“某人 / 陌生人”" in policy
+        assert "不把 ID 当人名输出" in policy
+        assert "不从家庭档案、历史描述或问题里给未确认身份的目标补姓名" in policy
+        assert "背影、侧身、局部、遮挡或模糊的真人仍算有人" in policy
+        assert "分不清是人还是物时说明“无法确认”，不得据此断言无人" in policy
+        assert "本轮未提供有效视频的设备不能用于确认当前人员" in policy
+        assert "不把其他机位的检测结果当作可见事实" in policy
+        assert "identities" not in sp
+        assert "caption" not in sp
+        assert "matched_rules" not in sp
+        assert payload["crops"] == []
+
+    def _build(self, packets, last_caption=None):
+        with (
+            patch("miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix", return_value=""),
+            patch("miloco.perception.engine.omni.prompt_builder._effective_panorama_short_edge", return_value=128),
+        ):
+            payload = build_query_prompt(
+                packets, "当前画面里是谁？", last_caption,
+                {"member": "当前成员", "other": "其他机位成员"},
+            )
+        self._assert_policy(payload)
+        return payload
+
+    @pytest.mark.parametrize("pid,bbox,verify,suppress,authorized", [
+        ("member", (100, 100, 400, 900), False, False, True),
+        ("member", None, False, False, False),
+        ("member", (100, 100, 400, 900), True, False, False),
+        ("member", (100, 100, 400, 900), False, True, False),
+        ("pending", (100, 100, 400, 900), False, False, False),
+        ("pending:member", (100, 100, 400, 900), False, False, False),
+        ("none", (100, 100, 400, 900), False, False, False),
+        ("", (100, 100, 400, 900), False, False, False),
+        ("unknown", (100, 100, 400, 900), False, False, False),
+        ("unknown_1", (100, 100, 400, 900), False, False, False),
+        ("unknown-scope-1", (100, 100, 400, 900), False, False, False),
+    ])
+    def test_name_requires_current_position_and_stable_identity(self, pid, bbox, verify, suppress, authorized):
+        ep = self._packet(pid, bbox, verify=verify, suppress=suppress)
+        payload = self._build([ep])
+        text = payload["user_content"]
+        assert payload["video_base64"]
+        assert "检测定位线索（不代表当前有人）" in text
+        assert ("当前成员" in text) is authorized
+        assert ("已确认成员线索：当前成员[bbox=(100, 100, 400, 900)]" in text) is authorized
+        assert ("不提供可沿用的身份标签" in text) is (not authorized)
+        assert "pending" not in text
+        assert "unknown" not in text
+        assert ep.targets[0].person_id == pid
+
+    @staticmethod
+    def _video_color(payload):
+        import base64
+        import io
+
+        import av
+
+        with av.open(io.BytesIO(base64.b64decode(payload["video_base64"]))) as video:
+            frames = list(video.decode(video=0))
+        assert frames
+        return float(np.mean(frames[-1].to_ndarray(format="bgr24")))
+
+    @pytest.mark.parametrize("first_has_frames", [True, False])
+    def test_only_encoded_camera_can_supply_names_and_history(self, first_has_frames):
+        first = self._packet(color=40)
+        second = self._packet("other", color=210)
+        if not first_has_frames:
+            first.all_frames = []
+        payload = self._build([first, second], "旧场景中的历史姓名")
+        text = payload["user_content"]
+        assert ("当前成员" in text) is first_has_frames
+        assert ("其他机位成员" in text) is (not first_has_frames)
+        assert text.count("已确认成员线索：") == 1
+        assert "本轮未提供该设备视频，不据其检测结果判断当前人物" in text
+        assert ("上一窗场景参考（仅历史，不证明本轮事实）：旧场景中的历史姓名" in text) is first_has_frames
+        assert ("旧场景中的历史姓名" in text) is first_has_frames
+        assert abs(self._video_color(payload) - (40 if first_has_frames else 210)) < 8
+
+    def test_source_follows_successful_encoding_not_frame_presence(self):
+        import miloco.perception.engine.omni.prompt_builder as builder
+
+        first = self._packet(color=40)
+        second = self._packet("other", color=210)
+        real_encode = builder._encode_video
+
+        def reject_first(packet, short_edge):
+            return (None, None) if packet is first else real_encode(packet, short_edge=short_edge)
+
+        with patch.object(builder, "_encode_video", side_effect=reject_first):
+            payload = self._build([first, second], "首镜头的历史姓名")
+        assert "当前成员" not in payload["user_content"]
+        assert "其他机位成员" in payload["user_content"]
+        assert "首镜头的历史姓名" not in payload["user_content"]
+        assert abs(self._video_color(payload) - 210) < 8
+
+    @pytest.mark.parametrize("has_packets", [False, True])
+    def test_no_video_does_not_supply_names_or_history(self, has_packets):
+        ep = self._packet()
+        ep.all_frames = []
+        payload = self._build([ep] if has_packets else [], "历史成员仍坐着")
+        assert payload["video_base64"] is None
+        text = payload["user_content"]
+        assert "本轮未提供有效视频，无法确认当前人员或场景" in text
+        assert "当前成员" not in text
+        assert "历史成员仍坐着" not in text
+        assert "已确认成员线索" not in text
+
+    def test_no_detections_does_not_assert_empty_scene(self):
+        ep = self._packet()
+        ep.targets = []
+        payload = self._build([ep])
+        assert payload["video_base64"]
+        assert "未检测到目标（不代表画面无人）" in payload["user_content"]
+
+    def test_empty_video_result_does_not_authorize_identity_metadata(self):
+        import miloco.perception.engine.omni.prompt_builder as builder
+
+        with patch.object(builder, "_encode_video", return_value=("", None)):
+            payload = self._build([self._packet()], "历史成员仍坐着")
+        assert not payload["video_base64"]
+        assert "本轮未提供有效视频" in payload["user_content"]
+        assert "当前成员" not in payload["user_content"]
+        assert "历史成员仍坐着" not in payload["user_content"]
+
+
 class TestDeviceHeaderRoster:
     """_build_device_header：名册按身份分桶（已识别人物 / 陌生人），含归一化位置，
     pending/未识别剔除，candidate_tids（本窗重审）剔除以去身份先验。"""
@@ -386,10 +536,12 @@ class TestDeviceHeaderRoster:
         ep_empty = self._packet([self._target(1, "pending", (1, 2, 3, 4))])
         assert all("归一化到 [0, 1000]" not in ln
                    for ln in _build_device_header([ep_empty], label_lookup={}))
-        # 有 bbox 的成员 → 末尾一句说明
+        # 有 bbox 的成员 → 坐标系说明句 + 紧随其后的定位语义句
         ep_bbox = self._packet([self._target(1, "pid-x", (1, 2, 3, 4))])
         lines = _build_device_header([ep_bbox], label_lookup={"pid-x": "王五"})
-        assert "归一化到 [0, 1000]" in lines[-1]
+        assert any("归一化到 [0, 1000]" in ln for ln in lines)
+        # 名册是定位线索,不是"当前有人"的断言 —— 空椅人体误检被名册安上姓名即由此而来
+        assert any("不得沿用姓名" in ln for ln in lines)
 
 
 class TestFormatTrackLine:
@@ -573,16 +725,67 @@ class TestNoMediaBlockWarning:
         assert "route=audio" in msg
         assert "room=厨房" in msg
 
+    def test_fused_audio_unencodable_marks_encode_failure_diagnostics(self):
+        """fused audio route 编不出媒体块 → 图中不会出现 encode 未知 + request OK。"""
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.flow_context import flow_diagnostics_scope
+
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
+        ep = _audio_only_packet()
+        ep.audio_clip = np.zeros(512, dtype=np.int16)  # < 一个 AAC 帧 → 编不出
+
+        with flow_diagnostics_scope(diagnostics):
+            build_fused_payload(
+                packets=[ep],
+                context=OmniContext(room_name="厨房"),
+                candidates=[],
+                gallery_snapshot={},
+            )
+
+        assert diagnostics.media_encode_status.value == "error"
+        assert diagnostics.omni_request_status.value == "skipped"
+
+    def test_batch_audio_unencodable_marks_encode_failure_diagnostics(self):
+        """batch audio route 编不出媒体块 → 同样标记 encode ERROR + request SKIPPED。"""
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+        from miloco.perception.engine.omni.prompt_builder import build_batch_prompt
+        from miloco.perception.flow_context import flow_diagnostics_scope
+
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
+        ep = _audio_only_packet()
+        ep.audio_clip = np.zeros(512, dtype=np.int16)
+
+        with flow_diagnostics_scope(diagnostics):
+            build_batch_prompt(
+                identity_packets=[ep],
+                context=OmniContext(room_name="厨房"),
+            )
+
+        assert diagnostics.media_encode_status.value == "error"
+        assert diagnostics.omni_request_status.value == "skipped"
+
     def test_query_route_warns_when_video_unencodable(self, caplog):
         """query 路径拼不出 video 块 → 打 warning。
 
-        query 只有 video 一个媒体块，拼不出就是纯文本问模型「现在怎么样」，而 prompt 里
-        还带着上一窗的 last_caption —— 用户直接读到没有本窗画面依据的现场描述。
+        query 拼不出有效视频时须保留可观测 warning，人物线索的隔离由查询护栏另测。
         """
         from miloco.perception.engine.omni.prompt_builder import build_query_prompt
 
         ep = _mock_edge_packet()
-        ep.all_frames = []  # _encode_batch_video 拿不到帧 → (None, None)
+        ep.all_frames = []  # 没有可编码的视频帧
 
         with caplog.at_level("WARNING"):
             payload = build_query_prompt([ep], "厨房现在怎么样")
@@ -664,6 +867,85 @@ class TestFusedAudioRoute:
         types = [b["type"] for b in user_blocks]
         assert "video_url" in types
         assert "input_audio" not in types
+
+
+class TestFusedVideoBlockSkipped:
+    """fused video route 拼出不可用 video 块(过短/为空)时必须留痕——与音频侧
+    ``record_audio_encode_failure`` 同口径,图中不能出现 encode OK + request OK。"""
+
+    def test_fused_video_b64_too_short_marks_block_skipped(self, monkeypatch, caplog):
+        """编码产出过短 b64 → video 块被跳过、text-only。
+
+        PyAV 编码异常可能返回非空但损坏的极短 base64 串(< _MIN_VIDEO_B64_LEN),
+        入 payload 会让 omni 服务端 400,故走 skip。模型本窗没收到画面,排查
+        「描述与实际画面不符」时图必须指向 encode ERROR 而非假全绿。
+        """
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+        from miloco.perception.engine.omni import prompt_builder
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.flow_context import flow_diagnostics_scope
+
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
+        monkeypatch.setattr(
+            prompt_builder,
+            "_encode_batch_video",
+            lambda packets, short_edge=0: (b"c2hvcnQ=", None),  # 7 字符 < 1000
+        )
+
+        with flow_diagnostics_scope(diagnostics), caplog.at_level("WARNING"):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()],
+                context=OmniContext(room_name="厨房"),
+                candidates=[],
+                gallery_snapshot={},
+            )
+
+        assert diagnostics.media_encode_status.value == "error"
+        assert diagnostics.omni_request_status.value == "skipped"
+        types = [b["type"] for b in _multimodal_user_content(fused["messages"])]
+        assert "video_url" not in types
+        assert any(
+            "fused_video_b64_too_short" in r.getMessage() for r in caplog.records
+        )
+
+    def test_fused_video_empty_marks_block_skipped(self, monkeypatch):
+        """编码产出为空 → video 块整个消失,同样标记 encode ERROR + request SKIPPED。"""
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+        from miloco.perception.engine.omni import prompt_builder
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+        from miloco.perception.flow_context import flow_diagnostics_scope
+
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
+        monkeypatch.setattr(
+            prompt_builder,
+            "_encode_batch_video",
+            lambda packets, short_edge=0: (None, None),
+        )
+
+        with flow_diagnostics_scope(diagnostics):
+            fused = build_fused_payload(
+                packets=[_video_route_packet()],
+                context=OmniContext(room_name="厨房"),
+                candidates=[],
+                gallery_snapshot={},
+            )
+
+        assert diagnostics.media_encode_status.value == "error"
+        assert diagnostics.omni_request_status.value == "skipped"
+        types = [b["type"] for b in _multimodal_user_content(fused["messages"])]
+        assert "video_url" not in types
 
 
 class TestFusedPetRefs:
@@ -1259,6 +1541,214 @@ class TestSpeechFieldsGatedByVAD:
         assert self._SPEECH_LIT in sp
 
 
+class TestAudioObservationDestinations:
+    """音频观察的落点与本轮可用字段一致，人物在场仍由画面确认。"""
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize(
+        ("has_audio", "has_speech"),
+        [(True, True), (True, False), (False, True), (False, False)],
+    )
+    def test_video_audio_observations_follow_available_fields(self, has_audio, has_speech, stream):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+
+        sp = build_system_prompt(
+            SceneDescriptor(route="video", has_audio=has_audio, has_speech=has_speech, stream=stream),
+            include_home_profile=False,
+        )
+        speech_destination = "听到的话 / 声音只如实写进 speeches / env_sounds"
+        environment_destination = "听到的声音只如实写进 env_sounds"
+        assert (speech_destination in sp) is (has_audio and has_speech)
+        assert (environment_destination in sp) is (has_audio and not has_speech)
+        assert "不代表当前有人" in sp
+
+
+class TestPersonNamingPolicy:
+    """真实装配入口须保留名册命名条件、候选独立性与人物否证出口。"""
+
+    @staticmethod
+    def _assert_visual_policy(sp, has_candidates):
+        assert "只有画面确认名册 bbox 对应真人" in sp
+        assert "且该名册项不在本轮待识别 track 中，才可沿用其姓名" in sp
+        assert "无法对应或未确认有人，不得沿用名册姓名" in sp
+        assert "本轮有待识别 track 时，该目标的姓名只用本轮 identities 结果" in sp
+        assert "unknown / 没给出 → 不得安成员名，画面确认有人时按对应字段要求使用泛称" in sp
+        assert "no_person → 不据该框描述人物或动作" in sp
+        assert "不得借名册覆盖该结果" in sp
+        assert "规则点名的人未确认在场或姓名无依据则不成立" in sp
+        assert "matched_rules 与 suggestions 的结论都不得与 caption 相矛盾" in sp
+        assert "caption 写锅静置就不能判“在加热”" in sp
+        assert "caption 认定是小明就不能当成小红" in sp
+        assert ('"identities"' in sp) is has_candidates
+        assert ("## identities\n" in sp) is has_candidates
+        assert ("名册项不重判、不补进 identities" in sp) is has_candidates
+        assert ("在其余输出字段中禁用该姓名及其人物结论" in sp) is has_candidates
+
+        caption = sp.split("## caption\n", 1)[1].split("\n## ", 1)[0]
+        rules = sp.split("## matched_rules\n", 1)[1].split("\n## ", 1)[0]
+        suggestions = sp.split("## suggestions\n", 1)[1].split("\n## ", 1)[0]
+        assert "画面确认后的非待识别名册姓名" in caption
+        assert "该目标本轮 identities 判出的姓名" in caption
+        assert "按总原则确认在场及姓名来源" in rules
+        assert "人物称呼遵守总原则" in suggestions
+        assert "按同一授权确认该成员姓名及在场" in suggestions
+        assert "涉及人物只用本轮 identities" not in caption
+        assert "指称画面里的人只用本轮 identities" not in suggestions
+        assert "须 identities 已确认该成员在场" not in suggestions
+
+    @pytest.mark.parametrize("has_audio,has_speech", [(True, True), (True, False), (False, False)])
+    @pytest.mark.parametrize("identity_mode", ["none", "match", "no-match"])
+    def test_fused_roster_and_candidate_naming_scopes(self, has_audio, has_speech, identity_mode):
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        ep = _video_packet(audio_active=has_audio, speech_active=has_speech)
+        ep.targets = [
+            TestDeviceHeaderRoster._target(1, "stable", (100, 100, 400, 900)),
+            TestDeviceHeaderRoster._target(2, "recheck", (500, 100, 900, 900)),
+        ]
+        has_candidates = identity_mode != "none"
+        candidates = [IdentityQueryItem(track_id=2, bbox_xyxy_norm=(500, 100, 900, 900))] if has_candidates else []
+        context = OmniContext(
+            per_camera_crop_enabled=False,
+            rule_conditions=[RuleCondition(rule_id="member_pc", rule_name="成员用电脑", query="稳定成员正在使用电脑")],
+        )
+        with patch("miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix", return_value=""):
+            fused = build_fused_payload(
+                packets=[ep], context=context, candidates=candidates, gallery_snapshot={},
+                label_lookup={"stable": "稳定成员", "recheck": "重核旧名"},
+                matching_moot=identity_mode == "no-match",
+            )
+        self._assert_visual_policy(fused["messages"][0]["content"], has_candidates)
+        main = _multimodal_user_content(fused["messages"])
+        text = "\n".join(b.get("text", "") for b in main if b.get("type") == "text")
+        assert "稳定成员[bbox=(100, 100, 400, 900)]" in text
+        assert ("重核旧名" in text) is (not has_candidates)
+        assert fused["candidate_track_ids"] == ([2] if has_candidates else [])
+
+    @pytest.mark.parametrize("has_audio,has_speech", [(True, True), (True, False), (False, False)])
+    def test_stream_roster_uses_same_naming_policy(self, has_audio, has_speech):
+        ep = _video_packet(audio_active=has_audio, speech_active=has_speech)
+        with patch("miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix", return_value=""):
+            payload = build_stream_prompt(ep, OmniContext())
+        self._assert_visual_policy(payload["system_prompt"], has_candidates=False)
+
+    def test_audio_only_does_not_authorize_visual_roster_names(self):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+
+        sp = build_system_prompt(SceneDescriptor(route="audio"), include_home_profile=False)
+        assert "名册 bbox 对应真人" not in sp
+        assert "名册项不在本轮待识别 track" not in sp
+        assert '"caption"' not in sp
+
+
+class TestSpeakerNamingPolicy:
+    """speaker 姓名沿用同一授权，还须看到对应的人正在说话。"""
+
+    @staticmethod
+    def _video_prompt(entry):
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        ep = _video_packet(audio_active=True, speech_active=True)
+        ep.targets = [TestDeviceHeaderRoster._target(1, "stable", (100, 100, 400, 900))]
+        context = OmniContext(per_camera_crop_enabled=False)
+        with patch("miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix", return_value=""):
+            if entry == "stream":
+                payload = build_stream_prompt(ep, context, label_lookup={"stable": "登记成员"})
+                sp, text = payload["system_prompt"], payload["user_content"]
+            else:
+                candidates = [IdentityQueryItem(track_id=2, bbox_xyxy_norm=(500, 100, 900, 900))] if entry == "fused-candidate" else []
+                payload = build_fused_payload(
+                    packets=[ep], context=context, candidates=candidates, gallery_snapshot={},
+                    label_lookup={"stable": "登记成员"},
+                )
+                sp = payload["messages"][0]["content"]
+                text = "\n".join(b.get("text", "") for b in _multimodal_user_content(payload["messages"]) if b.get("type") == "text")
+        assert "登记成员[bbox=(100, 100, 400, 900)]" in text
+        return sp
+
+    @pytest.mark.parametrize("entry", ["fused-roster", "fused-candidate", "stream"])
+    def test_visible_video_speaker_uses_authorized_name(self, entry):
+        sp = self._video_prompt(entry)
+        speeches = sp.split("## speeches\n", 1)[1].split("\n## ", 1)[0]
+        assert "且其姓名可按总原则确认" in speeches
+        assert "本轮 identities 判出的姓名，或画面确认后的非待识别名册姓名" in speeches
+        assert "画面里看到对应的人正在说话（嘴动/说话姿态）" in speeches
+        assert '否则填"未知"' in speeches
+        assert "不凭声音猜、不从 <gallery> 或家庭档案取名" in speeches
+        assert "且该名册项不在本轮待识别 track 中，才可沿用其姓名" in sp
+        assert "unknown / 没给出 → 不得安成员名" in sp
+        assert "不得借名册覆盖该结果" in sp
+        assert "unknown / 没给出 → 画面确认有人时写“某人 / 陌生人”" not in sp
+
+    def test_identity_example_has_visual_speaker_evidence(self):
+        sp = self._video_prompt("fused-candidate")
+        assert "看到其嘴动说话，听到" in sp
+        assert '"speaker":"小明"' in sp
+
+    def test_audio_speaker_keeps_self_report_exception(self):
+        with patch("miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix", return_value=""):
+            sp = build_prompt(_audio_only_packet(), OmniContext())["system_prompt"]
+        speeches = sp.split("## speeches\n", 1)[1].split("\n## ", 1)[0]
+        assert 'speaker 一律填"未知"（除非本人在话里自报姓名）' in speeches
+        assert "不凭声音猜、不臆测姓名，也不从家庭档案取成员名" in speeches
+        assert "非待识别名册姓名" not in speeches
+        assert "画面里看到对应的人正在说话" not in speeches
+
+
+class TestNoPersonCriterion:
+    """完整与精简身份说明都须区分确认非人体、真人及无法辨别。"""
+
+    @pytest.mark.parametrize("matching_moot", [False, True])
+    @pytest.mark.parametrize("has_audio,has_speech", [(True, True), (True, False), (False, False)])
+    def test_fused_criterion_preserves_human_recall(self, matching_moot, has_audio, has_speech):
+        from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+        from miloco.perception.engine.omni.prompt_builder import build_fused_payload
+
+        with patch("miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix", return_value=""):
+            payload = build_fused_payload(
+                packets=[_video_packet(audio_active=has_audio, speech_active=has_speech)],
+                context=OmniContext(per_camera_crop_enabled=False),
+                candidates=[IdentityQueryItem(track_id=7, bbox_xyxy_norm=(100, 100, 200, 400), face_visible=False)],
+                gallery_snapshot={}, matching_moot=matching_moot,
+            )
+        sp = payload["messages"][0]["content"]
+        assert payload["candidate_track_ids"] == [7]
+        assert '"identities"' in sp
+        identities = sp.split("## identities\n", 1)[1].split("\n## ", 1)[0]
+        assert ("不做成员匹配" in identities) is matching_moot
+        assert ("本人正向吻合" in identities) is (not matching_moot)
+        criterion = identities.replace("name 填 ", "")
+        assert '明确有人（哪怕背影/侧身/局部/遮挡/模糊）→ "unknown"' in criterion
+        assert '能确认是非人体（包括椅子、椅背、头枕、扶手、衣物等，即使叫不出具体名称）→ "no_person"，纵使轮廓像人' in criterion
+        assert '分不清是人还是物 → "unknown"（保护真人召回，别把真人误判成没人）' in criterion
+
+
+class TestPrincipleHeading:
+    """字段委托到总原则时，所有模态都须有包含正文的同名段。"""
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize("route,has_audio,has_speech", [
+        ("audio", True, True), ("video", False, False),
+        ("video", True, False), ("video", True, True),
+    ])
+    def test_all_variants_have_named_principle_section(self, route, has_audio, has_speech, stream):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+
+        sp = build_system_prompt(
+            SceneDescriptor(route=route, has_audio=has_audio, has_speech=has_speech, stream=stream),
+            include_home_profile=False,
+        )
+        heading = "\n\n# 总原则\n\n"
+        assert sp.count(heading) == 1
+        principle, task = sp.split(heading, 1)[1].split("\n\n# 任务\n", 1)
+        assert principle.startswith("宁缺毋滥（贯穿所有字段的默认姿态）：")
+        assert "拿不准 → 一律不输出该字段或该条" in principle
+        assert "# 输出格式\n" in task
+        assert "# 字段说明\n" in task
+
+
 class TestPendingStitchPromptWording:
     """last_speech 续接：数据与 gate-first 判断指令捆在 user 段（实测正样本 6/6 拼对、
     多数无关句不乱拼）。锁住 prompt 形态：last_speech 块在 user 段、用"能否拼接"判断式、
@@ -1508,8 +1998,23 @@ class TestIdentityMatchDisabled:
             route="video", has_identity=True, has_audio=True, has_speech=True,
             identity_match_disabled=False))
         assert self._EXAMPLE_A_MARKER in out
-        # 库非空用带名版实例 B（专名由实例 A 的 gallery 铺垫），非泛称版
+        # 带名版实例 B 自带名册授权依据，不依赖实例 A 的铺垫。
         assert "小明坐在电脑前" in out
+        assert "非待识别名册项小明[bbox=" in out
+        assert "画面确认该框对应真人" in out
+
+    @pytest.mark.parametrize("has_speech", [False, True])
+    def test_roster_example_authorization_without_identity_example(self, has_speech):
+        from miloco.perception.engine.omni.field_registry import SceneDescriptor
+
+        sp = build_system_prompt(SceneDescriptor(
+            route="video", has_identity=False, has_audio=True, has_speech=has_speech,
+            identity_match_disabled=False), include_home_profile=False)
+        assert self._EXAMPLE_A_MARKER not in sp
+        example = sp.split("## 实例 B", 1)[1]
+        assert "非待识别名册项小明[bbox=" in example
+        assert "画面确认该框对应真人" in example
+        assert "小明坐在电脑前" in example
 
     def test_system_prompt_no_member_matching_leak_when_moot(self):
         """整类 catch-all：库空 system prompt 不得残留任何成员匹配内容（任务描述 /
@@ -1757,7 +2262,7 @@ class TestAdaptiveResolution:
     def test_candidate_bbox_outside_region_falls_back_whole_window(self):
         """候选 bbox 换算不出来 → **整窗**回退全景(all-or-nothing)。
 
-        与名册 bbox 的处置有意不同:名册 bbox 是先验,撤掉退化成"只给姓名不给位置"仍正确;
+        与名册 bbox 的处置有意不同:名册只撤去坐标,人物称呼仍由总原则限制;
         候选 bbox 是模型把 track_id 对到画面里某个人的**唯一定位锚**,撤掉后多 track 场景
         只能凭猜分配姓名 —— 错认代价比分辨率收益高一个量级。故不允许"裁了但候选无锚"的
         中间态,宁可整窗不裁。
@@ -2047,7 +2552,7 @@ class TestAdaptiveResolution:
                 assert "[bbox=(156, 208, 281, 458)]" in roster
             note = self._bbox_note(content)
             assert "最后一帧" in note
-            assert "视频里的人" in note
+            assert "不替代本轮画面对" in note  # bbox 是定位线索,不是"有人"的证据
             assert "全景参考图" not in note  # 参考图不再充当 bbox 锚点
 
     def test_bbox_note_emitted_for_candidate_only_bbox(self):
@@ -2069,6 +2574,22 @@ class TestAdaptiveResolution:
         assert "[bbox=" not in roster  # 名册侧确实一个 bbox 都没有
         assert "bbox=(100, 200, 300, 400)" in roster  # track 行带 bbox
         assert "最后一帧" in self._bbox_note(content)  # 说明句照发
+
+    def test_roster_disclaimer_not_duplicated_on_fused_path(self):
+        # 名册否证条件("名册是定位线索;bbox 若对应非人体…")与坐标系说明同门:fused 入口传
+        # emit_bbox_note=False,该判据由组合说明句出,整条 user 消息里只该出现一次。门一松、
+        # 或入口漏传该参数,同一条消息里就会出现两句近逐字相同的话 —— 白付 token,且同一
+        # 判据存两份,改一处忘一处即漂移。
+        # 断言走 build_fused_payload(真实入口):只调 _build_device_header 并显式传参的话,
+        # 入口漏传那个参数照样绿,守的就不是要守的东西。
+        member = _adaptive_packet(person_id="p-alice", bbox_xyxy_norm=self._SELF_CONSISTENT_BBOX)
+        # 显式关掉 crop:本条数的是措辞出现几次,坐标口径不参与。
+        p1, p2 = self._patches(user_enabled=False)
+        with p1, p2:
+            content = self._content(packet=member, candidates=[])
+        text = self._roster_text(content)
+        assert "已识别人物：p-alice[bbox=" in text  # 前置:名册确实带了 bbox,条件句该发
+        assert text.count("不得沿用姓名") == 1
 
     def test_ref_block_failure_drops_guidance_but_keeps_bbox(self):
         # 契约防御:_jpeg_block 抛错时,引导语与图块**同进同退**,不留悬空指代。
@@ -2399,13 +2920,59 @@ class TestAdaptiveResolution:
 
     def test_non_fused_never_crops(self):
         # 非 fused/legacy 路径不接 crop:即便 adaptive 全开,也恒走全景、crops 为空(零回归)。
+        from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
         from miloco.perception.engine.omni.prompt_builder import build_batch_prompt
+        from miloco.perception.flow_context import flow_diagnostics_scope
 
+        diagnostics = PerDeviceFlowDiagnostics(
+            device_id="camera-1",
+            room_name="Living Room",
+            trace_id="trace-1",
+            device_trace_id="device-trace-1",
+            observed_at=1,
+        )
         p1, p2 = self._patches()
-        with p1, p2:
+        with p1, p2, flow_diagnostics_scope(diagnostics):
             payload = build_batch_prompt([_adaptive_packet()], OmniContext())
         assert payload["crops"] == []
         assert payload.get("video_base64")
+        assert diagnostics.smart_crop_enabled is False
+        assert diagnostics.smart_crop_applied is False
+        assert diagnostics.crop_region is None
+
+
+def test_video_transform_status_requires_every_frame_to_resize():
+    import miloco.perception.engine.omni.prompt_builder as pb
+    from miloco.observability.perception_flow import PerDeviceFlowDiagnostics
+    from miloco.perception.flow_context import flow_diagnostics_scope
+
+    diagnostics = PerDeviceFlowDiagnostics(
+        device_id="camera-1",
+        room_name="Living Room",
+        trace_id="trace-1",
+        device_trace_id="device-trace-1",
+        observed_at=1,
+    )
+    frames = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(2)]
+
+    with (
+        flow_diagnostics_scope(diagnostics),
+        patch.object(
+            pb.cv2,
+            "resize",
+            side_effect=[frames[0], RuntimeError("resize failed")],
+        ),
+        pytest.raises(RuntimeError, match="resize failed"),
+    ):
+        list(pb._resize_video_frames(frames, 4, 4, pb.cv2.INTER_AREA))
+
+    assert diagnostics.media_transform_status.value == "unknown"
+
+    with flow_diagnostics_scope(diagnostics):
+        resized = list(pb._resize_video_frames(frames, 4, 4, pb.cv2.INTER_AREA))
+
+    assert len(resized) == 2
+    assert diagnostics.media_transform_status.value == "ok"
 
 
 # =============================================================================
@@ -2632,3 +3199,16 @@ class TestPersonCropInject:
         )
         assert imgs[-1] == guide + 1, _dbg     # 引导语紧跟的那张，仍是 video 前最后一张
         assert self._note_idx(content) < guide, _dbg  # 人像注入整段在引导语之前
+
+
+def test_video_resize_is_lazy_to_avoid_retaining_the_whole_window():
+    from unittest.mock import patch as _patch
+
+    import miloco.perception.engine.omni.prompt_builder as pb
+
+    frames = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(2)]
+    with _patch.object(pb.cv2, "resize", wraps=pb.cv2.resize) as spy:
+        resized = pb._resize_video_frames(frames, 4, 4, pb.cv2.INTER_AREA)
+        assert spy.call_count == 0
+        next(resized)
+        assert spy.call_count == 1

@@ -17,25 +17,14 @@ from miot.types import MIoTCameraCodec
 
 from miloco.manager import get_manager
 from miloco.miot.transcoder import H264LiveEncoder
+from miloco.utils.common import safe_log
+from miloco.utils.logger import cam_tag
 
 if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
-
-
-def _safe_log(value) -> str:
-    """去 CR/LF 防 log injection (CodeQL py/log-injection)。
-
-    凡是来自请求/原生的值都要过一遍,不分类型——``channel`` 声明成 int 也照样被
-    报,污点还会传播;CodeQL 在 PR 上只对改动行报警。与 miot/router.py /
-    schedule/router.py / perception/events_service.py 的同名函数同款,本文件
-    不能反向 import router(router imports ws),故按既有惯例放本文件一份。
-    """
-    if value is None:
-        return "None"
-    return str(value).replace("\r", "").replace("\n", " ")
 
 
 class NalClipRecorder:
@@ -286,10 +275,10 @@ class _SubscriberSender:
         if exc is not None:
             logger.error(
                 "Sender task crashed, %s, %s, %s: %s",
-                _safe_log(self.camera_tag),
-                _safe_log(self.user_tag),
-                _safe_log(self.cid),
-                _safe_log(exc),
+                safe_log(self.camera_tag),
+                safe_log(self.user_tag),
+                safe_log(self.cid),
+                safe_log(exc),
             )
             self._crash_evict_task = asyncio.create_task(
                 self._die(f"sender crashed: {exc}")
@@ -309,9 +298,9 @@ class _SubscriberSender:
             if not self._drop_logged:
                 logger.warning(
                     "WebSocket send stalled, drop stale data, %s, %s, %s",
-                    _safe_log(self.camera_tag),
-                    _safe_log(self.user_tag),
-                    _safe_log(self.cid),
+                    safe_log(self.camera_tag),
+                    safe_log(self.user_tag),
+                    safe_log(self.cid),
                 )
                 self._drop_logged = True
             # 跳过控制消息,只淘汰最旧的数据帧
@@ -340,16 +329,16 @@ class _SubscriberSender:
         self.closed = True
         logger.warning(
             "WebSocket subscriber dead (%s), evict, %s, %s, %s",
-            reason,
-            _safe_log(self.camera_tag),
-            _safe_log(self.user_tag),
-            _safe_log(self.cid),
+            safe_log(reason),
+            safe_log(self.camera_tag),
+            safe_log(self.user_tag),
+            safe_log(self.cid),
         )
         try:
             await self._on_dead(self)
         except Exception:
             logger.exception(
-            "Evict dead subscriber failed, %s", _safe_log(self.camera_tag)
+            "Evict dead subscriber failed, %s", safe_log(self.camera_tag)
         )
 
     async def _run(self) -> None:
@@ -503,8 +492,8 @@ class MIoTVideoStreamManager:
         self._camera_reg_id[camera_tag] = reg_id
         self._camera_encoder[camera_tag] = H264LiveEncoder(gop=self._TRANSCODE_GOP)
         logger.info(
-            "Start video stream (transcode), %s.%d reg_id=%d",
-            camera_id, channel, reg_id,
+            "Start video stream (transcode), %s reg_id=%d",
+            cam_tag(camera_id, channel), reg_id,
         )
 
     async def resubscribe_camera(self, camera_id: str) -> None:
@@ -607,8 +596,8 @@ class MIoTVideoStreamManager:
         self._camera_codec.pop(camera_tag, None)
         self._camera_seen_keyframe.discard(camera_tag)
         logger.info(
-            "No connection, stop video stream, %s.%d",
-            camera_id, channel,
+            "No connection, stop video stream, %s",
+            cam_tag(camera_id, channel),
         )
 
     def _lock_for(self, camera_tag: str) -> asyncio.Lock:
@@ -678,10 +667,9 @@ class MIoTVideoStreamManager:
                 > self._CAMERA_CONNECT_COUNT_MAX
             ):
                 logger.warning(
-                    "Too many connections, %s.%d, %s, remove first connect",
-                    camera_id,
-                    channel,
-                    user_tag,
+                    "Too many connections, %s, %s, remove first connect",
+                    cam_tag(camera_id, channel),
+                    safe_log(user_tag),
                 )
                 _, stale = self._camera_connect_map[camera_tag][user_tag].popitem(
                     last=False
@@ -835,7 +823,7 @@ class MIoTVideoStreamManager:
         # fine, we still feed the recorder below; the WS encode path then
         # short-circuits since there are no clients to broadcast to.
         if not self._has_subscribers(camera_tag):
-            logger.error("No subscribers, %s.%d", did, channel)
+            logger.error("No subscribers, %s", cam_tag(did, channel))
             return
 
         # Fan-out the raw BGR frame to any attached clip recorders BEFORE
@@ -982,9 +970,8 @@ class MIoTAudioStreamManager:
                     callback=self.__audio_stream_callback,
                 )
                 logger.info(
-                    "Start audio stream, %s.%s",
-                    _safe_log(camera_id),
-                    _safe_log(channel),
+                    "Start audio stream, %s",
+                    cam_tag(camera_id, channel),
                 )
             user_tag = f"{user_name}.{token_hash}"
             self._camera_connect_map[camera_tag].setdefault(user_tag, OrderedDict())
@@ -1007,10 +994,9 @@ class MIoTAudioStreamManager:
                 > self._CAMERA_CONNECT_COUNT_MAX
             ):
                 logger.warning(
-                    "Too many audio connections, %s.%s, %s, remove first",
-                    _safe_log(camera_id),
-                    _safe_log(channel),
-                    _safe_log(user_tag),
+                    "Too many audio connections, %s, %s, remove first",
+                    cam_tag(camera_id, channel),
+                    safe_log(user_tag),
                 )
                 _, stale = self._camera_connect_map[camera_tag][user_tag].popitem(
                     last=False
@@ -1033,9 +1019,9 @@ class MIoTAudioStreamManager:
                 )
             logger.info(
                 "New audio stream connection, %s, %s, %s",
-                _safe_log(camera_tag),
-                _safe_log(user_tag),
-                _safe_log(connection_id),
+                safe_log(camera_tag),
+                safe_log(user_tag),
+                safe_log(connection_id),
             )
             return connection_id
 
@@ -1112,9 +1098,9 @@ class MIoTAudioStreamManager:
                 return
             logger.info(
                 "Close audio stream connection, %s, %s, %s",
-                _safe_log(camera_tag),
-                _safe_log(user_tag),
-                _safe_log(cid),
+                safe_log(camera_tag),
+                safe_log(user_tag),
+                safe_log(cid),
             )
             sender = self._camera_connect_map[camera_tag][user_tag].pop(cid)
             sender.cancel()
@@ -1130,9 +1116,8 @@ class MIoTAudioStreamManager:
                 self._camera_connect_map.pop(camera_tag)
                 self._camera_init_done.discard(camera_tag)
                 logger.info(
-                    "No connection, stop audio stream, %s.%s",
-                    _safe_log(camera_id),
-                    _safe_log(channel),
+                    "No connection, stop audio stream, %s",
+                    cam_tag(camera_id, channel),
                 )
 
     async def __audio_stream_callback(
@@ -1151,7 +1136,7 @@ class MIoTAudioStreamManager:
             async with self._lock_for(camera_tag):
                 if camera_tag not in self._camera_connect_map:
                     logger.error(
-                        "No connection, %s.%s", _safe_log(did), _safe_log(channel)
+                        "No connection, %s", cam_tag(did, channel)
                     )
                     await manager.miot_service.stop_audio_stream(did, channel)
                     return

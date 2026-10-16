@@ -176,7 +176,7 @@ async def create_cron(
     logger.info(
         "cron created - user=%s cron_id=%s kind=%s task_id=%s",
         safe_log(current_user),
-        cron_id,
+        safe_log(cron_id),
         safe_log(req.kind),
         safe_log(req.task_id),
     )
@@ -285,7 +285,7 @@ def _toggle_enabled(cron_id: str, enabled: bool) -> NormalResponse:
                     logger.warning(
                         "apply_enabled_state failed for %s: %s",
                         safe_log(cron_id),
-                        e,
+                        safe_log(e),
                     )
     else:
         agent_pending.append(

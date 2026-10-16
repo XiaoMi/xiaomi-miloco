@@ -104,7 +104,9 @@ export function PerfKpiCards({ state, embedded = false }: Props) {
         sub={[
           {
             label: t("perf.kpiShouldProcess"),
-            value: (s.cycle_count + s.dropped_count).toLocaleString(),
+            value: (
+              s.processed_device_window_count + s.dropped_count
+            ).toLocaleString(),
           },
         ]}
       />

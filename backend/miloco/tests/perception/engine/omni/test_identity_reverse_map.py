@@ -17,10 +17,10 @@ PID = "8278c2c9-4c28-40f2-9c92-e501ecac349c"
 
 
 def _name_to_pid(name: str, role: str | None) -> dict[str, str]:
-    """复刻 omni.run_omni_fused 构造 name_to_pid 的方式：真名 / 角色 / 复合标签 / uuid 都做 key。"""
+    """构造解析器单测的别名输入。"""
     n2p: dict[str, str] = {}
     if role:
-        label = f"{name}(角色:{role})"  # = prompt_builder.format_person_label(name, role)
+        label = f"{name}(角色:{role})"
         n2p[label] = PID
     else:
         label = name
@@ -84,11 +84,7 @@ PID_B = "22222222-2222-4222-8222-222222222222"
 
 
 def _name_to_pid_multi(persons: list[tuple[str, str, str | None]]) -> dict[str, str]:
-    """复刻 omni 加 role 唯一性 guard 后的反查表构造（多 person）。
-
-    persons: [(pid, name, role), ...]。镜像 omni.run_omni_fused：真名 / 完整标签恒做 key，
-    role 仅在 library 全局唯一时才做 key（多人同角色则跳过，避免纯角色反查误命中）。
-    """
+    """构造含角色歧义的解析器单测输入：[(pid, name, role), ...]。"""
     n2p: dict[str, str] = {}
     role_counts = Counter(r for _, _, r in persons if r)
     for pid, name, role in persons:

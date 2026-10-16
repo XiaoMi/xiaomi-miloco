@@ -102,3 +102,45 @@ describe("UsageOmniConfig 引用的 usage.* key 均存在", () => {
     expect(enKeys.has(`usage.${key}`), `en 缺 usage.${key}`).toBe(true);
   });
 });
+
+/**
+ * 日志页(事件流 + 动作流 + 折叠件)引用的 actions.* key 均存在。
+ *
+ * 与上面那段同法,只是被扫的是日志页那几处源文件——**组件与 lib 都要算**:折叠的装配
+ * 与文案拼装有一半在 lib 里,只扫组件会漏掉那半,而漏掉的那半恰恰没有别的东西把守:
+ * 格式化延迟那组用例喂的是假 t、断言的是拼装结果,把单位键从 zh/en 一起删掉也不变红,
+ * 运行时却会原样渲染出键名。加它的理由:zh/en 对齐那段只比对两侧的**键集合**——两边
+ * 都缺同一个键时它照样绿,而界面会原样显示 `actions.badgeAria`。
+ * 组件的静态渲染测试能盖住渲染路径上取到的键,取不到的(查询失败、范围外 chip 这些
+ * 边角分支)只能靠扫源码。
+ *
+ * 只认带引号的字面量:`actions.push` 这种成员访问不是 key。源文件里的 key 全是
+ * 字面量(没有模板串拼 key),漏网的拼法会在下面那条「至少扫到一批」上先露馅。
+ */
+describe("日志页引用的 actions.* key 均存在", () => {
+  const SOURCES = [
+    "../src/components/ActivityFeed.tsx",
+    "../src/components/ActionsFeed.tsx",
+    "../src/components/FeedFold.tsx",
+    "../src/lib/actionText.ts",
+    "../src/lib/feedFold.ts",
+  ].map((f) => readFileSync(fileURLToPath(new URL(f, import.meta.url)), "utf8"));
+  const referenced = [
+    ...new Set(
+      SOURCES.flatMap((src) =>
+        [...src.matchAll(/["'`]actions\.([a-zA-Z0-9_]+)["'`]/g)].map((m) => `actions.${m[1]}`),
+      ),
+    ),
+  ];
+  const zhKeys = new Set(Object.keys(loadDomain("zh", "actions.json")));
+  const enKeys = new Set(Object.keys(loadDomain("en", "actions.json")));
+
+  it("至少扫到一批 key(防正则失效后静默放行)", () => {
+    expect(referenced.length).toBeGreaterThan(20);
+  });
+
+  it.each(referenced)("%s 在 zh 与 en 均有定义", (key) => {
+    expect(zhKeys.has(key), `zh 缺 ${key}`).toBe(true);
+    expect(enKeys.has(key), `en 缺 ${key}`).toBe(true);
+  });
+});

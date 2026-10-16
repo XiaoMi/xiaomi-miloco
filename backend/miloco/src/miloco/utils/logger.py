@@ -9,6 +9,8 @@ Provides warning capture and deprecation warning filters via the logging system.
 import logging
 import warnings
 
+from miloco.utils.common import safe_log
+
 # 过滤掉来自第三方依赖的警告
 SUPPRESSED_DEPRECATION_PATTERNS: list[str] = [
     "websockets.legacy is deprecated",
@@ -101,3 +103,25 @@ class ColoredFormatter(logging.Formatter):
             record.levelname = orig_levelname
             record.msg = orig_msg
             record.args = orig_args
+
+
+def cam_tag(camera_id: str, channel: int) -> str:
+    """把「相机 + 通道」拼成一个可入日志的标识。
+
+    这两个值在日志里总是成对出现、指的是同一路码流，拼一次比每处都写
+    ``%s.%d`` 整齐，也让格式串少一个占位符——而「数值占位符配上字符串实参」这种
+    会让整行日志在运行期被吞掉的错配，在结构上也就不可能发生了。顺带剥掉换行：
+    相机标识是路径参数、外部可控，而拼接之后就分不出哪一段来自请求，所以在这里剥
+    而不在各个日志点包。
+
+    剥换行那份实现在 :func:`miloco.utils.common.safe_log`，本函数只是它的一个
+    拼装调用方；接口层与服务层都要打这一对值，两边都从那里取。
+
+    落点必须是「导入了清洗函数」的模块，别因为「跟 safe_log 就近」把它搬进
+    :mod:`miloco.utils.common`：本函数按裸名字调用 ``safe_log``，而
+    ``test_oauth_error_shape`` 里那条「已在调用清洗函数的文件不许掉出扫描范围」
+    的护栏，拿「文件里确实调用了清洗函数」当地面真值、范围则由「从清洗落点导入过
+    它的文件」∪「定义了路由的文件」两半构成 —— 定义落点的那个模块自己既不导入、
+    也不定义路由，写在那里就成了一处护栏看不见的调用方。改落点前先读那条护栏。
+    """
+    return safe_log(f"{camera_id}.{channel}")

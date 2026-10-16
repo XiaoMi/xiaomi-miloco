@@ -69,8 +69,6 @@ def register(ctx) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.exception("注册 pre_llm_call (空 noop) 失败: %s", exc)
 
-    # ── trace hooks（6 事件：pre/post_llm_call + pre/post_tool_call + on_session_start/end） ──
-    # 对齐 OpenClaw trace.ts：debug 模式写 $MILOCO_HOME/trace/agent/<date>/*.jsonl.gz + .meta.json
     try:
         n = register_trace_hooks(ctx)
         logger.info("[miloco-trace] 已注册 %d 个 trace hooks", n)

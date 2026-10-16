@@ -7,13 +7,40 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
+from miloco.config import get_settings
 from miloco.middleware import verify_token
 from miloco.observability.metrics_db import connect
+from miloco.observability.perception_flow import (
+    build_perception_flow_graph,
+    get_perception_flow_process_started_at,
+    get_perception_flow_store,
+)
 from miloco.observability.stats import VIEWS as STATS_VIEWS
 
 router = APIRouter(dependencies=[Depends(verify_token)])
+
+
+@router.get("/api/perf/perception-flow")
+async def get_perception_flow(
+    device_id: str | None = Query(default=None, max_length=128),
+):
+    store = get_perception_flow_store()
+    if store is None:
+        raise HTTPException(503, "perception flow diagnostics unavailable")
+
+    stale_after_sec = max(
+        2 * get_settings().perception.collect.window_size,
+        30,
+    )
+    graph = build_perception_flow_graph(
+        store,
+        device_id=device_id,
+        stale_after_sec=stale_after_sec,
+        process_started_at=get_perception_flow_process_started_at(),
+    )
+    return graph.model_dump(by_alias=True)
 
 
 @router.get("/api/trace/{trace_id}")
@@ -145,6 +172,7 @@ def list_actions(
     did: str | None = None,
     action_type: str | None = None,
     home_id: str | None = None,
+    trigger_event_id: str | None = None,
     failed_only: int | None = None,
     limit: int = 50,
 ):
@@ -152,6 +180,10 @@ def list_actions(
 
     action_ledger 表落在 observability.db(与本 router 其余 endpoint 同库),故放这里。
     limit 默认 50,上限 500(与 device/actions CLI 的分页节奏对齐,防一次拉全表)。
+
+    ``trigger_event_id`` 取一条事件的整组动作:同一支的触发行与退出行携带同一个值,
+    故一次查询就拿到完整的一组。注意 limit 仍是这个上限——组比 limit 大时尾部会被截掉,
+    需要整组时显式放大(上限 500)。
     """
     limit = max(1, min(limit, 500))
     db_path = request.app.state.obs_db_path
@@ -176,6 +208,9 @@ def list_actions(
             # 严格等值会让历史台账在任何家的视图里都蒸发——宁可多显示不可丢审计。
             clauses.append("(home_id = ? OR home_id IS NULL)")
             params.append(home_id)
+        if trigger_event_id:
+            clauses.append("trigger_event_id = ?")
+            params.append(trigger_event_id)
         if failed_only:
             clauses.append("success = 0")
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""

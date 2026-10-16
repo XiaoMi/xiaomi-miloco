@@ -7,7 +7,9 @@
  */
 
 import * as realImpl from "./real";
+import type { BackendPropSpec } from "./real";
 import { apiFetch } from "./client";
+import { decodeGraphResponse } from "@/lib/graphDecode";
 import type {
   ActivityEvent,
   Device,
@@ -19,6 +21,7 @@ import type {
   ProcSeries,
   MemorySeries,
   MemorySnapshot,
+  MiotAuthorizeResult,
   MonitorMeta,
   PerceptionCamera,
   PerfBucket,
@@ -51,8 +54,11 @@ import type {
   OmniModelsResult,
   UpgradeCheck,
   UpgradeStatus,
+  GraphProtocolWarning,
+  GraphResponse,
 } from "@/lib/types";
 export type { ScopeHome };
+export type { BackendPropSpec };
 
 const impl: typeof realImpl = realImpl;
 
@@ -70,7 +76,7 @@ export async function bindMiot(): Promise<{ oauthUrl: string }> {
 export async function authorizeMiot(
   code: string,
   state: string,
-): Promise<void> {
+): Promise<MiotAuthorizeResult> {
   return impl.realAuthorizeMiot(code, state);
 }
 
@@ -318,6 +324,15 @@ export async function listDevices(homeId?: HomeId): Promise<Device[]> {
   return impl.realListDevices();
 }
 
+/** did → 该设备的 spec 表。日志页把台账里的 iid 翻成人话用。
+ *  与设备控制页共用同一个 /api/miot/home 取数与缓存，不额外拉每台设备的状态。 */
+export async function listDeviceSpecs(
+  homeId?: HomeId,
+): Promise<Map<string, Record<string, BackendPropSpec>>> {
+  if (!isPrimary(homeId)) return new Map();
+  return impl.realDeviceSpecs();
+}
+
 export async function controlDeviceProp(
   did: string,
   iid: string,
@@ -337,9 +352,11 @@ export async function triggerScene(id: string): Promise<void> {
 }
 
 // ── 活动 ──────────────────────────────────────────────────
+/** `opts.eventId` = 按主键单查一条事件(反查动作的宿主事件),命中即不看时间窗——
+ *  要反查的场景正是「这条事件已经翻出当前窗口了」。查不到返回空数组。 */
 export async function listActivity(
   homeId?: HomeId,
-  opts?: { since?: number; before?: number; limit?: number; offset?: number },
+  opts?: { since?: number; before?: number; limit?: number; offset?: number; eventId?: string },
 ): Promise<ActivityEvent[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListActivity(opts);
@@ -608,6 +625,21 @@ export async function dismissUpgrade(version: string): Promise<void> {
 
 // ── 性能 tab（observability）────────────────────────────
 // backend observability/router.py 不走 Normal 包装,直接返回原始 JSON。
+
+export interface PerceptionFlowResult {
+  graph: GraphResponse;
+  warnings: GraphProtocolWarning[];
+}
+
+export async function getPerceptionFlow(
+  deviceId?: string,
+): Promise<PerceptionFlowResult> {
+  const decoded = decodeGraphResponse(
+    await impl.realGetPerceptionFlow(deviceId),
+  );
+  if (!decoded.ok) throw new Error(decoded.error);
+  return { graph: decoded.graph, warnings: decoded.warnings };
+}
 
 const PERF_WINDOW_MS: Record<PerfWindow, number> = {
   "1h": 60 * 60_000,

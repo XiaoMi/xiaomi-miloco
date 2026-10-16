@@ -155,15 +155,17 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 
 **为什么用 DeepSORT**：纯 IoU 跟踪在多人遮挡、检测抖动时 track 容易死亡重建，导致同一人被分配多个 track_id，身份状态频繁重置。DeepSORT 引入 ReID 特征关联，跨帧关联更鲁棒，减少 IdentityEngine 反复发送重复识别请求。
 
-**per-device Omni 设计**：每个摄像头独立调一次 Omni，而非多摄像头合并。合并调用时，prompt 只携带首个摄像头的视频，其他摄像头的 track 无对应视觉信息，识别准确率低。
+**实时感知的 per-device Omni 设计**：每个摄像头独立调一次 Omni，而非多摄像头合并。合并调用时，prompt 只携带首个摄像头的视频，其他摄像头的 track 无对应视觉信息，识别准确率低。
 
 **Fused 模式**：将身份识别合并到主 Omni 调用中，省掉额外的识别请求。gallery 采用"全或无"语义：任一候选成员的图像合成失败，整 gallery 放弃，避免少一个人时 Omni 错认。
 
-**主动查询路径（on-demand）**：主动查询入口从实时流缓冲 peek 数据后跳过 Gate 直接走 Identity + Omni，不影响实时流水线。每次查询自动写入 `on_demand_log` 表（query/answer/sources/latency），并复用 `OmniEventArtifacts` + `save_event_artifacts` 把 clip 和 omni_trace 落到 `snapshots/{log_id}/`；omni 未响应时只落 trace、跳过 clip。clip 始终为 mp4（`build_query_prompt` 不走 audio-only 路径）。前端 Activity 页通过子 Tab 浏览查询日志、播放 clip、提交反馈（反馈打包见 [事件反馈](event-feedback.md)）。
+**成员姓名规则**：实时感知与主动查询共用 `identity/names.py` 的姓名判定与建表函数，空名或全空白姓名均视为无可用姓名，有效姓名保持原样。名册显示、身份反查与 gallery 回退遵守同一姓名判据；无名成员仍保留 UUID 与参考图，不因缺名就把非空身份库当作空库。角色唯一性继续按完整成员列表判断。主动查询读库失败时保留泛称回答约束，warning 仅记录异常类型，不附带异常消息或堆栈。
+
+**主动查询路径（on-demand）**：主动查询入口从实时流缓冲 peek 数据后跳过 Gate 直接走 Identity + Omni，不影响实时流水线。查询入口从共享身份库取一份姓名映射，透传到查询 prompt；缺名、身份库不可用或读取失败时保留泛称回答约束，不从家庭档案补名。查询以实际编码的单一机位为视觉范围，仅提供该机位当前定位可用、身份稳定的成员线索；姓名与 bbox 仍须由画面确认对应真人后才可沿用。缺少定位、身份待确认或旧名被抑制的目标不提供可沿用姓名；画面有人但姓名无依据时用泛称，分不清人或物时说明无法确认。上一窗描述仅作历史参考；视频改选其他机位时舍弃首机位历史，无有效视频时不注入检测身份标签或上一窗描述。每次查询自动写入 `on_demand_log` 表（query/answer/sources/latency），并复用 `OmniEventArtifacts` + `save_event_artifacts` 把 clip 和 omni_trace 落到 `snapshots/{log_id}/`；omni 未响应时只落 trace、跳过 clip。clip 始终为 mp4（`build_query_prompt` 不走 audio-only 路径）。前端 Activity 页通过子 Tab 浏览查询日志、播放 clip、提交反馈（反馈打包见 [事件反馈](event-feedback.md)）。
 
 **Suggestion 去重**：`PerceptionEngine` 对建议做去重抑制，同类建议短期内只报一次，避免 Agent 被重复触发。去重用句向量语义相似度（`EventEmbedder`，`engine/omni/dedup_embedder.py`，bge-small-zh）而非精确文本匹配——措辞略有差异的同类建议也能识别为重复；embedder 初始化失败时降级为精确文本匹配。
 
-**Prompt 人名护栏**：VLM 只能给本轮 Identity 真正识别出的成员安姓名；对未识别（`unknown`）的人、或名册中本轮画面未真正出现的陌生人，一律不从 gallery / 家庭档案取成员名安到画面人物上，防止"注入了家庭档案就凭空点名"的幻觉。约束集中在各字段的 `FieldSpec`（`field_registry.py`）。
+**Prompt 人名护栏**：先由本轮画面确认是否有人，再按目标取用姓名。非待识别名册项只有在画面确认其 bbox 对应真人时，才可沿用名册称呼；本轮待识别目标只用本轮 `identities` 结果，`unknown` / 缺失结果不能借名册补名，画面确认有人时用泛称，`no_person` 不据该框描述人物或动作。完整与精简身份说明都保留真人召回边界：未认出姓名时，背影、侧身、局部、遮挡或模糊的真人用 `unknown`；分不清人或物也用 `unknown`，只有确认非人体才判 `no_person`。名册姓名与 bbox 是定位线索，不代表当前有人；无法对应或未确认有人时不沿用名册姓名，也不从 gallery / 家庭档案给未识别的人安名。caption、规则和建议共用这一授权，点名成员的规则与成员约定还须确认其在场。视频中的 `speeches.speaker` 还须看到对应的人正在说话才可按同一授权填名，否则填“未知”；纯音频版不据名册安名，保留话中自报姓名的例外。名册项不重判、不补进 `identities`，画面否证其在场时，不据该名册项在后续输出中安名或描述人物。总原则见 `constants.py`，字段细则见 `field_registry.py`。
 
 **omni prompt「当前时间」锚定部署时区**：注入 omni prompt 的当前时刻走 `deploy_timezone()`（`perception/engine/api.py` 的时钟格式化）而非裸主机时钟——VLM 会据此把画面标注成「凌晨 / 早上…」，宿主时区 ≠ 部署（家庭真实所在）时区时裸时钟会让模型编造出错误的时段。部署时区的定义、解析优先级与配置方式见 [开发指南 · 时区](../06-dev-guide/dev-guide.md#时区)。
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import re
 import shlex
 import shutil
 import signal
@@ -51,9 +52,27 @@ def _supervisor_log() -> Path:
 def _is_running(pid: int) -> bool:
     try:
         os.kill(pid, 0)
-        return True
     except (ProcessLookupError, PermissionError):
         return False
+    # 僵尸进程 kill(pid,0) 也成功，但它已经死了。不收尸的环境（容器里 PID 1 是
+    # `sleep infinity`、docker run 不带 init）会让 supervisord 长期以僵尸形态「活着」，
+    # _terminate 白等满 grace 才升级 SIGKILL —— 实测把 stop 拖到 40s。
+    # 只有 Linux 有 /proc；读不到就按老口径当作活着。
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            # comm 字段可能含空格与括号，故从最后一个 ')' 之后取 state
+            state = f.read().rsplit(b")", 1)[-1].split(None, 1)[0]
+        return state != b"Z"
+    except (OSError, IndexError):
+        return True
+
+
+def _kill_now(pid: int) -> None:
+    """SIGKILL，不给优雅余地：只用于已判定「没有可收的尾」的进程。"""
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass  # 进程已经没了 = 目的已达成
 
 
 def _is_port_in_use(base_url: str) -> bool:
@@ -111,14 +130,20 @@ def _find_pid_by_port_ss(port: int) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _find_supervisord_pids() -> list[int]:
-    """枚举所有加载本项目 supervisord.conf 的守护进程 PID（socket 失联也能找到）。
+# miloco 后端的命令行特征。**必须词边界**：token 级匹配 ``-m`` + ``miloco.main``
+# 才能避免命中 vim / grep miloco.main.py，也避免 ``python -m miloco.main_v2`` 这种
+# 词字符续接的无关进程 —— 这个谓词的输出直通 SIGKILL，宽一个字就是误杀。
+_MILOCO_BACKEND_RE = re.compile(r"-m\s+miloco\.main\b")
 
-    ``-ww``：要匹配的是完整的 ``supervisord -c <conf 绝对路径>``，macOS 上非 tty
-    输出默认截断到 80 列，会把 conf 路径切掉 → 迁移 reap 静默失效（同
-    ``_is_miloco_backend_proc``）。
+
+def _scan_ps(match) -> list[int]:
+    """按命令行谓词扫一遍进程表，返回命中的 PID。
+
+    ``-ww``：macOS 的 BSD ps 在 stdout 不是 tty（``capture_output=True`` 就是管道）
+    时把 command 截断到 80 列，只有 ``-ww`` 解除 —— 而本项目默认安装路径下
+    ``/Users/<name>/.../miloco/bin/python -m miloco.main`` 约 77~85 列，用户名稍长
+    就把特征截掉、谓词恒 False（方向仍安全：只会漏杀，不会误杀）。
     """
-    conf = str(_supervisor_conf())
     try:
         result = subprocess.run(
             ["ps", "-ww", "-axo", "pid=,command="],
@@ -131,12 +156,18 @@ def _find_supervisord_pids() -> list[int]:
     pids: list[int] = []
     for line in result.stdout.splitlines():
         pid_str, _, cmd = line.strip().partition(" ")
-        if "supervisord" in cmd and conf in cmd:
+        if match(cmd):
             try:
                 pids.append(int(pid_str))
             except ValueError:
-                pass
+                pass  # ps 首列不是数字的行直接跳过（表头 / 异常输出）
     return pids
+
+
+def _find_supervisord_pids() -> list[int]:
+    """枚举所有加载本项目 supervisord.conf 的守护进程 PID（socket 失联也能找到）。"""
+    conf = str(_supervisor_conf())
+    return _scan_ps(lambda cmd: "supervisord" in cmd and conf in cmd)
 
 
 def _terminate(pid: int, grace: float = 6.0) -> None:
@@ -153,7 +184,7 @@ def _terminate(pid: int, grace: float = 6.0) -> None:
     try:
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
-        pass
+        pass  # 进程已经没了 = 目的已达成
 
 
 def _process_uptime_seconds(pid: int) -> int | None:
@@ -324,18 +355,46 @@ def _supervisord_is_running() -> bool:
     return result.returncode == 0 and result.stdout.strip().isdigit()
 
 
-def _supervisorctl(*args: str) -> subprocess.CompletedProcess:
+def _supervisorctl(*args: str, timeout: float = 8.0) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             ["supervisorctl", "-c", str(_supervisor_conf()), *args],
             capture_output=True,
             text=True,
-            timeout=8,
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
             args, returncode=1, stdout="", stderr="timeout"
         )
+
+
+def _find_miloco_backend_pids() -> list[int]:
+    """枚举属于 miloco 后端的进程（launcher stub 与它的 python 子进程都算）。
+
+    只给 stop 的升级路径用：SIGKILL 打在 job 主进程(launcher)上时，真正干活的 python
+    子进程不会跟着死，会变成 ppid=1 的孤儿继续初始化 —— 实测多活十几秒，且初始化完
+    还会去 bind 端口。按「可证明属于 miloco」全扫一遍才收得干净。
+    """
+    return _scan_ps(lambda cmd: bool(_MILOCO_BACKEND_RE.search(cmd)))
+
+
+def _kill_miloco_backends(url: str, fallback_pid: int | None) -> None:
+    """SIGKILL 掉属于 miloco 的后端进程（按进程名全扫 + 端口/fallback 兜底）。
+
+    为什么要全扫：只杀 launcher/job 主进程的话，它的 python 子进程不会跟着死，会成
+    ppid=1 的孤儿继续初始化、最后去 bind 端口 —— 等于"报了 stopped 后端又起来"。
+
+    ``_find_miloco_backend_pids`` 的结果本身就是命令行匹配出来的、天然可证明；端口
+    反查与 fallback 两个来源**可能是用户其它服务**（比如它占用了 miloco 的端口），
+    所以必须过一遍 ``_is_miloco_backend_proc`` 才允许 SIGKILL —— 与
+    ``_cleanup_stale_port_holder`` / ``_launchd_stop`` 的端口兜底同一道验证。
+    """
+    proven = _find_miloco_backend_pids()
+    extra = [pid for pid in (_find_pid_by_port(url), fallback_pid) if pid]
+    for pid in dict.fromkeys([*proven, *extra]):
+        if pid in proven or _is_miloco_backend_proc(pid):
+            _kill_now(pid)
 
 
 def _get_backend_pid_from_supervisor() -> int | None:
@@ -392,6 +451,26 @@ def _supervisor_fatal() -> bool:
     return "FATAL" in _supervisorctl("status", _PROGRAM_NAME).stdout
 
 
+def _backend_ready(cfg: dict) -> bool:
+    """一次性探 /health，只用来挑 stop 的等待预算，不参与成败判定。
+
+    就绪的后端关停序列可能真的花十几秒（感知管线/中枢连接/在途请求，见
+    ``_MILOCO_STOP_GRACE_S``），未就绪的（正在启动 / 已坏）没有可收的尾，改用
+    ``_STOP_BUDGET_S`` 换速度 —— 宿主的 stop 预算只有 5s（openclaw 的
+    PLUGIN_SERVICE_REPLACEMENT_STOP_TIMEOUT_MS）。
+    """
+    import httpx
+
+    # 本地 backend 是 http（main.py 起 uvicorn 不带任何 ssl 参数），httpx 对 http 不做
+    # 证书校验，所以不传 verify —— 照抄别处的 verify=False 对 http 毫无作用，还会白白
+    # 挂一条 CodeQL request-without-cert-validation（局部回环上的误报）。
+    try:
+        url = cfg["server"]["url"].rstrip("/") + "/health"
+        return httpx.get(url, timeout=1).status_code == 200
+    except Exception:
+        return False
+
+
 # ─── launchd (macOS) ─────────────────────────────────────────────────────────
 #
 # macOS 上以用户态(euid 501)跑的后端直连 LAN 网关会被 Local Network Privacy(LNP)
@@ -438,6 +517,13 @@ def _launchctl(*args: str) -> subprocess.CompletedProcess:
 
 def _launchd_is_loaded() -> bool:
     return _launchctl("print", _launchd_target()).returncode == 0
+
+
+def _wait_launchd_unload(deadline: float) -> bool:
+    """等到 job 从 launchd 卸载或到点（deadline 由调用方按预算定）；返回是否已卸载。"""
+    while time.time() < deadline and _launchd_is_loaded():
+        time.sleep(0.3)
+    return not _launchd_is_loaded()
 
 
 def _launchd_backend_pid() -> int | None:
@@ -659,10 +745,7 @@ def _launchd_reload() -> tuple[bool, str]:
     target = _launchd_target()
     _launchctl("bootout", target)  # 未加载时报错,忽略
     # 等 job 从 launchd 完全消失,避免 bootstrap 撞拆卸竞态。
-    deadline = time.time() + _LAUNCHD_BOOTOUT_WAIT_S
-    while time.time() < deadline and _launchd_is_loaded():
-        time.sleep(0.3)
-    if _launchd_is_loaded():
+    if not _wait_launchd_unload(time.time() + _LAUNCHD_BOOTOUT_WAIT_S):
         # 拆卸没结束就往下走会连错三步:
         #   ① 在 launchd 仍持有 fd 时截断 launchd-stdio.log(_trim_launchd_stdio
         #      的前置条件就是"没人持有该 fd");
@@ -815,8 +898,6 @@ def _is_miloco_backend_proc(pid: int) -> bool:
     ``-m miloco.main`` 截掉,谓词恒 False,按端口清理残留的能力在默认安装路径上直接
     失效(方向仍安全:只会漏杀,不会误杀)。
     """
-    import re
-
     try:
         out = subprocess.run(
             ["ps", "-ww", "-p", str(pid), "-o", "command="],
@@ -826,7 +907,7 @@ def _is_miloco_backend_proc(pid: int) -> bool:
         )
     except Exception:
         return False
-    return bool(re.search(r"-m\s+miloco\.main\b", out.stdout))
+    return bool(_MILOCO_BACKEND_RE.search(out.stdout))
 
 
 def _reap_legacy_supervisord() -> list[int]:
@@ -878,6 +959,15 @@ def _launcher_ready_or_exit(pretty: bool) -> None:
 # 中途 SIGKILL,留半截清理并丢掉最后一段 trace。
 _MILOCO_STOP_GRACE_S = 30.0
 
+# 未就绪后端整段 stop 的总预算：从进入收尾到端口兜底全部共享它，各阶段只花"剩余
+# 时间"。**必须整段共享** —— 各阶段各自计预算，叠加起来最坏是「探活 1s + 等卸载
+# 2s + 杀后等 2s + 端口兜底 2s ≈ 7s」，越过调用方的硬失败线（openclaw 给 plugin
+# service 的 stop 预算只有 5s，超时算服务失败）。
+# 为什么未就绪才压：未就绪 = 正在启动或已坏，感知管线/中枢连接都还没建立，没有可
+# 收的尾；而启动期的同步初始化（模型加载等）会让 SIGTERM 排到秒级之后才轮到处理，
+# 等它没有意义。就绪的后端仍走 _MILOCO_STOP_GRACE_S，理由见上。
+_STOP_BUDGET_S = 3.0
+
 
 def _cleanup_stale_port_holder(
     cfg: dict, pretty: bool, grace: float = _MILOCO_STOP_GRACE_S
@@ -925,29 +1015,51 @@ def _launchd_start(cfg: dict, pretty: bool) -> None:
 
 
 def _launchd_stop(cfg: dict, pretty: bool, quiet: bool = False) -> None:
-    backend_pid = _launchd_backend_pid() or _find_pid_by_port(cfg["server"]["url"])
+    url = cfg["server"]["url"]
+    # 预算锚点取在入口：探活(≤1s)/查 job PID/扫残留/bootout 都可能阻塞，锚在它们之后
+    # 等于把这些开销叠加在预算之上 —— 未就绪最坏端到端就成了 5s，正好贴住调用方的
+    # 硬失败线。折进来之后，到点时各阶段自然退化为"不等、直接收"，方向安全。
+    t0 = time.time()
+    # 未就绪（正在启动/已坏）走 _STOP_BUDGET_S 总预算 + 允许 SIGKILL；就绪的后端保留
+    # 原预算（收尾可能真到 30s 量级）。理由见两个常量的注释。
+    ready = _backend_ready(cfg)
+    backend_pid = _launchd_backend_pid() or _find_pid_by_port(url)
     legacy = _reap_legacy_supervisord()  # 混合态:连带停掉残留的老 supervisord
     acted = _launchd_is_loaded() or backend_pid is not None or bool(legacy)
-    _launchctl("bootout", _launchd_target())  # 未加载时报错,忽略
+    _launchctl("bootout", _launchd_target())  # 未加载时报错,忽略;同时撤掉 KeepAlive
     # 等 job 真正从 launchd 消失,复用 _launchd_reload 的等待预算:bootout 只是
     # 发出拆卸请求,backend 收尾(感知管线/中枢连接/在途请求)可能耗时到 30s 量级,
     # 期间它早已释放监听 socket ——若这里不等、立刻查端口,_find_pid_by_port 会
     # 提前返回 None,让下面的残留清理整段跳过,stop 就在 job 还没卸完时误报
     # "stopped"(调用方紧接着 start 会撞见旧 job 仍在,见 _launchd_start 的
     # already-running 分支)。超时仍未卸载也不阻断:继续走残留清理兜底。
-    deadline = time.time() + _LAUNCHD_BOOTOUT_WAIT_S
-    while time.time() < deadline and _launchd_is_loaded():
-        time.sleep(0.3)
-    unloaded = not _launchd_is_loaded()
+    budget_s = _LAUNCHD_BOOTOUT_WAIT_S if ready else _STOP_BUDGET_S
+    deadline = time.time() + budget_s if ready else t0 + _STOP_BUDGET_S
+    if ready or _find_pid_by_port(url) is not None:
+        unloaded = _wait_launchd_unload(deadline)
+    else:
+        # 端口还没监听 = 已经证明它还没进 serve 阶段(uvicorn 先跑完 lifespan 再
+        # bind),没有可收的尾 —— 不等,直接进 SIGKILL,别把预算浪费在等一个必然
+        # 要杀的进程上(实测这一等就是 2.26s,而杀完 0.05s 就卸载)。
+        unloaded = not _launchd_is_loaded()
+    if not unloaded and not ready:
+        # 到点还没卸载:SIGKILL 掉 job 的进程。bootout 已撤掉 KeepAlive,杀了不会被
+        # 拉起来。为什么必须按进程名全扫,见 _kill_miloco_backends 的 docstring。
+        _kill_miloco_backends(url, backend_pid)
+        unloaded = _wait_launchd_unload(deadline)
     # 兜底:bootout 后仍在监听端口的残留进程——只清理可证明属于 miloco 的
     # (命令行含 -m miloco.main),绝不误杀用户其它服务(与 _launchd_start 一致)。
-    port_pid = _find_pid_by_port(cfg["server"]["url"])
+    port_pid = _find_pid_by_port(url)
     if port_pid and _is_miloco_backend_proc(port_pid):
         # 复用 _MILOCO_STOP_GRACE_S(与 _cleanup_stale_port_holder 同一个常量),
         # 避免两处各写一份 30.0 字面量、将来改一处漏改另一处。理由同该常量注释:
         # bootout 的 SIGTERM 经 launcher 转发到 python 后,这里紧接着再发一次
         # SIGTERM,backend 要收感知管线、中枢连接、在途请求,6s 默认值必然中途 SIGKILL。
-        _terminate(port_pid, grace=_MILOCO_STOP_GRACE_S)
+        # 未就绪时只花总预算的剩余部分,不在这里另起一份新的 grace。
+        _terminate(
+            port_pid,
+            grace=_MILOCO_STOP_GRACE_S if ready else max(0.0, deadline - time.time()),
+        )
     if _is_port_in_use(cfg["server"]["url"]) and not _has_port_lookup_tool():
         print_result(
             {
@@ -966,7 +1078,7 @@ def _launchd_stop(cfg: dict, pretty: bool, quiet: bool = False) -> None:
         _trim_launchd_stdio()
     else:
         print(
-            f"警告:job 未在 {_LAUNCHD_BOOTOUT_WAIT_S:.0f}s 内卸载,"
+            f"警告:job 未在 {budget_s:.0f}s 内卸载,"
             "跳过 launchd-stdio.log 裁剪(避免截断到仍持有 fd 的写方)",
             file=sys.stderr,
         )
@@ -1186,6 +1298,20 @@ def _do_stop(pretty: bool, quiet: bool = False) -> None:
         _launchd_stop(cfg, pretty, quiet)
         return
 
+    # 预算按就绪状态分档：未就绪（正在启动/已坏）没有可收的尾，整段共享一个总预算、
+    # 到点 SIGKILL；就绪的后端保留原 grace。理由见 _STOP_BUDGET_S 的注释。
+    # 锚点取在入口：探活(≤1s)与 load_config 都算进预算，锚在探活之后等于让这段开销
+    # 骑在预算之上（未就绪端到端最坏会顶到 5s 线）。
+    t0 = time.time()
+    ready = _backend_ready(cfg)
+    deadline = None if ready else t0 + _STOP_BUDGET_S
+
+    def _budget(default: float) -> float:
+        """未就绪时给"此刻剩余的预算"（到点即 0 → _terminate 立刻升级 SIGKILL），
+        否则给原值。**必须在每个用点现场算**，不能开头算一次存起来 —— 否则各阶段各自
+        拿一份"剩余"，叠加起来照样越过调用方的硬失败线。"""
+        return default if deadline is None else max(0.0, deadline - time.time())
+
     # reap 前先快照：是否有可停对象 + backend pid（reap 会连带停 backend，事后无从得知）
     control_up = _supervisord_is_running()
     backend_pid = _get_backend_pid_from_supervisor() if control_up else None
@@ -1194,6 +1320,7 @@ def _do_stop(pretty: bool, quiet: bool = False) -> None:
     acted = control_up or bool(_find_supervisord_pids()) or backend_pid is not None
 
     # 1. 控制通道在线时，优雅 shutdown supervisord（连带停掉子进程）
+    sup_pid: int | None = None
     if control_up:
         # 先读 pidfile 再 shutdown，避免 shutdown 后 pidfile 被清理
         try:
@@ -1203,20 +1330,55 @@ def _do_stop(pretty: bool, quiet: bool = False) -> None:
             result = _supervisorctl("pid")
             out = result.stdout.strip()
             sup_pid = int(out) if out.isdigit() else None
-        _supervisorctl("shutdown")
-        if sup_pid:
-            _terminate(sup_pid, grace=40.0)
+        # RPC 自己的 timeout 也必须吃共享预算：supervisord 要等子进程停完
+        # (stopwaitsecs=30) 才有响应，客户端全程阻塞 —— 不放进来，未就绪路径的上界就
+        # 从"探活 1s + 预算 3s"变成"再 + 8s"，越过调用方 5s 的硬失败线。掐客户端不影响
+        # 已送达的 shutdown 意图，剩下的交给下面按进程名收尾。
+        # 下限 0.5s：预算被前面的冷启动吃光时 timeout≈0 会让 supervisorctl 刚 spawn
+        # 就被杀、请求根本没写进 socket —— 那"断 autorestart"就落空了。送达只需写一次
+        # socket，0.5s 足够；这 0.5s 是本路径唯一允许超出共享预算的部分。
+        _supervisorctl("shutdown", timeout=max(0.5, _budget(8.0)))
 
-    # 2. 兜底：reap 所有残留 supervisord 守护进程（socket 失联也能杀，断掉 autorestart）
+    # 2. 未就绪（正在启动/已坏）时，shutdown 之后立刻把手上的后端进程全收掉：
+    # ① 顺序不能反 —— 必须先 shutdown 撤掉 autorestart 意图，否则杀了会被立刻拉起来；
+    # ② 必须按进程名全扫（_find_miloco_backend_pids）：这类后端可能还没被 supervisord
+    #    记上 PID、也还没监听端口，只按 pid/端口找会漏，漏下的会继续初始化到 bind
+    #    端口（等于"报了 stopped 后端又起来"）；
+    # ③ 端口还没监听 = 已证它没进 serve 阶段（uvicorn 先跑完 lifespan 再 bind），没有
+    #    可收的尾 → 直接 SIGKILL，别把预算花在等一个必然要杀的进程上（实测启动期的
+    #    SIGTERM 要 ~3s 才轮到处理）；端口已绑但 /health 不通（忙/卡）的仍给有界窗口。
+    # 顺手也把 supervisord 解围了 —— 它正陪着等这个子进程（stopwaitsecs=30）。
+    # 控制通道失联（sock/conf 缺失但守护进程还活着）时，上面那步 shutdown 整个跳过，
+    # 没有任何东西撤掉 autorestart —— 必须先 reap 守护进程再杀后端，否则杀掉的后端会被
+    # autorestart=true 立刻重生，而它已不归任何人管（第 4 步按端口也找不到：还没 bind）。
+    # 那就是本函数要消灭的「报了 stopped 后端又起来」，只是触发路径换成了控制通道失联。
+    if not ready and not control_up:
+        for pid in _find_supervisord_pids():
+            _terminate(pid, grace=_budget(6.0))
+
+    if not ready:
+        force = _find_pid_by_port(cfg["server"]["url"]) is None
+        for pid in _find_miloco_backend_pids():
+            if force:
+                _kill_now(pid)
+            else:
+                _terminate(pid, grace=_budget(0.0))
+
+    if sup_pid:
+        _terminate(sup_pid, grace=_budget(40.0))
+
+    # 3. 兜底：reap 所有残留 supervisord 守护进程（socket 失联也能杀，断掉 autorestart）
     for pid in _find_supervisord_pids():
-        _terminate(pid)
+        _terminate(pid, grace=_budget(6.0))
 
-    # 3. 兜底：autorestart 已断，按端口收尾仍在监听的 backend
+    # 4. 兜底：autorestart 已断，按端口收尾仍在监听的 backend
+    # 端口可能被用户其它服务占用，只有命令行能证明属于 miloco 的才允许收。就绪档保持
+    # 原样（尊重"就绪路径不动"）；未就绪档的 grace 已被压成≈0（事实 SIGKILL），必须先验。
     port_pid = _find_pid_by_port(cfg["server"]["url"])
-    if port_pid:
-        _terminate(port_pid)
+    if port_pid and (ready or _is_miloco_backend_proc(port_pid)):
+        _terminate(port_pid, grace=_budget(6.0))
 
-    # 4. 清理运行时文件
+    # 5. 清理运行时文件
     for f in (_supervisor_sock(), _supervisor_pid_file()):
         f.unlink(missing_ok=True)
 

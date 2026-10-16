@@ -23,6 +23,7 @@ class VisualEvalResult:
     max_score: float
     intra_max: float
     cross_max: float
+    checked_frame_count: int
     last_checked: NDArray[np.uint8] | None
 
 
@@ -43,7 +44,7 @@ def evaluate_visual(
     frames 为空时为 None（调用方应保留旧基准）。
     """
     if not frames:
-        return VisualEvalResult(False, 0.0, 0.0, 0.0, None)
+        return VisualEvalResult(False, 0.0, 0.0, 0.0, 0, None)
 
     # Select frames at check_fps intervals based on actual input fps
     interval = max(1, round(input_fps / config.check_fps))
@@ -54,7 +55,7 @@ def evaluate_visual(
     # 每帧只预处理一次;跳过空帧(解码异常兜底,cv2.resize 对空数组会抛错)
     processed = [_preprocess(frames[i]) for i in check_indices if frames[i].size > 0]
     if not processed:
-        return VisualEvalResult(False, 0.0, 0.0, 0.0, None)
+        return VisualEvalResult(False, 0.0, 0.0, 0.0, 0, None)
     last_checked = processed[-1]
 
     # cross_max: 上窗末帧 vs 本窗首帧的单一 score(仅 prev_frame 存在时)
@@ -77,6 +78,7 @@ def evaluate_visual(
         max_score=max_score,
         intra_max=intra_max,
         cross_max=cross_max,
+        checked_frame_count=len(processed),
         last_checked=last_checked,
     )
 

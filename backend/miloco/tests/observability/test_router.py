@@ -1,9 +1,17 @@
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
+from miloco.middleware import verify_token
 from miloco.observability.aggregate import aggregate_cycle
 from miloco.observability.metrics_client import MetricsClient
 from miloco.observability.metrics_db import connect, init_schema
+from miloco.observability.perception_flow import (
+    GraphStatus,
+    PerceptionFlowSnapshotStore,
+    PerDeviceFlowDiagnostics,
+    bind_perception_flow_store,
+)
 from miloco.observability.router import router
 from miloco.observability.types import (
     DecodeTrace,
@@ -56,6 +64,87 @@ async def test_get_trace_returns_cycle_and_devices(app_with_db):
         assert data["devices"][0]["device_id"] == "d2"
     finally:
         await client.stop()
+
+
+async def test_get_perception_flow_returns_graph_json_with_from_alias(app_with_db):
+    app, _db, _client = app_with_db
+    async def allow_request():
+        return None
+
+    app.dependency_overrides[verify_token] = allow_request
+    store = PerceptionFlowSnapshotStore()
+    store.retain_devices({"camera-1"})
+    store.merge_cycle(
+        "trace-1",
+        1_000,
+        {
+            "camera-1": PerDeviceFlowDiagnostics(
+                device_id="camera-1",
+                room_name="Living Room",
+                trace_id="trace-1",
+                device_trace_id="device-trace-1",
+                observed_at=1_000,
+                status=GraphStatus.OK,
+            )
+        },
+    )
+    bind_perception_flow_store(store, process_started_at=500)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(
+                "/api/perf/perception-flow?device_id=camera-1"
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["scope"]["device_id"] == "camera-1"
+        assert data["process_started_at"] == 500
+        assert "from" in data["graph"]["edges"][0]
+        assert "from_" not in data["graph"]["edges"][0]
+    finally:
+        bind_perception_flow_store(None)
+
+
+async def test_get_perception_flow_returns_service_unavailable_without_store(app_with_db):
+    app, _db, _client = app_with_db
+    async def allow_request():
+        return None
+
+    app.dependency_overrides[verify_token] = allow_request
+    bind_perception_flow_store(None)
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/perf/perception-flow")
+
+    assert response.status_code == 503
+
+
+async def test_get_perception_flow_rejects_overlong_device_id(app_with_db):
+    app, _db, _client = app_with_db
+
+    async def allow_request():
+        return None
+
+    app.dependency_overrides[verify_token] = allow_request
+    bind_perception_flow_store(PerceptionFlowSnapshotStore())
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.get(
+                "/api/perf/perception-flow?device_id=" + "x" * 129
+            )
+
+        assert response.status_code == 422
+    finally:
+        bind_perception_flow_store(None)
 
 
 async def test_list_traces_filters(app_with_db):
@@ -186,5 +275,62 @@ async def test_list_actions_home_filter(app_with_db):
             # home_id=H1:H1 行 + NULL 老行保留,H2 行排除,仍新到旧
             r = tc.get("/api/actions?home_id=H1", headers=headers)
             assert [x["id"] for x in r.json()] == ["legacy", "h1-row"]
+    finally:
+        await client.stop()
+
+
+async def test_list_actions_trigger_event_filter(app_with_db):
+    """trigger_event_id 过滤(v5):一次取回一条事件的整组动作。
+
+    同一支的触发行与退出行携带同一个值,故这一次查询要同时拿到两条;别的链路与
+    无链路的行都不能混进来。
+    """
+    from miloco.config import get_settings
+    from miloco.observability.types import ActionLedgerRecord
+
+    token = get_settings().server.token
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    app, _db, client = app_with_db
+    await client.start()
+    try:
+        def rec(
+            rid: str, ts: int, phase: str | None, ev: str | None
+        ) -> ActionLedgerRecord:
+            return ActionLedgerRecord(
+                id=rid, timestamp=ts, action_type="set_property", did="d1",
+                device_name=None, room=None, iid="prop.2.1", value_json="true",
+                result_code=None, result_msg=None, success=True, error=None,
+                phase=phase, trigger_event_id=ev,
+            )
+
+        client.record_action(rec("enter-1", 1000, "enter", "ev-1"))
+        client.record_action(rec("exit-1", 2000, "exit", "ev-1"))
+        client.record_action(rec("other", 3000, "enter", "ev-2"))
+        client.record_action(rec("orphan", 4000, None, None))
+        await client.flush()
+
+        with TestClient(app) as tc:
+            # 不带该参数:全部返回(向后兼容)
+            r = tc.get("/api/actions", headers=headers)
+            assert r.status_code == 200
+            assert [x["id"] for x in r.json()] == ["orphan", "other", "exit-1", "enter-1"]
+
+            # 按事件取整组:进入支与退出支一起拿到,别的链路与无链路的行排除
+            r = tc.get("/api/actions?trigger_event_id=ev-1", headers=headers)
+            rows = r.json()
+            assert [x["id"] for x in rows] == ["exit-1", "enter-1"]
+            assert {x["phase"] for x in rows} == {"enter", "exit"}
+            assert {x["trigger_event_id"] for x in rows} == {"ev-1"}
+
+            # 与既有条件组合:WHERE 各子句是相加的,缩窗后组内只剩范围内的那条
+            r = tc.get(
+                "/api/actions?trigger_event_id=ev-1&since_ms=1500", headers=headers
+            )
+            assert [x["id"] for x in r.json()] == ["exit-1"]
+
+            # 空值等于不筛(与其余参数同一个惯例):置空后仍是全量,不是零行
+            r = tc.get("/api/actions?trigger_event_id=", headers=headers)
+            assert [x["id"] for x in r.json()] == ["orphan", "other", "exit-1", "enter-1"]
     finally:
         await client.stop()

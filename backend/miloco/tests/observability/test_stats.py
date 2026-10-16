@@ -130,6 +130,12 @@ def app_with_full_data(tmp_path):
              omni_call, omni_err,
              dropped, overflow),
         )
+        conn.execute(
+            "INSERT INTO traces_device "
+            "(device_trace_id, cycle_id, timestamp, device_id) "
+            "VALUES (?, ?, ?, ?)",
+            (f"d-{i}", f"c-{i}", ts, "camera-1"),
+        )
         # 前 7 条 cycle 各挂 1 个 agent_run
         if i < 7:
             conn.execute(
@@ -152,19 +158,54 @@ def test_stats_summary_returns_aggregate_object(app_with_full_data):
     d = r.json()
     # 必备字段都在
     for k in (
-        "cycle_count", "skip_rate", "drop_rate", "omni_error_rate",
+        "cycle_count", "processed_device_window_count", "skip_rate",
+        "drop_rate", "omni_error_rate",
         "p95_rtf_e2e", "p95_rtf_omni", "agent_call_count", "window",
     ):
         assert k in d
     # 数值合理性:20 条 cycle,一半 skip → skip_rate=0.5
     assert d["cycle_count"] == 20
+    assert d["processed_device_window_count"] == 20
     assert d["skip_rate"] == pytest.approx(0.5, abs=1e-6)
-    # 丢包率:5*2=10 dropped,cycle=20 → 10/30
+    # 丢包率:10 dropped,20 processed device windows → 10/30
     assert d["drop_rate"] == pytest.approx(10 / 30, abs=1e-6)
     # omni 错误率:1 / 10 个非 skip cycle
     assert d["omni_error_rate"] == pytest.approx(0.1, abs=1e-6)
     # agent 调用数:i<7 → 7
     assert d["agent_call_count"] == 7
+
+
+def test_stats_summary_drop_rate_uses_device_windows(tmp_path):
+    db = tmp_path / "obs.db"
+    conn = connect(db)
+    init_schema(conn)
+    now_ms = int(time.time() * 1000)
+    conn.execute(
+        "INSERT INTO traces (trace_id, timestamp, dropped_windows_total) "
+        "VALUES (?, ?, ?)",
+        ("c-1", now_ms, 2),
+    )
+    for i in range(2):
+        conn.execute(
+            "INSERT INTO traces_device "
+            "(device_trace_id, cycle_id, timestamp, device_id) "
+            "VALUES (?, ?, ?, ?)",
+            (f"d-{i}", "c-1", now_ms, f"camera-{i}"),
+        )
+    conn.close()
+
+    app = FastAPI()
+    app.include_router(router)
+    app.state.obs_db_path = db
+
+    with TestClient(app) as tc:
+        response = tc.get("/api/stats?metric=summary")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["cycle_count"] == 1
+    assert data["processed_device_window_count"] == 2
+    assert data["drop_rate"] == pytest.approx(2 / 4, abs=1e-6)
 
 
 def test_stats_summary_empty_window(app_with_full_data):

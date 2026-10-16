@@ -180,9 +180,11 @@ async def test_e2e_rule_statuses_snapshot_to_persist(proxy_with_runner, monkeypa
     captured: dict = {}
 
     async def _fake_persist(
-        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+        *, result, device_ids, artifacts, rule_statuses=None,
+        incomplete_rule_ids=None, event_id=None,
     ):
         captured["rule_statuses"] = rule_statuses
+        captured["event_id"] = event_id
 
     monkeypatch.setattr(
         "miloco.perception.client._persist_meaningful_event", _fake_persist
@@ -217,9 +219,11 @@ async def test_e2e_rule_statuses_multi_cam_aggregates_to_fired(
     captured: dict = {}
 
     async def _fake_persist(
-        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+        *, result, device_ids, artifacts, rule_statuses=None,
+        incomplete_rule_ids=None, event_id=None,
     ):
         captured["rule_statuses"] = rule_statuses
+        captured["event_id"] = event_id
 
     monkeypatch.setattr(
         "miloco.perception.client._persist_meaningful_event", _fake_persist
@@ -257,7 +261,8 @@ async def test_main_loop_update_state_raise_marks_rule_incomplete(
     captured: dict = {}
 
     async def _fake_persist(
-        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+        *, result, device_ids, artifacts, rule_statuses=None,
+        incomplete_rule_ids=None, event_id=None,
     ):
         captured["incomplete"] = incomplete_rule_ids
 
@@ -303,9 +308,11 @@ async def test_e2e_early_send_failure_marks_rule_incomplete(
     captured: dict = {}
 
     async def _fake_persist(
-        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+        *, result, device_ids, artifacts, rule_statuses=None,
+        incomplete_rule_ids=None, event_id=None,
     ):
         captured["rule_statuses"] = rule_statuses
+        captured["event_id"] = event_id
         captured["incomplete"] = incomplete_rule_ids
 
     monkeypatch.setattr(
@@ -342,7 +349,8 @@ async def test_persist_spawned_even_if_update_state_raises(proxy_with_runner, mo
     persisted = {"called": False}
 
     async def _fake_persist(
-        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+        *, result, device_ids, artifacts, rule_statuses=None,
+        incomplete_rule_ids=None, event_id=None,
     ):
         persisted["called"] = True
 
@@ -391,9 +399,11 @@ async def test_stale_outcome_not_leaked_on_exception(proxy_with_runner, monkeypa
     captured: dict = {}
 
     async def _fake_persist(
-        *, result, device_ids, artifacts, rule_statuses=None, incomplete_rule_ids=None
+        *, result, device_ids, artifacts, rule_statuses=None,
+        incomplete_rule_ids=None, event_id=None,
     ):
         captured["rule_statuses"] = rule_statuses
+        captured["event_id"] = event_id
 
     def _boom_publish(*a, **k):
         raise RuntimeError("boom before update_state")
@@ -678,3 +688,64 @@ async def test_e2e_disabled_rule_during_cycle(proxy_with_runner, mock_miot_proxy
         for call in mock_miot_proxy.set_device_properties.call_args_list
     ]
     assert dids == ["enter-rule_dis"]
+
+
+@pytest.mark.asyncio
+async def test_e2e_ledger_link_matches_persisted_event_id(
+    proxy_with_runner, monkeypatch
+):
+    """一个 cycle 里,动作台账挂的那个 id 必须就是事件行拿到的那一个。
+
+    这是整条链的收口断言:进入支与退出支的台账行都要指回**同一条**事件行,
+    而那条事件行的 id 是感知周期在引擎调用前 mint 的。任一处另 mint 一个 uuid,
+    折叠页就会把动作挂到一条不存在的父上——而「找不到父」与「真的没有父」
+    在展示上是两种不同的东西,查起来只能靠猜。
+    """
+    proxy, runner, mgr_ctx = proxy_with_runner
+    runner.add_rule(_make_state_rule("rule_L", ["cam_A"]))
+    runner.set_task_actions(f"{TASK_ID}-rule_L", {'on_enter_actions': [{'did': 'enter-rule_L', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_enter_desc': None, 'on_exit_actions': [{'did': 'exit-rule_L', 'iid': 'prop.2.1', 'value': True, 'params': None, 'idempotent': True, 'cooldown_minutes': None}], 'on_exit_desc': None})
+
+    persisted: dict = {}
+    ledger: list[dict] = []
+
+    async def _fake_persist(
+        *, result, device_ids, artifacts, rule_statuses=None,
+        incomplete_rule_ids=None, event_id=None,
+    ):
+        persisted["event_id"] = event_id
+
+    async def _fake_ledger(_proxy, **kwargs):
+        ledger.append(kwargs)
+
+    monkeypatch.setattr(
+        "miloco.perception.client._persist_meaningful_event", _fake_persist
+    )
+    # _execute_action 体内 import,故打模块属性即可被取到。
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", _fake_ledger)
+
+    with mgr_ctx():
+        # cycle 1:命中 → ENTERED(带本 cycle 的事件 id)
+        await proxy.handle_realtime_perception_result(
+            _result(matched=[("rule_L", ["cam_A"], "人来")],
+                    device_rule_map={"cam_A": ["rule_L"]}),
+            artifacts=object(),  # 非 None → 真进 persist 分支
+            cycle_event_id="ev-cycle-1",
+        )
+        await asyncio.sleep(0.05)  # 让后台 persist task 跑起来
+        # cycle 2/3:未命中 → 第一帧观察窗 → 第二帧确认 EXIT(debounce=0 立即 fire)。
+        # 这两个周期不写事件行,故 id 传 None——正是要验的场景:退出支没有本周期
+        # 事件可挂,只能挂进入时那条。
+        for _ in range(2):
+            await proxy.handle_realtime_perception_result(
+                _result(device_rule_map={"cam_A": ["rule_L"]}),
+                artifacts=None,
+            )
+
+    await asyncio.sleep(0.05)
+    await runner.drain()
+
+    assert persisted.get("event_id") == "ev-cycle-1"
+    links = [(r["phase"], r["trigger_event_id"]) for r in ledger]
+    assert links == [("enter", "ev-cycle-1"), ("exit", "ev-cycle-1")], (
+        f"台账链路两列未指向同一条事件行,实际 {links}"
+    )

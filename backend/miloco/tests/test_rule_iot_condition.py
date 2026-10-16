@@ -222,6 +222,47 @@ async def test_property_without_notify_is_rejected(service):
 
 
 @pytest.mark.asyncio
+async def test_degraded_auth_says_rebind_not_wrong_home(service):
+    """降级态建 iot 规则要说「去重新授权」，不是「设备不在当前启用的家庭里」。
+
+    降级态下设备表拉不回来、缓存也是空的，``devices_in_current_home`` 因此恒为空，
+    往下走必然报那句「不在当前启用的家庭里」。那句话不假，但它把住户引向去改家庭
+    配置——而这件事需要他重新授权。判定必须排在查家庭之前，与 ``_validate_scene_ids``
+    同一口径。
+    """
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+
+    mgr = service._manager
+    mgr.miot_proxy.is_operational = False
+    mgr.miot_proxy.refusal_reason = lambda _what: (
+        "cannot check device home scope: Mi Home authorization is no longer valid;"
+        " please rebind."
+    )
+
+    with pytest.raises(MiotAuthUnavailableError, match="rebind"):
+        await service.create_rule(_iot_rule())
+
+    # 判为不可用就不该再去查家庭——那一次注定拿到空集，报出来的还是错的那句。
+    assert not mgr.miot_proxy.devices_in_current_home.called
+
+
+@pytest.mark.asyncio
+async def test_healthy_auth_still_checks_the_home_scope(service):
+    """反向：正常态下「设备不在启用家庭里」照旧拦——别把这道校验整个跳过。
+
+    与上一条成对：只验降级态会抛，把判据写成无条件的「抛 MiotAuthUnavailableError」
+    同样是绿的，而那样任何设备都建不了规则。
+    """
+    mgr = service._manager
+    mgr.miot_proxy.is_operational = True
+    mgr.miot_proxy.devices_in_current_home = AsyncMock(return_value={})
+
+    with pytest.raises(ValidationException, match="不在当前启用的家庭里"):
+        await service.create_rule(_iot_rule())
+    assert mgr.miot_proxy.devices_in_current_home.called
+
+
+@pytest.mark.asyncio
 async def test_iid_missing_from_spec_is_rejected(service):
     """容器里有值但解析出来的 spec 里没有的属性（厂商私有命名空间）建不出规则。
 

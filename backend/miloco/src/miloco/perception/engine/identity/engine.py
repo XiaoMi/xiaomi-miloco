@@ -48,6 +48,7 @@ from miloco.perception.engine.identity.library import (
     IdentityLibrary,
     PersonRef,
 )
+from miloco.perception.engine.identity.names import build_name_lookup
 from miloco.perception.engine.identity.tier_u import cam_id_from_device_id
 
 if TYPE_CHECKING:
@@ -609,11 +610,7 @@ class IdentityEngine:
         # 构造真名反查表（仅供下方 [Identity] 状态 log 把 person_id 渲染成姓名；
         # 身份先验不再进 prompt，candidates 不带姓名）。复用 step 0 已拿到的
         # person_refs，避免双 list_persons 调用。
-        name_lookup: dict[str, str] = {}
-        if person_refs is not None:
-            for ref in person_refs:
-                if ref.name:
-                    name_lookup[ref.person_id] = ref.name
+        name_lookup = build_name_lookup(person_refs or [])
 
         # 身份漂移自检(commit 后无脸 body-only 误跟踪纠正): 在收集 candidate 前施加,
         # enforce 撤回的 track 本窗即作去先验 candidate 一并重判(与 library 变化重置同款

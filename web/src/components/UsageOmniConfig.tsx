@@ -32,10 +32,12 @@ const INPUT_CLS =
   "focus:border-brand-primary focus:outline-none text-text-primary num";
 
 // omni 测试 / 模型列表的后端机器码 → i18n key;命中走前端本地化,
-// 未命中(如 http_error,含动态 HTTP 细节)回退后端 message。
-// 与 error_classifier.CODES 保持一致(10 个 code):测试路径撞 429 会返 rate_limited、
-// 200+非 JSON body 会返 bad_response,retry 被中断会返 cancelled。缺 code = 回退
-// 后端硬编码中文 message、污染英文界面。
+// 未命中回退后端 message。
+// 除 ok 与 list_unsupported 外,其余键取自 error_classifier.CODES(不含 timeout ——
+// probe 把所有异常统一归 unreachable,不产出该码):测试路径撞 429 会返 rate_limited、
+// 200+非 JSON body 会返 bad_response,retry 被中断会返 cancelled。
+// list_unsupported 是拉模型列表专有码,不参与熔断,故不在 CODES 里。
+// 缺 code = 回退后端硬编码中文 message、污染英文界面。
 const OMNI_CODE_KEY: Record<string, string> = {
   ok: "usage.testOk",
   bad_key: "usage.testBadKey",
@@ -47,7 +49,13 @@ const OMNI_CODE_KEY: Record<string, string> = {
   rate_limited: "usage.testRateLimited",
   bad_response: "usage.testBadResponse",
   cancelled: "usage.testCancelled",
+  list_unsupported: "usage.modelsListUnsupported",
 };
+
+// 拉不到模型列表 ≠ 配置有问题,故这类码走中性灰字提示、不打红 ✗:同一件事(这个地址列不出
+// 模型)在 ok:true+空列表 那条路上本来就是灰字,两条路不该一灰一红。文案已并列「端点没有这个
+// 方法」与「路径可能写错」两种可能,由用户自查,不必用错误色替他下判断。
+const MODELS_INFO_CODES = new Set(["list_unsupported"]);
 
 // 测试结果三档语义:连接正常(✓ 绿,chat 调通)/ 鉴权过但探测被拒(⚠ 黄,rejected_authed)/ 失败(✗ 红)。
 const TEST_WARN_CODES = new Set(["rejected_authed"]);
@@ -279,8 +287,9 @@ export function UsageOmniConfig() {
         setModels([]);
         const k = res.code ? OMNI_CODE_KEY[res.code] : undefined;
         setModelsMsg(k ? t(k) : res.message || t("usage.modelsFetchFailed"));
-        setModelsErr(true);
-        setModelsErrCode(res.code ?? null);
+        const isInfo = !!res.code && MODELS_INFO_CODES.has(res.code);
+        setModelsErr(!isInfo);
+        setModelsErrCode(isInfo ? null : (res.code ?? null));
       }
     } catch (e) {
       setModels([]);

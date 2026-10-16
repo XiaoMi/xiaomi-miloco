@@ -66,7 +66,7 @@ from miloco.schedule.router import router as schedule_router
 from miloco.schedule.runner import get_runner as get_schedule_runner
 from miloco.task.router import router as task_router
 from miloco.task_record.router import router as task_record_router
-from miloco.utils.common import escape_for_js_string
+from miloco.utils.common import escape_for_js_string, safe_log
 from miloco.utils.paths import miloco_home
 
 load_dotenv()
@@ -727,7 +727,10 @@ async def spa_handler(full_path: str, request: Request):
             # 真 path-traversal(..%2Fetc/passwd 等)→ 不在 static_dir 内 → 404。
             # warning 级 log 让运维事后审计能发现扫描器;截断 200 字符防灌爆 log,
             # %r repr 转义防 log injection。
-            logger.warning("spa_handler path-traversal blocked: %r", full_path[:200])
+            logger.warning(
+                "spa_handler path-traversal blocked: %r",
+                safe_log(full_path[:200]),
+            )
             return Response(status_code=404, content="404 Not Found")
         if real_file.is_file():
             # Cache-Control:vite 输出 /assets/*.{js,css,woff2} 都带 hash,内容

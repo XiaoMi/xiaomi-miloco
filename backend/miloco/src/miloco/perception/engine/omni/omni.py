@@ -14,6 +14,10 @@ import httpx
 
 from miloco.database.token_usage_repo import fire_record
 from miloco.perception.engine.config import OmniConfig
+from miloco.perception.engine.identity.names import (
+    build_name_lookup,
+    usable_person_name,
+)
 from miloco.perception.engine.omni.circuit_breaker import (
     CircuitOpenError,
     get_omni_circuit_breaker,
@@ -144,8 +148,8 @@ async def run_omni_fused(
     #   name_lookup  —— pid → 纯真名（不含角色），喂给 prompt「已识别人物/陌生人」名册显示。
     #                   名册里只展示真名（如"张三"），不展示"张三(角色:爸爸)"——角色不进名册。
     #   name_to_pid  —— 真名 / 角色 / 完整标签 → pid 反查。omni 输出 name 字段可能是真名、
-    #                   角色, 也可能把 gallery 里看到的完整标签"真名(角色:X)"整串回显。真名与
-    #                   完整标签恒做 key；角色因可空、不唯一，仅在全局唯一时才做 key（否则多人
+    #                   角色, 也可能把 gallery 里看到的完整标签"真名(角色:X)"整串回显。
+    #                   可用真名与完整标签做 key；角色因可空、不唯一，仅在全局唯一时才做 key（否则多人
     #                   同角色，纯角色反查会误命中最早遍历到的那个 pid）。
     name_lookup: dict[str, str] = {}
     name_to_pid: dict[str, str] = {}
@@ -158,15 +162,16 @@ async def run_omni_fused(
     person_lib_empty = False
     try:
         persons = list(identity_engine.library.list_persons())
+        name_lookup = build_name_lookup(persons)
         person_lib_empty = len(persons) == 0
         role_counts = Counter(r.role for r in persons if r.role)
         for ref in persons:
-            if ref.name:
-                name_lookup[ref.person_id] = ref.name
-                label = format_person_label(ref.name, ref.role)
+            name = name_lookup.get(ref.person_id)
+            if name is not None:
+                label = format_person_label(name, ref.role)
                 if label:
                     name_to_pid.setdefault(label, ref.person_id)
-                name_to_pid.setdefault(ref.name, ref.person_id)
+                name_to_pid.setdefault(name, ref.person_id)
                 if ref.role and role_counts[ref.role] == 1:
                     name_to_pid.setdefault(ref.role, ref.person_id)
             name_to_pid.setdefault(ref.person_id, ref.person_id)
@@ -217,9 +222,10 @@ async def run_omni_fused(
             # 来源 1 的 library 全局唯一性（role_counts）：来源 1 因不唯一跳过的角色这里不会加回；
             # library 查询整体失败时 role_counts 为空，角色一律不做 key（从严，避免误命中）。
             for pid, samples in gallery_snapshot.items():
-                if samples.name:
-                    name_to_pid.setdefault(samples.name, pid)
-                    lbl = format_person_label(samples.name, samples.role)
+                name = usable_person_name(samples.name)
+                if name is not None:
+                    name_to_pid.setdefault(name, pid)
+                    lbl = format_person_label(name, samples.role)
                     if lbl:
                         name_to_pid.setdefault(lbl, pid)
                 if samples.role and role_counts[samples.role] == 1:

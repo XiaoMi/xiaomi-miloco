@@ -16,7 +16,6 @@
     "confirmUnbindBodySuffix": ", and the home device list and family members will all be cleared.",
     "cancel": "Cancel",
     "unbinding": "Unbinding…",
-
     "bindTitle": "Bind Xiaomi Home account",
     "payloadEmpty": "Authorization code is empty, please copy it from the authorization page and paste",
     "payloadNotBase64": "Invalid authorization code format (not valid base64)",
@@ -42,7 +41,6 @@
     "step3Hint": "Choose the home for miloco to connect to. You can change it later in \"Switch home\".",
     "switching": "Switching…",
     "confirmSelect": "Confirm selection",
-
     "noCamera": "No camera recognized at home yet — first make sure the camera on Xiaomi Home is visible to miloco.",
     "whichCamera": "Which camera:",
     "watchTitle": "Live view",
@@ -58,10 +56,10 @@
     "startRecord": "Record {{seconds}}s",
     "abortRecord": "Stop",
     "abortRecordTitle": "Stop this recording early",
-
     "switchHomeOnlyOne": "Only one home under the current account",
     "switchHome": "Switch home",
     "switch": "Switch",
-    "switchHomeListLabel": "Switch home"
+    "switchHomeListLabel": "Switch home",
+    "authDegradedReason": "Authorization expired; stopped"
   }
 }

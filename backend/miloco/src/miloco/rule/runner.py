@@ -42,6 +42,7 @@ from miot.types import MIoTActionParam, MIoTGetPropertyParam, MIoTSetPropertyPar
 
 from miloco.database.rule_repo import RuleLogRepo
 from miloco.dispatch import dispatch_event
+from miloco.middleware.exceptions import MiotAuthUnavailableError
 from miloco.miot.client import MiotProxy
 from miloco.miot.result_codes import is_result_unknown
 from miloco.node_monitor import NodeName, get_monitor
@@ -73,6 +74,7 @@ from miloco.task.state_machine import (
     TransitionOutcome,
     slot_for_edge,
 )
+from miloco.utils.common import safe_log
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
@@ -272,6 +274,9 @@ class RuleRuntimeState:
     duration_window: "deque[int] | None" = None
     last_duration_round: int | None = None
     state_duration_fired: bool = False
+    # 本轮进入边沿那条事件行的 id：进的时候定下, 退出的时候透传(见 _debounced_exit)。
+    # 正常退出的那个感知周期不写事件, 父指针不能在退出那一刻现找, 只能这时存着。
+    round_trigger_event_id: str | None = None
     action_cooldown: dict[tuple[str, str], float] = field(default_factory=dict)
 
 
@@ -284,6 +289,9 @@ class PendingEnterContext:
     extra_metadata: dict | None = None
     caption: str = ""
     device_name: str = ""
+    # 边沿被守卫拦下时那一轮的事件行 id：动作要等到前提恢复才发, 那一刻已经在别的
+    # 周期里, 父指针只能随 payload 一起存着(与 RuleRuntimeState 那份同一个理由)。
+    trigger_event_id: str | None = None
 
 
 class RuleRunner:
@@ -751,9 +759,16 @@ class RuleRunner:
                     and not enabled_changed
                     and self._has_dispatched_enter(existing)
                 )
+                # 本轮事件 id 要在 _reset_runtime_state 之前取：那份状态整个
+                # 被 pop, 之后再取只剩空。
+                round_event_id = (
+                    self._state[rule.id].round_trigger_event_id
+                    if carry and rule.id in self._state
+                    else None
+                )
                 self._reset_runtime_state(rule.id)
                 if carry:
-                    self._carry_entered_baseline(rule)
+                    self._carry_entered_baseline(rule, round_event_id)
         self._rules[rule.id] = rule
 
     def _has_dispatched_enter(self, rule: Rule) -> bool:
@@ -777,7 +792,7 @@ class RuleRunner:
             return state.state_duration_fired
         return state.last_rule_state
 
-    def _carry_entered_baseline(self, rule: Rule) -> None:
+    def _carry_entered_baseline(self, rule: Rule, round_event_id: str | None) -> None:
         """换条件形状时把「已经进入」带到新状态上, 与 ``_rewind_abandoned_exit``
         是同一条命题: 撤掉一个中间态要连聚合基线一起拨回。
 
@@ -788,9 +803,15 @@ class RuleRunner:
 
         带 duration 时还要一并置 ``state_duration_fired``: 退出边沿被
         「没配对的 ENTERED」那道闸挡着, 不置位一样退不出去。
+
+        本轮事件 id (``round_trigger_event_id``) 跟着一起带: 换条件是一次配置
+        变更、不是一次会话重启 —— 状态机那边留在 on、也不重发 ENTERED, 这一次
+        会话挂的是哪条事件行没有变, 退出支马上就会来读这份值。不跟着带, 编辑期
+        间这个 id 被整份状态清掉, 本段退出就丢父。
         """
         state = self._ensure_state(rule.id)
         state.last_rule_state = True
+        state.round_trigger_event_id = round_event_id
         if rule.duration_seconds:
             state.state_duration_fired = True
 
@@ -906,6 +927,7 @@ class RuleRunner:
         cycle_source_states: Mapping[str, bool] | None = None,
         skip_flicker: bool = False,
         extra_metadata: dict | None = None,
+        trigger_event_id: str | None = None,
     ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
@@ -917,12 +939,19 @@ class RuleRunner:
         matched frame (room name + device ids of the camera that saw it). They
         ride along to the Agent callback on ENTERED and never participate in
         state aggregation; EXITED fires with them empty.
+
+        ``trigger_event_id`` is the id of this cycle's event row (minted on the
+        perception side so that both the early-send and the main loop share
+        one). It rides down to the action ledger's ``trigger_event_id`` column:
+        the ENTERED branch records it on the rule state so the debounced
+        EXITED can hand the same value to the exit actions. Callers with no
+        event row behind them (record-source ticks) leave it None.
         """
         async with get_monitor().track_async(NodeName.RULE, "update") as h:
             h.add_input(1)
             rule = self._rules.get(rule_id)
             if rule is None:
-                logger.warning("update_state: rule %s not found", rule_id)
+                logger.warning("update_state: rule %s not found", safe_log(rule_id))
                 return TriggerOutcome.NOT_FIRED
             if not self._is_effectively_enabled(rule):
                 return TriggerOutcome.NOT_FIRED
@@ -952,7 +981,8 @@ class RuleRunner:
                     if did not in observed_states
                 )
                 dur_outcome = await self._evaluate_duration(
-                    rule, effective_state, source_did, context, caption, device_name
+                    rule, effective_state, source_did, context, caption, device_name,
+                    trigger_event_id=trigger_event_id,
                 )
                 # out() 对 duration 规则一律取 dur_outcome，其非空由本块位置维持——静态类型
                 # 推不出来，失效后又会被 aggregate_outcomes 的 .get(o, -1) 兜底静默吞掉。
@@ -971,14 +1001,16 @@ class RuleRunner:
                         src.pending_exit = True
                         logger.debug(
                             "rule %s source %s exit pending (1st false)",
-                            rule_id, source_did,
+                            safe_log(rule_id), safe_log(source_did),
                         )
                         return out(TriggerOutcome.NOT_FIRED)
                     src.pending_exit = False
                 elif src.pending_exit:
                     src.pending_exit = False
                     logger.info(
-                        "rule %s source %s flicker absorbed", rule_id, source_did
+                        "rule %s source %s flicker absorbed",
+                        safe_log(rule_id),
+                        safe_log(source_did),
                     )
                     return out(TriggerOutcome.STILL_IN)
             elif not skip_flicker and self._state[rule_id].exit_debounce_task is not None:
@@ -992,21 +1024,21 @@ class RuleRunner:
                         logger.debug(
                             "rule %s source %s enter pending during exit_debounce "
                             "(1st true)",
-                            rule_id, source_did,
+                            safe_log(rule_id), safe_log(source_did),
                         )
                         return out(TriggerOutcome.NOT_FIRED)
                     src.pending_enter = False
                     logger.info(
                         "rule %s source %s enter confirmed (2 consecutive true) "
                         "during exit_debounce",
-                        rule_id, source_did,
+                        safe_log(rule_id), safe_log(source_did),
                     )
                 elif src.pending_enter:
                     src.pending_enter = False
                     logger.info(
                         "rule %s source %s single-frame true absorbed during "
                         "exit_debounce",
-                        rule_id, source_did,
+                        safe_log(rule_id), safe_log(source_did),
                     )
                     return out(TriggerOutcome.NOT_FIRED)
 
@@ -1037,6 +1069,7 @@ class RuleRunner:
                 rule, event, source_did, context, trigger_room, trigger_dids,
                 caption=caption, device_name=device_name,
                 extra_metadata=extra_metadata,
+                trigger_event_id=trigger_event_id,
             )
             h.add_output(1)
             if event == RuleEvent.EXITED:
@@ -1087,10 +1120,12 @@ class RuleRunner:
         """
         rule = self._rules.get(rule_id)
         if rule is None:
-            logger.warning("trigger_rule: rule %s not found", rule_id)
+            logger.warning("trigger_rule: rule %s not found", safe_log(rule_id))
             return None
         if not self._is_effectively_enabled(rule):
-            logger.info("trigger_rule: rule %s is disabled, skipping", rule_id)
+            logger.info(
+                "trigger_rule: rule %s is disabled, skipping", safe_log(rule_id)
+            )
             return None
 
         # Bridge: update state machine so future events diff correctly
@@ -1140,6 +1175,7 @@ class RuleRunner:
         context: str,
         caption: str = "",
         device_name: str = "",
+        trigger_event_id: str | None = None,
     ) -> TriggerOutcome:
         """每个采样周期采样一次 OR 聚合状态；窗口 True 比例达阈值即 fire。
 
@@ -1250,6 +1286,7 @@ class RuleRunner:
                 },
                 caption=caption,
                 device_name=device_name,
+                trigger_event_id=trigger_event_id,
             )
             if not self._state_machine_allows(rule, RuleEvent.ENTERED, payload):
                 # 在清窗口 / 标记 fired 之前问闸：被吞掉时这两样都不该动，否则
@@ -1273,7 +1310,9 @@ class RuleRunner:
                 context,
                 extra_metadata=payload.extra_metadata,
                 caption=caption, device_name=device_name,
+                trigger_event_id=trigger_event_id,
             )
+            state.round_trigger_event_id = trigger_event_id
             self._sync_record_source(rule, slot)
             return TriggerOutcome.FIRED
 
@@ -1292,6 +1331,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         extra_metadata: dict | None = None,
+        trigger_event_id: str | None = None,
     ) -> TriggerOutcome:
         """Translate a diff event into an action-layer fire (with state-mode
         debounce on EXITED).
@@ -1370,6 +1410,7 @@ class RuleRunner:
                 },
                 caption=caption,
                 device_name=device_name,
+                trigger_event_id=trigger_event_id,
             )
             if not self._state_machine_allows(rule, RuleEvent.ENTERED, payload):
                 # 状态机吞掉了这次边沿（已在态内 / 被对侧条件拦住）。按 STILL_IN
@@ -1390,6 +1431,7 @@ class RuleRunner:
                     trigger_room, trigger_dids,
                     extra_metadata=dict(extra_metadata or {}),
                     caption=caption, device_name=device_name,
+                    trigger_event_id=trigger_event_id,
                 )
                 return TriggerOutcome.FIRED
 
@@ -1399,7 +1441,11 @@ class RuleRunner:
                     **(payload.extra_metadata or {}),
                 },
                 caption=caption, device_name=device_name,
+                trigger_event_id=trigger_event_id,
             )
+            # 本轮的事件 id 在这里定下：退出边沿在 debounce 之后才发生, 那一刻的感知
+            # 周期不写事件, 退出支要挂回同一个父只能靠这份记下来的值。
+            state.round_trigger_event_id = trigger_event_id
             self._sync_record_source(rule, slot)
             return TriggerOutcome.FIRED
 
@@ -1521,6 +1567,12 @@ class RuleRunner:
             self._iot_source.record_compensated_exit()
         self._record_source.disarm(rule.task_id)
 
+        # 取与清放在同一个同步段里、排在 fire 之前。退出动作要 await 网络, 那
+        # 段时间里新开的一段会话会在同一个状态对象上改写这个 id (进入边沿), 清
+        # 排在 await 之后抹掉的就是新那一段记下的值 —— 比留着旧值更糟。
+        round_event_id = rs.round_trigger_event_id
+        rs.round_trigger_event_id = None
+
         # Background-task path: swallow exceptions so they don't surface as
         # "Task exception was never retrieved" warnings.
         try:
@@ -1528,6 +1580,9 @@ class RuleRunner:
                 rule, RuleEvent.EXITED, sources, context, str(uuid.uuid4()),
                 actual_exited_at=actual_exited_at,
                 extra_metadata=exit_metadata,
+                # 退出支挂回本轮进入时的那条事件: 确认离开的那个感知周期不写事件,
+                # 这里现找只会找到别人的行或空。
+                trigger_event_id=round_event_id,
             )
         except Exception:
             logger.exception(
@@ -1599,7 +1654,12 @@ class RuleRunner:
                 extra_metadata=payload.extra_metadata,
                 caption=payload.caption,
                 device_name=payload.device_name,
+                trigger_event_id=payload.trigger_event_id,
             )
+            # 补记这个 id：动作挂的是它自己那一轮的事件行, 而退出支(debounced
+            # exit)读的正是这份值。不补写的话, 这一次会话的 on_exit 会拿到上一轮
+            # 配对遗留的旧 id —— 不是丢父, 是指错父, 比丢更难发现。
+            self._ensure_state(rule.id).round_trigger_event_id = payload.trigger_event_id
             self._sync_record_source(rule, signal.slot)
             fired = True
         return fired
@@ -1726,6 +1786,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        trigger_event_id: str | None = None,
         actual_exited_at: str | None = None,
     ) -> None:
         """Schedule a fire as a background task; record handle to prevent GC."""
@@ -1735,6 +1796,7 @@ class RuleRunner:
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
                 action_slot=action_slot,
+                trigger_event_id=trigger_event_id,
                 actual_exited_at=actual_exited_at,
             )
         )
@@ -1754,6 +1816,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        trigger_event_id: str | None = None,
         actual_exited_at: str | None = None,
     ) -> None:
         try:
@@ -1762,11 +1825,16 @@ class RuleRunner:
                 trigger_room, trigger_dids, extra_metadata,
                 caption=caption, device_name=device_name,
                 action_slot=action_slot,
+                trigger_event_id=trigger_event_id,
                 actual_exited_at=actual_exited_at,
             )
         except Exception:
+            # 带上 context：失败路径上再没有别的日志能说清是谁发起的这次 fire
+            # （rule_fire 事件与 trigger_context 都写不进 —— 异常穿出 _fire 时
+            # 那条 RuleLog 根本不会产生），跨日强发与普通 fire 在这里就分不开。
             logger.exception(
-                "Rule fire failed: rule=%s event=%s", rule.id, event.value
+                "Rule fire failed: rule=%s event=%s context=%s",
+                rule.id, event.value, context,
             )
 
     def force_cross_day_reset(
@@ -1822,10 +1890,16 @@ class RuleRunner:
             #    session 边界操作；若投 actual_exited_at=midnight，preamble 会
             #    强制 agent 调 session-end --at midnight，而新 record 的
             #    active_session_start_at > midnight，触发 RecordSchemaError。
-            self._spawn_force_fire(
+            # 强发 EXITED 带上这一段会话记下的那个 id: 被结束的正是那次感知进入
+            # 打开的会话, 父可确知为真。取与清之间没有 await, 新一天的会话紧接着
+            # 从强发进入开始 —— 它不感知进入、也就不会记下新值; 不清则第二天早上
+            # 的真退出会挂回午夜之前那条事件 (指错父, 比丢父更难发现)。
+            self._spawn_fire(
                 rule, RuleEvent.EXITED, sources, "cross_day_rollover",
+                trigger_event_id=rs.round_trigger_event_id,
             )
-            self._spawn_force_fire(
+            rs.round_trigger_event_id = None
+            self._spawn_fire(
                 rule, RuleEvent.ENTERED, sources, "cross_day_rollover",
             )
 
@@ -1836,38 +1910,6 @@ class RuleRunner:
         )
         self._fire_tasks.add(handle)
         handle.add_done_callback(self._fire_tasks.discard)
-
-    def _spawn_force_fire(
-        self,
-        rule: Rule,
-        event: RuleEvent,
-        sources: list[str],
-        context: str,
-    ) -> None:
-        """跨日 force-reset 专用：fire on_exit / on_enter 不带 session 时间戳
-        metadata（rollover_one 已处理 session 切段）。独立错误日志保留 context 上下文。"""
-        task = asyncio.create_task(
-            self._force_fire_safely(rule, event, sources, context)
-        )
-        self._fire_tasks.add(task)
-        task.add_done_callback(self._fire_tasks.discard)
-
-    async def _force_fire_safely(
-        self,
-        rule: Rule,
-        event: RuleEvent,
-        sources: list[str],
-        context: str,
-    ) -> None:
-        try:
-            await self._fire(
-                rule, event, sources, context, str(uuid.uuid4()),
-            )
-        except Exception:
-            logger.exception(
-                "Cross-day force fire failed: rule=%s event=%s",
-                rule.id, event.value,
-            )
 
     async def drain(self) -> None:
         """Wait for all in-flight fire tasks to finish.
@@ -1909,6 +1951,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         action_slot: ActionSlot | None = None,
+        trigger_event_id: str | None = None,
     ) -> RuleExecuteResult | None:
         """Pick the slot for (mode, event), execute, write log."""
         slot = self._select_slot(rule, event, action_slot)
@@ -1939,7 +1982,16 @@ class RuleRunner:
         )
 
         if kind == "static":
-            action_results = [await self._execute_action(rule.id, a) for a in value]
+            # 相位跟触发它的事件走, 与台账两列同源: 退出边沿(含 debounce 之后那次真
+            # fire)标 exit, 进入与达标都算触发支。
+            phase = "exit" if event is RuleEvent.EXITED else "enter"
+            action_results = [
+                await self._execute_action(
+                    rule.id, a,
+                    phase=phase, trigger_event_id=trigger_event_id,
+                )
+                for a in value
+            ]
             ok_all = all(r.result for r in action_results)
             exec_result = RuleExecuteResult(
                 event=event,
@@ -2030,7 +2082,7 @@ class RuleRunner:
             return False
         logger.info(
             "Rule %s action %s %s in cooldown, skipping",
-            rule_id, action.did, action.iid,
+            safe_log(rule_id), safe_log(action.did), safe_log(action.iid),
         )
         return True
 
@@ -2043,13 +2095,17 @@ class RuleRunner:
         ] = time.time()
 
     async def _execute_scene_action(
-        self, rule_id: str, action: RuleAction
+        self,
+        rule_id: str,
+        action: RuleAction,
+        phase: str | None = None,
+        trigger_event_id: str | None = None,
     ) -> RuleActionExecuteResult:
         """触发米家场景（``iid`` 为 SCENE_IID，``did`` 位置是 scene_id）。
 
         去重只靠冷却（原因见 ``SCENE_IID``）。台账由
         ``miot.service._trigger_scene`` 统一落，与 CLI 触发同一形状，只是
-        ``source`` 标成 rule、``source_id`` 写 rule_id。
+        ``source`` 标成 rule、``source_id`` 写 rule_id，链路两列同 ``_execute_action``。
         """
         # service 校验只在 CRUD 走；runner 装载既有规则是直接从 repo 灌进来的，
         # 库里混进 idempotent=true 或 cooldown<1 的场景行都会让 _in_cooldown 直接
@@ -2058,7 +2114,10 @@ class RuleRunner:
             logger.error(
                 "Rule %s scene action %s has no dedup guard "
                 "(idempotent=%s, cooldown_minutes=%s), refusing to dispatch",
-                rule_id, action.did, action.idempotent, action.cooldown_minutes,
+                safe_log(rule_id),
+                safe_log(action.did),
+                safe_log(action.idempotent),
+                safe_log(action.cooldown_minutes),
             )
             return RuleActionExecuteResult(
                 action=action,
@@ -2078,14 +2137,20 @@ class RuleRunner:
 
         try:
             success = await _trigger_scene(
-                self._miot_proxy, action.did, source="rule", source_id=rule_id
+                self._miot_proxy, action.did, source="rule", source_id=rule_id,
+                phase=phase, trigger_event_id=trigger_event_id,
             )
         except Exception as e:
             # 场景不存在 / 不在允许的家庭 / SDK 抛错都归到这里；失败详情进
             # rule_log.execute_result，不吞。
-            logger.error(
-                "Failed to trigger scene %s (rule %s): %s", action.did, rule_id, e
-            )
+            # 授权失效不逐条告警：与紧邻的直控路径同一口径——失效是长期状态，
+            # 规则命中一次就下发一次，逐条打 ERROR 会把「什么时候失效」那一行
+            # 淹掉。被拒的这一次仍然可查：服务层已经落了一行写明原因的台账。
+            if not isinstance(e, MiotAuthUnavailableError):
+                logger.error(
+                    "Failed to trigger scene %s (rule %s): %s",
+                    safe_log(action.did), safe_log(rule_id), safe_log(e),
+                )
             return RuleActionExecuteResult(
                 action=action, result=False, error=f"exception: {e}"
             )
@@ -2099,7 +2164,11 @@ class RuleRunner:
         )
 
     async def _execute_action(
-        self, rule_id: str, action: RuleAction
+        self,
+        rule_id: str,
+        action: RuleAction,
+        phase: str | None = None,
+        trigger_event_id: str | None = None,
     ) -> RuleActionExecuteResult:
         """Execute a single RuleAction (设备直控路径).
 
@@ -2114,24 +2183,37 @@ class RuleRunner:
         - Dispatch via miot_proxy.set_device_properties /
           call_device_action and report success.
 
+        ``phase`` / ``trigger_event_id`` ride straight into the action ledger
+        and decide nothing here (skipped actions write no row at all).
+
         Cooldown state: ``self._state[rule_id].action_cooldown[(did, iid)]``.
         """
         # 场景没有 siid/aiid 可拆，必须在 iid 解析之前分流。
         if action.iid == SCENE_IID:
-            return await self._execute_scene_action(rule_id, action)
+            return await self._execute_scene_action(
+                rule_id, action,
+                phase=phase, trigger_event_id=trigger_event_id,
+            )
 
         # 白名单式判定：三种形态之外一律报错。少了这道，`scene.1.2` 会掉进
         # 「不是 prop. 就当 action.」的兜底，拿 scene_id 当 did 发出去。
         parsed = parse_device_iid(action.iid)
         if parsed is None:
-            logger.error("Invalid iid format '%s'", action.iid)
+            logger.error("Invalid iid format '%s'", safe_log(action.iid))
             return RuleActionExecuteResult(
                 action=action, result=False, error=f"invalid_iid: {action.iid}"
             )
         is_prop, siid, p_a_id = parsed
 
         # Idempotent check: query current state, skip if already at target.
-        if action.idempotent and is_prop and action.value is not None:
+        # 降级态跳过该预检：那一趟查询注定失败，动作随后又会被闸门拒掉，预检就
+        # 只剩「每次先打一趟云端、再留一条无信息量的 warning」这点副作用。
+        if (
+            action.idempotent
+            and is_prop
+            and action.value is not None
+            and self._miot_proxy.is_operational
+        ):
             try:
                 results = await self._miot_proxy.get_device_properties(
                     [MIoTGetPropertyParam(did=action.did, siid=siid, piid=p_a_id)]
@@ -2140,7 +2222,9 @@ class RuleRunner:
                     if results[0].get("value") == action.value:
                         logger.info(
                             "Rule %s action %s %s already at target, skipping",
-                            rule_id, action.did, action.iid,
+                            safe_log(rule_id),
+                            safe_log(action.did),
+                            safe_log(action.iid),
                         )
                         return RuleActionExecuteResult(
                             action=action, result=True, skipped=True
@@ -2148,7 +2232,7 @@ class RuleRunner:
             except Exception as e:
                 logger.warning(
                     "Idempotent check failed: %s %s: %s",
-                    action.did, action.iid, e,
+                    safe_log(action.did), safe_log(action.iid), safe_log(e),
                 )
 
         # Cooldown check: non-idempotent actions inside cooldown window are skipped.
@@ -2161,7 +2245,10 @@ class RuleRunner:
         # ——复用同一个 _write_action_ledger helper(source=rule),避免两套组装逻辑漂移。
         import json as _json
 
-        from miloco.miot.service import _write_action_ledger
+        from miloco.miot.service import (
+            _refusal_ledger_reason,
+            _write_action_ledger,
+        )
 
         # 台账元组先归一好,成功/异常路径共用——SDK/网络抛异常时台账也要能看到
         # 规则当时试图设置什么值 / 什么参数(失败审计完整性)。
@@ -2202,6 +2289,7 @@ class RuleRunner:
                 action_type=_ltype, did=action.did, iid=action.iid,
                 value_json=_lvalue, result_code=_lcode, result_msg=_lmsg,
                 success=success, error=err, source="rule", source_id=rule_id,
+                phase=phase, trigger_event_id=trigger_event_id,
             )
 
             # 冷却的用途是**防非幂等动作重复执行**,所以判据不是"成功",而是"这条指令
@@ -2222,17 +2310,34 @@ class RuleRunner:
             )
 
         except Exception as e:
+            # 台账无论哪种失败都要落——写在分支之外，免得日后改字段只改一处。
             await _write_action_ledger(
                 self._miot_proxy,
                 action_type=_ltype,
                 did=action.did, iid=action.iid, value_json=_lvalue,
                 result_code=None, result_msg=None,
-                success=False, error=str(e), source="rule", source_id=rule_id,
+                success=False,
+                # 被拒与一般失败分开取值：留痕的原因列是事后聚类的键，不该跟着
+                # 面向住户的提示文案漂——那份文案带着命令行提示、随时会改，而服务层
+                # 那两条路写进这一列的是另一套短语，同一列两套写法会让按它筛选的人
+                # 漏掉其中一整条路。
+                error=(
+                    _refusal_ledger_reason(self._miot_proxy)
+                    if isinstance(e, MiotAuthUnavailableError)
+                    else str(e)
+                ),
+                source="rule", source_id=rule_id,
+                phase=phase, trigger_event_id=trigger_event_id,
             )
-            logger.error(
-                "Failed to execute action %s %s: %s",
-                action.did, action.iid, e,
-            )
+            # 授权失效不逐条告警：失效是长期状态，而规则命中一次就下发一次——这条
+            # 是量最大的下发路径，逐条打 ERROR 会把「什么时候失效」那一行淹掉。
+            # 拒绝本身在代理层的闸门处已经记过一条，这里再记就是重复；台账里的
+            # error 带着「被拒」字样，事后仍分得清「设备真的没响应」与「根本没发」。
+            if not isinstance(e, MiotAuthUnavailableError):
+                logger.error(
+                    "Failed to execute action %s %s: %s",
+                    safe_log(action.did), safe_log(action.iid), safe_log(e),
+                )
             return RuleActionExecuteResult(
                 action=action, result=False, error=f"exception: {e}"
             )
@@ -2348,7 +2453,7 @@ class RuleRunner:
                 if attempt > 0:
                     logger.info(
                         "Agent callback succeeded for rule %s after %d retries",
-                        callback.rule_id,
+                        safe_log(callback.rule_id),
                         attempt,
                     )
                 return True
@@ -2392,7 +2497,7 @@ class RuleRunner:
                 f.write(entry)
         except Exception as e:
             logger.error("Failed to record dynamic failure (rule %s): %s",
-                         callback.rule_id, e)
+                         safe_log(callback.rule_id), safe_log(e))
 
     def _compose_prompt_text(
         self, rule: Rule, slot_text: str, extra_metadata: dict | None = None

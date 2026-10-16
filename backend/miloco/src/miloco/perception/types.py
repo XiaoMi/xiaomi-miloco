@@ -14,6 +14,8 @@ import numpy as np
 from numpy.typing import NDArray
 from pydantic import BaseModel, Field
 
+from miloco.observability.perception_flow import PerceptionFlowCycleDiagnostics
+
 
 @dataclass
 class PerceptionDevice:
@@ -362,6 +364,11 @@ class RealtimePerceptionResult(BaseModel):
             "精确推退未命中的 (rule_id, did) 状态机桶,避免 rule 绑 cam_A 时被 cam_B 帧 "
             "错误推退。空 dict 表示 OmniError 兜底/无下发。"
         ),
+    )
+    flow_diagnostics: PerceptionFlowCycleDiagnostics | None = Field(
+        default=None,
+        exclude=True,
+        description="Runtime-only flow diagnostics excluded from serialization.",
     )
 
 

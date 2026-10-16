@@ -19,13 +19,12 @@ import {
   type BackendActionRow,
 } from "@/components/ActionsFeed";
 import {
-  feedLowerBound,
   hasGapAbove,
-  mergeFeedRows,
   nextEvents,
   nextHasMore,
   nextOffset,
 } from "@/components/ActivityFeed";
+import { buildFoldRows, feedLowerBound, type FoldRow } from "@/lib/feedFold";
 import type { ActivityEvent } from "@/lib/types";
 
 const originalFetch = globalThis.fetch;
@@ -139,7 +138,45 @@ describe("actionTypeKey", () => {
   });
 });
 
-describe("mergeFeedRows — 单流合并 / 交错 / 窗口", () => {
+/** 行的可读标签:事件给 event id,单条动作给 action id,支给它的 key。
+ *  下面两组的 fixtures 都不带 trigger_event_id,所以支那一支不出现——它们守的是窗口与
+ *  次序,而这两条规则与怎么分组无关。 */
+const labels = (rows: FoldRow[]) =>
+  rows.map((r) => (r.kind === "event" ? r.event.id : r.kind === "action" ? r.action.id : r.key));
+
+/** 装配折叠视图的弱档入口,参数沿用本文件原有的「两 flag + 窗口」顺序。
+ *
+ *  为什么是弱档:这组用例守的是**窗口**与**交错次序**,两者都与"动作占不占行"无关,
+ *  而弱档下每条支自己占一行、单条动作也各占一行 —— 一行一件事,断言读起来最直接。
+ *  并列规则(同一时刻动作排在它的事件前,见 buildFoldRows 头)另有用例。
+ *
+ *  末尾的 `folded` 让同一组用例能在未折叠态上再跑一遍:本文件的动作 fixture 都不带
+ *  `trigger_event_id`,两种画法下它们都是"各自一行",故断言可以原样复用 —— 而**能不能
+ *  原样复用正是要守的东西**:窗口与地平线说的是"数据是什么",不该因为换个画法就松动。 */
+function weakRows(
+  events: ActivityEvent[],
+  actions: BackendActionRow[],
+  showEvents: boolean,
+  showActions: boolean,
+  sinceMs?: number,
+  beforeMs?: number,
+  hasMoreEvents = true,
+  folded = true,
+): FoldRow[] {
+  return buildFoldRows({
+    events,
+    actions,
+    showEvents,
+    showActions,
+    strength: "weak",
+    folded,
+    sinceMs,
+    beforeMs,
+    hasMoreEvents,
+  });
+}
+
+describe("buildFoldRows — 单流合并 / 交错 / 窗口(弱档)", () => {
   const events = [ev("e-new", 300), ev("e-mid", 200), ev("e-old", 100)];
   const actions = [
     row({ id: "act-newer", timestamp: 350 }), // 比最新事件更新
@@ -148,9 +185,9 @@ describe("mergeFeedRows — 单流合并 / 交错 / 窗口", () => {
   ];
 
   it("两 flag 都开:按 ts DESC 交错,窗外(更早)动作被裁掉", () => {
-    const r = mergeFeedRows(events, actions, true, true);
+    const r = weakRows(events, actions, true, true);
     // 350(act) 300(ev) 250(act) 200(ev) 100(ev);act-older(50)被裁
-    expect(r.map((x) => (x.kind === "event" ? x.event.id : x.action.id))).toEqual([
+    expect(labels(r)).toEqual([
       "act-newer",
       "e-new",
       "act-inwin",
@@ -166,44 +203,42 @@ describe("mergeFeedRows — 单流合并 / 交错 / 窗口", () => {
       row({ id: "after-win", timestamp: 250 }),
     ];
     // 窗 [100, 200],无事件:只保留 in-win(150);before/after 都被卡掉
-    const r = mergeFeedRows([], acts, true, true, 100, 200);
-    expect(
-      r.map((x) => (x.kind === "event" ? x.event.id : x.action.id)),
-    ).toEqual(["in-win"]);
+    const r = weakRows([], acts, true, true, 100, 200);
+    expect(labels(r)).toEqual(["in-win"]);
   });
 
   it("比最新展示事件更新的动作被保留在最上", () => {
-    const r = mergeFeedRows(events, actions, true, true);
+    const r = weakRows(events, actions, true, true);
     expect(r[0].kind).toBe("action");
     expect(r[0].kind === "action" && r[0].action.id).toBe("act-newer");
   });
 
   it("仅事件(动作 flag 关):不含任何动作行", () => {
-    const r = mergeFeedRows(events, actions, true, false);
+    const r = weakRows(events, actions, true, false);
     expect(r.every((x) => x.kind === "event")).toBe(true);
     expect(r.map((x) => x.ts)).toEqual([300, 200, 100]);
   });
 
   it("仅动作(事件 flag 关):动作不设窗口下界,全展示且不含事件", () => {
-    const r = mergeFeedRows(events, actions, false, true);
+    const r = weakRows(events, actions, false, true);
     expect(r.every((x) => x.kind === "action")).toBe(true);
     // 无事件窗 → 连更早的 act-older 也保留,ts DESC
     expect(r.map((x) => x.ts)).toEqual([350, 250, 50]);
   });
 
   it("两 flag 都关 → 空(渲染层显 emptyFilter 提示)", () => {
-    expect(mergeFeedRows(events, actions, false, false)).toEqual([]);
+    expect(weakRows(events, actions, false, false)).toEqual([]);
   });
 
   it("事件为空但显事件:动作不设下界(避免全裁),仍全展示", () => {
-    const r = mergeFeedRows([], actions, true, true);
+    const r = weakRows([], actions, true, true);
     expect(r.map((x) => x.ts)).toEqual([350, 250, 50]);
   });
 
-  it("同 ts:事件排在动作前(因果:先有事件后有动作)", () => {
-    const r = mergeFeedRows([ev("e", 200)], [row({ id: "a", timestamp: 200 })], true, true);
-    expect(r[0].kind).toBe("event");
-    expect(r[1].kind).toBe("action");
+  it("同 ts:动作排在它的事件前(降序里动作更靠前,回返角标才恒为直落)", () => {
+    const r = weakRows([ev("e", 200)], [row({ id: "a", timestamp: 200 })], true, true);
+    expect(r[0].kind).toBe("action");
+    expect(r[1].kind).toBe("event");
   });
 });
 
@@ -216,7 +251,7 @@ describe("mergeFeedRows — 单流合并 / 交错 / 窗口", () => {
  *
  * 这一组的共同前提:**sinceMs 已定义**(和生产默认态一致)。
  */
-describe("mergeFeedRows — 事件地平线(回归:事件断流)", () => {
+describe("buildFoldRows — 事件地平线(回归:事件断流)", () => {
   const DAY = 1_000_000; // 今天 00:00
   // 已加载的一页事件(生产里是 PAGE_SIZE=50 条中最旧的那批)
   const loaded = [ev("e-new", DAY + 900), ev("e-oldest-loaded", DAY + 500)];
@@ -228,63 +263,78 @@ describe("mergeFeedRows — 事件地平线(回归:事件断流)", () => {
     row({ id: "a-below-1", timestamp: DAY + 400 }),
     row({ id: "a-below-2", timestamp: DAY + 100 }),
   ];
-  const ids = (rows: ReturnType<typeof mergeFeedRows>) =>
-    rows.map((x) => (x.kind === "event" ? x.event.id : x.action.id));
   /** since/before 只约束动作:事件是后端按同一时间窗查回来的,前端不再二次过滤。 */
-  const actIds = (rows: ReturnType<typeof mergeFeedRows>) =>
+  const actIds = (rows: FoldRow[]) =>
     rows.flatMap((x) => (x.kind === "action" ? [x.action.id] : []));
 
   it("sinceMs 已定义时地平线仍生效:地平线以下的动作被裁(核心回归)", () => {
-    const r = mergeFeedRows(loaded, acts, true, true, DAY, undefined, true);
-    expect(ids(r)).toEqual([
+    const r = weakRows(loaded, acts, true, true, DAY, undefined, true);
+    expect(labels(r)).toEqual([
       "a-top",
       "e-new",
       "a-in",
+      "a-at-horizon", // 同 ts:动作排在事件前(降序里更靠前)
       "e-oldest-loaded",
-      "a-at-horizon", // 同 ts:事件在前、动作在后
     ]);
     // 老实现在这里会把 a-below-1 / a-below-2 也放出来,列表尾部成为"只有动作"的墙
-    expect(ids(r)).not.toContain("a-below-1");
-    expect(ids(r)).not.toContain("a-below-2");
+    expect(labels(r)).not.toContain("a-below-1");
+    expect(labels(r)).not.toContain("a-below-2");
   });
 
   it("hasMoreEvents=false(事件已全部加载)→ 不设地平线,动作铺到 sinceMs", () => {
-    const r = mergeFeedRows(loaded, acts, true, true, DAY, undefined, false);
-    expect(ids(r)).toContain("a-below-1");
-    expect(ids(r)).toContain("a-below-2");
+    const r = weakRows(loaded, acts, true, true, DAY, undefined, false);
+    expect(labels(r)).toContain("a-below-1");
+    expect(labels(r)).toContain("a-below-2");
   });
 
   it("翻页把地平线推下去,原先被裁的动作显出来", () => {
     const nextPage = [...loaded, ev("e-page2", DAY + 200)];
-    const r = mergeFeedRows(nextPage, acts, true, true, DAY, undefined, true);
-    expect(ids(r)).toContain("a-below-1"); // 400 >= 新地平线 200
-    expect(ids(r)).not.toContain("a-below-2"); // 100 < 200,仍在地平线下
+    const r = weakRows(nextPage, acts, true, true, DAY, undefined, true);
+    expect(labels(r)).toContain("a-below-1"); // 400 >= 新地平线 200
+    expect(labels(r)).not.toContain("a-below-2"); // 100 < 200,仍在地平线下
   });
 
   it("sinceMs 比地平线更晚时由 sinceMs 说了算(取 max,不是取地平线)", () => {
-    const r = mergeFeedRows(loaded, acts, true, true, DAY + 700, undefined, true);
+    const r = weakRows(loaded, acts, true, true, DAY + 700, undefined, true);
     // 地平线是 DAY+500,sinceMs 是 DAY+700 → 下界 700,a-in(600) 也被卡掉
     expect(actIds(r)).toEqual(["a-top"]);
   });
 
   it("事件 checkbox 关掉 → 无地平线,动作在 since 窗内全展示", () => {
-    const r = mergeFeedRows(loaded, acts, false, true, DAY, undefined, true);
-    expect(ids(r)).toEqual(["a-top", "a-in", "a-at-horizon", "a-below-1", "a-below-2"]);
+    const r = weakRows(loaded, acts, false, true, DAY, undefined, true);
+    expect(labels(r)).toEqual(["a-top", "a-in", "a-at-horizon", "a-below-1", "a-below-2"]);
   });
 
   it("beforeMs 与地平线同时生效(上下界互不干扰)", () => {
-    const r = mergeFeedRows(loaded, acts, true, true, DAY, DAY + 700, true);
+    const r = weakRows(loaded, acts, true, true, DAY, DAY + 700, true);
     // 上界 700 卡掉 a-top(950),下界(地平线 500)卡掉 a-below-*
     expect(actIds(r)).toEqual(["a-in", "a-at-horizon"]);
   });
 
   it("事件不受 since/before 二次过滤(后端已按同一时间窗查回)", () => {
-    const r = mergeFeedRows(loaded, acts, true, true, DAY + 700, DAY + 800, true);
+    const r = weakRows(loaded, acts, true, true, DAY + 700, DAY + 800, true);
     // 两条事件都在窗外,但仍原样保留——窗只管动作
-    expect(ids(r).filter((id) => id.startsWith("e-"))).toEqual([
+    expect(labels(r).filter((id) => id.startsWith("e-"))).toEqual([
       "e-new",
       "e-oldest-loaded",
     ]);
+  });
+
+  // 关掉折叠是**换画法**,不是换数据。这条回归的成因是一句写错的取界表达式,与"动作怎么
+  // 画"毫无关系——若未折叠那条路自己再算一遍窗口,同一个 bug 会以同一种方式再长出来一次。
+  it("未折叠态共用同一套窗口与地平线(换画法不该让动作墙回来)", () => {
+    const r = weakRows(loaded, acts, true, true, DAY, undefined, true, false);
+    expect(labels(r)).toEqual([
+      "a-top",
+      "e-new",
+      "a-in",
+      "a-at-horizon",
+      "e-oldest-loaded",
+    ]);
+    expect(labels(r)).not.toContain("a-below-1");
+    expect(labels(r)).not.toContain("a-below-2");
+    // 同一批数据、同一套窗口 → 两种画法的行序完全一致(这里只差画法,数据没动)
+    expect(labels(r)).toEqual(labels(weakRows(loaded, acts, true, true, DAY, undefined, true)));
   });
 });
 

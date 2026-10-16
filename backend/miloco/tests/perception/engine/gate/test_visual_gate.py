@@ -135,6 +135,7 @@ class TestEvaluateVisualPrevFrame:
         r = evaluate_visual([gray, empty, gray], self.config, prev_frame=_preprocess(gray))
         assert not r.changed
         assert r.max_score == 0.0
+        assert r.checked_frame_count == 2
         assert r.last_checked is not None
 
     def test_all_empty_frames_returns_none_baseline(self):
@@ -142,6 +143,7 @@ class TestEvaluateVisualPrevFrame:
         r = evaluate_visual([empty] * 3, self.config)
         assert not r.changed
         assert r.max_score == 0.0
+        assert r.checked_frame_count == 0
         assert r.last_checked is None
 
     def test_last_checked_equals_last_check_index_frame(self):

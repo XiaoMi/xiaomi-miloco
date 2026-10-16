@@ -50,9 +50,33 @@ def test_clear_action_resets_and_counts():
     _fill_ready(buf, 6, 100)
 
     dropped, ovf_cnt, max_depth, last_action = buf.consume_drop_stats()
-    assert dropped > 0
+    assert dropped == 3
     assert ovf_cnt >= 1
     assert max_depth > 2
+    assert last_action == "clear"
+
+
+def test_clear_action_counts_each_destroyed_window_once():
+    """clear 分支 dropped 只数实际被销毁的窗口：ready 窗口同时挂在 _windows 与
+    _ready_queue 下，不能两集合相加（否则 ready 窗口被数两遍）。"""
+    buf = MultiTrackSyncBuffer(
+        ["video", "audio"], window_ms=100,
+        max_windows=2, window_settle_ms=50,
+        buffer_full_action="clear",
+    )
+    # 4 个完整窗口:首个(partial)被跳过,至第 4 个 put 时 3 个 ready → 触发 clear。
+    # clear 后正在写的窗口会用当前帧重建,不计入被丢弃的窗口。
+    for i in range(4):
+        wall = (i + 1) * 100
+        buf.put("video", b"v", wall, wall)
+        buf.put("audio", b"a", wall, wall)
+    wall = 1400
+    buf.put("video", b"v", wall, wall)
+    buf.put("audio", b"a", wall, wall)
+
+    dropped, ovf_cnt, max_depth, last_action = buf.consume_drop_stats()
+    assert dropped == 3  # 3 个 ready 窗口,正在写的窗口重建、不计
+    assert ovf_cnt == 1
     assert last_action == "clear"
 
 
@@ -95,6 +119,9 @@ def test_drain_ready_returns_only_newest_window():
 
     ready = buf.drain_ready()
     assert ready is not None
+    assert ready.last_drain_observed_at > 0
+    assert ready.last_drain_ready_depth_before == 5
+    assert ready.last_drain_ready_depth_after == 0
     datas = [f.data for f in ready.tracks["video"]]
     assert datas == [b"v5"], f"应只返回最新窗口 v5,实际 {datas}"
 

@@ -144,6 +144,45 @@ class TestPersistMeaningfulEvent:
         assert (event_dir / "cam_living_01" / "clip.mp4").read_bytes() == _clip_payload(1)[0]
         assert (event_dir / "cam_kitchen_01" / "clip.mp4").read_bytes() == _clip_payload(2)[0]
 
+    async def test_given_event_id_is_used_verbatim(self, isolated_db, dao):
+        """外部传进来的 event_id 原样用作行 id 与快照目录名。
+
+        感知周期在引擎调用前就把 id 定下了(动作台账要挂到同一个点上),
+        这里若另起一个 uuid,台账里的 trigger_event_id 就指向一条不存在的行。
+        """
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts({"cam_kitchen_01": _clip_payload(3)}),
+            event_id="ev-cycle-1",
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["id"] == "ev-cycle-1"
+        from miloco.perception.snapshot_writer import get_snapshot_root
+
+        assert (get_snapshot_root() / "ev-cycle-1" / "cam_kitchen_01" / "clip.mp4").exists()
+
+    async def test_no_event_id_mints_fresh_uuid(self, isolated_db, dao):
+        """不传时自己 mint 一个——旧调用点(非感知链路)不该被迫先造 id。"""
+        result = RealtimePerceptionResult(
+            matched_rules=[MatchedRule(rule_id="r1", reason="厨房在炒菜")]
+        )
+        await _persist_meaningful_event(
+            result=result,
+            device_ids=["cam_kitchen_01"],
+            artifacts=_artifacts({"cam_kitchen_01": _clip_payload(3)}),
+        )
+
+        rows = dao.query()
+        assert len(rows) == 1
+        assert rows[0]["id"]
+        assert rows[0]["id"] != "ev-cycle-1"
+
     async def test_rule_status_rendered_in_text(self, isolated_db, dao):
         """rule_statuses 透传到 build_agent_text，DB.text 含「触发状态」行。"""
         result = RealtimePerceptionResult(

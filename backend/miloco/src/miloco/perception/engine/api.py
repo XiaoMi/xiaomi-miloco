@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from numpy.typing import NDArray
 
+from miloco.perception.engine.identity.names import build_name_lookup
 from miloco.perception.engine.identity.tier_u import cam_id_from_device_id
 from miloco.perception.engine_base import BasePerceptionEngine
 from miloco.perception.types import (
@@ -1010,11 +1011,8 @@ class PerceptionEngine(BasePerceptionEngine):
         """query 路径专用:剔除无视频帧的 snapshot。
 
         判据比 realtime 的 ``_drop_empty_snapshots``(「两个模态都没有」)更严,因为 query
-        路径**没有 audio route**:``build_query_prompt`` 只产出 ``video_base64``,而
-        ``_encode_video`` 对零帧直接返回 ``(None, None)`` —— 音频只作为 mp4 音轨随视频走,
-        零帧时连它一起丢。``_build_messages`` 两个 key 都拿不到就一个媒体块都不加,且无
-        warning。留着零帧 snapshot 的唯一效果,是让模型拿着上一窗的 ``last_caption`` 去回答
-        「现在怎么样」——用户直接读到的一句听起来正常、但没有本窗画面依据的现场描述。
+        路径**没有 audio route**，音频只随视频封装。零帧无法支撑当前视觉场景的回答，
+        提前剔除以避免发起无画面的查询。
 
         realtime 侧不能用这个判据:那边零帧+音频过闸有 audio route 接住,按无帧剔除会误杀
         拾音相机的纯音频感知。
@@ -1037,6 +1035,9 @@ class PerceptionEngine(BasePerceptionEngine):
         on_early_speeches: Callable[[list[Speech]], Awaitable[None]] | None = None,
         on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]] | None = None,
         on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None = None,
+        trace_id: str | None = None,
+        device_trace_ids: dict[str, str] | None = None,
+        collect_flow_diagnostics: bool = False,
     ) -> RealtimePerceptionResult | None:
         """Run full engine batch pipeline with rule evaluation."""
         from miloco.perception.engine.pipeline import run_batch_pipeline
@@ -1159,6 +1160,9 @@ class PerceptionEngine(BasePerceptionEngine):
                 gate_last_audio_pass_ts=self._gate_last_audio_pass_ts,
                 gate_hold_active=self._gate_hold_active,
                 gate_hold_started_at=self._gate_hold_started_at,
+                trace_id=trace_id,
+                device_trace_ids=device_trace_ids,
+                collect_flow_diagnostics=collect_flow_diagnostics,
             )
         except Exception as e:
             logger.error("Batch pipeline failed: %s", e, exc_info=True)
@@ -1187,25 +1191,16 @@ class PerceptionEngine(BasePerceptionEngine):
         # （_encode_video_mp4 对空 audio 自动出纯视频 mp4）。
         self._strip_unauthorized_voice_audio(batch)
 
-        # 剥完音频后复检。query 路径跳过 gate 且没有 audio route，零帧 snapshot 只能在
-        # 这里挡——否则 build_query_prompt 无帧不加任何媒体块，变成拿纯文本（外加上一窗的
-        # last_caption）去回答"房间里现在怎么样"。判据用「有没有画面」而非 realtime 的
-        # 「两个模态都没有」，理由见 _drop_frameless_snapshots。
+        # 剥完音频后复检。query 跳过 gate 且依赖视频，先剔除无画面的 snapshot；
+        # 不能照搬 realtime 的「两个模态都没有」判据，理由见 _drop_frameless_snapshots。
         self._drop_frameless_snapshots(batch)
         if batch.empty:
             return OnDemandPerceptionResult(answer="")
 
         # query 路径 omni 仍是 per-room 一次（产品语义：用户问"房间"，答案单份），
         # 需要 per-room 的 last_caption 作为参考。``_last_captions`` 已改 per-device，
-        # 这里合成 per-room：**取 room 内第一个 snapshot 对应 device 的 caption**——
-        # 与 ``_encode_batch_video`` 的 "first device that has frames" 视频选取精准对齐
-        # （query 路径不走 gate filter，identity_packets 顺序 = snapshots 顺序，
-        # ``snapshots[0]`` 通常就是 ``_encode_batch_video`` 实际选中那个 device）。
-        #
-        # 为什么不拼接多 device caption：query 路径 omni 实际只看到首镜头视频（遗留
-        # degenerate，见 run_query_pipeline 的 Note 段）。若 last_caption 拼成多视角
-        # "设备0：xxx；设备1：yyy"，但视频里没有设备1的画面 → 文本与视觉信息不对称，
-        # 容易触发模型混乱或幻觉。等 query 路径修好多视频问题后再升级。
+        # 这里取 room 内首设备的 caption，不拼接未提供画面的其他设备描述。
+        # prompt builder 若实际编码了其他设备，会舍弃这份历史，避免跨镜头借用。
         per_room_last_caption: dict[str, str] = {}
         for room_name, snapshots in batch.by_room().items():
             if not snapshots:
@@ -1214,6 +1209,18 @@ class PerceptionEngine(BasePerceptionEngine):
             cap = self._last_captions.get(first_did)
             if cap:
                 per_room_last_caption[room_name] = cap
+
+        # 每次查询共用一份姓名快照；读库失败仍可按画面回答，不借其他文本补名。
+        name_lookup: dict[str, str] = {}
+        if self._identity_lib is not None:
+            try:
+                name_lookup = build_name_lookup(self._identity_lib.list_persons())
+            except Exception as exc:  # noqa: BLE001
+                # 不附带异常消息或堆栈，避免泄露身份库数据。
+                logger.warning(
+                    "Query name lookup failed; error_type=%s; continuing without member names",
+                    type(exc).__name__,
+                )
 
         try:
             results = await run_query_pipeline(
@@ -1224,6 +1231,7 @@ class PerceptionEngine(BasePerceptionEngine):
                 get_identity_engine=self._get_or_create_identity_engine,
                 last_captions=per_room_last_caption,
                 frame_index_offset=self._global_frame_index,
+                label_lookup=name_lookup,
             )
         except Exception as e:
             logger.error("Query pipeline failed: %s", e, exc_info=True)
@@ -1274,6 +1282,7 @@ class PerceptionEngine(BasePerceptionEngine):
             skipped=all_skipped,
             timing=timing or None,
             device_rule_map=device_rule_map or {},
+            flow_diagnostics=result.flow_diagnostics,
         )
 
         for room_name, room_result in result.rooms.items():

@@ -175,9 +175,16 @@ class MiMoAdapter(OpenAICompatAdapter):
         }
 
     def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        # OpenAI 规范 input_audio 的 data+format 均必填——本地 mlx-vlm server 严格
+        # 校验,缺 format 直接 422(2026-07-29 感知停摆根因);宽松 provider 忽略
+        # 多余字段无副作用。载荷是 prompt_builder._encode_audio_only_mp4 产出的真 m4a
+        # 容器(ftyp="M4A "),format 报 "m4a",与 data 的 mime 及 QwenOmniAdapter 一致。
         return {
             "type": "input_audio",
-            "input_audio": {"data": f"data:audio/m4a;base64,{audio_base64}"},
+            "input_audio": {
+                "data": f"data:audio/m4a;base64,{audio_base64}",
+                "format": "m4a",
+            },
         }
 
     def build_request_body(
@@ -437,6 +444,9 @@ class GeminiAdapter(OmniProviderAdapter):
         # 刷屏,也弱化"名字不含 flash"这个粗判据对 gemini-3-pro 等大概率可用模型的误报噪音。
         if "flash" not in model.lower() and model not in _warned_non_flash_gemini:
             _warned_non_flash_gemini.add(model)
+            # model 来自用户配置,记日志前清掉 CR/LF 防日志注入(CodeQL log-injection)。
+            # 就地包在实参上而不是先赋给中间变量：这一处只为打日志存在，中间变量会让人
+            # 以为它另有用途。
             logger.warning(
                 "[omni] GeminiAdapter 默认发 thinkingConfig.thinkingBudget=0,仅对 gemini-3-flash "
                 "系列验证过;model=%s 若为强制思考模型(如 gemini-2.5-pro)会 400,需按模型放开此项",

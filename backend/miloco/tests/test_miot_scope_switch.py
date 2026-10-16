@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from miloco.database.kv_repo import ScopeConfigKeys
+from miloco.database.kv_repo import DeviceInfoKeys, ScopeConfigKeys
 from miloco.miot.service import MiotService
 from miloco.state import StateStore
 
@@ -297,8 +297,81 @@ async def test_authorizing_a_new_account_resets_the_agent_session(scene):
     """换账号比换家庭更该清：旧账号的设备 / 房间 / 习惯不清会串进新账号。
 
     main 上这件事搭在 list_homes 的兜底选家分支里，授权路径改调 _ensure_home_selected
-    之后那条路断了 —— 这条用例钉住补回来的那一行。
+    之后那条路断了 —— 这条用例钉住补回来的那一行。夹具里授权前的身份读不到（KV 里
+    没有那份 user_info，所以判据第一项就是假），走的是 fail-closed 那一档。
     """
     await scene.service.authorize_with_code(code="c", state="s")
 
     assert scene.session_resets == [1]
+
+
+# ── 「同账号重绑不清会话」这一档：uid 读得到时才有区别 ──────────────────
+#
+# 上面那条走的是 fail-closed（身份读不到 = 按换账号处理）。下面四条把 uid 明写
+# 出来，让判据的两个触发源各自被单独钉住：简化回 `not same_account` 时只有「账号
+# 没换、启用的家没了」那条红；简化成只看 `home_changed` 时只有「换账号、而这一趟
+# 看不到任何家庭」那条红。
+
+
+async def _authorize_as(scene, prev_uid: str, new_uid: str) -> None:
+    """让授权路径看到明确的「授权前 / 授权后」账号身份。"""
+    scene.proxy._kv_repo._data[DeviceInfoKeys.USER_INFO_KEY] = json.dumps(
+        {"uid": prev_uid}
+    )
+    scene.proxy.get_miot_auth_info = AsyncMock(
+        return_value=SimpleNamespace(user_info=SimpleNamespace(uid=new_uid))
+    )
+    await scene.service.authorize_with_code(code="c", state="s")
+
+
+async def test_rebinding_the_same_account_keeps_the_agent_session(scene):
+    """同账号重绑不重置：这正是授权失效的既定恢复出口，账号没换就没换作用域。
+
+    会话里攒的设备名 / 房间名 / 习惯是住户的上下文，重绑并不改变它们指向的东西。
+    与下一条成对：两条的差别只有 new_uid 这一个实参。
+    """
+    await _authorize_as(scene, prev_uid="u1", new_uid="u1")
+
+    assert scene.session_resets == [], "同账号重绑不该清会话"
+    assert json.loads(
+        scene.proxy._kv_repo._data[ScopeConfigKeys.HOME_WHITE_LIST_KEY]
+    ) == ["H1"], "同账号那一支不清启用集"
+
+
+async def test_rebinding_a_different_account_resets_the_agent_session(scene):
+    """换账号重置会话（uid 两边都读得到且不等这一档）。"""
+    await _authorize_as(scene, prev_uid="u1", new_uid="u2")
+
+    assert scene.session_resets == [1]
+
+
+async def test_rebinding_a_different_account_without_any_visible_home_resets_the_session(scene):
+    """换账号那一支即使这一趟看不到任何家庭，也要清会话。
+
+    与上一条是同一个触发源，差别只在兜底有没有动手：夹具里设备表有家可选，于是
+    home_changed 恒真，`not same_account` 那半边其实是被顺带覆盖的。把设备表清空，
+    兜底无家可选、home_changed 为假，这一档就只剩「换了账号」能触发——判据若被
+    简化成只看 home_changed，只有这条红。
+    """
+    scene.proxy.get_devices = AsyncMock(return_value={})
+
+    await _authorize_as(scene, prev_uid="u1", new_uid="u2")
+
+    assert scene.session_resets == [1], "换了账号就要清，与这一趟看不看得见家庭无关"
+
+
+async def test_rebinding_the_same_account_after_its_home_vanished_resets_the_session(scene):
+    """账号没换、但启用的家已被删除 / 共享被收回 —— 作用域真的换了，会话要跟着清。
+
+    `_ensure_home_selected` 发现启用集与可见家庭无交集时会兜底改选（与 list_homes
+    同一个判据）。判据只看账号的话，这一档旧家庭的设备名与房间名会留在会话里，
+    而它答的已经是另一个家。
+    """
+    scene.proxy._kv_repo._data[ScopeConfigKeys.HOME_WHITE_LIST_KEY] = json.dumps(["gone"])
+
+    await _authorize_as(scene, prev_uid="u1", new_uid="u1")
+
+    assert scene.session_resets == [1], "启用集被兜底改写 = 作用域换了，会话跟着清"
+    assert json.loads(
+        scene.proxy._kv_repo._data[ScopeConfigKeys.HOME_WHITE_LIST_KEY]
+    ) == ["H1"], "兜底选到字典序首个可见家庭"

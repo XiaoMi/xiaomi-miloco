@@ -36,6 +36,7 @@ from miloco.task_record.service import (
     TaskNotFoundError,
     TaskRecordService,
 )
+from miloco.utils.common import safe_log
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +78,9 @@ async def init_record(
     """方案 P 阶段 A'：插主表活跃行。前提 task 已存在。"""
     logger.info(
         "Init record - User: %s, task_id: %s, kind: %s",
-        current_user,
-        task_id,
-        req.kind.value,
+        safe_log(current_user),
+        safe_log(task_id),
+        safe_log(req.kind.value),
     )
     try:
         view = _service().init_record(task_id, req.kind, req.content)

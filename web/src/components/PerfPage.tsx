@@ -4,15 +4,16 @@
  * 顶部:窗口切换(1h/6h/24h/3d) + 手动刷新。下方按因果顺序排版:
  *   1. KPI 卡(PerfKpiCards)             — summary
  *   2. 实时率时序(PerfRtfChart)         — rtf_series (含 e2e 双线对比)
- *   3. Gate 过滤率(PerfGateChart)       — gate_pass_rate
- *   4. Omni 错误时序(PerfOmniErrorChart)— omni_error_series
- *   5. 窗口丢弃数(PerfDropChart)        — drop_series
- *   6. 阶段耗时分布(PerfStageTable)     — stage_percentiles
- *   6.4 进程 CPU/线程数(PerfProcChart)  — /api/monitor/proc/series
- *   6.5 进程内存(PerfMemoryChart)       — /api/monitor/memory + /series
- *   7. 最近 Agent 调用(PerfAgentList)    — /api/traces?has_agent=1
- *   8. 近期处理耗时(PerfTraceTimingChart)— latency_percentiles
- *   9. 原始 trace 列表(PerfTraceList)   — /api/traces
+ *   3. 运行态感知流向(PerfPipelineFlow) — /api/perf/perception-flow
+ *   4. Gate 过滤率(PerfGateChart)       — gate_pass_rate
+ *   5. Omni 错误时序(PerfOmniErrorChart)— omni_error_series
+ *   6. 窗口丢弃数(PerfDropChart)        — drop_series
+ *   7. 阶段耗时分布(PerfStageTable)     — stage_percentiles
+ *   8. 进程 CPU/线程数(PerfProcChart)   — /api/monitor/proc/series
+ *   9. 进程内存(PerfMemoryChart)        — /api/monitor/memory + /series
+ *   10. 最近 Agent 调用(PerfAgentList)  — /api/traces?has_agent=1
+ *   11. 近期处理耗时(PerfTraceTimingChart)— latency_percentiles
+ *   12. 原始 trace 列表(PerfTraceList)  — /api/traces
  *
  * 直接接 backend observability 真接口,不走 mock。空数据时各子区块自行降级显示。
  */
@@ -60,6 +61,7 @@ import { PerfGateScoreTable } from "./PerfGateScoreTable";
 import { PerfStageTable } from "./PerfStageTable";
 import { PerfTraceList } from "./PerfTraceList";
 import { PerfTraceTimingChart } from "./PerfTraceTimingChart";
+import { PerfPipelineFlow } from "./PerfPipelineFlow";
 import { RefreshIntervalInput } from "./RefreshIntervalInput";
 import { useRefreshInterval } from "@/hooks/useRefreshInterval";
 
@@ -68,6 +70,7 @@ export function PerfPage() {
   // 窗口选项随语言重算;memo 在 i18n.language 不变时保持引用稳定。
   const windows = useMemo(() => perfWindows(), [i18n.language]);
   const [windowKey, setWindow] = useState<PerfWindow>("1h");
+  const [refreshNonce, setRefreshNonce] = useState(0);
   const { sec: refreshSec, setSec: setRefreshSec } = useRefreshInterval();
   const bucket = defaultBucket(windowKey);
   const windowMs = WINDOW_MS[windowKey];
@@ -169,6 +172,10 @@ export function PerfPage() {
     memSeries.reload();
     procSeries.reload();
   };
+  const refreshAllManually = () => {
+    setRefreshNonce((value) => value + 1);
+    reloadAll();
+  };
   reloadAllRef.current = reloadAll;
 
   // 自动刷新周期由住户设定，与「模型」页共用同一个值（见 useRefreshInterval：一处改、
@@ -224,7 +231,7 @@ export function PerfPage() {
           <RefreshIntervalInput sec={refreshSec} onChange={setRefreshSec} />
           <button
             type="button"
-            onClick={reloadAll}
+            onClick={refreshAllManually}
             className="text-caption px-3 py-1.5 rounded-md border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
           >
             {t("common.refresh")}
@@ -237,6 +244,12 @@ export function PerfPage() {
 
       {/* 2. RTF 时间序列 */}
       <PerfRtfChart state={rtf} bucket={bucket} windowMs={windowMs} />
+
+      {/* 当前运行态流向图独立于历史 windowKey。 */}
+      <PerfPipelineFlow
+        refreshNonce={refreshNonce}
+        refreshSec={refreshSec}
+      />
 
       {/* 3. Gate 过滤率时间序列 + 打分分布 */}
       <PerfGateChart state={gate} bucket={bucket} windowMs={windowMs} />

@@ -54,16 +54,30 @@ async def list_events(
     ),
     limit: int = Query(50, ge=1, le=200, description="每页条数,上限 200"),
     offset: int = Query(0, ge=0, description="分页偏移"),
+    event_id: str | None = Query(
+        None,
+        description=(
+            "按主键单查(反查动作的宿主事件):命中即不看 since/before/limit/offset"
+            "(参数本身仍照常校验), 至多返回一条;查不到返回空列表而非报错"
+        ),
+    ),
     svc: EventsService = Depends(get_events_service),
 ):
     """拉取有意义事件列表,按 timestamp DESC 排序.
 
     响应不含 payload_json / schema_version / created_at(都是后端内部字段).
     前端按 "返回长度 < limit" 判断到尾,无 has_more 字段.
+
+    ``event_id`` 是给动作台账反查宿主事件用的, 走的是同一张表的另一条取法: 时间窗
+    参数在这条路上不参与取数, 因为要反查的场景正是"这条事件已经翻出当前窗口了".
     """
-    events = await svc.list_events(
-        since=since, before=before, limit=limit, offset=offset
-    )
+    if event_id:
+        one = await svc.get_event(event_id)
+        events = [one] if one is not None else []
+    else:
+        events = await svc.list_events(
+            since=since, before=before, limit=limit, offset=offset
+        )
     return NormalResponse(
         code=0, message="ok", data=EventListResponse(events=events)
     )

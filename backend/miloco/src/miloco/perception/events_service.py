@@ -106,6 +106,18 @@ class EventsService:
         feedback_index = self.build_feedback_index()
         return [self._row_to_event(row, snapshot_root, feedback_index) for row in rows]
 
+    async def get_event(self, event_id: str) -> MeaningfulEvent | None:
+        """按主键取单条,给「反查动作的宿主事件」那条路用。
+
+        与列表口径的差别只有一处、且是刻意的:**不带时间窗**。要反查的场景恰恰是
+        「这条事件已经翻出当前窗口了」,再拿窗口去套它等于把唯一需要它的那条路堵死。
+        取不到返回 None,由调用方决定怎么说——那不是故障。
+        """
+        row = self._dao.get_by_id(event_id)
+        if row is None:
+            return None
+        return self._row_to_event(row, get_snapshot_root(), self.build_feedback_index())
+
     async def locate_clip(
         self, event_id: str, device_id: str
     ) -> tuple[SnapshotStatus, Path | None, str | None, int | None]:
@@ -229,13 +241,15 @@ class EventsService:
                         "read_crop_meta bad crop meta event_id=%s device_id=%s: %s",
                         safe_log(event_id),
                         safe_log(device_id),
-                        e,
+                        safe_log(e),
                     )
                     return (self._no_box_status(event_id, device_id), None)
         except Exception as e:  # noqa: BLE001
             # path 里拼着 event_id,与上面那条同源 —— CodeQL 的 taint 没追进 Path 拼接
             # 只报了上面两处,但只清洗被点名的那处、留下这处,防线就是漏的。
-            logger.warning("read_crop_meta failed to parse trace %s: %s", safe_log(path), e)
+            logger.warning(
+                "read_crop_meta failed to parse trace %s: %s", safe_log(path), safe_log(e)
+            )
             return (self._no_box_status(event_id, device_id), None)
         return (self._no_box_status(event_id, device_id), None)
 

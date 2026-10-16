@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 from miloco.middleware.exceptions import (
     BusinessException,
     ConflictException,
+    MiotAuthUnavailableError,
     ResourceNotFoundException,
     ValidationException,
 )
@@ -1034,6 +1035,15 @@ class RuleService:
         from miloco.manager import get_manager
 
         manager = get_manager()
+        # 授权失效要排在查家庭之前判：降级态下设备表拉不回来、缓存也是空的，往下
+        # 走只会报「设备不在当前启用的家庭里」——那句话不假，但它把住户引向去改
+        # 家庭配置，而这件事需要他重新授权。与 `_validate_scene_ids` 同一口径。
+        if not manager.miot_proxy.is_operational:
+            raise MiotAuthUnavailableError(
+                manager.miot_proxy.refusal_reason("cannot check device home scope")
+                or "cannot check device home scope: Mi Home authorization is no"
+                " longer valid."
+            )
         # **`get_device_spec` 答不了作用域**: 它走 `get_devices()`, 那是账号全量, 过滤
         # 由各调用方自己做 (同文件的 control_device 就为此额外查了一次)。而容器的三条
         # 写入通道都按启用家庭过滤, 所以未启用家庭的设备那条叶子永远不进容器 —— 规则
@@ -1117,6 +1127,15 @@ class RuleService:
         }
         if not wanted:
             return
+        # 授权失效要排在拉列表之前判：场景表要有效令牌才拉得到、且不落盘，降级态
+        # 重启后必然为空，往下走只会报「拿不到场景表」——那句话不假，但它把住户
+        # 引向「等一等再试」，而这件事需要他重新授权。与触发场景那条入口同一口径。
+        if not self._miot_proxy.is_operational:
+            raise MiotAuthUnavailableError(
+                self._miot_proxy.refusal_reason("cannot verify scene IDs")
+                or "cannot verify scene IDs: Mi Home authorization is no longer"
+                " valid."
+            )
         all_scenes = (await self._miot_proxy.get_all_scenes()) or {}
         # 场景表拿不到(缓存空 + 刷新失败)时别谎报「你的 id 无效」——两种失败
         # 的修法完全不同。
@@ -1884,16 +1903,21 @@ class RuleService:
         caption: str = "",
         device_name: str = "",
         cycle_source_states: dict[str, bool] | None = None,
+        trigger_event_id: str | None = None,
     ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
         See :meth:`RuleRunner.update_state`. Returns the resulting
         ``TriggerOutcome`` (surfaced in the resident activity log).
+
+        ``trigger_event_id`` 是感知路径专有的（感知侧 mint 的那条事件行）；record
+        源达标那条路直接调 runner、不走这里，故那边留空。
         """
         return await self._runner.update_state(
             rule_id, source_did, current_bool, context, trigger_room, trigger_dids,
             caption=caption, device_name=device_name,
             cycle_source_states=cycle_source_states,
+            trigger_event_id=trigger_event_id,
         )
 
     # ---- Logs ----

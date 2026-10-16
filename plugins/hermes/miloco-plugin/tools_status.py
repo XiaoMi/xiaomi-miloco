@@ -2,9 +2,7 @@
 
 装好 miloco 兼容层后用户 / agent 能主动验证链路是否完整：
 
-- ``miloco_status`` — 一键自检 10 项不变量，返回结构化 JSON（plugin enabled /
-  state.json deliver.target / adapter health / 4 cron jobs / 16+ skills /
-  miloco backend status / 上次 webhook 时间）。诊断 root cause 用。
+- ``miloco_status`` — 返回各检查项的结构化诊断及修复提示；检查失败不等于推送失败。
 - ``miloco_test_push`` — 强制走一次完整投递链路（绕开 cron / perception），用户能立刻
   验证推送通不通。
 - ``miloco_notify_bind`` — IM 渠道切换：list 列出 state.json::candidates + 当前
@@ -233,40 +231,65 @@ def _check_versions(ctx: Any) -> Dict[str, Any]:
 
 
 def _check_trace_hooks() -> Dict[str, Any]:
-    """trace.py 是否被 register 了——通过查 $MILOCO_HOME/trace/agent/ 目录近期活动。
+    """trace hook 有没有在写盘——查 $MILOCO_HOME/trace/agent/ 今天的 meta.json。
 
-    注意：trace 是 debug 开关，没开过不代表坏了。所以 trace 目录不存在时
-    返回 ``ok=True, note="trace debug 未启用"``，不进 failed_count。
+    meta.json 每个 miloco turn 都写，不受 debug 开关影响（它是 backend 记账的唯一
+    来源）；归 debug 管的只有 jsonl.gz 明细。所以「没有 meta」不能解释成 debug 没开，
+    只有两种可能：今天确实没派过 turn，或者 hook 没注册上。
     """
+    from datetime import datetime
+
+    from .trace import is_debug_enabled
+
     trace_dir = miloco_home() / "trace" / "agent"
+    debug = is_debug_enabled()
+    no_meta_fix = (
+        "先确认 backend 今天确实派过 turn（miloco-cli service status）。派过却没有 meta "
+        "就是 trace hook 没注册上：查 hermes gateway 日志里的 "
+        "'[miloco-trace] register ... failed'，或确认插件已加载"
+    )
     if not trace_dir.is_dir():
         return {
             "ok": True,
-            "note": "trace debug 未启用（没跑过 MILOCO_TRACE_DEBUG=1 的 turn）— 不算异常",
-            "enabled": False,
-            "fix": "需要 debug 时再 export MILOCO_TRACE_DEBUG=1 跑一个 turn",
+            "note": "trace/agent 目录还不存在——至今没有 miloco turn 落过 meta",
+            "debug_enabled": debug,
+            "trace_dir": str(trace_dir),
+            "fix": no_meta_fix,
         }
-    # 看今天有没有 meta.json 写过
-    from datetime import datetime
     today = trace_dir / datetime.now().strftime("%Y%m%d")
     if not today.is_dir():
         return {
             "ok": True,
-            "note": "trace 目录在但今天没 turn 跑过（首次跑会建目录 + meta.json）",
+            "note": "今天还没有 miloco turn 落过 meta",
+            "debug_enabled": debug,
             "trace_dir": str(trace_dir),
+            "fix": no_meta_fix,
         }
-    metas = list(today.glob("*.meta.json"))
+    metas: list[tuple[float, Path]] = []
+    for meta_path in today.glob("*.meta.json"):
+        try:
+            metas.append((meta_path.stat().st_mtime, meta_path))
+        except FileNotFoundError:
+            continue
     if not metas:
+        # 今天的目录只由落盘时的 mkdir 建出来，所以目录在 = 至少一个 turn 走到了落盘。
+        # 走到了却没留下 meta，就是落盘失败，这一天的 agent 统计会全部丢。
         return {
-            "ok": True,
-            "note": "今天还没 turn 跑过（debug 模式需 MILOCO_TRACE_DEBUG=1）",
-            "trace_dir": str(trace_dir),
+            "ok": False,
+            "error": "今天的 trace 目录建了却没有一份 meta——落盘失败，当天 agent 统计会全丢",
+            "debug_enabled": debug,
+            "trace_dir": str(today),
+            "fix": (
+                "查 hermes gateway 日志里的 '[miloco-trace] flush failed'，"
+                "常见原因是磁盘写满或目录没有写权限；若恰好有 turn 正在跑，稍后重跑本自检"
+            ),
         }
-    newest = max(metas, key=lambda p: p.stat().st_mtime)
+    newest = max(metas, key=lambda entry: entry[0])[1]
     return {
         "ok": True,
-        "trace_files_today": len(list(today.glob("*.jsonl.gz"))),
         "meta_files_today": len(metas),
+        "jsonl_files_today": len(list(today.glob("*.jsonl.gz"))),  # debug 开时才有
+        "debug_enabled": debug,
         "newest_meta": newest.name,
     }
 
@@ -403,7 +426,7 @@ def _check_hermes_plugin_enabled() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def gather_status(ctx: Any) -> Dict[str, Any]:
-    """一键自检 10 项不变量，返回结构化 JSON。"""
+    """返回各检查项的结果及修复提示。"""
     checks: Dict[str, Dict[str, Any]] = {}
     # 两个 backend check 共用一份快照：各跑一次 service status 时，两次之间后端若
     # 重启/崩溃，同一份报告会自相矛盾（一个说在跑、一个说没托管），agent 据此给出
@@ -444,8 +467,8 @@ def gather_status(ctx: Any) -> Dict[str, Any]:
         "failed": failed,
         "checks": checks,
         "hint": (
-            "全部 ok=True = 推送链路完整；fail 项按 checks[*].fix 修。"
-            "最常见 fail: state_json_deliver_target（hermes 没配 IM 或装时没读到）。"
+            "按失败项的 error / fix 定位问题；检查失败不等于推送失败，"
+            "需要验证投递时使用测试推送。"
         ),
     }
 
@@ -484,10 +507,8 @@ def test_push(ctx: Any, message: Optional[str] = None) -> Dict[str, Any]:
 MILOCO_STATUS_SCHEMA: Dict[str, Any] = {
     "name": "miloco_status",
     "description": (
-        "一键自检 miloco 推送链路 10 项不变量（plugin / state.json target / hermes plugin enabled / "
-        "adapter health / 4 cron jobs / miloco backend / 16+ skills）。\n"
-        "返回结构化 JSON：checks[*].ok + 失败项 fix 提示。**没收到推送时第一时间调这个**——"
-        "会告诉你卡在哪一环（绝大多数情况是 state.json::deliver.target=null）。\n"
+        "诊断 miloco 运行状态，返回结构化 JSON：checks[*].ok 及失败项的 error / fix 提示。\n"
+        "检查失败不等于推送失败，应根据具体失败项排查；需要验证投递时使用测试推送。\n"
         "无需参数，agent / 用户都能调。"
     ),
     "parameters": {"type": "object", "properties": {}, "required": []},

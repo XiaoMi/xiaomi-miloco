@@ -22,6 +22,10 @@ class MIoTErrorCode(Enum):
     CODE_TIMEOUT = -10006
     # OAuth error code
     CODE_OAUTH_UNAUTHORIZED = -10020
+    # 云端明确拒绝了 refresh_token(如 error=96009 invalid refresh token)。
+    # 与 CODE_UNKNOWN 的区别在于「重试无用」——调用方据此判定凭据已永久失效、
+    # 需要用户重新授权,而不是退避重试。
+    CODE_OAUTH_INVALID_REFRESH_TOKEN = -10021
     # Http error code
     CODE_HTTP_INVALID_ACCESS_TOKEN = -10030
     # MIoT mips error code

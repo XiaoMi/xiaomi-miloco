@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -35,6 +36,7 @@ from miloco.perception.engine.identity.gallery_composite import (
     encode_png_bytes,
     hstack_to_height,
 )
+from miloco.perception.engine.identity.names import usable_person_name
 from miloco.perception.engine.types import IdentityPacket, IdentityTarget, OmniContext
 
 from .constants import (
@@ -46,6 +48,7 @@ from .constants import (
     _HISTORY_HEADER,
     _OUTPUT_MODE_FREE,
     _OUTPUT_MODE_JSON,
+    _PERSON_PRESENCE,
     _PRINCIPLE,
     _PRINCIPLE_AUDIO,
     _PRINCIPLE_VIDEO_NO_AUDIO,
@@ -171,6 +174,19 @@ def build_batch_stream_prompt(
     return _build_payload(identity_packets, context, stream=True, label_lookup=label_lookup)
 
 
+_QUERY_PERSON_GROUNDING = (
+    "# 人物在场与称呼\n"
+    + _PERSON_PRESENCE
+    + "- 当前画面中谁在场、在做什么，只据本轮提供的视频判断；检测定位线索、上一窗场景参考、家庭档案和问题里的人名都不证明本轮有人。\n"
+    "- 只有画面确认给出的 bbox 对应真人、且该条为已确认成员线索时，才可沿用对应姓名。"
+    "bbox 标注该设备视频最后一帧的位置，坐标归一化到 [0, 1000]（左上 0,0；右下 1000,1000）。\n"
+    "- 确认有人但无法对应姓名时用“某人 / 陌生人”；身份标签若只是 ID，不把 ID 当人名输出，"
+    "不从家庭档案、历史描述或问题里给未确认身份的目标补姓名。\n"
+    "- 背影、侧身、局部、遮挡或模糊的真人仍算有人；分不清是人还是物时说明“无法确认”，不得据此断言无人。\n"
+    "- 本轮未提供有效视频的设备不能用于确认当前人员；只回答提供画面的范围，不把其他机位的检测结果当作可见事实。"
+)
+
+
 def build_query_prompt(
     identity_packets: list[IdentityPacket],
     query: str,
@@ -181,6 +197,7 @@ def build_query_prompt(
     parts = [
         _ROLE,
         _OUTPUT_MODE_FREE,
+        _QUERY_PERSON_GROUNDING,
         _COMMONSENSE,
     ]
     home_profile = get_home_profile_prefix()
@@ -188,13 +205,13 @@ def build_query_prompt(
         parts.append(home_profile)
     # query 不接 crop(v1 范围外);走 _effective_panorama_short_edge() 兜掉历史 config.json 里
     # 可能残留的 0(早期哨兵),否则 _encode_video_mp4 会算出 scale=0 崩掉按需查询。
-    video_b64, media_info = _encode_batch_video(
+    video_b64, media_info, video_packet_index = _encode_batch_video_with_source(
         identity_packets, short_edge=_effective_panorama_short_edge()
     )
     if not video_b64:
-        # query 路径只有 video 一个媒体块,拼不出就是纯文本问模型"现在怎么样",而 prompt 里
-        # 还注入了上一窗的 last_caption。零帧已由引擎入口的 _drop_frameless_snapshots 挡在
-        # 外面,走到这里说明编码本身失败。event 名与 fused 两条路由一致。
+        video_packet_index = None
+        # 无有效视频时，不注入检测身份标签或上一窗描述，以免它们替代当前画面。
+        # 保留 warning，便于定位编码失败或绕过入口零帧过滤的调用。
         logger.warning(
             "event=fused_no_media_block route=query reason=empty_video room=%s, "
             "本窗口未拼出 video 块、走 text-only",
@@ -202,7 +219,10 @@ def build_query_prompt(
         )
     return {
         "system_prompt": "\n\n".join(parts),
-        "user_content": _build_query_user_content(identity_packets, query, last_caption, label_lookup),
+        "user_content": _build_query_user_content(
+            identity_packets, query, last_caption, label_lookup,
+            video_packet_index=video_packet_index,
+        ),
         "video_base64": video_b64,
         "media_info": media_info,
         "crops": [],
@@ -258,19 +278,23 @@ def build_fused_payload(
 
     if label_lookup is None:
         label_lookup = {
-            pid: format_person_label(s.name, s.role)
+            pid: label
             for pid, s in gallery_snapshot.items()
-            if s.name
+            if (label := format_person_label(s.name, s.role)) is not None
         }
 
     # audio route：无视觉信息，候选作废。与 video 同款 message 隔离（待判断规则/只读历史
     # 各自独立 user 消息）；本轮事实只放"当前时间 + 音频"——audio 无视频，不渲染名册/gallery/
-    # 待识别 track（名册的 bbox 是为"把姓名对应到视频里的人"，audio 场景无意义）。
+    # 待识别 track（名册的 bbox 是为"定位名册项对应的目标"，audio 场景无意义）。
     if _resolve_route(packets) == "audio":
         scene = SceneDescriptor(route="audio", has_identity=False, stream=False)
         system_prompt = build_system_prompt(scene, include_home_profile=False, camera_prompt=context.camera_prompt)
         ep = packets[0]
         audio_b64 = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
+        if not (audio_b64 and len(audio_b64) >= _MIN_AUDIO_B64_LEN):
+            from miloco.perception.flow_context import record_audio_encode_failure
+
+            record_audio_encode_failure()
         user_content: list[dict] = []
         if context.current_time:
             user_content.append({"type": "text", "text": f"当前时间: {context.current_time}"})
@@ -306,7 +330,8 @@ def build_fused_payload(
 
     # 自适应分辨率(Smart Crop)。prompt 里所有 bbox 都按**全景整帧**归一化到 [0,1000],
     # 裁切生效时一律经 bbox_remap 换算进 crop 坐标系;换算不出来时两侧处置不同:
-    #   - 名册 bbox(已定身份的成员/陌生人)是**先验**:退化成"只给姓名不给位置"仍然正确。
+    #   - 名册 bbox(已定身份的成员/陌生人)是**先验**:换算失败时只撤去位置,
+    #     姓名保留作线索,能否用于描述仍须按人物总原则判断。
     #   - 候选 bbox(待识别 track)是模型把 track_id 对到画面里某个人的**唯一定位锚**:
     #     撤掉就没有锚点,多 track 场景下模型只能凭猜分配姓名 —— 错认代价比分辨率收益高
     #     一个量级,所以候选侧取 all-or-nothing:每个带 bbox 的候选都必须换算得出(非 None),
@@ -525,6 +550,10 @@ def _build_payload(
     if route == "audio":
         ep = packets[0]
         base["audio_base64"] = _encode_audio_only_mp4(ep.audio_clip, ep.sample_rate)
+        if not base["audio_base64"]:
+            from miloco.perception.flow_context import record_audio_encode_failure
+
+            record_audio_encode_failure()
         base["media_info"] = _audio_only_media_info(ep.sample_rate)
     else:
         # 自适应分辨率(Smart Crop)只接 fused 生产路径。此路(非 fused/legacy)不裁切:
@@ -534,6 +563,7 @@ def _build_payload(
         video_b64, media_info = _encode_batch_video(
             packets, short_edge=_effective_panorama_short_edge()
         )
+        _record_panorama_mode(smart_crop_enabled=False)
         base["video_base64"] = video_b64
         base["media_info"] = media_info
     return base
@@ -552,10 +582,7 @@ def build_system_prompt(
 ) -> str:
     """按场景装配 system prompt。
 
-    结构：``角色 → 输出模式 → # 任务 → # 输出格式(schema) → # 字段说明 → # 提醒判定
-    → # 通用常识 → # 输出实例 → [家庭档案?]``。schema / 字段说明 / 实例 / 任务行均按
-    ``scene`` 选取（audio 场景剥 caption/identity；有身份候选才带 identity 与实例 A），
-    同场景前缀稳定，利于 omni 服务端 prefix cache。
+    模态相关内容按 ``scene`` 选取；通用约束前置，低频上下文置尾，便于复用共享前缀。
 
     流程不再单列「工作流程」段——各任务（含 suggestions 的触发与 urgency 判定）的细则
     全部内联进对应「# 字段说明」的 ``## 字段`` 块。
@@ -579,7 +606,7 @@ def build_system_prompt(
     parts: list[str] = [
         role,
         _OUTPUT_MODE_JSON,
-        principle,
+        "# 总原则\n\n" + principle,
         _render_task_list(scene),
         "# 输出格式\n\n" + _render_schema_section(scene),
         "# 字段说明\n\n" + render_field_spec(scene),
@@ -667,8 +694,8 @@ def _render_examples(scene: SceneDescriptor) -> str:
     examples = []
     if scene.has_identity and scene.has_speech and not scene.identity_match_disabled:
         examples.append(_EXAMPLE_IDENTITY)
-    # 库空时实例 B 用泛称版：此窗无成员铺垫（实例 A 已 gate 掉），caption 示范不该叫专名，
-    # 与「库空不产成员名」收敛一致。库非空照旧用带名版（其"小明"由上方实例 A 的 gallery 铺垫）。
+    # 库空时实例 B 用泛称版，避免示范姓名被当成无依据的命名许可。
+    # 带名版本也须遵守总原则的人物称呼授权。
     examples.append(
         _EXAMPLE_CHAIN_NO_NAME if scene.identity_match_disabled else _EXAMPLE_CHAIN
     )
@@ -804,9 +831,8 @@ def _build_fused_user_content(
                         pid, samples.name, len(face_jpg), _MIN_JPEG_BYTES,
                     )
                     face_jpg = None
-                # 名册/gallery/输出统一用纯真名（角色上下文在「# 家庭档案」里）；
-                # name_to_pid 对纯名有 key，omni 输出 name 即可反查回 UUID
-                prepared.append((pid, samples.name or pid, body_jpg, face_jpg))
+                # 无可用姓名时仍展示 UUID，保留该成员的参考图。
+                prepared.append((pid, usable_person_name(samples.name) or pid, body_jpg, face_jpg))
 
             if give_up_reason is not None:
                 # 整 gallery 放弃 —— 不渲染 gallery 段，本窗口等价于无 gallery 主调用
@@ -887,7 +913,9 @@ def _build_fused_user_content(
         content.append({"type": "text", "text": (
             "上方已识别人物、陌生人及待识别 track 中的 bbox=(x1, y1, x2, y2) 均为视频**最后一帧**中"
             "归一化到 [0, 1000] 区间的位置（左上 0,0；右下 1000,1000），"
-            "用于把姓名 / track_id 对应到视频里的人；画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+            "用于定位名册项 / track 对应的目标；它不替代本轮画面对‘是否有人’的判断。"
+            "框内若是非人体，不得沿用姓名，也不算有人。"
+            "画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
         )})
 
     # 参考帧图块:引导语与图块同进同退,避免只留文字不留图。
@@ -959,6 +987,9 @@ def _build_fused_user_content(
     if video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
         content.append(adapter.build_video_block(video_b64, media_info))
     elif video_b64:
+        from miloco.perception.flow_context import record_video_block_skipped
+
+        record_video_block_skipped()
         logger.warning(
             "event=fused_video_b64_too_short size=%d (< %d), 跳过 video_url 块, "
             "本窗口走 text-only 识别",
@@ -977,6 +1008,9 @@ def _build_fused_user_content(
             1 for b in content
             if isinstance(b, dict) and b.get("type") in ("image_url", "input_audio")
         )
+        from miloco.perception.flow_context import record_video_block_skipped
+
+        record_video_block_skipped()
         logger.warning(
             "event=fused_no_media_block route=video reason=empty_video room=%s "
             "other_media_blocks=%d, 本窗口未拼出 video 块、走 text-only"
@@ -1101,15 +1135,22 @@ def _build_device_header(
                 lines.append(f"  陌生人：{', '.join(strangers)}")
             lines.append("")
 
-    # 名册含位置时附一句坐标系说明（非 fused 路径用）；fused 路径传 emit_bbox_note=False，
+    # 名册含位置时附说明（非 fused 路径用）；fused 路径传 emit_bbox_note=False，
     # 由 _build_fused_user_content 统一出一句覆盖名册 + 待识别 track，避免两处重复。
     # 「最后一帧」与 fused 侧同口径:bbox 只标末帧位置(engine._normalize_bbox_to_1000 按
     # all_frames[-1] 归一化),视频却跨整个窗口,不写明会让模型拿它去读中间帧。
     # 此路(非 fused/legacy)恒走全景、不接 Smart Crop,故无需坐标换算。
+    #
+    # 两句同门:第二句(空椅坏例的关键防护)若自己判"名册里有没有 bbox",fused 路径就会在名册
+    # 处多出它一份,而 fused 侧的说明句已含同款否证条件 —— 同一判据存两份,改一处忘一处即漂移。
     if emit_bbox_note and any("[bbox=" in ln for ln in lines):
         lines.append(
             "上方已识别人物、陌生人中 [bbox=(x1, y1, x2, y2)] 为该人在视频**最后一帧**中归一化到 [0, 1000] 区间的位置"
-            "（左上 0,0；右下 1000,1000），用于把姓名对应到视频里的人；画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+            "（左上 0,0；右下 1000,1000），用于定位名册项对应的目标，不替代本轮画面对‘是否有人’的判断；"
+            "画面中的人在窗口内可能移动，靠前的帧以视觉为准。"
+        )
+        lines.append(
+            "名册是定位线索；bbox 若对应非人体，不得沿用姓名，也不算有人。"
         )
     return lines
 
@@ -1149,9 +1190,10 @@ def _build_context_parts(context: OmniContext, *, stream: bool = False) -> list[
 def format_person_label(name: str | None, role: str | None) -> str | None:
     """把真名 + 家庭角色拼成 prompt 显示标签：``真名(角色:爸爸)``；role 为空只显真名。
 
-    name 为空时返回 None，由调用方兜底为 person_id（理论上 backfill 后 name 必有）。
+    name 为空或全空白时返回 None；有效姓名保持原样。
     """
-    if not name:
+    name = usable_person_name(name)
+    if name is None:
         return None
     if role:
         return f"{name}(角色:{role})"
@@ -1426,6 +1468,16 @@ def _audio_only_media_info(sample_rate: int) -> LocalMediaInfo:
     )
 
 
+def _record_panorama_mode(*, smart_crop_enabled: bool) -> None:
+    from miloco.perception.flow_context import record_smart_crop
+
+    record_smart_crop(
+        region=None,
+        applied=False,
+        enabled=smart_crop_enabled,
+    )
+
+
 def _get_video_short_edge() -> int:
     try:
         from miloco.config import get_settings
@@ -1524,6 +1576,29 @@ def _encode_target_wh(w0: int, h0: int, short_edge: int) -> tuple[int, int]:
     return int(w0 * scale) // 2 * 2, int(h0 * scale) // 2 * 2
 
 
+def _resize_video_frames(
+    frames: list[NDArray[np.uint8]],
+    target_w: int,
+    target_h: int,
+    interpolation: int,
+) -> Iterator[NDArray[np.uint8]]:
+    from miloco.perception.flow_context import record_media_transform
+
+    for index, frame in enumerate(frames):
+        resized = cv2.resize(
+            frame,
+            (target_w, target_h),
+            interpolation=interpolation,
+        )
+        if index == len(frames) - 1:
+            record_media_transform(
+                width=target_w,
+                height=target_h,
+                frame_count=len(frames),
+            )
+        yield resized
+
+
 def _encode_video_mp4(
     frames: list[NDArray[np.uint8]],
     audio_clip: NDArray[np.int16],
@@ -1571,6 +1646,12 @@ def _encode_video_mp4(
         # 用的是退化成最近邻的 INTER_AREA;换核后画质更好但**编码字节会变**,落盘 clip.mp4
         # 随之变化。即:双闸全关的用户走的也是被本行改过的路径,不是零回归。
         interp = cv2.INTER_LANCZOS4 if scale > 1.0 else cv2.INTER_AREA
+        resized_frames = _resize_video_frames(
+            frames,
+            target_w,
+            target_h,
+            interp,
+        )
         v_stream = container.add_stream("h264", rate=fps)
         v_stream.width = target_w
         v_stream.height = target_h
@@ -1591,10 +1672,7 @@ def _encode_video_mp4(
             a_stream = container.add_stream("aac", rate=sample_rate)
             a_stream.layout = "mono"
 
-        for frame_data in frames:
-            resized = cv2.resize(
-                frame_data, (target_w, target_h), interpolation=interp,
-            )
+        for resized in resized_frames:
             frame = av.VideoFrame.from_ndarray(resized, format="bgr24")
             for packet in v_stream.encode(frame):
                 container.mux(packet)
@@ -1630,6 +1708,9 @@ def _encode_video_mp4(
             has_audio=has_audio,
             audio_sample_rate=sample_rate if has_audio else 0,
         )
+        from miloco.perception.flow_context import record_encoded_media
+
+        record_encoded_media(media_info)
         return base64.b64encode(mp4_bytes).decode(), media_info
     finally:
         if os.path.exists(tmp_path):
@@ -1706,7 +1787,10 @@ def _encode_audio_only_mp4(
     import os
     import tempfile
 
+    from miloco.perception.flow_context import record_audio_only_start
     from miloco.perception.snapshot_context import push_clip_bytes
+
+    record_audio_only_start()
 
     _AAC_FRAME_SIZE = 1024
     if audio_clip is None or audio_clip.size < _AAC_FRAME_SIZE:
@@ -1742,6 +1826,12 @@ def _encode_audio_only_mp4(
             m4a_bytes = f.read()
         # 旁路把 audio-only 的 m4a 字节 push 给 meaningful_events 复用(零重编)
         push_clip_bytes(m4a_bytes, "m4a")
+        from miloco.perception.flow_context import record_encoded_media
+
+        record_encoded_media(
+            _audio_only_media_info(sample_rate),
+            audio_only=True,
+        )
         return base64.b64encode(m4a_bytes).decode()
     finally:
         if os.path.exists(tmp_path):
@@ -1757,11 +1847,20 @@ def _encode_batch_video(
     audio route 由 _build_payload 短路，不会进入本函数。
     返回 ``(base64_str, media_info)``。
     """
-    for ep in edge_packets:
+    b64, media_info, _ = _encode_batch_video_with_source(edge_packets, short_edge)
+    return b64, media_info
+
+
+def _encode_batch_video_with_source(
+    edge_packets: list[IdentityPacket],
+    short_edge: int = _VIDEO_SHORT_EDGE,
+) -> tuple[str | None, LocalMediaInfo | None, int | None]:
+    """返回实际编码设备的索引，让查询定位线索与视频共用来源。"""
+    for index, ep in enumerate(edge_packets):
         b64, media_info = _encode_video(ep, short_edge=short_edge)
         if b64 is not None:
-            return b64, media_info
-    return None, None
+            return b64, media_info, index
+    return None, None, None
 
 
 def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, str]]:
@@ -1796,7 +1895,7 @@ def _encode_batch_crops(edge_packets: list[IdentityPacket]) -> list[dict[str, st
 #      height(1280/720)是**死配置**:传进 RealTrackingService 存成 _input_width/
 #      _input_height 后再没人读,真正决定输入尺寸的是模型的 416x416;engine/api.py
 #      还把它当调试信息暴露出去,容易被读成"感知输入分辨率"。
-#    - ReID tracker/human_reid.py `preprocess` → 人体 crop 缩到 192x96
+#    - ReID tracker/human_reid.py `preprocess` → 人体 crop 缩到 ONNX 输入 shape
 #    - 身份 crop 进 omni:本文件 _CROP_SIZE = (512,512)
 # ⑤ omni 推理分辨率 = `video_short_edge`(**本 PR 前后都只有这一个旋钮**):
 #    settings.yaml 默认 512、UI 档位 [360,512,768,1080]、admin API 收 64..2160。
@@ -1928,6 +2027,10 @@ def _maybe_encode_adaptive(
     # (调用方 build_fused_payload 没有 try,抛上去会被 omni.py 折成整相机 skipped)。
     try:
         cfg = crop_enhance_config_from_settings()
+        smart_crop_enabled = bool(
+            cfg.enabled and cfg.user_enabled and per_camera_enabled
+        )
+        _record_panorama_mode(smart_crop_enabled=smart_crop_enabled)
         # 三闸相与:发版级开关 AND 单机用户开关(下面这个 if) AND per-camera 开关(再下一个 if,
         # 单独判是为了打日志)。任一为 false → 回退全景路径(不裁切)。注意这不等于字节回到接本
         # 特性前 —— 全景走的 _encode_video_mp4 放大分支已换重采样核,见该函数注释。
@@ -2072,6 +2175,9 @@ def _maybe_encode_adaptive(
         # short_edge 记的是**目标**短边;实际编码值会被 _encode_video_mp4 的 //2*2 取偶
         # (以及浮点截断)下调 1-2px,按它反算送模型的像素网格会有这点误差。
         push_crop_meta(region=region, frame_size=(fw, fh), short_edge=cse)
+        from miloco.perception.flow_context import record_smart_crop
+
+        record_smart_crop(region=region, applied=True)
         return _AdaptiveResult(video_b64, media_info, ref_jpeg, region, (fw, fh))
     except Exception:  # noqa: BLE001 —— 任何失败都回退全景,不让 crop 打断推理
         # 统一 event 名(adaptive_crop_fallback),灰度期按单一 event grep 不漏异常回退
@@ -2089,24 +2195,41 @@ def _build_query_user_content(
     query: str,
     last_caption: str | None,
     label_lookup: "dict[str, str] | None" = None,
+    *,
+    video_packet_index: int | None = None,
 ) -> str:
     parts: list[str] = []
 
+    if video_packet_index is None:
+        parts.append("本轮未提供有效视频，无法确认当前人员或场景。")
     for i, ep in enumerate(edge_packets):
         if len(edge_packets) > 1:
             parts.append(f"--- 设备 {i + 1} ---")
+        if i != video_packet_index:
+            parts.append("本轮未提供该设备视频，不据其检测结果判断当前人物。")
+            continue
+        parts.append("本轮视频来自此设备。")
         if not ep.targets:
-            parts.append("检测结果：未检测到目标")
+            parts.append("检测定位线索：未检测到目标（不代表画面无人）")
         else:
-            parts.append("检测结果：")
+            parts.append("检测定位线索（不代表当前有人）：")
             for t in ep.targets:
-                parts.append(_format_target(t, label_lookup))
+                if (
+                    t.bbox_xyxy_norm is not None
+                    and _is_confirmed_member_pid(t.person_id)
+                    and not t.needs_omni_verify
+                    and not t.suppress_as_prior
+                ):
+                    parts.append("已确认成员线索：" + _render_roster_entry(t, label_lookup))
+                else:
+                    parts.append("目标（不提供可沿用的身份标签）")
         parts.append(f"场景状态：{ep.scene_motion.value}")
         parts.append(f"音频：{ep.audio_analysis.type.value}（能量: {ep.audio_analysis.energy_level:.3f}）")
         parts.append("")
 
-    if last_caption:
-        parts.append(f"当前场景参考：{last_caption}")
+    # 调用方的历史描述对应首设备；编码选到其他设备时不借用其历史。
+    if last_caption and video_packet_index == 0:
+        parts.append(f"上一窗场景参考（仅历史，不证明本轮事实）：{last_caption}")
 
     parts.append(f"\n用户问题：{query}")
     return "\n".join(parts)

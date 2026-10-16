@@ -13,10 +13,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from miloco.miot.client import refusal_reason_for
 from miloco.miot.schema import DeviceControlRequest
 from miloco.miot.service import MiotService
 from miloco.observability import metrics_client as mc
 from miloco.observability.metrics_client import MetricsClient
+from miot.error import MIoTErrorCode
 
 
 class _DBConnector:
@@ -51,8 +53,29 @@ class _DBConnector:
             return [dict(r) for r in cur.fetchall()]
 
 
+def _degrade(proxy) -> None:
+    """把替身推进「被云端判死」那一档：判据与健康度一起翻。
+
+    真实代理上 ``is_operational`` 是从健康度派生的（凭据在、且没被判死），替身把
+    它拍成了可写属性，于是这一档要翻两处才立得住。只翻判据会写出「被拒的行、授权
+    状态却是 ok」——判据为假而健康度正常的**只有**「没绑」那一档，那种行本就该留
+    ok（见 ``test_never_bound_is_not_reported_as_expired``），不能混用。
+
+    错误码取与 ``test_miot_auth_cutoff`` 那份替身相同的真实取值：云端永久拒绝这条
+    路必经 ``is_permanent_auth_error``，它只认特定几个码，``None`` 到不了这里。
+    """
+    degraded, _ = proxy.auth_health.mark_failure(
+        permanent=True,
+        code=MIoTErrorCode.CODE_OAUTH_INVALID_REFRESH_TOKEN.value,
+        message="invalid refresh token",
+    )
+    proxy.auth_health = degraded
+    proxy.is_operational = False
+
+
 def _make_service(tmp_path: Path) -> MiotService:
     from miloco.database.kv_repo import ScopeConfigKeys
+    from miloco.miot.auth_state import MiotAuthHealth
 
     db = _DBConnector(tmp_path / "lru.sqlite")
     store: dict[str, str] = {
@@ -60,6 +83,16 @@ def _make_service(tmp_path: Path) -> MiotService:
     }
     dev = SimpleNamespace(home_id="H1", name="台灯", room_name="客厅")
     proxy = SimpleNamespace(
+        # 真实代理有这个判据，夹具也要有：缺了它，生产侧任何「先问一句能不能用」
+        # 的检查都会在这里撞 AttributeError，而那不是生产缺陷、是夹具没建模。
+        is_operational=True,
+        # 同上：台账的授权状态列读的就是这个只读属性，替身不建模的话
+        # ``_auth_state_of`` 会把 AttributeError fail-open 成 NULL——本 PR 新加的
+        # 那一列便在所有用例里恒为空，且没有一条断言会发现。用真实实现，不写复刻件。
+        auth_health=MiotAuthHealth(),
+        # 真实代理还有「有没有绑」这一档，以及据它分档的拒绝文案。夹具取生产那
+        # 份纯函数、不另写一份措辞——复刻件会与本体漂移，而漂移之后测试照样绿。
+        is_authenticated=True,
         _kv_repo=SimpleNamespace(
             db_connector=db,
             get=lambda key, default=None: store.get(key, default),
@@ -81,7 +114,25 @@ def _make_service(tmp_path: Path) -> MiotService:
         get_all_scenes=AsyncMock(
             return_value={"scene1": SimpleNamespace(home_id="H1", scene_name="回家")}
         ),
+        # 真实代理上这是「只读已在手的那份、不触发刷新」的取数口，返回的就是
+        # get_all_scenes 命中缓存时那份。夹具照样建模，否则被拒那条路会撞
+        # AttributeError——那不是生产缺陷、是替身没建模。
+        cached_scenes={"scene1": SimpleNamespace(home_id="H1", scene_name="回家")},
+        # 真实代理另有一对**不触发刷新**的取数口（降级态下写台账走它们，避免为一行
+        # 留痕去打一趟注定 401 的云端）。夹具让它们与上面那两个刷新口返回同一份，
+        # 缺了它们，被拒那条路会在这里撞 AttributeError。
+        cached_devices={"dev1": dev},
+        get_cached_camera=lambda did: {
+            "cam1": SimpleNamespace(
+                home_id="H1", name="门口摄像头", room_name="门口"
+            )
+        }.get(did),
         execute_miot_scene=AsyncMock(return_value=True),
+    )
+    proxy.refusal_reason = lambda what: refusal_reason_for(
+        what,
+        operational=proxy.is_operational,
+        authenticated=proxy.is_authenticated,
     )
     return MiotService(miot_proxy=proxy)
 
@@ -170,6 +221,119 @@ async def test_writer_records_source_rule(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ledger_records_link_columns(bound_client, tmp_path):
+    """公共 helper 带 phase / trigger_event_id 时台账落链路两列(v5)。
+
+    这两列是「动作折叠回触发它的那条事件」唯一的接缝:写丢了,折叠页就只能靠
+    时间相近去猜父子,而猜错比不折叠更难查。
+    """
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="dev1", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None, source="rule", source_id="rule-42",
+        phase="exit", trigger_event_id="ev-enter",
+    )
+    await client.flush()
+    r = _rows(obs_db)[0]
+    assert r["phase"] == "exit"
+    assert r["trigger_event_id"] == "ev-enter"
+
+
+@pytest.mark.asyncio
+async def test_ledger_link_columns_null_by_default(bound_client, tmp_path):
+    """不传时两列留 NULL——人工 CLI 与动态槽没有触发事件,占位值会伪造出父子关系。"""
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="dev1", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None, source="cli",
+    )
+    await client.flush()
+    r = _rows(obs_db)[0]
+    assert r["phase"] is None
+    assert r["trigger_event_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_auth_state(bound_client, tmp_path):
+    """v6 那一列拿得到真实值：正常态落 ok、降级态落 degraded。
+
+    这是「被拒的指令」与「设备真的没响应」唯一的分野，web 那枚徽标就是按
+    ``row.auth_state === "degraded"`` 判的。而写入链每一环都是 fail-open：
+    ``_auth_state_of`` 抛异常静默返回空、``to_row()`` 少个键也只是少一列、
+    INSERT 按存在的键拼——任何一环断掉这一列都变空，徽标永不出现，而后端全绿、
+    连一条日志都没有（v6 迁移的 docstring 自己写着「缺这一列不会报错、台账静默
+    停记」，值级漂移与列级漂移同构）。故断言取具体取值，不取「非空」。
+
+    与链路两列那对用例同形：那两列有正反两面夹住写入路径，这一列此前没有。
+    """
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="dev1", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None,
+    )
+    _degrade(svc._miot_proxy)
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="dev1", iid="prop.2.1",
+        value_json="true", result_code=None, result_msg=None,
+        success=False,
+        error="refused: mi home authorization no longer valid",
+    )
+    await client.flush()
+
+    # 两行可能落在同一毫秒上，按 success 归而不是按下标取
+    assert {r["success"]: r["auth_state"] for r in _rows(obs_db)} == {
+        0: "degraded",
+        1: "ok",
+    }
+
+
+@pytest.mark.asyncio
+async def test_ledger_auth_state_stays_null_when_health_is_missing(
+    bound_client, tmp_path
+):
+    """取不到健康度时这一列留空，且不拖垮那一行——这是同一列的另一面。
+
+    「空」的意思是「写入时还没有这个维度」（迁移前的老行同样如此），不是「当时授权
+    正常」；网页那枚角标只认 ``degraded``，空值不画，方向是安全的。而这层保障整个
+    裹着 fail-open：取数口抛异常只吞成空，行照落、下发结果不受影响——写坏了也只
+    是静默变空，所以「取不到就留空、不伪造、也不跑飞」这一面同样要夹住。
+    """
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    del svc._miot_proxy.auth_health  # 取数口整个不在：老代理，或它被改名挪走了
+
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="dev1", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None,
+    )
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["auth_state"] is None
+    assert r["success"] == 1, "取不到健康度不该拖垮这一行"
+
+
+@pytest.mark.asyncio
 async def test_ledger_records_device_home_id(bound_client, tmp_path):
     """v4:写入时从 device cache 解析设备所属家庭(dev1 ∈ H1),合流页才能按家过滤。"""
     client, obs_db = bound_client
@@ -182,8 +346,13 @@ async def test_ledger_records_device_home_id(bound_client, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_ledger_home_id_null_when_device_unknown(bound_client, tmp_path):
-    """device cache 查不到 did → home_id 落 NULL(fail-open,不影响审计主体)。"""
+async def test_ledger_falls_back_to_the_sole_enabled_home(bound_client, tmp_path):
+    """两级缓存都查不到 did 时，只启用了一个家的话就归它，而不是落空。
+
+    降级态下这两级都填不回来——填它们要走云端，而那正是被拒的原因。缺了这一列的
+    行会被查询侧的 NULL 放行捞进每一个家的合流页，别家的设备号与「那个家授权坏了」
+    就此跨家可见；紧邻那条摄像头回落的用例记的是同一件事。
+    """
     from miloco.miot.service import _write_action_ledger
 
     client, obs_db = bound_client
@@ -195,7 +364,38 @@ async def test_ledger_home_id_null_when_device_unknown(bound_client, tmp_path):
         success=True, error=None,
     )
     await client.flush()
-    assert _rows(obs_db)[0]["home_id"] is None
+    assert _rows(obs_db)[0]["home_id"] == "H1"
+
+
+@pytest.mark.asyncio
+async def test_ledger_still_writes_when_the_home_is_genuinely_ambiguous(
+    bound_client, tmp_path
+):
+    """多家同时启用且查不到 did 时仍落空——这是已知残留，但那一行必须照样落库。
+
+    反向钉住两件事：兜底只在「唯一启用」时才敢认（多家时认一个就是认错家），以及
+    解析不出归属绝不能连带把审计吞掉（这条 fail-open 是原有语义）。
+    """
+    import json as _json
+
+    from miloco.database.kv_repo import ScopeConfigKeys
+    from miloco.miot.service import _write_action_ledger
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy._kv_repo.set(
+        ScopeConfigKeys.HOME_WHITE_LIST_KEY, _json.dumps(["H1", "H2"])
+    )
+    await _write_action_ledger(
+        svc._miot_proxy,
+        action_type="set_property", did="ghost", iid="prop.2.1",
+        value_json="true", result_code=0, result_msg=None,
+        success=True, error=None,
+    )
+    await client.flush()
+    rows = _rows(obs_db)
+    assert len(rows) == 1, "解析不出归属不该把这一行审计吞掉"
+    assert rows[0]["home_id"] is None
 
 
 @pytest.mark.asyncio
@@ -291,6 +491,152 @@ async def test_failure_code_decoded_in_ledger(bound_client, tmp_path):
     assert r["success"] == 0
     assert r["result_code"] == -704042011
     assert r["result_msg"] == "设备离线"
+
+
+@pytest.mark.asyncio
+async def test_scene_refusal_surfaces_the_reason(bound_client, tmp_path):
+    """场景是第三条下发面：被拒时住户要拿到「需要重新授权」，不是「场景触发失败」。
+
+    故意用一个**不在列表里**的场景号：降级态下拉场景列表本身就会被拒，重启之后
+    本地那份缓存是空的，于是每一个场景都「不存在」。失效判定排在存在性之后的话，
+    住户点一个明明还在的场景，拿到的是「场景不存在」，真正的原因被盖掉。
+    """
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    _degrade(svc._miot_proxy)
+
+    with pytest.raises(MiotAuthUnavailableError) as e:
+        await svc.trigger_scene("no-such-scene")
+    assert "Rebind" in str(e.value) or "重新授权" in str(e.value)
+    # 判为不可用就不该再去试云端——那一次注定被闸门拒掉。
+    assert not svc._miot_proxy.execute_miot_scene.called
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["success"] == 0
+    assert "refused" in (r["error"] or ""), "台账要记明是被拒，而不是笼统失败"
+    # 家庭标识不能空：查询侧对空标识有一条刻意的放行（迁移前的老行没有标记），
+    # 漏传的行会被捞进**每一个**家的合流页，别家的场景号与「那个家授权坏了」
+    # 就此跨家可见。这里场景表里没有这个号，靠「只启用了一个家」这一级问出来。
+    assert r["home_id"] == "H1", "被拒的行漏了家庭标识，会串进每一个家的台账"
+    # 通用文案会把原因盖掉：下游取 `result_msg or error`，这一列有值就再也看不到
+    # 「被拒」。控制那条路的被拒留痕同样是留空 result_msg、原因写在 error 里。
+    assert not r["result_msg"], "被拒的行不该再写通用失败文案"
+
+
+@pytest.mark.asyncio
+async def test_control_refusal_beats_device_not_found(bound_client, tmp_path):
+    """降级态冷启动时点一台设备，要拿到「请重新授权」，不是「设备不存在」。
+
+    家庭校验靠两份纯内存的设备缓存，而填满它们要走云端——降级态下重启一次，两级都
+    是空的且填不回来。判定排在校验之后的话，住户拿到 404 加「设备不存在」，会去米家
+    App 里翻设备列表，而不是去点状态条上的「重新绑定」；并且那一次被拒连一行台账都
+    不落，因为「设备不存在」是原样上抛的。
+    """
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    # 冷启动：两份缓存都填不回来
+    svc._miot_proxy.get_devices = AsyncMock(return_value={})
+    svc._miot_proxy.get_cameras = AsyncMock(return_value={})
+    _degrade(svc._miot_proxy)
+
+    with pytest.raises(MiotAuthUnavailableError) as e:
+        await svc.control_device(
+            "lumi.acn003",
+            SimpleNamespace(type="set_property", iid="prop.2.1", value=True),
+        )
+    assert "Rebind" in str(e.value) or "重新授权" in str(e.value)
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["success"] == 0
+    assert "refused" in (r["error"] or ""), "被拒的下发同样要留痕"
+    assert r["home_id"] == "H1", "留痕缺了家庭标识会串进每一个家的台账"
+
+
+@pytest.mark.asyncio
+async def test_refused_dispatch_makes_no_doomed_cloud_call(bound_client, tmp_path):
+    """被拒的下发不许为了写一行台账去打注定 401 的云端。
+
+    台账要填设备名与所属家，而那两个取数口见缓存为空会先去拉一次——降级态下那一次
+    必然被云端拒掉、缓存依然为空，于是住户每被拒一次就多 1-2 趟无效往返，还各自漏
+    出一条 WARNING / ERROR，把这条路径刻意压成 INFO 的噪声抬回去。不钉住的话，这条
+    约束只活在注释里。
+    """
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+
+    client, _ = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.refresh_devices = AsyncMock(return_value=None)
+    svc._miot_proxy.refresh_cameras = AsyncMock(return_value=None)
+    _degrade(svc._miot_proxy)
+
+    with pytest.raises(MiotAuthUnavailableError):
+        await svc.control_device(
+            "lumi.acn003",
+            SimpleNamespace(type="set_property", iid="prop.2.1", value=True),
+        )
+    await client.flush()
+
+    assert not svc._miot_proxy.get_devices.called, "降级态下不该走会触发刷新的取数口"
+    assert not svc._miot_proxy.get_cameras.called
+    assert not svc._miot_proxy.refresh_devices.called
+    assert not svc._miot_proxy.refresh_cameras.called
+
+
+@pytest.mark.asyncio
+async def test_never_bound_is_not_reported_as_expired(bound_client, tmp_path):
+    """从未绑定 / 刚解绑的机器上，别把「没绑」说成「凭据失效」。
+
+    判据是「凭据存在**且**未被云端拒绝」的与，而解绑会清空凭据、同时把健康度复位
+    成全新的正常态——于是判据为假、降级却并没有发生。此时照搬「授权已失效」会让
+    三处同时错：文案让住户去「重新绑定」一个他没绑过的账号；台账的原因列写着凭据
+    失效；而同一行的授权状态列取的是健康度、写着正常，自相矛盾——网页那个失效角标
+    恰好按状态列判，于是住户看到的是一条毫无解释的失败记录。
+    """
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.is_operational = False
+    svc._miot_proxy.is_authenticated = False  # 没绑，而不是绑了但废了
+
+    with pytest.raises(MiotAuthUnavailableError) as e:
+        await svc.trigger_scene("scene1")
+    msg = str(e.value)
+    assert "not bound" in msg, "应当说「没绑定」"
+    assert "no longer valid" not in msg, "不该说成「凭据已失效」"
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert "not bound" in (r["error"] or ""), "台账的原因列同样要分档"
+
+
+@pytest.mark.asyncio
+async def test_scene_refusal_prefers_the_scene_own_home(bound_client, tmp_path):
+    """场景表里有这个号时，家庭标识取场景自己的家，而不是「唯一启用的那个家」。
+
+    两级回落在夹具默认值下答案相同，只验被拒那条的话，把第一级删掉照样全绿。这里
+    让场景属于另一个家，两级的答案才分得开。
+    """
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.cached_scenes = {
+        "scene-elsewhere": SimpleNamespace(home_id="H2", scene_name="另一个家")
+    }
+    _degrade(svc._miot_proxy)
+
+    with pytest.raises(MiotAuthUnavailableError):
+        await svc.trigger_scene("scene-elsewhere")
+    await client.flush()
+
+    assert _rows(obs_db)[0]["home_id"] == "H2"
 
 
 @pytest.mark.asyncio
@@ -415,7 +761,7 @@ async def test_no_client_bound_control_still_works(tmp_path):
 
 @pytest.mark.asyncio
 async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
-    """规则直控场景:台账 source=rule / source_id=rule_id。
+    """规则直控场景:台账 source=rule / source_id=rule_id,链路两列一并透传。
 
     没有这条透传,规则触发的场景在台账里和人工 CLI 触发无法区分,
     「规则触发 → 实际执行了什么」这条链就是断的。
@@ -425,7 +771,8 @@ async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
     client, obs_db = bound_client
     svc = _make_service(tmp_path)
     ok = await _trigger_scene(
-        svc._miot_proxy, "scene1", source="rule", source_id="rule-77"
+        svc._miot_proxy, "scene1", source="rule", source_id="rule-77",
+        phase="enter", trigger_event_id="ev-open",
     )
     await client.flush()
 
@@ -434,6 +781,8 @@ async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
     assert r["action_type"] == "scene_trigger"
     assert r["source"] == "rule"
     assert r["source_id"] == "rule-77"
+    assert r["phase"] == "enter"
+    assert r["trigger_event_id"] == "ev-open"
     # 场景无 did:did/iid 都占 scene_id,与 CLI 触发同一形状
     assert r["did"] == "scene1"
     assert r["iid"] == "scene1"
@@ -441,7 +790,7 @@ async def test_scene_trigger_records_source_rule(bound_client, tmp_path):
 
 @pytest.mark.asyncio
 async def test_scene_trigger_failure_records_source_rule(bound_client, tmp_path):
-    """异常路径也要带 source/source_id——失败的规则动作最需要能回指到规则。"""
+    """异常路径也要带 source/source_id 与链路两列——失败的规则动作最需要能回指到规则。"""
     from miloco.middleware.exceptions import MiotServiceException
     from miloco.miot.service import _trigger_scene
 
@@ -450,7 +799,8 @@ async def test_scene_trigger_failure_records_source_rule(bound_client, tmp_path)
     svc._miot_proxy.execute_miot_scene = AsyncMock(side_effect=RuntimeError("boom"))
     with pytest.raises(MiotServiceException):
         await _trigger_scene(
-            svc._miot_proxy, "scene1", source="rule", source_id="rule-77"
+            svc._miot_proxy, "scene1", source="rule", source_id="rule-77",
+            phase="exit", trigger_event_id="ev-open",
         )
     await client.flush()
 
@@ -458,6 +808,43 @@ async def test_scene_trigger_failure_records_source_rule(bound_client, tmp_path)
     assert r["success"] == 0
     assert r["source"] == "rule"
     assert r["source_id"] == "rule-77"
+    assert r["phase"] == "exit"
+    assert r["trigger_event_id"] == "ev-open"
+
+
+@pytest.mark.asyncio
+async def test_scene_refused_records_link_columns(bound_client, tmp_path):
+    """降级态下被拒的场景触发,链路两列照样透传,source 仍是 rule。
+
+    被拒这条写入点与同函数其余三处同一口径。规则触发的场景撞上授权失效时,
+    住户该看到的是「授权坏了」——但「这条是规则触发的」不该跟着一起坏掉:折叠视图
+    只在链路两列有值时才认父子,两列空着而 source=rule 的行会走「没有触发源」兜底,
+    等于把规则触发记成人手直控。
+
+    与上面那条异常路径成对:那条走的是校验/执行失败,这条走的是授权挡在最前面,
+    两条都不经过 get_all_scenes,家庭标识只能从手上那份场景表问出来。
+    """
+    from miloco.middleware.exceptions import MiotAuthUnavailableError
+    from miloco.miot.service import _trigger_scene
+
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    _degrade(svc._miot_proxy)
+    with pytest.raises(MiotAuthUnavailableError):
+        await _trigger_scene(
+            svc._miot_proxy, "scene1", source="rule", source_id="rule-77",
+            phase="exit", trigger_event_id="ev-open",
+        )
+    await client.flush()
+
+    r = _rows(obs_db)[0]
+    assert r["success"] == 0
+    assert r["source"] == "rule"
+    assert r["source_id"] == "rule-77"
+    assert r["phase"] == "exit"
+    assert r["trigger_event_id"] == "ev-open"
+    # 降级态下家庭标识问不出就会串进每个家的合流页,这条路的 did 是场景号
+    assert r["home_id"] == "H1"
 
 
 @pytest.mark.asyncio

@@ -300,6 +300,12 @@ def summary(conn, bucket, since, until):
         (s, u),
     ).fetchone()
     cycle_count, skip_avg, dropped_sum, omni_err, omni_call = row
+    processed_device_window_count = conn.execute(
+        "SELECT COUNT(*) FROM traces_device td "
+        "JOIN traces t ON t.trace_id = td.cycle_id "
+        "WHERE t.timestamp BETWEEN ? AND ?",
+        (s, u),
+    ).fetchone()[0]
     agent_count = conn.execute(
         "SELECT COUNT(*) FROM agent_runs WHERE timestamp BETWEEN ? AND ?",
         (s, u),
@@ -308,6 +314,7 @@ def summary(conn, bucket, since, until):
         return {
             "cycle_count": 0,
             "dropped_count": 0,
+            "processed_device_window_count": 0,
             "skip_rate": 0.0,
             "drop_rate": 0.0,
             "omni_error_rate": 0.0,
@@ -317,7 +324,8 @@ def summary(conn, bucket, since, until):
             "window": {"since": s, "until": u},
         }
     dropped_sum = dropped_sum or 0
-    drop_rate = dropped_sum / (dropped_sum + cycle_count)
+    drop_denominator = dropped_sum + processed_device_window_count
+    drop_rate = dropped_sum / drop_denominator if drop_denominator else 0.0
     omni_call = omni_call or 0
     omni_err = omni_err or 0
     omni_error_rate = (omni_err / omni_call) if omni_call > 0 else 0.0
@@ -331,6 +339,7 @@ def summary(conn, bucket, since, until):
     return {
         "cycle_count": cycle_count,
         "dropped_count": dropped_sum,
+        "processed_device_window_count": processed_device_window_count,
         "skip_rate": skip_avg or 0.0,
         "drop_rate": drop_rate,
         "omni_error_rate": omni_error_rate,

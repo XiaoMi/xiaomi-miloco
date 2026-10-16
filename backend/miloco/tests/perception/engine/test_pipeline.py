@@ -2,7 +2,8 @@
 
 import json
 import time
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 import pytest
@@ -32,7 +33,9 @@ from miloco.perception.engine.types import (
     FrameInfo,
     FrameResolution,
     IdentityPacket,
+    IdentityTarget,
     MotionState,
+    ObjectType,
     OmniContext,
     RoomPipelineResult,
     RuleCondition,
@@ -570,6 +573,255 @@ async def test_query_rooms_run_concurrently():
     assert max_concurrent == 2, f"on_demand 未并发, max={max_concurrent}"
     assert results["study-room"].answer == "有人在"
     assert results["kitchen"].answer == "有人在"
+
+
+class TestQueryMemberNames:
+    """从生产查询入口验证姓名接线，保留真实 pipeline、prompt 装配与视频编码。"""
+
+    member_id = "a1b2c3d4-1111-4444-8888-abcdef012345"
+    other_id = "e5f6a7b8-2222-4444-8888-abcdef012345"
+
+    @staticmethod
+    def _target(pid, *, bbox=(100, 100, 400, 900), verify=False, suppress=False):
+        return IdentityTarget(
+            type=ObjectType.HUMAN_WITH_FACE, person_id=pid, track_id=7,
+            needs_omni_verify=verify, suppress_as_prior=suppress,
+            box_info=[], bbox_xyxy_norm=bbox,
+        )
+
+    @pytest.fixture
+    def entry(self, monkeypatch):
+        from miloco.perception.engine.identity.library import PersonRef
+
+        library = Mock()
+        library.list_persons.return_value = [
+            PersonRef(self.member_id, "登记成员", None, True, 0),
+            PersonRef(self.other_id, "其他镜头成员", None, True, 0),
+        ]
+        build_library = Mock(return_value=library)
+        monkeypatch.setattr(
+            "miloco.perception.engine.identity.engine.build_identity_library", build_library,
+        )
+        monkeypatch.setattr("miloco.perception.engine.identity.tier_u.TierUPool", Mock())
+        monkeypatch.setattr("miloco.perception.engine.omni.dedup_embedder.EventEmbedder", Mock())
+        monkeypatch.setattr("miloco.perception.engine.api._voice_allowed_dids", lambda: set())
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder.get_home_profile_prefix",
+            lambda: "家庭档案中的另一个姓名",
+        )
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder._effective_panorama_short_edge", lambda: 128,
+        )
+        omni = AsyncMock(return_value={"choices": [{"message": {"content": "查询完成"}}]})
+        monkeypatch.setattr("miloco.perception.engine.omni.omni_client.call_omni", omni)
+
+        def make(*, disabled=False, targets=None):
+            config = PerceptionConfig()
+            config.input.fps = config.input.omni_fps = 1
+            config.identity_engine.enabled = not disabled
+            engine = PerceptionEngine(config)
+            monkeypatch.setattr(
+                engine, "_get_or_create_tracking_service",
+                lambda did, room: SimpleNamespace(did=did),
+            )
+            # 末设备 engine 不可用也不能丢掉共享库中的姓名。
+            monkeypatch.setattr(
+                engine, "_get_or_create_identity_engine",
+                lambda did, room: None if did == "cam-last" or disabled else Mock(),
+            )
+
+            async def identity(gate, config, tracking, **kwargs):
+                return IdentityPacket(
+                    packet_id=gate.packet_id, room_name=gate.room_name, timestamp=gate.timestamp,
+                    frame_info=FrameInfo(start_timestamp=0, end_timestamp=3000, fps=gate.fps),
+                    targets=(targets or {}).get(tracking.did, [self._target(self.member_id)]),
+                    scene_motion=MotionState.STATIC, frames=[], all_frames=gate.frames,
+                    audio_clip=gate.audio_clip,
+                    audio_analysis=AudioAnalysis(type=AudioType.SILENCE, is_urgent=False, energy_level=0.0),
+                    trigger=gate.trigger,
+                )
+
+            monkeypatch.setattr("miloco.perception.engine.pipeline.run_identity", identity)
+            return engine
+
+        return make, library, build_library, omni
+
+    @staticmethod
+    def _batch(*cameras):
+        return BatchedSnapshot(snapshots=[
+            _make_snapshot(room, did, [_solid(color, color, color)] * 3)
+            for room, did, color in cameras
+        ])
+
+    @staticmethod
+    def _video_color(payload):
+        import base64
+        import io
+
+        import av
+
+        with av.open(io.BytesIO(base64.b64decode(payload["video_base64"]))) as video:
+            frames = list(video.decode(video=0))
+        assert frames
+        return float(np.mean(frames[-1].to_ndarray(format="bgr24")))
+
+    async def test_names_from_shared_library_reach_omni_once_per_query(self, entry):
+        make, library, build_library, omni = entry
+        engine = make(targets={
+            "cam-last": [self._target(self.other_id)],
+            "cam-kitchen": [self._target(self.other_id)],
+        })
+        batch = self._batch(("study", "cam-first", 40), ("study", "cam-last", 210),
+                            ("kitchen", "cam-kitchen", 120))
+        result = await engine.on_demand_perceive(batch, "现在是谁？")
+
+        assert result.answer == "查询完成\n查询完成"
+        build_library.assert_called_once_with()
+        library.list_persons.assert_called_once_with()
+        assert omni.await_count == 2
+        for call, name, absent, color in zip(
+            omni.await_args_list, ["登记成员", "其他镜头成员"],
+            ["其他镜头成员", "登记成员"], [40, 120], strict=True,
+        ):
+            payload = call.args[0]
+            assert f"已确认成员线索：{name}[bbox=(100, 100, 400, 900)]" in payload["user_content"]
+            assert absent not in payload["user_content"]
+            assert self.member_id not in payload["user_content"]
+            assert self.other_id not in payload["user_content"]
+            assert "只有画面确认给出的 bbox 对应真人" in payload["system_prompt"]
+            assert abs(self._video_color(payload) - color) < 8
+
+    @pytest.mark.parametrize("case", ["missing", "empty", "blank", "unicode-blank", "empty-library", "read-error", "os-error", "permission-error", "unavailable", "disabled"])
+    async def test_missing_names_keep_query_and_generic_name_policy(self, entry, case, caplog):
+        from miloco.perception.engine.identity.library import PersonRef
+
+        make, library, build_library, omni = entry
+        if case in {"missing", "empty", "blank", "unicode-blank"}:
+            name = {"missing": None, "empty": "", "blank": "   ", "unicode-blank": "\u3000\t\n"}[case]
+            library.list_persons.return_value = [PersonRef(self.member_id, name, None, True, 0)]
+        elif case == "empty-library":
+            library.list_persons.return_value = []
+        elif case in {"read-error", "os-error", "permission-error"}:
+            error_type = {"read-error": RuntimeError, "os-error": OSError, "permission-error": PermissionError}[case]
+            library.list_persons.side_effect = error_type("private library detail")
+        elif case == "unavailable":
+            build_library.side_effect = RuntimeError("library unavailable")
+        engine = make(disabled=case == "disabled")
+        result = await engine.on_demand_perceive(self._batch(("study", "cam-first", 40)), "现在是谁？")
+
+        assert result.answer == "查询完成"
+        omni.assert_awaited_once()
+        payload = omni.await_args.args[0]
+        assert f"已确认成员线索：{self.member_id}[bbox=" in payload["user_content"]
+        assert "登记成员" not in payload["user_content"]
+        assert "家庭档案中的另一个姓名" not in payload["user_content"]
+        assert "确认有人但无法对应姓名时用“某人 / 陌生人”" in payload["system_prompt"]
+        assert "不把 ID 当人名输出" in payload["system_prompt"]
+        assert "不从家庭档案、历史描述或问题里给未确认身份的目标补姓名" in payload["system_prompt"]
+        if case in {"disabled", "unavailable"}:
+            library.list_persons.assert_not_called()
+        else:
+            library.list_persons.assert_called_once_with()
+        if case == "disabled":
+            build_library.assert_not_called()
+        if case in {"read-error", "os-error", "permission-error"}:
+            assert "Query name lookup failed" in caplog.text
+            assert f"error_type={error_type.__name__}" in caplog.text
+            assert "private library detail" not in caplog.text
+            records = [r for r in caplog.records if "Query name lookup failed" in r.getMessage()]
+            assert len(records) == 1
+            assert records[0].exc_info is None
+            assert records[0].stack_info is None
+
+    @pytest.mark.parametrize("name", ["登记成员", " 登记成员 "])
+    async def test_valid_name_spelling_survives_query_entry(self, entry, name):
+        from miloco.perception.engine.identity.library import PersonRef
+
+        make, library, _, omni = entry
+        library.list_persons.return_value = [PersonRef(self.member_id, name, None, True, 0)]
+        result = await make().on_demand_perceive(self._batch(("study", "cam-first", 40)), "现在是谁？")
+
+        assert result.answer == "查询完成"
+        library.list_persons.assert_called_once_with()
+        omni.assert_awaited_once()
+        assert f"已确认成员线索：{name}[bbox=" in omni.await_args.args[0]["user_content"]
+
+    @pytest.mark.parametrize("change", ["no-position", "recheck", "suppressed", "pending"])
+    async def test_library_name_does_not_bypass_visual_identity_gates(self, entry, change):
+        make, library, _, omni = entry
+        target = self._target(self.member_id, bbox=None if change == "no-position" else (100, 100, 400, 900),
+                              verify=change == "recheck", suppress=change == "suppressed")
+        if change == "pending":
+            target.person_id = "pending:" + self.member_id
+        engine = make(targets={"cam-first": [target]})
+        result = await engine.on_demand_perceive(self._batch(("study", "cam-first", 40)), "现在是谁？")
+
+        assert result.answer == "查询完成"
+        library.list_persons.assert_called_once_with()
+        omni.assert_awaited_once()
+        text = omni.await_args.args[0]["user_content"]
+        assert "目标（不提供可沿用的身份标签）" in text
+        assert "登记成员" not in text
+        assert self.member_id not in text
+
+    async def test_names_follow_actual_encoding_when_first_camera_fails(self, entry, monkeypatch):
+        import miloco.perception.engine.omni.prompt_builder as builder
+
+        make, library, _, omni = entry
+        engine = make(targets={"cam-last": [self._target(self.other_id)]})
+        engine._last_captions["cam-first"] = "首镜头历史中的姓名"
+        real_encode = builder._encode_video
+
+        def reject_first(packet, short_edge):
+            if float(np.mean(packet.all_frames[0])) < 100:
+                return None, None
+            return real_encode(packet, short_edge=short_edge)
+
+        monkeypatch.setattr(builder, "_encode_video", reject_first)
+        result = await engine.on_demand_perceive(
+            self._batch(("study", "cam-first", 40), ("study", "cam-last", 210)), "现在是谁？",
+        )
+
+        assert result.answer == "查询完成"
+        library.list_persons.assert_called_once_with()
+        omni.assert_awaited_once()
+        payload = omni.await_args.args[0]
+        assert "已确认成员线索：其他镜头成员[bbox=" in payload["user_content"]
+        assert "登记成员" not in payload["user_content"]
+        assert "首镜头历史中的姓名" not in payload["user_content"]
+        assert abs(self._video_color(payload) - 210) < 8
+
+    async def test_empty_video_never_uses_library_names_or_history(self, entry, monkeypatch):
+        make, library, _, omni = entry
+        engine = make()
+        engine._last_captions["cam-first"] = "历史姓名"
+        monkeypatch.setattr(
+            "miloco.perception.engine.omni.prompt_builder._encode_video", lambda *a, **k: (None, None),
+        )
+        result = await engine.on_demand_perceive(self._batch(("study", "cam-first", 40)), "现在是谁？")
+
+        assert result.answer == "查询完成"
+        library.list_persons.assert_called_once_with()
+        omni.assert_awaited_once()
+        payload = omni.await_args.args[0]
+        assert payload["video_base64"] is None
+        assert "本轮未提供有效视频，无法确认当前人员或场景" in payload["user_content"]
+        assert "登记成员" not in payload["user_content"]
+        assert "历史姓名" not in payload["user_content"]
+        assert self.member_id not in payload["user_content"]
+
+    async def test_frameless_query_stops_before_library_read(self, entry):
+        make, library, _, omni = entry
+        engine = make()
+        batch = BatchedSnapshot(snapshots=[
+            _make_snapshot("study", "cam-first", [], np.zeros(16000, dtype=np.int16)),
+        ])
+        result = await engine.on_demand_perceive(batch, "现在是谁？")
+
+        assert result.answer == ""
+        assert batch.snapshots == []
+        library.list_persons.assert_not_called()
+        omni.assert_not_awaited()
 
 
 # =============================================================================

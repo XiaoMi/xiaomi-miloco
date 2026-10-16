@@ -1,5 +1,6 @@
 import pytest
 from miloco.observability.types import (
+    ActionLedgerRecord,
     AgentRunRecord,
     CycleTraceRecord,
     DecodeTrace,
@@ -98,6 +99,28 @@ def test_agent_run_record_to_row():
     assert row["llm_total_ms"] == 820.0
     assert row["slowest_tool_name"] == "miot_call"
     assert row["success"] == 1
+
+
+def test_action_ledger_record_to_row_carries_link():
+    """台账行的 to_row 带上链路两列(v5)。
+
+    落库那条 INSERT 的列名由 row 的键推出来,故「record 少一个键」= 「那一列永远
+    写不进去」——而且不会报错,只会静默留 NULL。这条把两个键钉住。
+    """
+    base = dict(
+        id="a-1", timestamp=1000, action_type="set_property", did="d-1",
+        device_name="灯", room="客厅", iid="prop.2.1", value_json="true",
+        result_code=0, result_msg=None, success=True, error=None,
+    )
+    row = ActionLedgerRecord(**base).to_row()
+    assert row["phase"] is None
+    assert row["trigger_event_id"] is None
+
+    row = ActionLedgerRecord(
+        **base, source="rule", source_id="r-1", phase="enter", trigger_event_id="ev-1"
+    ).to_row()
+    assert row["phase"] == "enter"
+    assert row["trigger_event_id"] == "ev-1"
 
 
 class TestGateTraceHoldPass:

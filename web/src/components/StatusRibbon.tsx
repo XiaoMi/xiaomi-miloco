@@ -5,11 +5,14 @@
  * 取代 v2 的"大色块 chip"——dev tool 风格更克制，不抢主区注意力。
  *
  * Item 1: 看家（perception running / paused / 异常）
- * Item 2: 米家（已连 / 未连）
+ * Item 2: 米家（已连 / 授权已失效 / 未连）
  */
 
 import { type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
+import { relativeTime } from "@/lib/relativeTime";
+import { miotTone } from "@/lib/miotTone";
+import { watchTier } from "@/lib/watchTier";
 import type { HomeStatus } from "@/lib/types";
 
 type Tone = "ok" | "info" | "warn" | "danger" | "brand";
@@ -76,7 +79,10 @@ type ItemProps = {
   label: ReactNode;
   meta?: ReactNode;
 } & (
-  | { cta?: { text: string; onClick: () => void; disabled?: boolean }; onClick?: never }
+  | {
+      cta?: { text: string; onClick: () => void; disabled?: boolean };
+      onClick?: never;
+    }
   | { cta?: never; onClick: () => void }
 );
 
@@ -115,11 +121,7 @@ function StatusItem({ tone, label, meta, cta, onClick }: ItemProps) {
       </button>
     );
   }
-  return (
-    <div className={cls}>
-      {inner}
-    </div>
-  );
+  return <div className={cls}>{inner}</div>;
 }
 
 interface Props {
@@ -147,22 +149,33 @@ export function StatusRibbon({
   // running=true && ready=false  → 黄,引擎跑着但缺模型/异常,可重启
   // running=false                → 蓝,主动暂停态,唤醒它
   // (backend 当前只有 stop/start 两态,没有 pausedUntil 倒计时,该字段已删)
-  const watchItem = status.perception.running ? (
-    status.perception.ready ? (
-      <StatusItem
-        tone={allCamerasOff ? "warn" : "ok"}
-        label={allCamerasOff ? t("hero.watchItemStandby") : t("hero.watchItemWatching")}
-      />
-    ) : (
+  // 分档判据抽成了共用纯函数，组件只负责渲染。授权失效那一档不带 CTA：
+  // 重新绑定的入口就在旁边那一项上，同一件事不给两个按钮。
+  const tier = watchTier({
+    miot: status.miot,
+    perception: status.perception,
+    allCamerasOff,
+  });
+  const watchItem = tier === "auth-stopped" ? (
+    <StatusItem tone="danger" label={t("hero.watchItemAuthStopped")} />
+  ) : tier === "watching" || tier === "standby" ? (
+    <StatusItem
+      tone={tier === "standby" ? "warn" : "ok"}
+      label={
+        tier === "standby"
+          ? t("hero.watchItemStandby")
+          : t("hero.watchItemWatching")
+      }
+    />
+  ) : tier === "not-ready" ? (
+    (
       <StatusItem
         tone="warn"
         // engineMessage 长度无 cap（backend 可能塞 traceback / i18n 长文）—— 截
         // 60 字符防 ribbon 撑爆 / 把 cta 挤下一行；完整 message 放在 title 属性
         // 里 hover 看。
         label={
-          <span
-            title={status.perception.engineMessage ?? undefined}
-          >
+          <span title={status.perception.engineMessage ?? undefined}>
             {t("hero.watchItemNotReady")}
             {status.perception.engineMessage
               ? ` · ${truncate(status.perception.engineMessage, 60)}`
@@ -180,30 +193,59 @@ export function StatusRibbon({
     />
   );
 
-  // ── Item 2：米家连接 ─────────────────────────
-  const miotItem = status.miot.bound ? (
-    <StatusItem
-      tone="ok"
-      label={
-        <>
-          {t("hero.miotConnected")}
-          {status.miot.accountName ? ` · ${status.miot.accountName}` : ""}
-        </>
-      }
-      meta={
-        <span className="num">
-          {t("hero.miotDevicesCount", { n: status.miot.devicesCount })}
-        </span>
-      }
-      onClick={onJumpDevices}
-    />
-  ) : (
-    <StatusItem
-      tone="warn"
-      label={t("hero.miotNotConnected")}
-      cta={{ text: t("hero.miotCtaConnect"), onClick: onConnectMiot }}
-    />
-  );
+  // ── Item 2：米家连接 3 态 ─────────────────────
+  // authDegraded           → 红，授权已失效（设备控制与感知均已停止）
+  // bound                  → 绿，已连
+  // 其余                    → 黄，未连
+  // 失效档**独立于 bound、且优先级最高**，与命令行体检的分支顺序对齐。两者正交：
+  // 续期被云端拒绝、而 access_token 还没到期时 bound 仍是 true，只看 bound 会在
+  // 授权其实已失效时显示「一切正常」；等 access_token 也过期 bound 翻 false，若
+  // 失效档被 bound 门控，问题变得更严重的那一刻反而从红退回黄「未连」，失效原因
+  // 也一并消失——而同一刻命令行体检正确报不通过，两个面的口径就劈叉了。
+  const miotItem =
+    miotTone(status.miot) === "degraded" ? (
+      <StatusItem
+        tone="danger"
+        label={
+          <span
+            title={
+              // 有起点就说明「自 X 时起」——失效是永久状态，住户想知道是从
+              // 什么时候开始的（命令行体检也报这个时间，两处口径一致）。
+              status.miot.authDegradedSince
+                ? t("hero.miotAuthDegradedSince", {
+                    since: relativeTime(status.miot.authDegradedSince * 1000),
+                  })
+                : t("hero.miotAuthDegradedHint")
+            }
+          >
+            {t("hero.miotAuthDegraded")}
+          </span>
+        }
+        cta={{ text: t("account.rebind"), onClick: onConnectMiot }}
+      />
+    ) : miotTone(status.miot) === "connected" ? (
+      <StatusItem
+        tone="ok"
+        label={
+          <>
+            {t("hero.miotConnected")}
+            {status.miot.accountName ? ` · ${status.miot.accountName}` : ""}
+          </>
+        }
+        meta={
+          <span className="num">
+            {t("hero.miotDevicesCount", { n: status.miot.devicesCount })}
+          </span>
+        }
+        onClick={onJumpDevices}
+      />
+    ) : (
+      <StatusItem
+        tone="warn"
+        label={t("hero.miotNotConnected")}
+        cta={{ text: t("hero.miotCtaConnect"), onClick: onConnectMiot }}
+      />
+    );
 
   return (
     <div

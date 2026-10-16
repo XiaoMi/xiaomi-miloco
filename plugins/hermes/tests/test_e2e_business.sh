@@ -5,7 +5,7 @@
 #   0. 前置(.env model.omni.api_key 配齐 + is_bound: true)
 #   1. L1 守门激活:hermes gateway restart → 4 cron 应自动 active
 #   2. 真实感知事件:miloco-cli perceive query → backend dispatch → adapter
-#   3. trace meta 写盘:$MILOCO_HOME/trace/agent/<日期>/<run_id>.meta.json
+#   3. trace meta 写盘:$MILOCO_HOME/trace/agent/<日期>/*.meta.json
 #   4. backend poller 读盘:event_meta_v 或 agent_runs 表
 #   5. 真实规则触发:miloco-cli rule list + 测试
 #   6. 真实任务流:miloco-cli task list
