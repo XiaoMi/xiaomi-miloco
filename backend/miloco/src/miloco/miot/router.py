@@ -27,6 +27,7 @@ from miloco.miot.schema import (
     AuthorizeRequest,
     CameraCropToggleRequest,
     CameraPromptRequest,
+    CameraSchedule,
     CameraToggleRequest,
     CameraVoiceToggleRequest,
     DeviceControlRequest,
@@ -695,6 +696,20 @@ async def toggle_scope_camera(
     data = await manager.miot_service.toggle_camera(
         [{"did": i.did, "in_use": i.in_use} for i in request.items]
     )
+    return NormalResponse(code=0, message="ok", data=data)
+
+
+@router.put(
+    path="/scope/cameras/{did}/schedule",
+    summary="Set a camera daily sensing schedule",
+    response_model=NormalResponse,
+)
+async def set_scope_camera_schedule(
+    did: str,
+    request: CameraSchedule,
+    current_user: str = Depends(verify_token),
+):
+    data = await manager.miot_service.set_camera_schedule(did, request)
     return NormalResponse(code=0, message="ok", data=data)
 
 

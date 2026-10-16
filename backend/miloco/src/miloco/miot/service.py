@@ -11,6 +11,7 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 
 from miot.types import (
     MIoTActionParam,
@@ -38,16 +39,22 @@ from miloco.miot.filter import (
     MAX_ENABLED_CAMERAS,
     allowed_home_ids,
     camera_prompts,
+    camera_schedule_for,
+    camera_schedule_paused,
     clear_camera_prompt,
     crop_denied_camera_dids,
     denied_camera_dids,
     denied_channels_of,
     filter_by_home,
+    is_camera_channel_denied,
     is_camera_connected,
     is_home_allowed,
+    load_schedule_map,
+    next_camera_schedule_change_at,
     physical_camera_did,
     select_active_camera_dids,
     set_camera_prompt,
+    set_camera_schedule,
     set_cameras_channels_in_use,
     set_cameras_crop_in_use,
     set_cameras_voice_in_use,
@@ -63,10 +70,12 @@ from miloco.miot.schema import (
     CameraChannel,
     CameraImgSeq,
     CameraInfo,
+    CameraSchedule,
     DeviceControlRequest,
     DeviceInfo,
     SceneInfo,
 )
+from miloco.utils.time_utils import deploy_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -499,6 +508,7 @@ class MiotService:
         """Clear service-layer scope residue (called on account switch)."""
         self._kv_repo.delete(ScopeConfigKeys.HOME_WHITE_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_BLACK_LIST_KEY)
+        self._kv_repo.delete(ScopeConfigKeys.CAMERA_SCHEDULES_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_VOICE_ALLOW_LIST_KEY)
         self._kv_repo.delete(ScopeConfigKeys.CAMERA_PROMPT_MAP_KEY)
         # 裁切关闭集同样按合成 did 逐路存、绑在当前账号的相机 did 上：换账号后旧 did 既读不到
@@ -1490,27 +1500,28 @@ class MiotService:
         return homes
 
     async def list_cameras_with_state(self) -> list[dict]:
-        """列出当前启用家庭下的相机，每项含三态可用性 + in_use / voice_in_use / connected。
+        """列出当前启用家庭下的相机，含三态可用性、拾音偏好与定时感知状态。
 
-        可用性拆成三个正交指标（替代旧的一把揉 is_online）：
+        可用性拆成三个正交指标：
           - ``cloud_online``：米家云端在线
           - ``lan_reachable``：局域网可达（能拉流的前提）
           - ``awake``：镜头开关。True=镜头开启 / False=镜头关闭(隐私·遮挡) /
             None=该机型无开关属性或读取失败（未知）。走 cache_only 只读 refresh_camera_online_status
             已填的缓存，不单独打云；缓存空时为 None（未知），刷新后自愈。
-        ``in_use``=**当下真正开启**（= 该相机在 select_active 的活跃集里：默认开·未拉黑 +
-        三态满足 + 上限≤4）——离线/不可达/镜头关的相机 in_use=false，不显示为开；超上限的
-        也不算开。兼容字段 ``is_online`` = ``cloud_online and lan_reachable``（纯连通性）。
+        ``in_use``=活跃集（默认开·未拉黑 +
+        三态满足 + 上限≤4），不含定时门控；定时暂停不改写开关显示。
+        ``effective_in_use``=真实投喂集（叠加定时门控与 cap）。离线/不可达/镜头关或
+        超上限的相机 in_use=false。兼容字段 ``is_online`` = ``cloud_online and lan_reachable``（纯连通性）。
         ``voice_in_use`` 是**存储的拾音偏好**（在拾音白名单即 True，**默认 False**），与
         ``in_use`` 正交；「生效态」= ``in_use and voice_in_use`` 由前端派生，此处不合并。
         ``crop_in_use`` 是**存储的 Smart Crop 偏好**（不在关闭集即 True，**默认 True**），
         逐通道给（按合成 did，同 ``perception_prompt``）；``crop_effective`` 是**生效态**
-        （= ``in_use`` AND 全局双闸 ``crop_enhance.enabled`` / ``user_enabled``
+        （= ``effective_in_use`` AND 全局双闸 ``crop_enhance.enabled`` / ``user_enabled``
         AND ``crop_in_use``）——不在活跃集的相机根本没在投喂，不可能在裁。
         这里合并而 ``voice_in_use`` 不合并，是因为拾音的生效态有前端在派生，而裁切没有
         任何消费方——不在此合并就没有单一来源能回答"这台的三道闸有没有全开"。
 
-        本字段用 ``in_use``（是否被选中）而**不是** ``connected``（流是否真订阅上）：
+        本字段用 ``effective_in_use``（是否被选中投喂）而**不是** ``connected``（流是否真订阅上）：
         选中但没订阅上时本字段仍为 True，而该路根本没进感知窗、裁切判定一次都没跑——那一层
         要看同一行的 ``connected``（口径同说明书与 CLI help 里给的排查第一跳）。
 
@@ -1521,6 +1532,7 @@ class MiotService:
         排查时以那份为准，别在此处复制它的子集。也就是说 ``crop_effective=True`` 不等于"这一窗真的裁了"；那一层只能
         看日志 ``event=adaptive_crop_fallback`` 的 ``reason=``。
         """
+        denied = denied_camera_dids(self._kv_repo)
         voice_allowed = voice_allowed_camera_dids(self._kv_repo)
         prompt_map = camera_prompts(self._kv_repo)
         crop_denied = crop_denied_camera_dids(self._kv_repo)
@@ -1546,19 +1558,45 @@ class MiotService:
         cameras = filter_by_home(
             self._kv_repo, await self._miot_proxy.get_cameras() or {}
         )
-        # 过滤已从账号删除的摄像头：_camera_info_dict 是内存缓存，
-        # 设备删除后不会自动清除，需要用 _device_info_dict 做交集校验。
         devices = await self._miot_proxy.get_devices()
         cameras = {did: info for did, info in cameras.items() if did in devices}
-        # awake：只读缓存（云读收在 refresh_camera_online_status，前端列表前必调）。
         awake_map = await self._miot_proxy.read_cameras_awake(
             list(cameras.keys()), cache_only=True
         )
-        # in_use = 活跃集：与拉流/投喂同一口径（select_active：未拉黑 + home + 三态 + 上限）。
+        tz = deploy_timezone()
+        now = datetime.now(tz)
+        # 开关显示口径：不受定时暂停影响
         active = set(
-            select_active_camera_dids(self._kv_repo, cameras, awake_map=awake_map)
+            select_active_camera_dids(
+                self._kv_repo,
+                cameras,
+                awake_map=awake_map,
+                apply_schedule=False,
+                now=now,
+            )
+        )
+        # 真实投喂集：叠加定时门控
+        feeding_dids = set(
+            select_active_camera_dids(
+                self._kv_repo,
+                cameras,
+                awake_map=awake_map,
+                apply_schedule=True,
+                now=now,
+            )
+        )
+        cap_eligible_dids = set(
+            select_active_camera_dids(
+                self._kv_repo,
+                cameras,
+                awake_map=awake_map,
+                apply_schedule=True,
+                cap=False,
+                now=now,
+            )
         )
         out: list[dict] = []
+        schedule_map = load_schedule_map(self._kv_repo)
         for did, info in cameras.items():
             cloud_online = bool(getattr(info, "online", False))
             device_connected = is_camera_connected(info)
@@ -1585,9 +1623,19 @@ class MiotService:
             )
             channel_count = getattr(info, "channel_count", None) or 1
             lens_awake = awake_map.get(did) or {}
-            # 全拆后每路是独立一等相机：``did`` 仍是物理 did（会话/拾音按整台），``channel``
-            # 区分通道；``awake`` / ``in_use`` / ``connected`` 逐通道给。单通道 channel=0、
-            # 各字段按裸 did，与旧行为一致，仅多带 channel。
+            schedule = camera_schedule_for(self._kv_repo, did, schedules=schedule_map)
+            manually_allowed = not all(
+                is_camera_channel_denied(denied, did, ch, channel_count)
+                for ch in range(channel_count)
+            )
+            schedule_paused = manually_allowed and camera_schedule_paused(schedule, now)
+            next_change = (
+                next_camera_schedule_change_at(schedule, now, tz)
+                if manually_allowed
+                else None
+            )
+            # 全拆后每路是独立一等相机：``did`` 仍是物理 did（会话/拾音/定时按整台），
+            # ``channel`` 区分通道；``awake`` / ``in_use`` / ``connected`` 逐通道给。
             base = {
                 "did": did,
                 "name": getattr(info, "name", None),
@@ -1606,9 +1654,18 @@ class MiotService:
                 # 存储偏好：在拾音白名单 = 拾音开启（**默认关闭**，opt-in）。拾音按整台存
                 # （只球机/ch0 有 mic），前端在无 mic 的通道上隐藏该开关。
                 "voice_in_use": did in voice_allowed,
+                # 定时按物理机：各通道共享同一份 schedule / paused / next change。
+                "schedule_paused": schedule_paused,
+                "schedule": schedule,
+                "next_schedule_change_at": (
+                    next_change.isoformat(timespec="seconds") if next_change else None
+                ),
             }
             for ch in range(channel_count):
                 syn_did = synthetic_camera_did(did, ch, channel_count)
+                capped_out = (
+                    syn_did in cap_eligible_dids and syn_did not in feeding_dids
+                )
                 out.append(
                     {
                         **base,
@@ -1617,6 +1674,8 @@ class MiotService:
                         "awake": lens_awake.get(ch),
                         # per-channel 启用（活跃集按合成 did）+ per-channel 真投喂
                         "in_use": syn_did in active,
+                        "effective_in_use": syn_did in feeding_dids,
+                        "capped_out": capped_out,
                         "connected": syn_did in connected,
                         # 每摄像头的自定义「感知须知」prompt（无则 ""）。
                         # 按合成 did 存取，双摄每路可有独立须知。
@@ -1627,28 +1686,40 @@ class MiotService:
                         # crop_effective（本字段保持纯存储语义，故关掉相机不改写它、
                         # 重新启用后旧偏好自动回来，同 voice_in_use 的存储偏好口径）。
                         "crop_in_use": syn_did not in crop_denied,
-                        # **生效态**：该路在感知**活跃集**里 AND 全局双闸 AND 本路存储偏好。
-                        # 三者缺一就没在裁。注意用的是 in_use（是否被选中），**不是**上面的
-                        # connected（流是否真订阅上）——选中但没订阅上时本字段仍为 True，那一
-                        # 层要看同一行的 connected（口径同 voice 的生效态，前端也只含 in_use）。
-                        # 与 voice_in_use 刻意不同——那项的生效态有前端在合
-                        # （HeroNow 渲染 `inUse && voiceInUse`，同样含 in_use），而 crop
-                        # 没有任何消费方，不在这里合就没有单一来源可回答"这台到底在不在裁"。
-                        # 本字段为 false 时,三种成因由 (in_use, crop_in_use) 反查区分：
-                        #   in_use=false                        → 这台压根不在感知范围里
-                        #   in_use=true, crop_in_use=false      → 这一路自己关了裁切
-                        #   in_use=true, crop_in_use=true       → 被全局双闸挡住
-                        # 另有一格**本字段为 true 却仍没在裁**,不由上面那对键区分:
-                        #   connected=false（in_use=true）       → 选中了但流没订阅上,该路没进
-                        #                                          感知窗、裁切判定一次都没跑
+                        # 生效态：该路在真实投喂集（含定时门控）里 AND 全局双闸 AND 本路偏好。
+                        # 定时暂停不改写 in_use / crop_in_use，但此时不会运行裁切。
+                        # connected 是订阅状态；配置闸全开后，逐窗内容仍可能回退全景，
+                        # 原因见 adaptive_crop_fallback 日志与 _maybe_encode_adaptive。
                         "crop_effective": (
-                            syn_did in active
+                            syn_did in feeding_dids
                             and crop_global_on
                             and syn_did not in crop_denied
                         ),
                     }
                 )
         return out
+
+    async def set_camera_schedule(self, did: str, schedule: CameraSchedule) -> dict:
+        """Set a camera's daily sensing schedule and hot-sync perception."""
+        scoped = filter_by_home(
+            self._kv_repo, await self._miot_proxy.get_cameras() or {}
+        )
+        if did not in scoped:
+            raise ValidationException(
+                f"Unknown camera did {did!r}; valid: {sorted(scoped.keys())}"
+            )
+
+        normalized, changed = set_camera_schedule(
+            self._kv_repo, did, schedule.model_dump()
+        )
+        if changed:
+            await self._sync_camera_adapter()
+
+        all_cameras = await self.list_cameras_with_state()
+        for cam in all_cameras:
+            if cam["did"] == did:
+                return cam
+        raise ResourceNotFoundException(f"Camera '{did}' not found")
 
     async def toggle_camera(self, items: list[dict]) -> list[dict]:
         """批量切换相机**某通道**的启用状态。每项 {"did": str, "in_use": bool}。
@@ -1748,6 +1819,7 @@ class MiotService:
             # 上限检查：数「操作后可用启用通道数」——每路独占一个名额。逐 in_scope 相机模拟
             # 本批操作后的黑名单，统计 未拉黑 && 三态好(云端+局域网+该路镜头开) 的通道数。
             # 镜头关/离线/局域网不可达的路不占名额（与 select_active / 前端 in_use 同口径）。
+            # 定时暂停不释放名额（此处不读 schedule）。
             denied_now = denied_camera_dids(self._kv_repo)
             streams_after = 0
             for p in in_scope:

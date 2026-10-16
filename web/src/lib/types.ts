@@ -295,6 +295,11 @@ export interface ScopeCamera {
   // 声音完全不被处理（引擎入口剥离音频，不转写、不上云）。与 inUse 正交：
   // 生效态 = inUse && voiceInUse（关掉相机感知时拾音自动失效，但偏好保留、不落库）。
   voiceInUse: boolean;
+  effectiveInUse: boolean;
+  cappedOut: boolean;
+  schedulePaused: boolean;
+  schedule: CameraSchedule;
+  nextScheduleChangeAt?: string;
   // 每摄像头自定义「感知须知」prompt（PUT /api/miot/scope/cameras/prompt）。
   // 该机位专属的环境说明 / 关注 / 忽略事项，逐感知窗注入 omni system prompt 尾部，指导模型
   // 消解固定误识（如门口机位误把公共走廊电梯门当自家入户门）。"" = 无自定义。与 inUse /
@@ -305,6 +310,17 @@ export interface ScopeCamera {
   // 探测可达 + 拉流长期卡在连接中——大概率是路由器 NAT 类型限制拉流，不是暂时抖动。
   // 云端已离线时不给这条诊断：相机自己掉线了，问题不在路由器 NAT 上。
   streamError?: "cross_subnet_nat";
+}
+
+export interface CameraScheduleWindow {
+  start: string;
+  end: string;
+}
+
+export interface CameraSchedule {
+  enabled: boolean;
+  weekdays: number[];
+  windows: CameraScheduleWindow[];
 }
 
 // 相机是否满足「开启感知」的全部条件：云端在线 && 局域网可达 && 镜头未关。

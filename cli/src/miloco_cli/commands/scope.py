@@ -11,6 +11,88 @@ _CAMERAS_VOICE_PATH = "/api/miot/scope/cameras/voice"
 _CAMERAS_PROMPT_PATH = "/api/miot/scope/cameras/prompt"
 _CAMERAS_CROP_PATH = "/api/miot/scope/cameras/crop"
 
+_ALL_WEEKDAYS = [0, 1, 2, 3, 4, 5, 6]
+_WEEKDAY_ALIASES = {
+    "1": 0,
+    "mon": 0,
+    "monday": 0,
+    "周一": 0,
+    "星期一": 0,
+    "2": 1,
+    "tue": 1,
+    "tues": 1,
+    "tuesday": 1,
+    "周二": 1,
+    "星期二": 1,
+    "3": 2,
+    "wed": 2,
+    "wednesday": 2,
+    "周三": 2,
+    "星期三": 2,
+    "4": 3,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "thursday": 3,
+    "周四": 3,
+    "星期四": 3,
+    "5": 4,
+    "fri": 4,
+    "friday": 4,
+    "周五": 4,
+    "星期五": 4,
+    "6": 5,
+    "sat": 5,
+    "saturday": 5,
+    "周六": 5,
+    "星期六": 5,
+    "7": 6,
+    "sun": 6,
+    "sunday": 6,
+    "周日": 6,
+    "星期日": 6,
+    "周天": 6,
+    "星期天": 6,
+}
+
+
+def _parse_weekdays(values) -> list[int]:
+    if not values:
+        return list(_ALL_WEEKDAYS)
+
+    weekdays: set[int] = set()
+    for value in values:
+        key = value.strip().lower()
+        if key not in _WEEKDAY_ALIASES:
+            raise click.BadParameter(
+                "weekday must be mon..sun, 1..7, or 周一..周日",
+                param_hint="--weekday",
+            )
+        weekdays.add(_WEEKDAY_ALIASES[key])
+    return sorted(weekdays)
+
+
+def _normalize_window_time(value: str) -> str:
+    """Normalize HH:MM to zero-padded 24-hour form accepted by the backend."""
+    parts = value.strip().split(":", 1)
+    if len(parts) != 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        raise click.BadParameter(
+            "time must be HH:MM in 24-hour format",
+            param_hint="--window",
+        )
+    hour, minute = int(parts[0]), int(parts[1])
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59:
+        raise click.BadParameter(
+            "time must be HH:MM in 24-hour format",
+            param_hint="--window",
+        )
+    return f"{hour:02d}:{minute:02d}"
+
+
+def _physical_camera_did(did: str) -> str:
+    physical, marker, channel = did.rpartition(":ch")
+    return physical if marker and channel.isdigit() else did
+
 
 def _compose_channel_dids(resp: dict) -> dict:
     """CLI 展示层：把**多通道相机**每行的 ``did`` 显示成合成 did ``{did}:ch{n}``、去掉
@@ -78,11 +160,11 @@ def scope_camera_list(pretty):
     """列出全部摄像头；in_use=当下真正开启(活跃集,≤4)，三态可用性 cloud_online(云端在线)/
     lan_reachable(局域网可达)/awake(镜头开关:true=开/false=关/null=未知)，connected=视频流已连接。
     多通道相机(双摄)每路一行，did 显示为合成 did did:chN(单摄保持裸 did)——该 did 可直接复制给
-    enable/disable 精确到某一路；mic-on/off 是相机级(拾音只在球机/ch0，:chN 会被归一到整台，
+    enable/disable 精确到某一路；mic-on/off 和 schedule 是相机级(拾音只在球机/ch0，:chN 会被归一到整台，
     不精确到路)；crop-on/off 与 prompt-set 一样**精确到路**(裁不裁取决于该路镜头的视野)。
     crop_in_use=该路的智能裁切**存储偏好**(默认 true)；crop_effective=**三道闸是否全开**
-    (= in_use AND 全局双闸 AND crop_in_use)。crop_effective=false 时按三种情形反查：in_use=false
-    是这台不在感知范围里；crop_in_use=false 是这一路自己关的；两者都 true 则是被全局闸挡住、
+    (= effective_in_use AND 全局双闸 AND crop_in_use)。crop_effective=false 时反查：effective_in_use=false
+    是这台未被选中投喂（含定时暂停）；crop_in_use=false 是这一路自己关的；两者都 true 则是被全局闸挡住、
     逐机位全白设。注意 crop_effective=true 只说明闸开着,**不含**
     "流是否真订阅上"(看同一行 connected；connected=false 时这一路没进感知窗、裁切判定一次都
     没跑),也**不保证每窗都在裁**——本窗无检测框且无显著运动块
@@ -144,6 +226,89 @@ def scope_camera_mic_off(dids, pretty):
     print_result(result, pretty)
 
 
+@scope_camera.group("schedule")
+def scope_camera_schedule():
+    """管理摄像头每日感知时间段。"""
+
+
+@scope_camera_schedule.command("get")
+@click.argument("did")
+@click.option("--pretty", is_flag=True)
+def scope_camera_schedule_get(did, pretty):
+    """查看指定摄像头的定时感知配置。"""
+    did = _physical_camera_did(did)
+    result = api_get(_CAMERAS_PATH)
+    cameras = result.get("data") or []
+    for camera in cameras:
+        if camera.get("did") == did:
+            print_result({"code": 0, "message": "ok", "data": camera}, pretty)
+            return
+    raise click.ClickException(f"camera did not found: {did}")
+
+
+@scope_camera_schedule.command("set")
+@click.argument("did")
+@click.option(
+    "--window",
+    "windows",
+    multiple=True,
+    required=True,
+    help="允许感知时间段，格式 HH:MM-HH:MM（小时可省略前导零，如 7:00-08:00）；可重复传入。",
+)
+@click.option(
+    "--weekday",
+    "weekdays",
+    multiple=True,
+    help="允许感知星期，可重复传入；支持 mon..sun、1..7、周一..周日。不传表示每天。",
+)
+@click.option("--pretty", is_flag=True)
+def scope_camera_schedule_set(did, windows, weekdays, pretty):
+    """设置指定摄像头的每日感知时间段。"""
+    did = _physical_camera_did(did)
+    parsed = []
+    for value in windows:
+        try:
+            start, end = value.split("-", 1)
+        except ValueError as exc:
+            raise click.BadParameter(
+                "window must be HH:MM-HH:MM",
+                param_hint="--window",
+            ) from exc
+        parsed.append(
+            {
+                "start": _normalize_window_time(start),
+                "end": _normalize_window_time(end),
+            }
+        )
+    result = api_put(
+        f"{_CAMERAS_PATH}/{did}/schedule",
+        {"enabled": True, "weekdays": _parse_weekdays(weekdays), "windows": parsed},
+    )
+    print_result(result, pretty)
+
+
+@scope_camera_schedule.command("off")
+@click.argument("did")
+@click.option("--pretty", is_flag=True)
+def scope_camera_schedule_off(did, pretty):
+    """关闭指定摄像头的定时限制。"""
+    did = _physical_camera_did(did)
+    current = api_get(_CAMERAS_PATH)
+    weekdays = list(_ALL_WEEKDAYS)
+    windows = []
+    for camera in current.get("data") or []:
+        if camera.get("did") == did:
+            schedule = camera.get("schedule") or {}
+            weekdays = schedule.get("weekdays") or list(_ALL_WEEKDAYS)
+            windows = schedule.get("windows") or []
+            break
+    result = api_put(
+        f"{_CAMERAS_PATH}/{did}/schedule",
+        {"enabled": False, "weekdays": weekdays, "windows": windows},
+    )
+    print_result(result, pretty)
+
+
 # ── Smart Crop（智能裁切增强）逐机位开关：默认开，关掉即该路改走全景 ──
 #
 # 裁不裁是**机位级**判断：门口窄视野机位裁了收益小，客厅广角机位收益大，故逐路可配
@@ -151,7 +316,7 @@ def scope_camera_mic_off(dids, pretty):
 # perception.engine.crop_enhance.enabled / user_enabled **相与** —— 全局关时这里设了也不
 # 生效（不报错，允许预配置）。与启用/拾音开关正交、不重启引擎，下一感知窗即生效。
 # 查状态分两层看 scope camera list：crop_in_use = 这里设成了什么（**存储偏好**，全局闸
-# 关着时它照样是 true）；crop_effective = 三道闸是否全开（= in_use AND 全局双闸 AND
+# 关着时它照样是 true）；crop_effective = 三道闸是否全开（= effective_in_use AND 全局双闸 AND
 # crop_in_use）。问「这一路到底在不在裁」只能看后者，crop_in_use 答不了。
 
 
