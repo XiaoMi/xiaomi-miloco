@@ -78,6 +78,14 @@ async def init_perception_module(miot_proxy, kv_repo):
 
     get_omni_circuit_breaker().register_listener(_emit_omni_health)
 
+    # 7.2 初始化多 provider 故障转移池 + 启动恢复探测后台循环。
+    # ProviderPool 注册为 CB listener，在熔断打开时自动 failover 到备选 provider；
+    # 后台循环定期探测 failed provider，primary 恢复后自动切回。
+    from miloco.perception.engine.omni.provider_pool import init_pool
+
+    provider_pool = init_pool(loop)
+    await provider_pool.start()
+
     # 8. 启动引擎 —— 尊重用户「休息」意图：上次被手动暂停则不自动拉起，
     #    否则后台每次重启都会无视暂停、继续烧 token。
     from miloco.perception.engine_state import is_perception_enabled
