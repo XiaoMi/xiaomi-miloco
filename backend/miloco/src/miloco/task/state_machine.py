@@ -220,6 +220,9 @@ class TaskStateMachine:
         # 进入被前提拦下时, 是否保存信号等前提成立后补发。按 task 显式开启, 默认关。
         self._defer_blocked_enter: dict[str, bool] = {}
         self._pending_enters: dict[str, dict[str, TaskSignal]] = {}
+        # 补发关闭时, 拦下日志按 (task_id, rule_id) 首次 INFO、后续 DEBUG。
+        # duration 型 rule 每个采样轮都会重问闸, 不去重就是每轮一条 INFO。
+        self._blocked_drop_logged: set[tuple[str, str]] = set()
         self._queues: dict[str, deque[TaskSignal]] = {}
         self._wakeups: dict[str, asyncio.Event] = {}
         self._consumers: dict[str, asyncio.Task] = {}
@@ -270,6 +273,7 @@ class TaskStateMachine:
         self._defer_blocked_enter[task_id] = defer_blocked_enter
         self._states.setdefault(task_id, TaskRuntimeState.OFF)
         self._pending_enters.pop(task_id, None)
+        self._forget_blocked_drop_log(task_id)
         self._queues.setdefault(task_id, deque(maxlen=SIGNAL_QUEUE_DEPTH))
         self._wakeups.setdefault(task_id, asyncio.Event())
 
@@ -281,6 +285,7 @@ class TaskStateMachine:
         self._defer_blocked_enter.pop(task_id, None)
         self._states.pop(task_id, None)
         self._pending_enters.pop(task_id, None)
+        self._forget_blocked_drop_log(task_id)
         self._queues.pop(task_id, None)
         self._wakeups.pop(task_id, None)
         self._reconfiguring.discard(task_id)
@@ -380,6 +385,7 @@ class TaskStateMachine:
             # 幂等: 多条路径同时进只执行一次边界动作。排在前提回查之前 —— 这次没有
             # 进入可拦, 记成被前提拦下会让判定摘要和日志描述一次没发生的进入。
             self._pending_enters.pop(signal.task_id, None)
+            self._forget_blocked_drop_log(signal.task_id)
             return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
         unmet = self._unmet_guards(topology)
@@ -388,12 +394,24 @@ class TaskStateMachine:
                 # 该 task 没开启补发: 这次进入就此丢弃, 前提之后成立也不补 —— 上游
                 # 不会收到释放请求。清掉可能残留的旧挂起, 免得开关关上后又冒出来。
                 self.clear_pending_enters(signal.task_id, signal.rule_id)
-                logger.info(
-                    "task %s 的进入被前提拦下 (rule=%s): %s; 补发未开启, 本次进入丢弃",
-                    signal.task_id,
-                    signal.rule_id,
-                    ", ".join(f"{rid}={why}" for rid, why in unmet),
-                )
+                key = (signal.task_id, signal.rule_id)
+                first = key not in self._blocked_drop_logged
+                self._blocked_drop_logged.add(key)
+                if first:
+                    logger.info(
+                        "task %s 的进入被前提拦下 (rule=%s): %s; "
+                        "补发未开启, 本次进入丢弃",
+                        signal.task_id,
+                        signal.rule_id,
+                        ", ".join(f"{rid}={why}" for rid, why in unmet),
+                    )
+                else:
+                    logger.debug(
+                        "task %s 的进入仍被前提拦下 (rule=%s): %s; 补发未开启",
+                        signal.task_id,
+                        signal.rule_id,
+                        ", ".join(f"{rid}={why}" for rid, why in unmet),
+                    )
                 return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
 
             # 条件层锁存后不会再产生同一条 false→true 边沿，因此先保存信号，等前提
@@ -416,6 +434,10 @@ class TaskStateMachine:
                 )
             pending.setdefault(signal.rule_id, signal)
             return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
+
+        # 前提成立了 —— 不论这次进入最终是否落地, 这一轮拦下 episode 已结束,
+        # 下次再被拦会重新打一条 INFO。
+        self._forget_blocked_drop_log(signal.task_id, signal.rule_id)
 
         if not topology.is_session_type:
             # 事件型: runtime_state 恒 off, 每次进信号都执行 on_enter, 不卡死。
@@ -503,6 +525,17 @@ class TaskStateMachine:
         pending.pop(rule_id, None)
         if not pending:
             self._pending_enters.pop(task_id, None)
+
+    def _forget_blocked_drop_log(
+        self, task_id: str, rule_id: str | None = None
+    ) -> None:
+        """重置拦下日志的去重状态, 让下一次拦下重新打 INFO。"""
+        if rule_id is None:
+            self._blocked_drop_logged = {
+                key for key in self._blocked_drop_logged if key[0] != task_id
+            }
+            return
+        self._blocked_drop_logged.discard((task_id, rule_id))
 
     def _handle_exit(
         self, signal: TaskSignal, topology: TaskTopology
@@ -618,6 +651,7 @@ class TaskStateMachine:
         """
         self._reconfiguring.add(task_id)
         try:
+            self._forget_blocked_drop_log(task_id)
             if defer_blocked_enter is not None:
                 self._defer_blocked_enter[task_id] = defer_blocked_enter
             defer = self._defer_blocked_enter.get(task_id, False)
@@ -669,6 +703,7 @@ class TaskStateMachine:
             return
         self._states[task_id] = TaskRuntimeState.OFF
         self._pending_enters.pop(task_id, None)
+        self._forget_blocked_drop_log(task_id)
         queue = self._queues.get(task_id)
         if queue:
             for stale in queue:

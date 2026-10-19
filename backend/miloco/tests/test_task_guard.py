@@ -373,6 +373,92 @@ def test_release_refuses_pending_after_the_flag_is_off():
     assert h.sm.release_pending_enters("t1") == []
 
 
+def test_blocked_drop_is_logged_once_when_defer_is_off(caplog):
+    """默认关闭时, 同一 rule 的重复拦下只打一条 INFO。
+
+    duration 型 rule 每个采样轮都会重问闸; 不去重就是每 3 秒一条 INFO。
+    """
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="miloco.task.state_machine"):
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    blocked = [
+        record for record in caplog.records if "前提拦下" in record.message
+    ]
+    assert [record.levelno for record in blocked] == [logging.INFO, logging.DEBUG]
+
+
+def test_blocked_drop_log_resets_after_enter_succeeds(caplog):
+    """前提恢复、进入成功后, 下一次被拦下重新打 INFO。"""
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+        h.satisfied["g"] = True
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.EVENT_FIRED
+        h.satisfied["g"] = False
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    infos = [
+        record
+        for record in caplog.records
+        if "前提拦下" in record.message and record.levelno == logging.INFO
+    ]
+    assert len(infos) == 2
+
+
+def test_reconfigure_resets_blocked_drop_log(caplog):
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+        h.sm.reconfigure("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    infos = [
+        record
+        for record in caplog.records
+        if "前提拦下" in record.message and record.levelno == logging.INFO
+    ]
+    assert len(infos) == 2
+
+
+def test_suspend_resets_blocked_drop_log(caplog):
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+        h.sm.suspend("t1")
+        assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    infos = [
+        record
+        for record in caplog.records
+        if "前提拦下" in record.message and record.levelno == logging.INFO
+    ]
+    assert len(infos) == 2
+
+
+def test_unregister_task_discards_blocked_drop_log():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+    assert ("t1", "a") in h.sm._blocked_drop_logged
+
+    h.sm.unregister_task("t1")
+
+    assert not any(key[0] == "t1" for key in h.sm._blocked_drop_logged)
+
+
 # ── session 型 task 的前提 ────────────────────────────────────────
 
 
