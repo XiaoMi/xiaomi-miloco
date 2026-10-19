@@ -64,6 +64,8 @@ def _get_session():
                 return None
             # silero 是小型有状态模型(单帧 <1ms)，直接走 CPU EP：CoreML 对其有状态算子
             # 支持差、易逐算子回落，CPU 已足够且与离线验证口径一致。
+            # Intel 平台同理:OpenVINO EP 对 silero 的有状态 RNN 支持差,且模型极小,
+            # CPU EP 单线程已够快,故强制保留 CPU EP 不走 OpenVINO。
             opts = ort.SessionOptions()
             opts.intra_op_num_threads = TINY_MODEL_THREADS
             opts.inter_op_num_threads = TINY_MODEL_THREADS

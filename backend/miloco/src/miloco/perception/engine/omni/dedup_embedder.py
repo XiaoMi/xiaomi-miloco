@@ -39,6 +39,8 @@ class EventEmbedder:
         # ~10ms、低频(suggestion 去重),线程限到 TINY(满核纯浪费)。ARM CPU EP 上
         # KleidiAI 含 int8 GEMM 微内核(issue #429 同源),补 opt-out(1.27 已上游根治,
         # 此为防御,保持"所有自建 session 统一调 apply_kleidiai_opt_out"不变量)。
+        # Intel 平台同理:OpenVINO EP 对 int8 量化模型支持不全,且模型极小,
+        # CPU EP 单线程已够快,故强制保留 CPU EP 不走 OpenVINO。
         # 延迟导入(与 speech_vad 同款):运行时才从 ort_utils 取,便于测试 spy 该 helper。
         from miloco.perception.inference.ort_utils import apply_kleidiai_opt_out
 
