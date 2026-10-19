@@ -217,6 +217,8 @@ class TaskStateMachine:
         self._dispatching = True
         self._topologies: dict[str, TaskTopology] = {}
         self._states: dict[str, TaskRuntimeState] = {}
+        # 进入被前提拦下时, 是否保存信号等前提成立后补发。按 task 显式开启, 默认关。
+        self._defer_blocked_enter: dict[str, bool] = {}
         self._pending_enters: dict[str, dict[str, TaskSignal]] = {}
         self._queues: dict[str, deque[TaskSignal]] = {}
         self._wakeups: dict[str, asyncio.Event] = {}
@@ -256,9 +258,16 @@ class TaskStateMachine:
 
     # ── 拓扑维护 ──────────────────────────────────────────────────
 
-    def register_task(self, task_id: str, directions: dict[str, RuleDirection]) -> None:
+    def register_task(
+        self,
+        task_id: str,
+        directions: dict[str, RuleDirection],
+        *,
+        defer_blocked_enter: bool = False,
+    ) -> None:
         """登记 / 重新登记一个 task。重启后从 ``off`` 起 (§7)。"""
         self._topologies[task_id] = TaskTopology(task_id, dict(directions))
+        self._defer_blocked_enter[task_id] = defer_blocked_enter
         self._states.setdefault(task_id, TaskRuntimeState.OFF)
         self._pending_enters.pop(task_id, None)
         self._queues.setdefault(task_id, deque(maxlen=SIGNAL_QUEUE_DEPTH))
@@ -269,6 +278,7 @@ class TaskStateMachine:
         self._on_forget(task_id)
         self._stop_consumer(task_id)
         self._topologies.pop(task_id, None)
+        self._defer_blocked_enter.pop(task_id, None)
         self._states.pop(task_id, None)
         self._pending_enters.pop(task_id, None)
         self._queues.pop(task_id, None)
@@ -374,6 +384,18 @@ class TaskStateMachine:
 
         unmet = self._unmet_guards(topology)
         if unmet:
+            if not self._defer_blocked_enter.get(signal.task_id, False):
+                # 该 task 没开启补发: 这次进入就此丢弃, 前提之后成立也不补 —— 上游
+                # 不会收到释放请求。清掉可能残留的旧挂起, 免得开关关上后又冒出来。
+                self.clear_pending_enters(signal.task_id, signal.rule_id)
+                logger.info(
+                    "task %s 的进入被前提拦下 (rule=%s): %s; 补发未开启, 本次进入丢弃",
+                    signal.task_id,
+                    signal.rule_id,
+                    ", ".join(f"{rid}={why}" for rid, why in unmet),
+                )
+                return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
+
             # 条件层锁存后不会再产生同一条 false→true 边沿，因此先保存信号，等前提
             # 满足后由上游释放。保存原始信号也意味着 session 的起点按主条件首次成立
             # 计，而不是按前提恢复时刻计。
@@ -416,10 +438,16 @@ class TaskStateMachine:
 
         只返回原始信号，由上游保留的执行上下文负责真正派发动作；状态机只完成
         Task 级进入许可和状态转移。
+
+        补发按 task 显式开启（默认关）。没开启的 task 不会有挂起项; 这里再挡一道,
+        开关关掉之后不可能再释放出任何东西。
         """
         topology = self._topologies.get(task_id)
         pending = self._pending_enters.get(task_id)
         if topology is None or not pending:
+            return []
+        if not self._defer_blocked_enter.get(task_id, False):
+            self._pending_enters.pop(task_id, None)
             return []
 
         if self.runtime_state(task_id) is TaskRuntimeState.ON:
@@ -571,16 +599,29 @@ class TaskStateMachine:
 
     # ── 重新配置 (§19.5) ──────────────────────────────────────────
 
-    def reconfigure(self, task_id: str, directions: dict[str, RuleDirection]) -> None:
+    def reconfigure(
+        self,
+        task_id: str,
+        directions: dict[str, RuleDirection],
+        *,
+        defer_blocked_enter: bool | None = None,
+    ) -> None:
         """rule 增删改 / 单独启停 / task 重新 enable 统一走这条。
 
         运行态反映感知到的现实, 而配置变化不改变现实 —— 只在出口侧再没有条件
         撑着时才退回 ``off``, 否则原样保留。无条件清 ``off`` 会同时造成两个后果:
         那次退出的 on_exit 漏发, 且 runner 侧的边沿仍认为在态内、不会再发 enter
         信号, 两边就此分叉且不会自愈。
+
+        ``defer_blocked_enter`` 为 ``None`` 表示保持当前开关; 显式关掉时一并丢弃
+        已挂起的进入 —— 用户关掉补发之后, 那些信号不该再冒出来。
         """
         self._reconfiguring.add(task_id)
         try:
+            if defer_blocked_enter is not None:
+                self._defer_blocked_enter[task_id] = defer_blocked_enter
+            defer = self._defer_blocked_enter.get(task_id, False)
+
             queue = self._queues.get(task_id)
             if queue:
                 # 期间到达的旧信号对应改动前的配置, 排队只会把过期信号灌进新配置。
@@ -590,6 +631,10 @@ class TaskStateMachine:
 
             new_topology = TaskTopology(task_id, dict(directions))
             pending = self._pending_enters.get(task_id)
+            if pending is not None:
+                if not defer:
+                    self._pending_enters.pop(task_id, None)
+                    pending = None
             if pending is not None:
                 pending = {
                     rule_id: signal

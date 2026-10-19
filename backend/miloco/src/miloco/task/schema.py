@@ -58,6 +58,10 @@ class TaskCreateRequest(BaseModel):
     expires_at: str | None = Field(
         None, description="到期时刻 ISO8601（带时区偏移），仅 lifecycle=temporary"
     )
+    defer_blocked_enter: bool = Field(
+        False,
+        description="进入被前提拦下时是否挂起、等前提成立后补发（默认关闭）",
+    )
 
     _check_expiry = field_validator("expires_at")(_validated_iso)
 
@@ -90,6 +94,9 @@ class TaskUpdateRequest(BaseModel):
     description: str | None = Field(None, max_length=200)
     lifecycle: Literal["permanent", "temporary"] | None = None
     expires_at: str | None = None
+    defer_blocked_enter: bool | None = Field(
+        None, description="进入被前提拦下时是否挂起补发；不传表示这次不动它"
+    )
 
     _check_expiry = field_validator("expires_at")(_validated_iso)
 
@@ -154,6 +161,8 @@ class TaskFullView(BaseModel):
     runtime_state: Literal["off", "on"] = "off"
     lifecycle: Literal["permanent", "temporary"] = "permanent"
     expires_at: str | None = None
+    # 进入被前提拦下时是否挂起、等前提成立后补发。默认关闭: 拦下即丢弃。
+    defer_blocked_enter: bool = False
     # 最后一次判定的结论摘要, 回答「我的规则现在为什么不触发」(§18.5)。
     # None = 该 task 还没被状态机接管, 或接管后一次判定都没发生过。
     last_decision: dict | None = None

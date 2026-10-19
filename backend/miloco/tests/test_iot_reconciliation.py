@@ -180,7 +180,9 @@ def _duration_iot_rule(
     return rule
 
 
-def _runner_with_state_machine(rules: list[Rule]):
+def _runner_with_state_machine(
+    rules: list[Rule], *, defer_blocked_enter: bool = False
+):
     runner = RuleRunner(
         rules=rules,
         miot_proxy=AsyncMock(),
@@ -195,6 +197,7 @@ def _runner_with_state_machine(rules: list[Rule]):
     state_machine.register_task(
         rules[0].task_id,
         derive_directions((rule.id, rule.resolved_direction.value) for rule in rules),
+        defer_blocked_enter=defer_blocked_enter,
     )
     return runner, state_machine
 
@@ -254,7 +257,7 @@ async def test_duration_exit_does_not_release_pending_enter():
     exit_rule = _duration_iot_rule("exit", RuleDirection.EXIT)
     guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
     runner, state_machine = _runner_with_state_machine(
-        [enter_rule, exit_rule, guard_rule]
+        [enter_rule, exit_rule, guard_rule], defer_blocked_enter=True
     )
     source = _FakeIotSource({"enter": True, "exit": True, "guard": False})
     runner._iot_source = source
@@ -309,7 +312,9 @@ async def test_session_duration_exit_does_not_release_pending_enter():
         "session", RuleDirection.SESSION, duration_ratio=0.5
     )
     guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
-    runner, state_machine = _runner_with_state_machine([session_rule, guard_rule])
+    runner, state_machine = _runner_with_state_machine(
+        [session_rule, guard_rule], defer_blocked_enter=True
+    )
     source = _FakeIotSource({"session": True, "guard": False})
     runner._iot_source = source
     fired: list[tuple[str, RuleEvent]] = []
@@ -595,7 +600,7 @@ async def test_guard_refresh_releases_entry_that_was_already_blocked():
     exit_rule = _iot_rule("exit", RuleDirection.EXIT, value=False)
     guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
     runner, state_machine = _runner_with_state_machine(
-        [enter_rule, exit_rule, guard_rule]
+        [enter_rule, exit_rule, guard_rule], defer_blocked_enter=True
     )
     source = _FakeIotSource({"guard": False, "exit": False})
     runner._iot_source = source
@@ -642,7 +647,9 @@ async def test_session_guard_releases_pending_enter_and_exits():
         "session", RuleDirection.SESSION, exit_debounce_seconds=0
     )
     guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
-    runner, state_machine = _runner_with_state_machine([session_rule, guard_rule])
+    runner, state_machine = _runner_with_state_machine(
+        [session_rule, guard_rule], defer_blocked_enter=True
+    )
     source = _FakeIotSource({"session": True, "guard": False})
     runner._iot_source = source
     fired = AsyncMock()
@@ -684,7 +691,9 @@ async def test_session_guard_releases_pending_enter_and_exits():
 async def test_guard_release_does_not_fire_after_main_rule_exits():
     enter_rule = _iot_rule("enter", RuleDirection.ENTER)
     guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
-    runner, state_machine = _runner_with_state_machine([enter_rule, guard_rule])
+    runner, state_machine = _runner_with_state_machine(
+        [enter_rule, guard_rule], defer_blocked_enter=True
+    )
     source = _FakeIotSource({"enter": True, "guard": False})
     runner._iot_source = source
     fired = AsyncMock()
@@ -717,7 +726,9 @@ async def test_guard_release_does_not_fire_after_main_rule_exits():
 async def test_unknown_guard_recovery_releases_pending_enter():
     enter_rule = _iot_rule("enter", RuleDirection.ENTER)
     guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
-    runner, state_machine = _runner_with_state_machine([enter_rule, guard_rule])
+    runner, state_machine = _runner_with_state_machine(
+        [enter_rule, guard_rule], defer_blocked_enter=True
+    )
     source = _FakeIotSource({"guard": None})
     runner._iot_source = source
     fired = AsyncMock()
@@ -745,7 +756,9 @@ async def test_unknown_guard_recovery_releases_pending_enter():
 async def test_main_rule_unknown_keeps_pending_enter_until_guard_recovers():
     enter_rule = _iot_rule("enter", RuleDirection.ENTER)
     guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
-    runner, state_machine = _runner_with_state_machine([enter_rule, guard_rule])
+    runner, state_machine = _runner_with_state_machine(
+        [enter_rule, guard_rule], defer_blocked_enter=True
+    )
     source = _FakeIotSource({"enter": True, "guard": False})
     runner._iot_source = source
     fired = AsyncMock()
@@ -780,7 +793,9 @@ async def test_main_rule_unknown_keeps_pending_enter_until_guard_recovers():
 async def test_guard_recovery_keeps_pending_enter_while_main_rule_is_unknown():
     enter_rule = _iot_rule("enter", RuleDirection.ENTER)
     guard_rule = _iot_rule("guard", RuleDirection.GUARD, value=True)
-    runner, state_machine = _runner_with_state_machine([enter_rule, guard_rule])
+    runner, state_machine = _runner_with_state_machine(
+        [enter_rule, guard_rule], defer_blocked_enter=True
+    )
     source = _FakeIotSource({"enter": True, "guard": False})
     runner._iot_source = source
     fired = AsyncMock()

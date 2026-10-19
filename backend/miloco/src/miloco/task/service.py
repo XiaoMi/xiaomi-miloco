@@ -42,7 +42,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_META_COLUMN_NAMES = frozenset({"description", "lifecycle", "expires_at"})
+_META_COLUMN_NAMES = frozenset(
+    {"description", "lifecycle", "expires_at", "defer_blocked_enter"}
+)
 
 # 这些列传 null 是"清空"; 其余都是 NOT NULL, 传 null 会在 UPDATE 时撞约束。
 _NULLABLE_META = frozenset({"expires_at"})
@@ -97,10 +99,11 @@ class TaskService:
             description=req.description,
             lifecycle=req.lifecycle,
             expires_at=req.expires_at,
+            defer_blocked_enter=req.defer_blocked_enter,
         )
 
     def update_meta(self, task_id: str, req: TaskUpdateRequest) -> bool:
-        """partial 改 description / lifecycle / 到期时刻。
+        """partial 改 description / lifecycle / 到期时刻 / 补发开关。
 
         约束判的是**这次改动落地之后**的组合: permanent 带到期时刻是自相矛盾的
         配置, 而两个字段可以分两次请求改 —— 只看本次传进来的那个, 「先把 lifecycle
@@ -132,7 +135,12 @@ class TaskService:
                 "expires_at 只能配 lifecycle=temporary: 改成 permanent 要同时清掉"
                 "到期时刻 (--clear-expires-at)"
             )
-        return self.repo.update_meta(task_id, updates)
+        ok = self.repo.update_meta(task_id, updates)
+        if ok and "defer_blocked_enter" in updates and self._rule_service is not None:
+            # 状态机里的开关是登记时的副本 —— 只写库不推下去, 改了要到重启才生效,
+            # 而接口已经返回成功。与动作槽是同一类"静默不生效"。
+            self._rule_service.reconfigure_task(task_id)
+        return ok
 
     def get_description(self, task_id: str) -> str | None:
         """按 task_id 取任务描述（住户日志「所属任务」用）。"""
@@ -232,6 +240,7 @@ class TaskService:
             # 用 [] 不用 .get(): 少 SELECT 一列时立刻 KeyError, 而 .get() 会把
             # "这一列没查"静默变成"这个 task 没到期时刻", 列表接口整片回 null。
             expires_at=raw["expires_at"],
+            defer_blocked_enter=raw["defer_blocked_enter"],
             runtime_state=self._runtime_state(raw["task_id"]),
             last_decision=self._last_decision(raw["task_id"]),
             rule_briefs=rule_briefs,

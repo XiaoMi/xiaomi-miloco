@@ -35,7 +35,9 @@ from miloco.rule.schema import (
 from miloco.rule.service import RuleService, attach_task_state_machine
 from miloco.task.state_machine import (
     ActionSlot,
+    SignalKind,
     TaskRuntimeState,
+    TaskSignal,
     TransitionOutcome,
 )
 
@@ -104,6 +106,36 @@ _ACTIONS = {"on_enter_desc": "task 侧", "on_exit_desc": "task 侧退出"}
 
 async def _anoop(*_a, **_kw):
     return None
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_task_refreshes_defer_blocked_enter_flag(env):
+    """开关改了要推给状态机 —— 只写库的话运行态要到重启才跟上。"""
+    service, runner, _ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    sm = runner.state_machine
+    assert sm._defer_blocked_enter["t1"] is False
+
+    TaskRepo().update_meta("t1", {"defer_blocked_enter": True})
+    service.reconfigure_task("t1")
+
+    assert sm._defer_blocked_enter["t1"] is True
+
+
+@pytest.mark.asyncio
+async def test_reconfigure_task_turning_off_defer_drops_pending_enters(env):
+    """关掉补发后, 已挂起的进入不能在下次重配时又被放出来。"""
+    service, runner, ids, _ = _build(_ACTIONS, [_rule("[t1] s")])
+    sm = runner.state_machine
+    TaskRepo().update_meta("t1", {"defer_blocked_enter": True})
+    service.reconfigure_task("t1")
+    sm._pending_enters["t1"] = {
+        ids[0]: TaskSignal("t1", ids[0], SignalKind.ENTERED)
+    }
+
+    TaskRepo().update_meta("t1", {"defer_blocked_enter": False})
+    service.reconfigure_task("t1")
+
+    assert "t1" not in sm._pending_enters
 
 
 # ── 删掉唯一出边 rule ─────────────────────────────────────────────────

@@ -5858,7 +5858,7 @@ class _EventLinkFixtures:
     """台账父指针用例共用的装配：挂了状态机的 runner、进 / 出两个槽都配好动作。"""
 
     @staticmethod
-    def _build(rules, task_id=TASK_ID):
+    def _build(rules, task_id=TASK_ID, *, defer_blocked_enter=False):
         from miloco.task.state_machine import TaskStateMachine, derive_directions
 
         svc = MagicMock()
@@ -5889,6 +5889,7 @@ class _EventLinkFixtures:
         sm.register_task(
             task_id,
             derive_directions((x.id, x.resolved_direction.value) for x in rules),
+            defer_blocked_enter=defer_blocked_enter,
         )
         return r, sm
 
@@ -5934,7 +5935,9 @@ class TestGuardBlockedEnterKeepsEventLink(_EventLinkFixtures):
 
         session_rule = self._rule("r-ses", RuleDirection.SESSION)
         guard_rule = self._rule("r-guard", RuleDirection.GUARD)
-        r, sm = self._build([session_rule, guard_rule])
+        r, sm = self._build(
+            [session_rule, guard_rule], defer_blocked_enter=True
+        )
 
         # 前提先明确为假：走"未就绪"那条分支的话，拦下与恢复可能被同一轮吃掉。
         await r.update_state("r-guard", "cam-001", False, "")

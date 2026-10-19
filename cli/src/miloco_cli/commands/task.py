@@ -79,8 +79,14 @@ def task_group():
         "配 permanent 会被拒"
     ),
 )
+@click.option(
+    "--defer-blocked-enter",
+    "defer_blocked_enter",
+    is_flag=True,
+    help="进入被前提拦下时挂起、等前提成立后补发（默认关闭: 拦下即丢弃）",
+)
 @click.option("--pretty", is_flag=True)
-def task_create(task_id, description, lifecycle, expires_at, pretty):
+def task_create(task_id, description, lifecycle, expires_at, defer_blocked_enter, pretty):
     """建 task 占位行 (v2)。
 
     rule / cron / record 关联挂载由后续命令完成:
@@ -101,6 +107,8 @@ def task_create(task_id, description, lifecycle, expires_at, pretty):
         # 与 record 的 --at 同处理: agent 习惯给 ISO 加引号, 而 exec tool 不解析
         # shell 引号 (见 _strip_quotes)。
         body["expires_at"] = _strip_quotes(expires_at)
+    if defer_blocked_enter:
+        body["defer_blocked_enter"] = True
     data = api_post(API_PREFIX, body)
     print_result(data, pretty)
 
@@ -127,9 +135,23 @@ def task_create(task_id, description, lifecycle, expires_at, pretty):
     is_flag=True,
     help="清空到期时刻（限时改回长期时用）",
 )
+@click.option(
+    "--defer-blocked-enter/--no-defer-blocked-enter",
+    "defer_blocked_enter",
+    default=None,
+    help="开启/关闭「进入被前提拦下后补发」。不传表示这次不动它",
+)
 @click.option("--pretty", is_flag=True)
-def task_update(task_id, description, lifecycle, expires_at, clear_expires_at, pretty):
-    """改 description / 生命周期 / 到期时刻。只有传了的字段会被改。"""
+def task_update(
+    task_id,
+    description,
+    lifecycle,
+    expires_at,
+    clear_expires_at,
+    defer_blocked_enter,
+    pretty,
+):
+    """改 description / 生命周期 / 到期时刻 / 补发开关。只有传了的字段会被改。"""
     from miloco_cli.client import api_patch
 
     if clear_expires_at and expires_at:
@@ -145,6 +167,8 @@ def task_update(task_id, description, lifecycle, expires_at, clear_expires_at, p
     elif clear_expires_at:
         # 显式 null 才是清空; 不传等于"这次不动它"。
         body["expires_at"] = None
+    if defer_blocked_enter is not None:
+        body["defer_blocked_enter"] = defer_blocked_enter
     if not body:
         _exit_error("至少要传一个可改字段")
 

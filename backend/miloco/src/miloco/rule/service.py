@@ -626,12 +626,20 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
         rules_by_task.setdefault(rule.task_id, []).append(rule)
 
     # 派生量 seed: 重启后按 DB 里的 task.status 重算「有效启用」(§19.9)
-    for row in task_repo.list_all():
+    task_rows = task_repo.list_all()
+    for row in task_rows:
         rule_runner.set_task_paused(row["task_id"], row["status"] != "active")
+    defer_by_task = {
+        row["task_id"]: bool(row["defer_blocked_enter"]) for row in task_rows
+    }
 
     for task_id, rules in rules_by_task.items():
         rule_runner.set_task_actions(task_id, task_repo.get_boundary_actions(task_id))
-        state_machine.register_task(task_id, _live_topology(rules))
+        state_machine.register_task(
+            task_id,
+            _live_topology(rules),
+            defer_blocked_enter=defer_by_task.get(task_id, False),
+        )
     logger.info("task state machine attached: %d task(s)", len(rules_by_task))
     _seed_reached_targets(rule_runner)
 
@@ -1803,7 +1811,16 @@ class RuleService:
                 sm.reconfigure(task_id, {})
                 sm.unregister_task(task_id)
             return
-        sm.reconfigure(task_id, _live_topology(rules))
+        # 开关是 task 上的配置, 状态机那侧是登记时的副本 —— 每次重配都按 DB 现值
+        # 刷新。用 ``is True``: 测试注入的 repo 可能是 Mock, 别把 Mock 返回值当开启。
+        defer_blocked_enter = (
+            self._task_repo.get_defer_blocked_enter(task_id) is True
+        )
+        sm.reconfigure(
+            task_id,
+            _live_topology(rules),
+            defer_blocked_enter=defer_blocked_enter,
+        )
         # 排 timer 只挂在「进入会话」那个边沿上, 而装配是分步的 —— 三样齐备的那
         # 一刻可能落在会话开始之后, 那时进入边沿早过去了, 这一天的达标就只能靠
         # 退出兜底或跨零点补发, 而这条通知的全部意义是到点提醒。已经在态内就补

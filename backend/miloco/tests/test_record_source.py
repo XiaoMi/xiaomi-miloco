@@ -484,7 +484,9 @@ class TestMilestoneReconcile:
             is_condition_satisfied=lambda _r: None,
             dispatch_action=lambda *_a: None,
         )
-        monkeypatch.setattr(sm, "reconfigure", lambda t, d: seen.append(dict(d)))
+        monkeypatch.setattr(
+            sm, "reconfigure", lambda t, d, **_kw: seen.append(dict(d))
+        )
         svc._runner.attach_state_machine(sm)
 
         svc.reconfigure_task(TASK_ID)

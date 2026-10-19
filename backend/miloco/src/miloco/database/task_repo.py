@@ -64,6 +64,7 @@ class TaskRepo:
         description: str,
         lifecycle: str = "permanent",
         expires_at: str | None = None,
+        defer_blocked_enter: bool = False,
     ) -> None:
         """INSERT task 行 (占位)。rule / cron 关联挂载由后续 endpoint 完成。"""
         with self.db.get_connection() as conn:
@@ -71,14 +72,16 @@ class TaskRepo:
             try:
                 cursor.execute(
                     "INSERT INTO task "
-                    "(task_id, description, status, created_at, lifecycle, expires_at) "
-                    "VALUES (?, ?, 'active', ?, ?, ?)",
+                    "(task_id, description, status, created_at, lifecycle, expires_at, "
+                    "defer_blocked_enter) "
+                    "VALUES (?, ?, 'active', ?, ?, ?, ?)",
                     (
                         task_id,
                         description,
                         now_ms(),
                         lifecycle,
                         iso_to_ms(expires_at) if expires_at else None,
+                        1 if defer_blocked_enter else 0,
                     ),
                 )
                 conn.commit()
@@ -107,13 +110,26 @@ class TaskRepo:
             ).fetchone()
             return row["description"] if row else None
 
+    def get_defer_blocked_enter(self, task_id: str) -> bool | None:
+        """该 task 是否开启「被前提拦下后补发」；task 不存在返回 None。
+
+        状态机登记与重新配置都要读它, 用轻量单列查询 —— 别为了一个布尔值把整行
+        动作槽拉出来。
+        """
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT defer_blocked_enter FROM task WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+        return bool(row["defer_blocked_enter"]) if row else None
+
     def get_full_view(self, task_id: str) -> dict[str, Any] | None:
         """单 task 视图: task 元信息 + cron_refs (rule_briefs 由 service 层拼装)."""
         with self.db.get_connection() as conn:
             task_row = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at, lifecycle, "
                 "expires_at, on_enter_actions, on_enter_desc, on_exit_actions, "
-                "on_exit_desc, on_target_actions, on_target_desc "
+                "on_exit_desc, on_target_actions, on_target_desc, defer_blocked_enter "
                 "FROM task WHERE task_id=?",
                 (task_id,),
             ).fetchone()
@@ -131,6 +147,7 @@ class TaskRepo:
                 "created_at": ms_to_iso_local(task_row["created_at"]),
                 "lifecycle": task_row["lifecycle"],
                 "expires_at": ms_to_iso_local(task_row["expires_at"]),
+                "defer_blocked_enter": bool(task_row["defer_blocked_enter"]),
                 "actions": _boundary_actions_of(task_row),
                 "cron_refs": [
                     {
@@ -147,7 +164,8 @@ class TaskRepo:
             tasks = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at, "
                 "lifecycle, expires_at, on_enter_actions, on_enter_desc, "
-                "on_exit_actions, on_exit_desc, on_target_actions, on_target_desc "
+                "on_exit_actions, on_exit_desc, on_target_actions, on_target_desc, "
+                "defer_blocked_enter "
                 "FROM task ORDER BY created_at DESC"
             ).fetchall()
             all_crons = conn.execute(
@@ -168,6 +186,7 @@ class TaskRepo:
                     "created_at": ms_to_iso_local(t["created_at"]),
                     "lifecycle": t["lifecycle"],
                     "expires_at": ms_to_iso_local(t["expires_at"]),
+                    "defer_blocked_enter": bool(t["defer_blocked_enter"]),
                     # 动作槽跟基础字段同一行, 一起 SELECT 不产生额外查询。多条 rule
                     # 的 task 动作只存在这里 —— 列表不带的话住户界面显示成"无动作"。
                     "actions": _boundary_actions_of(t),
@@ -252,14 +271,16 @@ class TaskRepo:
 
         时间列入参走 ISO, 入库 int ms —— 与 ``create_task`` / task_record 同口径。
         """
-        allowed = {"description", "lifecycle", "expires_at"}
+        allowed = {"description", "lifecycle", "expires_at", "defer_blocked_enter"}
         unknown = set(updates) - allowed
         if unknown:
             raise ValueError(f"unknown task meta column(s): {sorted(unknown)}")
         if not updates:
             return False
         params = [
-            iso_to_ms(v) if k == "expires_at" and v is not None else v
+            iso_to_ms(v)
+            if k == "expires_at" and v is not None
+            else (1 if k == "defer_blocked_enter" and v else v)
             for k, v in updates.items()
         ]
         assignments = ", ".join(f"{k}=?" for k in updates)

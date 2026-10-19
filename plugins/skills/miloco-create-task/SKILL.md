@@ -274,6 +274,7 @@ temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性�
 
 - 前提只管进入。要「条件不再成立就退出」用 `--direction exit`。
 - 前提条件未就绪（设备离线 / 属性还没对齐）时不允许进入。
+- 进入被前提拦下时默认**直接丢弃**，前提之后成立也不补发。要「前提晚成立也补发」，在 task 上显式开启：`miloco-cli task create ... --defer-blocked-enter`，或对已有 task 用 `miloco-cli task update <task_id> --defer-blocked-enter`；关回去用 `--no-defer-blocked-enter`。
 - 前提不支持 `--duration-seconds`。
 - 同 task 多条前提全部成立才允许进入。
 

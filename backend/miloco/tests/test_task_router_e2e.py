@@ -231,6 +231,37 @@ def test_update_description(client):
     assert r.json()["data"]["description"] == "new"
 
 
+def test_defer_blocked_enter_defaults_off_and_can_be_toggled(client):
+    """body 里没传 → 默认关闭; PATCH 能开、能关, GET 如实回读。"""
+    _create_task(client, "t1")
+    body = client.get("/api/tasks/t1").json()["data"]
+    assert body["defer_blocked_enter"] is False
+
+    r = client.patch("/api/tasks/t1", json={"defer_blocked_enter": True})
+    assert r.status_code == 200
+    body = client.get("/api/tasks/t1").json()["data"]
+    assert body["defer_blocked_enter"] is True
+
+    client.patch("/api/tasks/t1", json={"defer_blocked_enter": False})
+    body = client.get("/api/tasks/t1").json()["data"]
+    assert body["defer_blocked_enter"] is False
+
+
+def test_create_accepts_defer_blocked_enter(client):
+    """extra=forbid 下新字段必须真的进模型, 否则 create 会被 422 拒。"""
+    r = client.post(
+        "/api/tasks",
+        json={
+            "task_id": "t1",
+            "description": "x",
+            "defer_blocked_enter": True,
+        },
+    )
+    assert r.status_code == 200
+    body = client.get("/api/tasks/t1").json()["data"]
+    assert body["defer_blocked_enter"] is True
+
+
 def test_e2e_summary_full_flow(client):
     """summary endpoint 完整流程:3 个 task / 三种 kind / 真实 progress/event mutate。"""
     _create_task(client, "morning_workout", "每天做 20 个俯卧撑")

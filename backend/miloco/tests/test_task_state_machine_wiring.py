@@ -482,6 +482,32 @@ def test_attach_registers_direction_from_db(tmp_path, monkeypatch):
     assert runner._state_machine.runtime_state("t1") is TaskRuntimeState.ON
 
 
+def test_attach_defaults_defer_blocked_enter_off(tmp_path, monkeypatch):
+    """启动登记按 DB 现值 —— 没开启的 task 不能被补发挂起。"""
+    rule_repo = _seed_db(tmp_path, monkeypatch, {"on_enter_desc": "task 侧"})
+    runner = _runner(rule_repo.get_all(), monkeypatch)
+
+    from miloco.rule.service import attach_task_state_machine
+
+    attach_task_state_machine(runner, rule_repo)
+
+    assert runner._state_machine._defer_blocked_enter["t1"] is False
+
+
+def test_attach_reads_defer_blocked_enter_from_db(tmp_path, monkeypatch):
+    rule_repo = _seed_db(tmp_path, monkeypatch, {"on_enter_desc": "task 侧"})
+    from miloco.database.task_repo import TaskRepo
+
+    assert TaskRepo().update_meta("t1", {"defer_blocked_enter": True})
+
+    runner = _runner(rule_repo.get_all(), monkeypatch)
+    from miloco.rule.service import attach_task_state_machine
+
+    attach_task_state_machine(runner, rule_repo)
+
+    assert runner._state_machine._defer_blocked_enter["t1"] is True
+
+
 # ── reconfigure: 配置变了、现实没变 ───────────────────────────────────
 
 

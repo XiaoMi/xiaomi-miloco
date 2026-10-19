@@ -105,7 +105,11 @@ def test_event_type_blocked_when_guard_false():
 
 def test_blocked_enter_is_logged_once_while_waiting_for_guard(caplog):
     h = Harness({"g": False})
-    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
 
     with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
         assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
@@ -127,7 +131,11 @@ def test_blocked_event_type_dispatches_nothing():
 
 def test_blocked_event_can_be_released_after_guard_becomes_true():
     h = Harness({"a": True, "g": False})
-    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
     signal = _entered("a", payload={"caption": "原始上下文"})
 
     assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
@@ -146,6 +154,7 @@ def test_blocked_event_releases_all_pending_enters_after_guard_becomes_true():
             "b": RuleDirection.ENTER,
             "g": RuleDirection.GUARD,
         },
+        defer_blocked_enter=True,
     )
     first = _entered("a", payload={"caption": "第一条"})
     second = _entered("b", payload={"caption": "第二条"})
@@ -167,6 +176,7 @@ def test_releasing_event_keeps_unknown_sibling_pending():
             "b": RuleDirection.ENTER,
             "g": RuleDirection.GUARD,
         },
+        defer_blocked_enter=True,
     )
     first = _entered("a")
     second = _entered("b")
@@ -191,6 +201,7 @@ def test_event_fire_keeps_unknown_sibling_pending():
             "b": RuleDirection.ENTER,
             "g": RuleDirection.GUARD,
         },
+        defer_blocked_enter=True,
     )
     pending = _entered("b")
 
@@ -209,7 +220,11 @@ def test_event_fire_keeps_unknown_sibling_pending():
 
 def test_blocked_session_release_enters_once_and_preserves_payload():
     h = Harness({"s": True, "g": False})
-    h.sm.register_task("t1", {"s": RuleDirection.SESSION, "g": RuleDirection.GUARD})
+    h.sm.register_task(
+        "t1",
+        {"s": RuleDirection.SESSION, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
     signal = _entered("s", payload={"room": "客厅"})
 
     assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
@@ -224,7 +239,11 @@ def test_blocked_session_release_enters_once_and_preserves_payload():
 
 def test_pending_enter_is_dropped_when_main_rule_is_no_longer_true():
     h = Harness({"a": True, "g": False})
-    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
     signal = _entered("a")
 
     assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
@@ -236,7 +255,11 @@ def test_pending_enter_is_dropped_when_main_rule_is_no_longer_true():
 
 def test_reconfigure_preserves_pending_enter_that_remains_an_entry_rule():
     h = Harness({"a": True, "g": False})
-    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
     signal = _entered("a")
     assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
 
@@ -247,7 +270,11 @@ def test_reconfigure_preserves_pending_enter_that_remains_an_entry_rule():
 
 def test_reconfigure_drops_pending_enter_removed_from_entry_topology():
     h = Harness({"g": False})
-    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
     assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
 
     h.sm.reconfigure("t1", {"g": RuleDirection.GUARD})
@@ -256,13 +283,92 @@ def test_reconfigure_drops_pending_enter_removed_from_entry_topology():
 
 def test_suspend_clears_pending_enter():
     h = Harness({"g": False})
-    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
     assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
 
     h.satisfied["g"] = False
-    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
     assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
     h.sm.suspend("t1")
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+
+
+# ── 补发按 task 显式开启, 默认关闭 ───────────────────────────────
+
+
+def test_blocked_enter_is_dropped_by_default():
+    """默认不补发: 被前提拦下的进入直接丢弃, 前提之后成立也不补。"""
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a", payload={"caption": "原始上下文"})
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+    # 不是"挂起但不释放" —— 压根没存。释放口还有第二道闸, 只看它的返回值分不开
+    # "没存"和"存了但拒绝释放"。
+    assert "t1" not in h.sm._pending_enters
+
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+def test_reconfigure_can_turn_on_defer_for_later_blocked_enters():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.sm.reconfigure(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
+    signal = _entered("a")
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [signal]
+
+
+def test_reconfigure_turning_off_defer_drops_pending_enter():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.sm.reconfigure(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=False,
+    )
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_release_refuses_pending_after_the_flag_is_off():
+    """第二道闸: 开关关掉之后, 残留的挂起项不能再被释放。
+
+    正常路径里 reconfigure 已经先清了; 这里绕过它直接改开关, 验的是释放口自己
+    也认这个开关 —— 只靠一处清理的话, 任何一条漏清的路径都会让补发复活。
+    """
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task(
+        "t1",
+        {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD},
+        defer_blocked_enter=True,
+    )
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.sm._defer_blocked_enter["t1"] = False
     h.satisfied["g"] = True
     assert h.sm.release_pending_enters("t1") == []
 

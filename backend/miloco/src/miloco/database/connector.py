@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 # 步进跑到此值。历史基线 v1 (cron 挪出 task_link + rule 加 FK CASCADE 前)。
 # v4 = task 运行态重构的 expand-contract 阶段 A (只加列, 阶段 B 才删列)。
 # v5 = on-demand 日志持久化视觉 artifact 元数据。
-_DB_SCHEMA_VERSION = 5
+# v6 = 进入被前提拦下后的挂起补发改成按 task 显式开启, 默认关闭。
+_DB_SCHEMA_VERSION = 6
 
 
 def incremental_vacuum(
@@ -609,7 +610,8 @@ class SQLiteConnector:
                 on_exit_actions   TEXT NOT NULL DEFAULT '[]',
                 on_exit_desc      TEXT,
                 on_target_actions TEXT NOT NULL DEFAULT '[]',
-                on_target_desc    TEXT
+                on_target_desc    TEXT,
+                defer_blocked_enter INTEGER NOT NULL DEFAULT 0
             )
         """)
         logger.info("task table created successfully")
@@ -1318,6 +1320,7 @@ def _table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
 # 每级取该级迁移真正新加的列。判定从高到低, 全中即认这一级。新增迁移必须在这里
 # 补一行, 否则形状兜底那条路会把新库判成上一级、把该级迁移再跑一遍。
 _SCHEMA_VERSION_MARKERS: tuple[tuple[int, tuple[tuple[str, str], ...]], ...] = (
+    (6, (("task", "defer_blocked_enter"),)),
     (5, (
         ("on_demand_log", "visual_artifact_kind"),
         ("on_demand_log", "image_frame_counts"),
@@ -1934,12 +1937,33 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
         raise
 
 
+# 默认 0 = 不挂起。存量 task 一律落在这个值上: 进入边沿被前提拦下就丢弃,
+# 不保留到前提成立后补发。
+_V6_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("defer_blocked_enter", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """v5 → v6: 挂起补发改成按 task 显式开启, 默认关闭。"""
+    cursor = conn.cursor()
+    try:
+        added = _add_columns_if_missing(cursor, "task", _V6_TASK_COLUMNS)
+        cursor.execute("PRAGMA user_version = 6")
+        conn.commit()
+        logger.info("v5→v6 migration done: added=%s", added)
+    except Exception:
+        conn.rollback()
+        raise
+
+
 # schema 步进迁移登记表
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v1_to_v2,
     3: _migrate_v2_to_v3,
     4: _migrate_v3_to_v4,
     5: _migrate_v4_to_v5,
+    6: _migrate_v5_to_v6,
 }
 
 

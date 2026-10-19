@@ -649,6 +649,66 @@ def test_update_rejects_clearing_the_description(service):
         service.update_meta("t1", TaskUpdateRequest(description=None))
 
 
+def test_create_task_defaults_defer_blocked_enter_off(service):
+    """补发默认关闭: 建 task 不传就落 0, 详情页读回 false。"""
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+
+    assert service.get_full_view("t1").defer_blocked_enter is False
+
+
+def test_create_task_stores_defer_blocked_enter(service):
+    service.create_task(
+        TaskCreateRequest(
+            task_id="t1", description="d", defer_blocked_enter=True
+        )
+    )
+
+    assert service.get_full_view("t1").defer_blocked_enter is True
+
+
+def test_update_can_turn_defer_blocked_enter_on_and_off(service):
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+
+    assert service.update_meta(
+        "t1", TaskUpdateRequest(defer_blocked_enter=True)
+    )
+    assert service.get_full_view("t1").defer_blocked_enter is True
+
+    assert service.update_meta(
+        "t1", TaskUpdateRequest(defer_blocked_enter=False)
+    )
+    assert service.get_full_view("t1").defer_blocked_enter is False
+
+
+def test_update_defer_blocked_enter_refreshes_the_state_machine(service):
+    """状态机里的开关是登记时的副本 —— 只写库不推下去, 改了要重启才生效。"""
+    _mk_task(service)
+    reconfigured: list[str] = []
+
+    class _Stub:
+        def reconfigure_task(self, task_id):
+            reconfigured.append(task_id)
+
+    service._rule_service = _Stub()
+    service.update_meta("t1", TaskUpdateRequest(defer_blocked_enter=True))
+
+    assert reconfigured == ["t1"]
+
+
+def test_update_other_meta_does_not_reconfigure_the_state_machine(service):
+    _mk_task(service)
+    reconfigured: list[str] = []
+
+    class _Stub:
+        def reconfigure_task(self, task_id):
+            reconfigured.append(task_id)
+
+    service._rule_service = _Stub()
+    service.update_meta("t1", TaskUpdateRequest(description="new"))
+
+    assert reconfigured == []
+
+
 def test_update_rejects_an_empty_body(service):
     from miloco.middleware.exceptions import ValidationException
 

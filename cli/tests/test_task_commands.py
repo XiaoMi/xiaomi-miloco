@@ -224,6 +224,55 @@ def test_update_uses_patch(runner):
         assert body == {"description": "new desc"}
 
 
+def test_create_sends_defer_blocked_enter_when_given(runner):
+    with patch("miloco_cli.client.api_post") as mock_post:
+        mock_post.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group,
+            [
+                "create",
+                "--task-id",
+                "t1",
+                "--description",
+                "d",
+                "--defer-blocked-enter",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_post.call_args.args
+        assert body["defer_blocked_enter"] is True
+
+
+def test_update_can_turn_defer_blocked_enter_both_ways(runner):
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        mock_patch.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group, ["update", "t1", "--defer-blocked-enter"]
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_patch.call_args.args
+        assert body == {"defer_blocked_enter": True}
+
+        result = runner.invoke(
+            task_group, ["update", "t1", "--no-defer-blocked-enter"]
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_patch.call_args.args
+        assert body == {"defer_blocked_enter": False}
+
+
+def test_update_omits_defer_blocked_enter_when_not_given(runner):
+    """不传表示这次不动它 —— 显式 false 会把已开启的补发关掉。"""
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        mock_patch.return_value = {"code": 0, "message": "ok", "data": {}}
+        result = runner.invoke(
+            task_group, ["update", "t1", "--description", "new"]
+        )
+        assert result.exit_code == 0, result.output
+        _, body = mock_patch.call_args.args
+        assert "defer_blocked_enter" not in body
+
+
 def test_list_calls_get(runner):
     with patch("miloco_cli.client.api_get") as mock_get:
         mock_get.return_value = {"code": 0, "data": []}
