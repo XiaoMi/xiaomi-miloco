@@ -1,0 +1,80 @@
+# 知识库每周自动刷新：拉最新 main → 固定六阶段（增量同步×3 → 全量同步×1 →
+# 完整审查×1 → review×1（只读） → 解决（有 [ISSUE] 才跑） → commit+PR）→ 护栏（只允许改 knowledge/）
+# → docs 格式门 → 开一个待人工确认的 PR。人是唯一合并闸门：本 workflow 只开 PR、从不自动合并。
+# 通知沿用 GitHub 原生（PR 一开即发通知邮件）。复用 pr-review 基础设施：pr-review:trixie 容器（含 claude
+# CLI）+ ANTHROPIC_* 密钥。
+name: KB Weekly Refresh
+
+on:
+  # 每周六 UTC 13:07 ≈ 北京时间周六 21:07（避开整点分散负载）；PR 留到周一人工确认。
+  schedule:
+    - cron: "7 13 * * 6"
+  workflow_dispatch: {}
+
+# 串行：同一时刻只跑一个，避免并发开重复 PR。cancel-in-progress: false —— 任务耗时长（~90min）且开 PR
+# 幂等，让在跑的先跑完、新触发排队，不打断。
+concurrency:
+  group: kb-weekly-refresh
+  cancel-in-progress: false
+
+permissions:
+  contents: write # 建分支 + 提交 knowledge/ 改动
+  pull-requests: write # 开 PR
+  issues: write # 建标签 + 打标签走 issues API，缺此权限去重按标签查不到
+  packages: read # 拉 ghcr 上的 pr-review 容器镜像
+
+jobs:
+  kb-refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    container:
+      image: ghcr.io/xiaomi/xiaomi-miloco/pr-review:trixie
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      # 只用主模型、不接主/备降级：批处理任务，模型故障时脚本 fail-loud（exit 5），人工重跑即可。
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      PR_AGENT_MODEL: ${{ vars.PR_AGENT_MODEL }}
+      # 内置 GITHUB_TOKEN 开的 PR 不触发其它 workflow（防递归），故 docs.yml / pr-review 不会自动跑——脚本已
+      # 内联等效补救（docs 门 + 出 PR 前 review）。若日后配"必需检查"分支保护，需改用 PAT / App token 开 PR。
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      KB_LEDGER: /tmp/kb-refresh-ledger.md # 落到固定路径，供失败时的诊断产物导出用
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: main # 始终对最新 main 复审
+          fetch-depth: 0 # 保留历史，供 git log / git diff 感知近期变更
+
+      - name: 允许 git 访问工作区
+        # 容器内 HOME 指到 /github/home，镜像预设的 safe.directory 不生效，运行时再设一次
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # pr-review 容器无 node/npx；docs 门要跑 prettier+markdownlint，显式装 node（版本与 docs.yml 对齐）。
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+
+      # 安全：agent 持有 Read/Glob/Grep/Edit/Write + 只读 Bash 白名单（git status/diff/log/show/rev-parse、rg、grep、ls、jq），
+      # 写范围不靠工具限制、由事后路径护栏硬保证（只允许改 knowledge/ 下 .md）；密钥经 env 注入、不落文件。
+      # 注：本流程不走镜像里的 pr-review 包装器（其 --tools 无 Edit/Write），是脚本另起 claude 调用。
+      # F14：本 job 未传 --resume，也没有 cache/artifact 保存脚本的断点续跑状态文件——容器一次性、
+      # 每次都是全新 checkout，超时或失败只能整轮重跑，脚本的断点续跑能力在这里实际用不上。
+      - name: 跑知识库刷新（增量同步 → 全量同步 → 完整审查 → review → 解决 → 护栏 → docs 门 → 开 PR）
+        run: bash .ci/kb-refresh.sh
+
+      # 无论成功/失败/中途 exit（含护栏拦截、docs 门失败、开 PR 阶段失败）都留痕，防止产物随容器销毁丢失。
+      - name: 导出改动产物（诊断用）
+        if: always()
+        run: git diff -- knowledge > /tmp/kb-refresh-knowledge.diff 2>/dev/null || true
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: always()
+        with:
+          name: kb-refresh-artifacts
+          path: |
+            /tmp/kb-refresh-knowledge.diff
+            /tmp/kb-refresh-ledger.md
+          if-no-files-found: ignore
