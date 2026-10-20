@@ -1092,10 +1092,11 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
                 _exit_error(
                     f"{flag_name}[{i}]: generate requires idempotent=false"
                 )
-            if (
-                not isinstance(cooldown, (int, float))
-                or isinstance(cooldown, bool)
-                or cooldown < 1
+            # 与 scene 分支同一口径：只对数值比较。字符串形态（"30"）交给后端
+            # pydantic 收敛；bool 走数值语义（False=0 拒、True=1 放）。多排除
+            # bool 会让 JSON false 在本地漏过，反而不一致。
+            if cooldown is None or (
+                isinstance(cooldown, (int, float)) and cooldown < 1
             ):
                 _exit_error(
                     f"{flag_name}[{i}]: generate requires cooldown_minutes >= 1"
@@ -1110,9 +1111,14 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
                     f"{RESULT_PLACEHOLDER}"
                 )
             prompt = generate.get("prompt")
-            if not isinstance(prompt, str) or not prompt.strip():
+            if (
+                not isinstance(prompt, str)
+                or not prompt.strip()
+                or len(prompt) > 1000
+            ):
                 _exit_error(
-                    f"{flag_name}[{i}]: generate.prompt must be a non-empty string"
+                    f"{flag_name}[{i}]: generate.prompt must be a non-empty "
+                    f"string of at most 1000 chars"
                 )
             sources = generate.get("sources")
             if sources is not None:

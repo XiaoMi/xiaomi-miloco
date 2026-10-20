@@ -55,7 +55,7 @@ user-facing text 仅在两个时机出现：
 2. 终态 §响应动作 同时含「触发后做什么」+「记录什么」：Y / N
 3. 每条装配提示「怎么改」字段给出用户可直接复述的短语：Y / N
 4. iot 规则的 iid 抄自本轮 `device spec` 输出，did / value 抄自本轮真实输出：Y / N / NA
-5. 带 generate 的动作：`action.*` + `idempotent:false` + `cooldown_minutes>=1` + `params` 含 `{{result}}`；达标槽显式配 `sources`：Y / N / NA
+5. 带 generate 的动作：`action.*` + `idempotent:false` + `cooldown_minutes>=1` + `params` 含 `{{result}}`；达标槽、iot / record 规则与 session 退出槽显式配 `sources`：Y / N / NA
 ```
 
 ## 装配提示元规则
@@ -681,7 +681,7 @@ session + duration record 三 desc 分工：
 
 - `prompt` 只写语义要求（观察谁、生成什么、语气），**不写 JSON 格式**——`{"result":"..."}` 契约由系统提示词固定。
 - `params` 必须含 `{{result}}`；省略 `params` 等价于 `["{{result}}"]`。
-- `sources` 省略时按「触发相机 → 规则 `--source`」回退；**达标槽没有触发相机，必须显式配 `sources`**。
+- `sources` 省略时按「触发相机 → 规则 `--source`」回退；**达标槽没有触发相机；iot / record 规则没有触发相机、相机条件也被强制留空；session 退出槽的离开边沿不带触发相机。这三类下必须显式配 `sources`，否则写入时就被拒**。omni 规则的进入 / 事件槽不在此列：空相机条件是「广播到全部相机」的合法写法，命中时用命中的那台相机回退。
 - 只支持 `action.*`；必须 `idempotent:false` + `cooldown_minutes >= 1`。
 - 生成失败（无帧 / 模型错误 / 空结果）时不下发、不落冷却；同一 `(rule, did, iid)` 在途时后续触发跳过。
 - 同槽按顺序执行，生成会阻塞后面的动作——生成式动作单独放，或排在槽内最后。

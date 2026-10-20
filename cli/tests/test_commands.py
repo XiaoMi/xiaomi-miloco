@@ -2802,11 +2802,80 @@ def test_rule_create_generate_action_valid(runner):
     ]
 
 
+def test_rule_create_generate_action_string_cooldown_is_deferred(runner):
+    """agent 常把数字写成 "30"；scene 分支交给后端收敛，generate 同口径。"""
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["{{result}}"],
+            "generate": {"prompt": "夸夸画面里最显著的人"},
+            "idempotent": False,
+            "cooldown_minutes": "30",
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {"code": 0, "data": {"rule_id": "r-gen-str"}}
+        result = runner.invoke(cli, _rule_create_argv(action))
+
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+    body = mock.call_args[0][1]
+    assert body["actions"][0]["cooldown_minutes"] == "30"
+
+
+def test_rule_create_generate_action_prompt_at_max_length_passes(runner):
+    """上界是 1000，恰好 1000 必须放行；写成 >= 就与后端 schema 分叉。"""
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["{{result}}"],
+            "generate": {"prompt": "x" * 1000},
+            "idempotent": False,
+            "cooldown_minutes": 30,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {"code": 0, "data": {"rule_id": "r-gen-max"}}
+        result = runner.invoke(cli, _rule_create_argv(action))
+
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+
+
+@pytest.mark.parametrize("cooldown", [1, True])
+def test_rule_create_generate_action_accepts_numeric_cooldown(runner, cooldown):
+    """bool 按数值语义走（True=1 放，False=0 拒），与后端 int 收敛一致。"""
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["{{result}}"],
+            "generate": {"prompt": "看"},
+            "idempotent": False,
+            "cooldown_minutes": cooldown,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {"code": 0, "data": {"rule_id": "r-gen-cool"}}
+        result = runner.invoke(cli, _rule_create_argv(action))
+
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+    body = mock.call_args[0][1]
+    assert body["actions"][0]["cooldown_minutes"] == cooldown
+
+
 @pytest.mark.parametrize(
     ("generate", "expected"),
     [
         ({"prompt": ""}, "generate.prompt must be a non-empty string"),
         ({"prompt": "   "}, "generate.prompt must be a non-empty string"),
+        (
+            {"prompt": "x" * 1001},
+            "generate.prompt must be a non-empty string of at most 1000 chars",
+        ),
         ({"prompt": "看", "sources": []}, "generate.sources must contain 1-3 dids"),
         (
             {"prompt": "看", "sources": ["a", "b", "c", "d"]},
@@ -2856,6 +2925,10 @@ def test_rule_create_generate_action_rejects_bad_fields(runner, generate, expect
         ),
         (
             {"idempotent": False, "cooldown_minutes": 0},
+            "generate requires cooldown_minutes >= 1",
+        ),
+        (
+            {"idempotent": False, "cooldown_minutes": False},
             "generate requires cooldown_minutes >= 1",
         ),
         (
@@ -2927,3 +3000,94 @@ def test_task_set_actions_rejects_bad_generate_locally(runner):
     assert result.exit_code != 0
     assert "generate requires idempotent=false" in combined
     mock.assert_not_called()
+
+
+def test_task_set_actions_target_generate_requires_sources(runner):
+    """达标槽没有触发相机与规则相机；本地先拦，别等后端写入拒。"""
+    with patch("miloco_cli.client.api_patch") as mock:
+        result = runner.invoke(
+            cli,
+            [
+                "task",
+                "set-actions",
+                "t1",
+                "--on-target-action",
+                _GENERATE_ACTION,
+            ],
+        )
+
+    combined = result.output + (result.stderr or "")
+    assert result.exit_code != 0
+    assert "--on-target-action[0]" in combined
+    assert "generate requires explicit generate.sources" in combined
+    mock.assert_not_called()
+
+
+def test_task_set_actions_target_generate_with_sources_passes(runner):
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["{{result}}"],
+            "generate": {
+                "prompt": "夸夸画面里最显著的人",
+                "sources": ["cam-1"],
+            },
+            "idempotent": False,
+            "cooldown_minutes": 30,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_patch") as mock:
+        mock.return_value = {"code": 0, "data": {}}
+        result = runner.invoke(
+            cli,
+            ["task", "set-actions", "t1", "--on-target-action", action],
+        )
+
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+    body = mock.call_args[0][1]
+    assert body["on_target_actions"][0]["generate"]["sources"] == ["cam-1"]
+
+
+def test_task_set_actions_target_plain_action_passes(runner):
+    """达标槽的普通设备直控不能被 generate 判据连带拒掉。"""
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["达标了"],
+            "idempotent": False,
+            "cooldown_minutes": 30,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_patch") as mock:
+        mock.return_value = {"code": 0, "data": {}}
+        result = runner.invoke(
+            cli, ["task", "set-actions", "t1", "--on-target-action", action]
+        )
+
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+
+
+def test_task_set_actions_exit_generate_without_sources_passes(runner):
+    """退出槽不做静态判据：task 可能挂 enter 规则，退出 fire 会带触发相机。"""
+    with patch("miloco_cli.client.api_patch") as mock:
+        mock.return_value = {"code": 0, "data": {}}
+        result = runner.invoke(
+            cli,
+            [
+                "task",
+                "set-actions",
+                "t1",
+                "--on-exit-action",
+                _GENERATE_ACTION,
+            ],
+        )
+
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+    body = mock.call_args[0][1]
+    assert body["on_exit_actions"][0]["generate"]["prompt"] == (
+        "夸夸画面里最显著的人"
+    )

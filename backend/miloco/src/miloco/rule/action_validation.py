@@ -109,8 +109,28 @@ def validate_action(action: RuleAction, where: str) -> None:
         raise ValidationException(error)
 
 
-def validate_action_dict(raw: Any, where: str) -> None:
-    """校验 task 侧的原始动作 dict（先按 RuleAction 解析再走共享判据）。"""
+def generate_sources_required_error(
+    action: RuleAction, where: str, reason: str
+) -> str | None:
+    """没有可回退的相机时，生成动作必须显式配 ``generate.sources``。
+
+    是否「有可回退相机」由调用方的上下文决定（槽位、规则的相机条件），动作
+    自身看不出来，所以不并进 :func:`action_validation_error`：那会让所有调用方
+    在不知道上下文的情况下误判。
+    """
+    if action.generate is None or action.generate.sources:
+        return None
+    return (
+        f"{where} (did={action.did}, iid={action.iid}): {reason}; "
+        f"generate requires explicit generate.sources"
+    )
+
+
+def validate_action_dict(raw: Any, where: str) -> RuleAction:
+    """校验 task 侧的原始动作 dict，返回解析后的动作。
+
+    返回解析结果是为了让调用方直接做上下文相关的追加校验，不必再 parse 一次。
+    """
     try:
         action = RuleAction.model_validate(raw)
     except ValidationError as e:
@@ -120,3 +140,4 @@ def validate_action_dict(raw: Any, where: str) -> None:
         )
         raise ValidationException(f"{where}: 动作格式非法: {details}") from e
     validate_action(action, where)
+    return action

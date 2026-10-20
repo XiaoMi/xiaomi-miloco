@@ -34,7 +34,10 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot.client import MiotProxy, is_subscribable_did
 from miloco.miot.filter import allowed_home_ids, filter_by_home
-from miloco.rule.action_validation import validate_action
+from miloco.rule.action_validation import (
+    generate_sources_required_error,
+    validate_action,
+)
 from miloco.rule.condition import (
     condition_to_dnf,
     dnf_structure_error,
@@ -442,7 +445,36 @@ def _validate_rule_consistency(rule: Rule) -> None:
         ("on_exit_actions", rule.on_exit_actions),
     ):
         for i, a in enumerate(slot_actions):
-            validate_action(a, f"{slot_name}[{i}]")
+            where = f"{slot_name}[{i}]"
+            validate_action(a, where)
+            # 只有「这次 fire 不带 trigger_dids 且规则相机也为空」才必然
+            # no_source：
+            # - 非 omni（iot / record）：喂数据的路径不带 trigger_dids，相机
+            #   条件也被 _validate_condition_against_dnf 强制留空；
+            # - omni 的 session 退出槽：EXITED 的 trigger_dids 恒为空（见
+            #   RuleRunner.update_state 的说明），只剩规则相机可回退。
+            # omni 的进入 / 事件槽不能拒：空 perceive_device_ids 是「广播到
+            # 全部相机」的合法写法，命中那一刻 trigger_dids 就是命中的那台。
+            # guard 规则到不了这里（_validate_guard 拒绝所有动作字段）。
+            fires_without_trigger_dids = (
+                rule.resolved_source_type != OMNI_SOURCE_TYPE
+                or (
+                    slot_name == "on_exit_actions"
+                    and rule.resolved_direction is RuleDirection.SESSION
+                )
+            )
+            if (
+                fires_without_trigger_dids
+                and not rule.condition.perceive_device_ids
+            ):
+                error = generate_sources_required_error(
+                    a,
+                    where,
+                    "this fire carries no trigger camera and the rule has no "
+                    "camera condition item",
+                )
+                if error:
+                    raise ValidationException(error)
 
 
 # ---- Service factory -------------------------------------------------------

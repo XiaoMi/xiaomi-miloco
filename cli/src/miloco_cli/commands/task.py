@@ -304,6 +304,18 @@ def task_set_actions(
     for name in clear_slots:
         body[name] = None
 
+    # 达标槽由服务端代建的 milestone 规则驱动：条件里没有相机，fire 也不带
+    # trigger_dids，generate 的回退源全空。_parse_actions 与 rule 共用、看不到
+    # 槽位上下文，这条只能在 task 侧补。
+    for i, action in enumerate(body.get("on_target_actions") or []):
+        generate = action.get("generate")
+        if isinstance(generate, dict) and not generate.get("sources"):
+            _exit_error(
+                f"--on-target-action[{i}]: the target slot has no trigger "
+                f"cameras or rule cameras; generate requires explicit "
+                f"generate.sources"
+            )
+
     if not body:
         _exit_error("至少要传一个动作槽或 --clear")
 

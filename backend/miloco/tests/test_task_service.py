@@ -1316,6 +1316,85 @@ def test_set_actions_accepts_generate(real_db):
     )
 
 
+def test_set_actions_target_generate_requires_sources(real_db):
+    """达标 fire 没有触发相机与规则相机；不配 sources 写入时就该拒。
+
+    放行的话每次达标只会留下 generate_failed: no_source，配置看起来完全正确。
+    """
+    from miloco.middleware.exceptions import ValidationException
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+
+    with pytest.raises(
+        ValidationException,
+        match=r"on_target_actions\[0\].*generate requires explicit "
+        r"generate\.sources",
+    ):
+        service.set_boundary_actions(
+            "t1",
+            TaskActionsUpdateRequest(on_target_actions=[_generate_action()]),
+        )
+
+
+def test_set_actions_target_generate_with_sources_passes(real_db):
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+
+    assert service.set_boundary_actions(
+        "t1",
+        TaskActionsUpdateRequest(
+            on_target_actions=[
+                _generate_action(
+                    generate={
+                        "prompt": "夸夸画面里最显著的人",
+                        "sources": ["cam-1"],
+                    }
+                )
+            ]
+        ),
+    )
+
+
+def test_set_actions_target_plain_action_passes(real_db):
+    """达标槽的普通设备直控不经过 generate 判据，不能被连带拒掉。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+
+    assert service.set_boundary_actions(
+        "t1",
+        TaskActionsUpdateRequest(
+            on_target_actions=[
+                {
+                    "did": "speaker-1",
+                    "iid": "action.5.3",
+                    "params": ["达标了"],
+                    "idempotent": False,
+                    "cooldown_minutes": 30,
+                }
+            ]
+        ),
+    )
+
+
+def test_set_actions_exit_generate_without_sources_passes(real_db):
+    """退出槽没有静态判据：task 可能挂 enter 规则，退出 fire 会带触发相机。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+
+    assert service.set_boundary_actions(
+        "t1",
+        TaskActionsUpdateRequest(on_exit_actions=[_generate_action()]),
+    )
+
+
 @pytest.mark.parametrize(
     ("overrides", "match"),
     [

@@ -2349,9 +2349,10 @@ class RuleRunner:
                         action=action, result=False,
                         error=f"generate_failed: {code}",
                     )
-                # 不原地改：_select_slot 每次 fire 都从内存快照重建 RuleAction，
-                # 但同一条 fire 里 action 还会被日志与结果引用；原地改会让下一次
-                # fire 带着上一次的生成文本。
+                # 不原地改：入参 action 还会被本次 fire 的执行结果与规则日志
+                # 引用；model_copy 出新对象再渲染，调用方手里的动作保持模板原样。
+                # （_select_slot 每次 fire 都 RuleAction(**a) 重建，跨 fire 本就
+                # 不共享，替换文本不会带到下一次。）
                 action = action.model_copy(
                     update={
                         "params": _render_generated_params(action.params, text)

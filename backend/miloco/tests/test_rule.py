@@ -6455,6 +6455,93 @@ async def test_create_generate_action_passes(service):
     assert rid == "new-rule-id"
 
 
+@pytest.mark.parametrize("source_type", ["iot", "record"])
+def test_validate_generate_requires_sources_without_camera_fallback(source_type):
+    """非 omni 规则没有回退源，generate 不配 sources 写入时就该拒。
+
+    iot / record 的 fire 路径不带 trigger_dids，相机条件又被
+    ``_validate_condition_against_dnf`` 强制留空 —— 运行期三条回退全空。
+    """
+    from miloco.rule.service import _validate_rule_consistency
+
+    rule = _make_static_rule(
+        rule_id="",
+        actions=[_generated_action()],
+        condition=RuleCondition(perceive_device_ids=[], query=""),
+    )
+    rule.condition_dnf = RuleConditionDNF(
+        any_of=[[ConditionItem(source_type=source_type)]]
+    )
+    with pytest.raises(
+        ValidationException,
+        match=r"actions\[0\].*generate requires explicit generate\.sources",
+    ):
+        _validate_rule_consistency(rule)
+
+
+def test_validate_generate_allows_broadcast_omni_rule():
+    """omni 的空相机条件是「广播到全部相机」，命中时 trigger_dids 非空。
+
+    这种规则的进入 / 事件槽不配 sources 也能回退，写时就拒属于误报。
+    """
+    from miloco.rule.service import _validate_rule_consistency
+
+    rule = _make_static_rule(
+        rule_id="",
+        actions=[_generated_action()],
+        condition=RuleCondition(perceive_device_ids=[], query="有人落座"),
+    )
+    _validate_rule_consistency(rule)
+
+
+def test_validate_generate_requires_sources_on_session_exit_without_cameras():
+    """session 的退出边沿是 EXITED，trigger_dids 恒为空，只剩规则相机可回退。"""
+    from miloco.rule.service import _validate_rule_consistency
+
+    rule = _make_state_rule(
+        rule_id="",
+        on_exit_actions=[_generated_action()],
+        condition=RuleCondition(perceive_device_ids=[], query="有人坐在书桌前"),
+    )
+    with pytest.raises(
+        ValidationException,
+        match=r"on_exit_actions\[0\].*generate requires explicit generate\.sources",
+    ):
+        _validate_rule_consistency(rule)
+
+
+def test_validate_generate_allows_session_exit_with_rule_cameras():
+    """退出槽有规则相机可回退，不配 sources 是合法的。"""
+    from miloco.rule.service import _validate_rule_consistency
+
+    rule = _make_state_rule(
+        rule_id="",
+        on_exit_actions=[_generated_action()],
+    )
+    _validate_rule_consistency(rule)
+
+
+def test_validate_generate_with_sources_passes_without_cameras():
+    from miloco.rule.service import _validate_rule_consistency
+
+    rule = _make_static_rule(
+        rule_id="",
+        actions=[
+            _generated_action(
+                generate={
+                    "prompt": "夸夸画面里最显著的人",
+                    "sources": ["cam-1"],
+                }
+            )
+        ],
+        condition=RuleCondition(perceive_device_ids=[], query=""),
+    )
+    rule.condition_dnf = RuleConditionDNF(
+        any_of=[[ConditionItem(source_type="iot")]]
+    )
+    _validate_rule_consistency(rule)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("overrides", "match"),
