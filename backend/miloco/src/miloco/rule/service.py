@@ -1143,6 +1143,26 @@ class RuleService:
                 f"available: {', '.join(sorted(scenes)) or '(none)'}"
             )
 
+    async def _validate_generate_sources(self, rule: Rule) -> None:
+        """``generate.sources`` 的 did 必须是真实存在的感知设备。
+
+        抄错的话规则能建成功、运行期每次 fire 都是 ``generate_failed: no_frame``,
+        用户和 agent 都拿不到反馈——与 ``_validate_scene_ids`` 挡 scene did 同一
+        理由。sources 恒为相机(感知设备), 与规则自身的 source_type 无关: iot /
+        record 规则配 generate 时 sources 反而必填, 故不套
+        ``_validate_perceive_devices_of`` 的 omni 豁免。
+        """
+        wanted = {
+            did
+            for slot in (rule.actions, rule.on_enter_actions, rule.on_exit_actions)
+            for a in slot
+            if a.generate is not None and a.generate.sources
+            for did in a.generate.sources
+        }
+        if not wanted:
+            return
+        await self._validate_perceive_device_ids(sorted(wanted))
+
     def _fill_default_duration_ratio(self, rule: Rule) -> None:
         """未显式指定时回填 settings.rule.default_duration_ratio。
 
@@ -1178,6 +1198,7 @@ class RuleService:
         self._validate_task_rule_set(rule)
         self._validate_action_reachable(rule)
         await self._validate_scene_ids(rule)
+        await self._validate_generate_sources(rule)
 
         rule_id = self._repo.create(rule)
         if not rule_id:
@@ -1265,6 +1286,7 @@ class RuleService:
         self._validate_task_rule_set(rule, previous)
         self._validate_action_reachable(rule)
         await self._validate_scene_ids(rule)
+        await self._validate_generate_sources(rule)
 
         success = self._repo.update(rule)
         if success:
@@ -1455,6 +1477,7 @@ class RuleService:
             self._validate_action_reachable(existing)
         if {"actions", "on_enter_actions", "on_exit_actions"} & fields:
             await self._validate_scene_ids(existing)
+            await self._validate_generate_sources(existing)
 
         success = self._repo.update(existing)
         if success:

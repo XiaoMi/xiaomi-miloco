@@ -6455,6 +6455,81 @@ async def test_create_generate_action_passes(service):
     assert rid == "new-rule-id"
 
 
+class TestRuleServiceGenerateSourceExistence:
+    """generate.sources 抄错一位 → 规则建成功但每次 fire 都 no_frame; 写入期就挡。"""
+
+    @pytest.mark.asyncio
+    async def test_unknown_source_rejected(self, service):
+        rule = _make_static_rule(
+            rule_id="",
+            actions=[
+                _generated_action(generate={"prompt": "夸夸", "sources": ["cam-typo"]})
+            ],
+        )
+        with pytest.raises(
+            ValidationException, match=r"Invalid perception device IDs: cam-typo"
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_known_source_passes(self, service):
+        rule = _make_static_rule(
+            rule_id="",
+            actions=[
+                _generated_action(generate={"prompt": "夸夸", "sources": ["cam-002"]})
+            ],
+        )
+        assert await service.create_rule(rule) == "new-rule-id"
+
+    @pytest.mark.asyncio
+    async def test_exit_slot_source_also_checked(self, service):
+        """三个槽共用一份收集逻辑, 漏掉退出槽就是一个静默的哑规则。"""
+        rule = _make_state_rule(
+            rule_id="",
+            on_exit_actions=[
+                _generated_action(generate={"prompt": "夸夸", "sources": ["cam-typo"]})
+            ],
+        )
+        rule.direction = RuleDirection.SESSION
+        with pytest.raises(
+            ValidationException, match=r"Invalid perception device IDs: cam-typo"
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_update_rule_also_validates_source(self, service, mock_rule_repo):
+        """PUT 是整条替换, 同样能写进一个抄错的 did。"""
+        rule = _make_static_rule(
+            rule_id="r1",
+            actions=[
+                _generated_action(generate={"prompt": "夸夸", "sources": ["cam-typo"]})
+            ],
+        )
+        mock_rule_repo.get_by_id.return_value = rule
+        with pytest.raises(
+            ValidationException, match=r"Invalid perception device IDs: cam-typo"
+        ):
+            await service.update_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_patch_rule_also_validates_source(self, service, mock_rule_repo):
+        """PATCH 路径不能是校验缺口。"""
+        mock_rule_repo.get_by_id = MagicMock(return_value=_make_static_rule())
+        with pytest.raises(
+            ValidationException, match=r"Invalid perception device IDs: cam-typo"
+        ):
+            await service.patch_rule(
+                "rule-1",
+                RuleUpdate(
+                    actions=[
+                        _generated_action(
+                            generate={"prompt": "夸夸", "sources": ["cam-typo"]}
+                        )
+                    ]
+                ),
+            )
+
+
 @pytest.mark.parametrize("source_type", ["iot", "record"])
 def test_validate_generate_requires_sources_without_camera_fallback(source_type):
     """非 omni 规则没有回退源，generate 不配 sources 写入时就该拒。
