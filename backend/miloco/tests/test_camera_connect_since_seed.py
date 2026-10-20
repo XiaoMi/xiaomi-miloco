@@ -134,6 +134,8 @@ async def test_reconnect_camera_reseeds_connect_since():
     since = proxy._camera_connect_since.get("cam1")
     assert since is not None
     assert since != 1.0, "旧时间戳必须被换成本次重建的时刻"
+    # 重建路径也注册了 LAN 回调，必须同步记台账，否则账号移除时清理不到。
+    assert "cam1" in proxy._lan_callback_dids
 
 
 # ── 失败重试不得把 60s 计时器归零 ──────────────────────────────────────────

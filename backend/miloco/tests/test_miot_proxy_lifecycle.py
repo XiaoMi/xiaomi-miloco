@@ -181,6 +181,22 @@ async def test_init_after_deinit_rebuilds_bind_listener(proxy_env):
 
 
 @pytest.mark.asyncio
+async def test_init_and_deinit_clear_lan_callback_ledger(proxy_env):
+    """台账必须与 SDK 回调表同生共死：deinit / init 换新 client 时都要清空。"""
+    p, _client = proxy_env
+
+    p._lan_callback_dids.add("c1")
+    await p.deinit()
+    assert p._lan_callback_dids == set()
+
+    p._lan_callback_dids.add("c1")
+    await p.init()
+    assert p._lan_callback_dids == set()
+
+    await p.deinit()
+
+
+@pytest.mark.asyncio
 async def test_bind_event_subscribes_device(proxy_env):
     """A bind push means the device is back in the account: the handler must
     subscribe state+meta immediately (recorded into the intent mirrors on SDK

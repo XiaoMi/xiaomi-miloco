@@ -271,6 +271,9 @@ class MiotProxy:
         self._auth_health: MiotAuthHealth = self._load_auth_health()
         self._apply_interrupted_refresh_on_start()
         self._camera_img_managers: dict[str, CameraVisionHandler] = {}
+        # 已注册 LAN 状态回调的 did 集合。回调覆盖全量相机（不只活跃集），
+        # 注销只在相机从账号消失时做；见 refresh_cameras 的注册段。
+        self._lan_callback_dids: set[str] = set()
         self._token_refresh_task: asyncio.Task | None = None
         # 后台顺带对账任务(见 _spawn_subscription_sync),deinit 时取消
         self._background_syncs: set[asyncio.Task] = set()
@@ -696,6 +699,9 @@ class MiotProxy:
     async def init(self):
         """Initialize MIoT proxy: create new client, init it, refresh info, start token refresh."""
         self._miot_client = self._create_miot_client()
+        # 新 SDK client 的回调表是空的，台账必须同步清空；否则会误以为旧相机
+        # 已注册，refresh 跳过补注册，回调永远不会重新挂上。
+        self._lan_callback_dids.clear()
         # Rebuild listeners + register the push callbacks BEFORE init_async().
         # init_async runs _setup_mips_async, which (re)subscribes mips topics —
         # the broker may push the moment a SUBSCRIBE is acked. Wiring the
@@ -826,6 +832,7 @@ class MiotProxy:
         self._verify_token_on_start = False
         self._camera_info_dict = {}
         self._camera_connect_since = {}
+        self._lan_callback_dids.clear()
         self._device_info_dict = {}
         self._scene_info_dict = {}
         self._user_info = None
@@ -1242,6 +1249,27 @@ class MiotProxy:
             return False
         return (time.monotonic() - since) >= self._STREAM_NAT_TIMEOUT
 
+    async def _sync_lan_callbacks(self, cameras: dict[str, MIoTCameraInfo]) -> None:
+        """让 LAN 回调覆盖账号内全量相机，并清掉已移除相机的残留。
+
+        回调不能只挂在活跃集上：refresh 往往早于 LAN 首轮发现，非活跃相机的
+        lan_online 只能靠它回灌；漏注册会让按需补建判据读陈旧缓存、永不自愈。
+        """
+        for did in cameras:
+            if did not in self._lan_callback_dids:
+                await self._miot_client.register_lan_device_changed_async(
+                    did=did, callback=self._on_lan_device_changed
+                )
+                self._lan_callback_dids.add(did)
+        for did in list(self._lan_callback_dids - set(cameras)):
+            try:
+                await self._miot_client.unregister_lan_device_changed_async(did=did)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("unregister stale lan callback %s failed: %s", did, e)
+            else:
+                # 失败时保留台账，下一轮 refresh 继续重试（与 manager 销毁路径同一策略）
+                self._lan_callback_dids.discard(did)
+
     async def refresh_cameras(self) -> dict[str, MIoTCameraInfo] | None:
         async with self._refresh_cameras_lock:
             try:
@@ -1251,6 +1279,12 @@ class MiotProxy:
                 self._camera_info_dict = cameras
                 # 相机列表已成功加载(放字典发布处,而非整段副作用全绿之后)
                 self._cameras_loaded = True
+                # LAN 回调必须覆盖**全量**相机，不能只挂在已建 manager 的活跃集上：
+                # 重启/登录时本轮 refresh 往往早于 LAN 首轮发现，非活跃相机的
+                # lan_online 只能靠这条回调回灌。只给活跃相机注册会形成死锁——非活跃
+                # 没回调 → lan_online 永远 False → 按需补建判据读同一份缓存 → 永不
+                # 补建 manager，只能手动 device refresh。
+                await self._sync_lan_callbacks(cameras)
                 # 启动/新设备补读 awake：对当前家庭、awake 缓存里还没有的相机读一次并回填。
                 # 重启后 refresh_cameras 在感知首轮 sync 就会跑 → 镜头态从启动即热，不依赖
                 # 开面板/上下线推送；select_active 的镜头门随即可用。只补"缺失的"→ 启动读
@@ -1302,9 +1336,6 @@ class MiotProxy:
                         # Only register when the manager exists, so register/unregister
                         # stay paired with _camera_img_managers.
                         if manager is not None:
-                            await self._miot_client.register_lan_device_changed_async(
-                                did=camera_did, callback=self._on_lan_device_changed
-                            )
                             await self._miot_client.register_camera_status_changed_async(
                                 did=camera_did,
                                 callback=self._on_camera_status_changed,
@@ -1348,9 +1379,6 @@ class MiotProxy:
                     # 任一台 unregister/destroy 抛错不能拖垮其余——否则剩余 manager 留在
                     # dict 里继续白拉流，要等下次 refresh 才重试。失败的留在 dict 待重试。
                     try:
-                        await self._miot_client.unregister_lan_device_changed_async(
-                            did=camera_did
-                        )
                         # 单独兜异常：原生实例已不在册时这一步会抛 MIoTCameraError
                         # （camera.py unregister_status_changed_async 显式 raise），
                         # 而它排在销毁序列最前面——原生销毁是先 pop 再 destroy，
@@ -1417,6 +1445,9 @@ class MiotProxy:
                 cameras = await self._miot_client.get_cameras_async()
                 self._camera_info_dict = copy.deepcopy(cameras)
                 self._cameras_loaded = True
+                # 这条轻量路径也会重建缓存；不补回调的话，经它进入缓存的相机会
+                # 漏掉 LAN 回灌（与 refresh_cameras 必须维持同一不变量）。
+                await self._sync_lan_callbacks(cameras)
             except Exception as e:
                 logger.error("Failed to refresh camera online status: %s", e)
                 return None
@@ -1455,14 +1486,6 @@ class MiotProxy:
         async with self._refresh_cameras_lock:
             manager = self._camera_img_managers.get(did)
             if manager is not None:
-                try:
-                    await self._miot_client.unregister_lan_device_changed_async(
-                        did=did
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        "unregister lan change failed on reconnect %s: %s", did, e
-                    )
                 # 必须在 manager.destroy() 之前注销：destroy 会把 did 从 SDK 的
                 # _camera_map 里 pop 掉，之后再注销会抛 MIoTCameraError。
                 try:
@@ -1495,6 +1518,9 @@ class MiotProxy:
                     await self._miot_client.register_lan_device_changed_async(
                         did=did, callback=self._on_lan_device_changed
                     )
+                    # 与 refresh_cameras 的注册段共用台账：账号移除时的清理靠
+                    # 「台账 − 账号清单」，漏记会让 SDK 回调表残留。
+                    self._lan_callback_dids.add(did)
                     # 新实例的回调表是空的，状态回调必须重新注册，否则该相机的
                     # 连接态永远停在重建前的快照上。
                     await self._miot_client.register_camera_status_changed_async(

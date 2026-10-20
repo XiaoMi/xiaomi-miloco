@@ -40,6 +40,7 @@ def _bare_proxy() -> MiotProxy:
     proxy._subscribed_device_state_dids = set()
     proxy._camera_info_dict = {}
     proxy._device_info_dict = {}
+    proxy._lan_callback_dids = set()
     proxy._sub_intent_lock = asyncio.Lock()
     proxy._sub_intent_generation = 0
     proxy._sub_semaphore = asyncio.Semaphore(_RECONCILE_CONCURRENCY)

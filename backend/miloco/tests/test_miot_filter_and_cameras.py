@@ -1236,8 +1236,8 @@ async def test_authorize_with_code_keeps_scope_when_exchange_fails():
 # single write point into `_camera_img_managers`, so a scope check there means
 # scope-denied dids never start pulling. `refresh_cameras`'s existing destroy
 # loop is extended to also fire on scope-deny, which tears down历史 managers
-# carried over from the pre-scope era. Pair `destroy()` and `unregister_lan`
-# must stay coupled to keep LAN callback registrations consistent.
+# carried over from the pre-scope era. LAN 回调不随 manager 销毁注销：相机
+# 离线/被关后重新上线要靠它回灌 lan_online；只在账号移除时清理。
 
 from miloco.config import (  # noqa: E402  (kept near MiotProxy tests for locality)
     reset_settings,
@@ -1383,7 +1383,8 @@ async def test_refresh_cameras_destroys_scope_denied_existing_manager(_scope_pro
     """先有 manager + 后写停用集 + refresh → manager 被销毁（关就停）。
 
     设计:相机被关(in_use=false → 进黑名单)时 refresh 销毁其 manager,真正停掉
-    native PPCS 会话+解码线程,不再拉流。destroy + unregister + dict 删除三件配对。
+    native PPCS 会话+解码线程,不再拉流。destroy + dict 删除配对；LAN 回调刻意保留
+    ——相机重新上线时还要靠它把 lan_online 回灌进缓存。
     """
     proxy, kv, miot_client = _scope_proxy_env
 
@@ -1398,7 +1399,14 @@ async def test_refresh_cameras_destroys_scope_denied_existing_manager(_scope_pro
     await proxy.refresh_cameras()
 
     handler.destroy.assert_awaited_once()
-    miot_client.unregister_lan_device_changed_async.assert_awaited_once_with(did="c1")
+    # LAN 回调不随 manager 注销：相机被关/离线后重新上线要靠它回灌 lan_online
+    miot_client.register_lan_device_changed_async.assert_awaited_once()
+    assert miot_client.register_lan_device_changed_async.await_args.kwargs["did"] == "c1"
+    assert (
+        miot_client.register_lan_device_changed_async.await_args.kwargs["callback"]
+        == proxy._on_lan_device_changed
+    )
+    miot_client.unregister_lan_device_changed_async.assert_not_awaited()
     assert "c1" not in proxy._camera_img_managers
 
 
@@ -1458,9 +1466,11 @@ async def test_refresh_cameras_skips_manager_for_denied_camera(_scope_proxy_env)
 
 @pytest.mark.asyncio
 async def test_refresh_cameras_destroys_when_camera_removed_from_account(_scope_proxy_env):
-    """摄像头从账号消失(cam is None) → destroy + unregister + dict 删除三件配对。
+    """摄像头从账号消失(cam is None) → destroy + dict 删除两件配对。
 
     destroy 触发路径之一(另两条:移出当前家庭 / 被关闭,见上面两个测试)。
+    本测试没有先跑过一轮 refresh（_lan_callback_dids 为空），所以没有残留 LAN
+    回调需要注销。
     """
     proxy, kv, miot_client = _scope_proxy_env
 
@@ -1473,8 +1483,119 @@ async def test_refresh_cameras_destroys_when_camera_removed_from_account(_scope_
     await proxy.refresh_cameras()
 
     handler.destroy.assert_awaited_once()
-    miot_client.unregister_lan_device_changed_async.assert_awaited_once_with(did="c_gone")
+    # 本测试没跑过上一轮 refresh，_lan_callback_dids 为空 → 无残留回调可注销
+    miot_client.unregister_lan_device_changed_async.assert_not_awaited()
     assert "c_gone" not in proxy._camera_img_managers
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_registers_lan_callback_for_non_active_camera(_scope_proxy_env):
+    """重启后 refresh 早于 LAN 发现：相机尚不可达、不在活跃集，也必须注册 LAN 回调。
+
+    只给活跃相机注册会形成死锁：非活跃 → 无回调 → 上层缓存 lan_online 永远 False
+    → 按需补建判据读同一份缓存 → 永不补建 manager，只能手动 device refresh。
+    """
+    from miot.types import MIoTLanDeviceInfo
+
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+    cam = _camera("c1", home_id="H1", online=True, lan_online=False)
+    miot_client.get_cameras_async = AsyncMock(return_value={"c1": cam})
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()
+
+    miot_client.register_lan_device_changed_async.assert_awaited_once()
+    assert miot_client.register_lan_device_changed_async.await_args.kwargs["did"] == "c1"
+    assert (
+        miot_client.register_lan_device_changed_async.await_args.kwargs["callback"]
+        == proxy._on_lan_device_changed
+    )
+    # 相机不在活跃集（lan 不可达），此时不应建 manager
+    assert "c1" not in proxy._camera_img_managers
+
+    # LAN 首轮发现后，回调必须把 lan_online / local_ip 回灌进上层缓存
+    await proxy._on_lan_device_changed(
+        "c1",
+        MIoTLanDeviceInfo(
+            did="c1", online=True, ip="192.168.1.9", cross_subnet=False
+        ),
+    )
+    assert proxy._camera_info_dict["c1"].lan_online is True
+    assert proxy._camera_info_dict["c1"].local_ip == "192.168.1.9"
+
+    # 第二轮 refresh：缓存已翻转 → 相机进入活跃集 → 必须走到建 manager 分支
+    # （证明「回调回灌 → 下一轮补建」的自愈闭环，而不只是注册了回调）
+    cam.lan_online = True
+    proxy._camera_awake_cache = {"c1": {0: True}}
+
+    async def _fake_create(_cam):
+        manager = MagicMock()
+        proxy._camera_img_managers["c1"] = manager
+        return manager
+
+    proxy._create_camera_img_manager = AsyncMock(side_effect=_fake_create)
+    await proxy.refresh_cameras()
+
+    proxy._create_camera_img_manager.assert_awaited_once()
+    assert "c1" in proxy._camera_img_managers
+    # 已在台账里的 did 不重复注册（幂等）
+    assert miot_client.register_lan_device_changed_async.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_camera_online_status_registers_lan_callbacks(_scope_proxy_env):
+    """轻量刷新也会重建缓存，必须同步补 LAN 回调（与 refresh_cameras 同一不变量）。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    kv.set(ScopeConfigKeys.HOME_WHITE_LIST_KEY, json.dumps(["H1"]))
+    cam = _camera("c1", home_id="H1", online=True, lan_online=False)
+    miot_client.get_cameras_async = AsyncMock(return_value={"c1": cam})
+    proxy.read_cameras_awake = AsyncMock()
+    proxy._spawn_subscription_sync = MagicMock()
+
+    await proxy.refresh_camera_online_status()
+
+    miot_client.register_lan_device_changed_async.assert_awaited_once()
+    assert miot_client.register_lan_device_changed_async.await_args.kwargs["did"] == "c1"
+    assert "c1" in proxy._lan_callback_dids
+
+
+@pytest.mark.asyncio
+async def test_refresh_cameras_unregisters_lan_callback_for_removed_camera(_scope_proxy_env):
+    """相机从账号消失时，上一轮注册的 LAN 回调要顺手注销（否则残留回调只增不减）。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    cam = _camera("c1", home_id="H1")
+    miot_client.get_cameras_async = AsyncMock(return_value={"c1": cam})
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+
+    await proxy.refresh_cameras()
+    assert "c1" in proxy._lan_callback_dids
+    miot_client.unregister_lan_device_changed_async.assert_not_awaited()
+
+    miot_client.get_cameras_async = AsyncMock(return_value={})
+    await proxy.refresh_cameras()
+
+    miot_client.unregister_lan_device_changed_async.assert_awaited_once_with(did="c1")
+    assert "c1" not in proxy._lan_callback_dids
+
+
+@pytest.mark.asyncio
+async def test_failed_lan_callback_unregister_keeps_ledger(_scope_proxy_env):
+    """注销失败必须保留台账，下一轮 refresh 继续重试（不能悄悄丢掉）。"""
+    proxy, kv, miot_client = _scope_proxy_env
+    cam = _camera("c1", home_id="H1")
+    miot_client.get_cameras_async = AsyncMock(return_value={"c1": cam})
+    miot_client.create_camera_instance_async = AsyncMock(return_value=None)
+    await proxy.refresh_cameras()
+    assert "c1" in proxy._lan_callback_dids
+
+    miot_client.get_cameras_async = AsyncMock(return_value={})
+    miot_client.unregister_lan_device_changed_async = AsyncMock(
+        side_effect=RuntimeError("boom")
+    )
+    await proxy.refresh_cameras()
+
+    assert "c1" in proxy._lan_callback_dids, "失败时台账不能丢，否则再也清不掉"
 
 
 @pytest.mark.asyncio
