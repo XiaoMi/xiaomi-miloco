@@ -33,7 +33,7 @@ import uuid
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Literal, Mapping
 
 if TYPE_CHECKING:
     from miloco.task_record.service import TaskRecordService
@@ -98,6 +98,20 @@ def _summarize_rule_result(obj: object) -> tuple[bool, int | None, str | None]:
     from miloco.miot.result_codes import summarize_results
 
     return summarize_results(obj)
+
+
+def _render_generated_params(params: list[Any] | None, text: str) -> list[Any]:
+    """把生成文本替换进 ``params`` 的 ``{{result}}``。
+
+    空 ``params`` 等价于 ``["{{result}}"]``（写入校验允许省略）；非字符串项
+    原样保留，一台设备可能同时收文本与枚举参数。
+    """
+    if not params:
+        return [text]
+    return [
+        item.replace("{{result}}", text) if isinstance(item, str) else item
+        for item in params
+    ]
 
 
 def build_rule_callbacks_text(callbacks: list[RuleTriggerCallback]) -> str | None:
@@ -349,7 +363,22 @@ class RuleRunner:
         # iot 源。要等容器和拉属性的入口接上来才建, 见 attach_iot_source。
         self._iot_source: IotSource | None = None
 
+        # 生成动作的文本生成器。rule 服务先于感知模块初始化，构造时拿不到；
+        # manager 在感知就绪后 attach。None 时生成动作明确失败，不回退固定文案。
+        self._text_generator: Any = None
+        # 同规则同动作的「生成中」集合。冷却要等设备下发成功才落，生成成功到
+        # 落冷却之间有一个窗口，只靠冷却挡不住并发重复播报。
+        self._generating: set[tuple[str, str, str]] = set()
+
         logger.info("RuleRunner init, rules: %d", len(self._rules))
+
+    def attach_text_generator(self, generator: Any) -> None:
+        """接上感知侧的文本生成器。
+
+        调用契约是 keyword-only：``prompt`` / ``sources`` / ``max_chars``，
+        返回生成文本；失败时抛异常，异常上的 ``code`` 属性会进规则日志。
+        """
+        self._text_generator = generator
 
     # ---- record 源接线 ----
 
@@ -1989,6 +2018,8 @@ class RuleRunner:
                 await self._execute_action(
                     rule.id, a,
                     phase=phase, trigger_event_id=trigger_event_id,
+                    trigger_dids=trigger_dids,
+                    perceive_device_ids=rule.condition.perceive_device_ids,
                 )
                 for a in value
             ]
@@ -2169,6 +2200,8 @@ class RuleRunner:
         action: RuleAction,
         phase: str | None = None,
         trigger_event_id: str | None = None,
+        trigger_dids: list[str] | None = None,
+        perceive_device_ids: list[str] | None = None,
     ) -> RuleActionExecuteResult:
         """Execute a single RuleAction (设备直控路径).
 
@@ -2180,16 +2213,28 @@ class RuleRunner:
           query current value, skip if already at target.
         - Cooldown path (idempotent=False with cooldown_minutes): skip if
           inside the time window since last successful exec.
+        - ``generate`` present: call the attached text generator once, replace
+          ``{{result}}`` in ``params``, then continue on the normal dispatch
+          path. Generation failure returns before any device call, so no
+          ledger row and no cooldown are written.
         - Dispatch via miot_proxy.set_device_properties /
           call_device_action and report success.
 
         ``phase`` / ``trigger_event_id`` ride straight into the action ledger
         and decide nothing here (skipped actions write no row at all).
+        ``trigger_dids`` / ``perceive_device_ids`` are only used to resolve
+        ``generate.sources`` when the action does not name them explicitly.
 
         Cooldown state: ``self._state[rule_id].action_cooldown[(did, iid)]``.
         """
         # 场景没有 siid/aiid 可拆，必须在 iid 解析之前分流。
         if action.iid == SCENE_IID:
+            if action.generate is not None:
+                # 写入时已拒；这里是历史坏行的兜底，不能把 scene_id 当相机。
+                return RuleActionExecuteResult(
+                    action=action, result=False,
+                    error="generate_failed: invalid_iid",
+                )
             return await self._execute_scene_action(
                 rule_id, action,
                 phase=phase, trigger_event_id=trigger_event_id,
@@ -2204,6 +2249,12 @@ class RuleRunner:
                 action=action, result=False, error=f"invalid_iid: {action.iid}"
             )
         is_prop, siid, p_a_id = parsed
+        if action.generate is not None and is_prop:
+            # 生成结果只用于 action params；prop 的 value 是数字/布尔。
+            return RuleActionExecuteResult(
+                action=action, result=False,
+                error="generate_failed: invalid_iid",
+            )
 
         # Idempotent check: query current state, skip if already at target.
         # 降级态跳过该预检：那一趟查询注定失败，动作随后又会被闸门拒掉，预检就
@@ -2241,6 +2292,123 @@ class RuleRunner:
                 action=action, result=True, skipped=True
             )
 
+        # ---- 生成式动作：一次画面观测 → 文本 → 替换 params ----
+        # 放在冷却之后：冷却命中时一次模型调用都不该发生。放在下发送之前：生成
+        # 失败时一条设备指令都不该发出去（不落台账、不落冷却，等下一次边沿）。
+        generating_key: tuple[str, str, str] | None = None
+        if action.generate is not None:
+            spec = action.generate
+            generating_key = (rule_id, action.did, action.iid)
+            if generating_key in self._generating:
+                logger.info(
+                    "Rule %s generate action %s %s already in flight, skipping",
+                    safe_log(rule_id), safe_log(action.did), safe_log(action.iid),
+                )
+                return RuleActionExecuteResult(
+                    action=action, result=True, skipped=True
+                )
+            sources = self._resolve_generate_sources(
+                spec.sources, trigger_dids, perceive_device_ids,
+            )
+            if not sources:
+                logger.warning(
+                    "Rule %s generate action %s %s has no camera source",
+                    safe_log(rule_id), safe_log(action.did), safe_log(action.iid),
+                )
+                return RuleActionExecuteResult(
+                    action=action, result=False,
+                    error="generate_failed: no_source",
+                )
+            if self._text_generator is None:
+                logger.error(
+                    "Rule %s generate action %s %s: text generator not attached",
+                    safe_log(rule_id), safe_log(action.did), safe_log(action.iid),
+                )
+                return RuleActionExecuteResult(
+                    action=action, result=False,
+                    error="generate_failed: unavailable",
+                )
+            self._generating.add(generating_key)
+            try:
+                try:
+                    text = await self._text_generator(
+                        prompt=spec.prompt,
+                        sources=sources,
+                        max_chars=spec.max_chars,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    # 生成器用异常上的 code 分类（no_frame / omni_error /
+                    # invalid_json / empty_result）；未知异常归 generate_error。
+                    code = getattr(e, "code", None) or "generate_error"
+                    logger.warning(
+                        "Rule %s generate failed for %s %s: %s",
+                        safe_log(rule_id), safe_log(action.did),
+                        safe_log(action.iid), safe_log(e),
+                    )
+                    return RuleActionExecuteResult(
+                        action=action, result=False,
+                        error=f"generate_failed: {code}",
+                    )
+                # 不原地改：_select_slot 每次 fire 都从内存快照重建 RuleAction，
+                # 但同一条 fire 里 action 还会被日志与结果引用；原地改会让下一次
+                # fire 带着上一次的生成文本。
+                action = action.model_copy(
+                    update={
+                        "params": _render_generated_params(action.params, text)
+                    }
+                )
+                return await self._dispatch_action(
+                    rule_id, action,
+                    is_prop=is_prop, siid=siid, p_a_id=p_a_id,
+                    phase=phase, trigger_event_id=trigger_event_id,
+                )
+            finally:
+                # 一直持有到下发送结束：生成成功到冷却落盘之间有一个窗口，只靠
+                # 冷却挡不住同一规则同一动作的并发重复播报。放在 finally 里，
+                # 取消 / 下发异常也不会把 key 永久留在在途集合里。
+                self._generating.discard(generating_key)
+
+        return await self._dispatch_action(
+            rule_id, action,
+            is_prop=is_prop, siid=siid, p_a_id=p_a_id,
+            phase=phase, trigger_event_id=trigger_event_id,
+        )
+
+    @staticmethod
+    def _resolve_generate_sources(
+        explicit: list[str] | None,
+        trigger_dids: list[str] | None,
+        perceive_device_ids: list[str] | None,
+    ) -> list[str]:
+        """显式 → 触发相机 → 规则相机；去重保序，最多 3 个。
+
+        达标槽由服务端代建 milestone 规则，没有画面边沿：两个回退都是空的，
+        必须显式配 sources。
+        """
+        for candidate in (explicit, trigger_dids, perceive_device_ids):
+            if not candidate:
+                continue
+            # 去重且保序；上限 3 控制 payload 与网关压力。空白 did 是历史坏行，
+            # 跳过它继续看下一级回退。
+            sources = [
+                did for did in dict.fromkeys(candidate) if did.strip()
+            ]
+            if sources:
+                return sources[:3]
+        return []
+
+    async def _dispatch_action(
+        self,
+        rule_id: str,
+        action: RuleAction,
+        *,
+        is_prop: bool,
+        siid: int,
+        p_a_id: int,
+        phase: str | None,
+        trigger_event_id: str | None,
+    ) -> RuleActionExecuteResult:
+        """下发已解析、参数已就绪的动作，并落设备台账与冷却。"""
         # Execute. rule static 直控不经 MiotService.control_device,故这里显式落 action_ledger
         # ——复用同一个 _write_action_ledger helper(source=rule),避免两套组装逻辑漂移。
         import json as _json

@@ -1287,3 +1287,88 @@ def test_set_actions_allows_target_desc_before_any_rule_exists(real_db):
     assert service.set_boundary_actions(
         "t1", TaskActionsUpdateRequest(on_target_desc="达标推送")
     )
+
+
+# ---- 生成式动作：task 写入校验 ----
+
+
+def _generate_action(**overrides):
+    data = {
+        "did": "speaker-1",
+        "iid": "action.5.3",
+        "params": ["{{result}}"],
+        "generate": {"prompt": "夸夸画面里最显著的人", "max_chars": 30},
+        "idempotent": False,
+        "cooldown_minutes": 30,
+    }
+    data.update(overrides)
+    return data
+
+
+def test_set_actions_accepts_generate(real_db):
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+
+    assert service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_actions=[_generate_action()])
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"iid": "prop.2.1"}, r"generate requires 'action\."),
+        ({"iid": "scene", "did": "scene-1"}, r"generate requires 'action\."),
+        ({"idempotent": True}, r"generate requires idempotent=false"),
+        ({"cooldown_minutes": None}, r"generate requires cooldown_minutes >= 1"),
+        ({"cooldown_minutes": 0}, r"generate requires cooldown_minutes >= 1"),
+        ({"params": ["没有占位符"]}, r"requires at least one params item"),
+        (
+            {"generate": None, "params": ["{{result}}"]},
+            r"params contains \{\{result\}\} but generate is missing",
+        ),
+        (
+            {"generate": {"prompt": "x", "sources": [""]}},
+            r"generate\.sources must not contain empty dids",
+        ),
+        (
+            {"generate": {"prompt": "   "}},
+            r"generate\.prompt must be a non-empty string",
+        ),
+        ({"generate": {"prompt": ""}}, r"动作格式非法"),
+        ({"generate": {"prompt": "x", "max_chars": 0}}, r"动作格式非法"),
+        ({"generate": {"prompt": "x", "sources": []}}, r"动作格式非法"),
+        ({"generate": {"prompt": "x", "max_char": 10}}, r"动作格式非法"),
+    ],
+)
+def test_set_actions_rejects_bad_generate(real_db, overrides, match):
+    from miloco.middleware.exceptions import ValidationException
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+
+    with pytest.raises(ValidationException, match=match):
+        service.set_boundary_actions(
+            "t1",
+            TaskActionsUpdateRequest(
+                on_enter_actions=[_generate_action(**overrides)]
+            ),
+        )
+
+
+def test_set_actions_only_validates_slots_in_the_request(real_db):
+    """没动过的槽不重新校验 —— 否则新校验会把历史脏数据变成整个 task 写不动。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+    service.repo.set_boundary_actions(
+        "t1", on_exit_actions=[_generate_action(iid="prop.2.1")]
+    )
+
+    assert service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_desc="进入指令")
+    )

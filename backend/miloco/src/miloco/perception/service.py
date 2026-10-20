@@ -285,6 +285,28 @@ class PerceptionService:
             timestamp=ms_to_iso_local(t_end),
         )
 
+    async def generate_text(
+        self,
+        *,
+        prompt: str,
+        sources: list[str],
+        max_chars: int = 30,
+    ) -> str:
+        """按一次画面观测生成文本（规则生成式动作）。
+
+        与 ``on_demand_perceive`` 分开：只发最近帧的 JPEG crop，不带视频、
+        不写主动查询日志、不占引擎推理锁。失败抛 ``GenerateError``（带稳定
+        ``code``），由规则层决定「不下发、不落冷却」。
+        """
+        from miloco.perception.generate import generate_text
+
+        return await generate_text(
+            self._collector,
+            prompt=prompt,
+            sources=sources,
+            max_chars=max_chars,
+        )
+
     # ---- Perception logs ----
 
     def query_logs(

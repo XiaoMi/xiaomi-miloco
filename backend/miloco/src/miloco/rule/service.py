@@ -34,6 +34,7 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot.client import MiotProxy, is_subscribable_did
 from miloco.miot.filter import allowed_home_ids, filter_by_home
+from miloco.rule.action_validation import validate_action
 from miloco.rule.condition import (
     condition_to_dnf,
     dnf_structure_error,
@@ -73,7 +74,6 @@ from miloco.rule.schema import (
     RuleMode,
     RuleUpdate,
     TriggerOutcome,
-    parse_device_iid,
     task_rule_set_error,
 )
 
@@ -433,43 +433,16 @@ def _validate_rule_consistency(rule: Rule) -> None:
     # ---- 3. lifecycle ----
     _validate_lifecycle(rule)
 
-    # ---- 4. action idempotent / cooldown 配对 ----
-    # idempotent=False 的 action 不会做"读现值后判跳过"，必须靠 cooldown_minutes
-    # 限频；否则 runner._execute_action 的冷却分支会被 None 短路掉，每次 ENTERED
-    # 都重发 → TTS / 通知风暴。
+    # ---- 4. action 形态 / idempotent / cooldown / generate 配对 ----
+    # 判据与 task 写入、CLI 共用一份（rule.action_validation）：task 边界动作
+    # 是运行期唯一来源，却不经过这里，两条路径各写一套迟早漂移。
     for slot_name, slot_actions in (
         ("actions", rule.actions),
         ("on_enter_actions", rule.on_enter_actions),
         ("on_exit_actions", rule.on_exit_actions),
     ):
         for i, a in enumerate(slot_actions):
-            # 与 runner._execute_action 同口径:三种形态之外一律拒。少了这道,
-            # `scene.1.2` / `prop.2` 这类写法能建成功,运行期每次 fire 只在
-            # rule_log 里留一条 invalid_iid,规则永远是哑的。
-            if a.iid != SCENE_IID and parse_device_iid(a.iid) is None:
-                raise ValidationException(
-                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): iid must be "
-                    f"'{SCENE_IID}', 'prop.<siid>.<piid>' or "
-                    f"'action.<siid>.<aiid>'"
-                )
-            # 幂等分支会跳过判定直接下发,等于没有去重(原因见 SCENE_IID)。
-            if a.iid == SCENE_IID and a.idempotent:
-                raise ValidationException(
-                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
-                    f"iid={SCENE_IID} requires idempotent=false"
-                )
-            # 冷却是场景唯一的去重手段,而 runner 把 0 当「无冷却」——填 0 会让
-            # 每次 fire 都真触发一次场景,正是执行侧闸门要防的那种。
-            if a.iid == SCENE_IID and (a.cooldown_minutes or 0) < 1:
-                raise ValidationException(
-                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
-                    f"iid={SCENE_IID} requires cooldown_minutes >= 1"
-                )
-            if not a.idempotent and a.cooldown_minutes is None:
-                raise ValidationException(
-                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
-                    f"idempotent=false requires cooldown_minutes"
-                )
+            validate_action(a, f"{slot_name}[{i}]")
 
 
 # ---- Service factory -------------------------------------------------------
@@ -698,6 +671,15 @@ class RuleService:
 
             task_record_service = TaskRecordService()
         self._task_record_service = task_record_service
+
+    def attach_text_generator(self, generator: Any) -> None:
+        """接上感知侧的文本生成器（keyword-only: prompt/sources/max_chars）。
+
+        rule 服务先于感知模块初始化，构造时注入拿不到；由 manager 在感知就绪后
+        接线。生成动作在没接上时明确失败（规则日志 ``generate_failed:
+        unavailable``），不会崩，也不会退回固定文案。
+        """
+        self._runner.attach_text_generator(generator)
 
     def _target_record_task_id(self, rule: Rule) -> str | None:
         """这条 rule 的达标看哪个 task 的 record —— 看不出达标就返 None。

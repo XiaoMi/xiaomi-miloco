@@ -6429,3 +6429,349 @@ class TestExitRuleEdgeTimestamp:
 
         assert _edge_timestamp(ActionSlot.ON_TARGET, "2026-09-02T10:00:00+08:00") == {}
         assert _edge_timestamp(None, "2026-09-02T10:00:00+08:00") == {}
+
+
+# ---- 生成式动作：写入校验 ----
+
+
+def _generated_action(**overrides) -> RuleAction:
+    data = {
+        "did": "speaker-1",
+        "iid": "action.5.3",
+        "params": ["{{result}}"],
+        "generate": {"prompt": "夸夸画面里最显著的人", "max_chars": 30},
+        "idempotent": False,
+        "cooldown_minutes": 30,
+    }
+    data.update(overrides)
+    return RuleAction(**data)
+
+
+@pytest.mark.asyncio
+async def test_create_generate_action_passes(service):
+    rid = await service.create_rule(
+        _make_static_rule(rule_id="", actions=[_generated_action()])
+    )
+    assert rid == "new-rule-id"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("overrides", "match"),
+    [
+        ({"iid": "prop.2.1"}, r"generate requires 'action\."),
+        ({"iid": "scene", "did": "scene-1"}, r"generate requires 'action\."),
+        ({"idempotent": True}, r"generate requires idempotent=false"),
+        ({"cooldown_minutes": None}, r"generate requires cooldown_minutes >= 1"),
+        ({"cooldown_minutes": 0}, r"generate requires cooldown_minutes >= 1"),
+        ({"params": ["没有占位符"]}, r"requires at least one params item"),
+        (
+            {"generate": None, "params": ["{{result}}"]},
+            r"params contains \{\{result\}\} but generate is missing",
+        ),
+        (
+            {"generate": {"prompt": "x", "sources": [""]}},
+            r"generate\.sources must not contain empty dids",
+        ),
+        (
+            {"generate": {"prompt": "   "}},
+            r"generate\.prompt must be a non-empty string",
+        ),
+    ],
+)
+async def test_create_generate_action_rejects(service, overrides, match):
+    rule = _make_static_rule(rule_id="", actions=[_generated_action(**overrides)])
+    with pytest.raises(ValidationException, match=match):
+        await service.create_rule(rule)
+
+
+@pytest.mark.parametrize(
+    "generate",
+    [
+        {"prompt": ""},
+        {"prompt": "x", "max_chars": 0},
+        {"prompt": "x", "max_chars": 201},
+        {"prompt": "x", "max_chars": "30"},
+        {"prompt": "x", "sources": []},
+        {"prompt": "x", "sources": ["a", "b", "c", "d"]},
+        {"prompt": "x", "max_char": 10},
+    ],
+)
+def test_generate_spec_rejects_bad_fields(generate):
+    with pytest.raises(ValidationError):
+        RuleAction(
+            did="speaker-1",
+            iid="action.5.3",
+            params=["{{result}}"],
+            generate=generate,
+            idempotent=False,
+            cooldown_minutes=30,
+        )
+
+
+# ---- 生成式动作：执行语义 ----
+
+
+@pytest.mark.asyncio
+async def test_generate_action_replaces_params_and_dispatches(runner, monkeypatch):
+    from unittest.mock import AsyncMock as _AM
+
+    ledger = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", ledger)
+    seen: list[dict] = []
+
+    async def _gen(**kwargs):
+        seen.append(kwargs)
+        return "这件外套很衬你"
+
+    runner.attach_text_generator(_gen)
+    action = _generated_action(params=["夸一句：{{result}}", 7])
+    result = await runner._execute_action(
+        "rule-gen", action, trigger_dids=["cam-trigger"],
+    )
+
+    assert result.result is True
+    assert seen == [
+        {
+            "prompt": "夸夸画面里最显著的人",
+            "sources": ["cam-trigger"],
+            "max_chars": 30,
+        }
+    ]
+    sent = runner._miot_proxy.call_device_action.await_args.args[0]
+    assert sent.in_ == ["夸一句：这件外套很衬你", 7]
+    assert ledger.await_args.kwargs["value_json"] == json.dumps(
+        ["夸一句：这件外套很衬你", 7], ensure_ascii=False
+    )
+    assert (
+        "speaker-1",
+        "action.5.3",
+    ) in runner._ensure_state("rule-gen").action_cooldown
+    # 共享动作对象不能被原地改：下一次 fire 还要从模板重新生成。
+    assert action.params == ["夸一句：{{result}}", 7]
+
+
+@pytest.mark.asyncio
+async def test_generate_failure_does_not_dispatch_or_cool(runner, monkeypatch):
+    from unittest.mock import AsyncMock as _AM
+
+    ledger = _AM()
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", ledger)
+
+    class _Boom(Exception):
+        code = "no_frame"
+
+    async def _gen(**kwargs):
+        raise _Boom("no frame")
+
+    runner.attach_text_generator(_gen)
+    result = await runner._execute_action(
+        "rule-gen-fail", _generated_action(), trigger_dids=["cam-trigger"],
+    )
+
+    assert result.result is False
+    assert result.error == "generate_failed: no_frame"
+    runner._miot_proxy.call_device_action.assert_not_awaited()
+    ledger.assert_not_awaited()
+    assert not runner._ensure_state("rule-gen-fail").action_cooldown
+
+
+@pytest.mark.asyncio
+async def test_generate_without_generator_fails_explicitly(runner):
+    result = await runner._execute_action(
+        "rule-gen-off", _generated_action(), trigger_dids=["cam-trigger"],
+    )
+
+    assert result.result is False
+    assert result.error == "generate_failed: unavailable"
+    runner._miot_proxy.call_device_action.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generate_without_any_source_fails_before_generator(runner):
+    async def _gen(**kwargs):  # pragma: no cover - 不该被调到
+        raise AssertionError("generator must not be called without a source")
+
+    runner.attach_text_generator(_gen)
+    result = await runner._execute_action(
+        "rule-gen-nosrc", _generated_action(),
+        trigger_dids=None, perceive_device_ids=[],
+    )
+
+    assert result.result is False
+    assert result.error == "generate_failed: no_source"
+    assert not runner._generating
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("iid", "did"), [("scene", "scene-1"), ("prop.2.1", "speaker-1")]
+)
+async def test_generate_runtime_rejects_non_action_iid(runner, iid, did):
+    """写入已拒；历史坏行到执行时也不能把 scene_id 当相机、把生成文本当 value。"""
+    action = _generated_action(iid=iid, did=did)
+    result = await runner._execute_action(
+        "rule-gen-iid", action, trigger_dids=["cam-trigger"],
+    )
+
+    assert result.result is False
+    assert result.error == "generate_failed: invalid_iid"
+    runner._miot_proxy.call_device_action.assert_not_awaited()
+    assert not runner._generating
+
+
+@pytest.mark.parametrize(
+    ("explicit", "trigger", "rule_cams", "expected"),
+    [
+        (["cam-explicit"], ["cam-trigger"], ["cam-rule"], ["cam-explicit"]),
+        (
+            None,
+            ["cam-trigger", "cam-b", "cam-trigger"],
+            ["cam-rule"],
+            ["cam-trigger", "cam-b"],
+        ),
+        (None, None, ["cam-rule"], ["cam-rule"]),
+        (None, None, None, []),
+        (None, [""], ["cam-rule"], ["cam-rule"]),
+        (None, ["c1", "c2", "c3", "c4"], None, ["c1", "c2", "c3"]),
+    ],
+)
+def test_resolve_generate_sources_priority(explicit, trigger, rule_cams, expected):
+    assert RuleRunner._resolve_generate_sources(
+        explicit, trigger, rule_cams
+    ) == expected
+
+
+@pytest.mark.asyncio
+async def test_generate_action_in_cooldown_skips_generator(runner):
+    calls: list[dict] = []
+
+    async def _gen(**kwargs):
+        calls.append(kwargs)
+        return "x"
+
+    runner.attach_text_generator(_gen)
+    runner._ensure_state("rule-gen-cd").action_cooldown[
+        ("speaker-1", "action.5.3")
+    ] = time.time()
+
+    result = await runner._execute_action(
+        "rule-gen-cd", _generated_action(), trigger_dids=["cam-trigger"],
+    )
+
+    assert result.result is True
+    assert result.skipped is True
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_generate_in_flight_second_fire_skips(runner, monkeypatch):
+    # 第一次 fire 会真的走到下发与台账；台账换成 AsyncMock，避免用例碰到
+    # 观测客户端（本文件其余下发用例同样这么做）。
+    monkeypatch.setattr(
+        "miloco.miot.service._write_action_ledger", AsyncMock()
+    )
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def _gen(**kwargs):
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+        return "好看"
+
+    runner.attach_text_generator(_gen)
+    action = _generated_action()
+    first = asyncio.create_task(
+        runner._execute_action(
+            "rule-gen-flight", action, trigger_dids=["cam-trigger"]
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    second_task = asyncio.create_task(
+        runner._execute_action(
+            "rule-gen-flight", action, trigger_dids=["cam-trigger"],
+        )
+    )
+    # 让第二个 fire 走到在途判定：守卫在时它立刻返回；守卫被删时它会进入
+    # 生成器并卡在 release 上，所以先放行再取结果，避免变异验证挂死。
+    await asyncio.sleep(0.05)
+    release.set()
+    second = await asyncio.wait_for(second_task, timeout=1)
+    assert second.result is True
+    assert second.skipped is True
+
+    first_result = await asyncio.wait_for(first, timeout=1)
+    assert first_result.result is True
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_generate_cancellation_releases_in_flight_key(runner):
+    """取消 / 外部打断时在途 key 必须归还 —— 否则该动作此后永远跳过。"""
+    started = asyncio.Event()
+
+    async def _gen(**kwargs):
+        started.set()
+        await asyncio.sleep(30)
+        return "好看"
+
+    runner.attach_text_generator(_gen)
+    task = asyncio.create_task(
+        runner._execute_action(
+            "rule-gen-cancel", _generated_action(), trigger_dids=["cam-trigger"]
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    assert runner._generating
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not runner._generating
+
+
+def test_render_generated_params():
+    from miloco.rule.runner import _render_generated_params
+
+    assert _render_generated_params(None, "好看") == ["好看"]
+    assert _render_generated_params([], "好看") == ["好看"]
+    assert _render_generated_params(
+        ["{{result}}/{{result}}", 3], "好看"
+    ) == ["好看/好看", 3]
+
+
+@pytest.mark.asyncio
+async def test_fire_forwards_trigger_dids_then_rule_cameras(runner):
+    action = _generated_action()
+    rule = _make_static_rule(
+        rule_id="rule-gen-fire",
+        task_id="task-gen-fire",
+        actions=[action],
+    )
+    runner.add_rule(rule)
+    runner.set_task_actions(
+        "task-gen-fire",
+        {"on_enter_actions": [action.model_dump()], "on_enter_desc": None},
+    )
+    seen: list[list[str]] = []
+
+    async def _gen(*, prompt, sources, max_chars):
+        seen.append(sources)
+        return "好看"
+
+    runner.attach_text_generator(_gen)
+    await runner._fire(
+        rule, RuleEvent.ENTERED, ["cam-source"], "ctx", "exec-gen-1",
+        trigger_dids=["cam-trigger"],
+    )
+    runner._ensure_state("rule-gen-fire").action_cooldown.clear()
+    await runner._fire(
+        rule, RuleEvent.ENTERED, ["cam-source"], "ctx", "exec-gen-2",
+        trigger_dids=None,
+    )
+
+    assert seen == [["cam-trigger"], ["cam-001"]]

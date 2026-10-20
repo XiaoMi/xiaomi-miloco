@@ -205,7 +205,10 @@ _ACTION_SLOTS = (
     "--on-enter-action",
     "on_enter_actions_raw",
     multiple=True,
-    help="进入时的设备直控动作 JSON（可重复），格式同 rule create --action",
+    help=(
+        "进入时的设备直控动作 JSON（可重复），格式同 rule create --action；"
+        "支持 generate 按画面生成播报"
+    ),
 )
 @click.option(
     "--on-enter-desc", "on_enter_desc", default=None, help="进入时交给 Agent 的指令"
@@ -214,7 +217,10 @@ _ACTION_SLOTS = (
     "--on-exit-action",
     "on_exit_actions_raw",
     multiple=True,
-    help="退出时的设备直控动作 JSON（可重复）",
+    help=(
+        "退出时的设备直控动作 JSON（可重复），格式同 rule create --action；"
+        "支持 generate 按画面生成播报"
+    ),
 )
 @click.option(
     "--on-exit-desc", "on_exit_desc", default=None, help="退出时交给 Agent 的指令"
@@ -223,7 +229,10 @@ _ACTION_SLOTS = (
     "--on-target-action",
     "on_target_actions_raw",
     multiple=True,
-    help="达标时的设备直控动作 JSON（可重复）",
+    help=(
+        "达标时的设备直控动作 JSON（可重复），格式同 rule create --action；"
+        "达标槽没有触发相机，带 generate 时必须显式配 generate.sources"
+    ),
 )
 @click.option(
     "--on-target-desc", "on_target_desc", default=None, help="达标时交给 Agent 的指令"

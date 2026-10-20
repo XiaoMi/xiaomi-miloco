@@ -120,7 +120,13 @@
 
 **STATIC 动作两重检查**：执行前做幂等检查（先查当前属性值，已达目标则跳过）和冷却检查（冷却窗口内跳过，适合 TTS 等不宜频繁触发的动作）。`idempotent=false` 的动作必须配 `cooldown_minutes`，service 层在 CRUD 时强制校验。
 
-**STATIC 动作三种形态**：`iid` 决定形态——`prop.<siid>.<piid>` 走属性直控（带 `value`），`action.<siid>.<aiid>` 走 method call（带 `params`，如 TTS），`scene` 触发米家场景（`did` 位置放 scene_id，无 `value`/`params`）。场景读不到当前值，无法做幂等比对，所以强制 `idempotent=false` + `cooldown_minutes`，去重只靠冷却；冷却键是 `(did, iid)`，同一条规则里的多个场景互不干扰。场景执行复用 `MiotService` 的家庭白名单校验和场景台账，与 CLI 手动触发落同一形状，仅 `source` 标成 `rule`、`source_id` 写 rule_id。
+**STATIC 动作的 iid 形态**：`iid` 决定形态——`prop.<siid>.<piid>` 走属性直控（带 `value`），`action.<siid>.<aiid>` 走 method call（带 `params`，如 TTS），`scene` 触发米家场景（`did` 位置放 scene_id，无 `value`/`params`）。场景读不到当前值，无法做幂等比对，所以强制 `idempotent=false` + `cooldown_minutes`，去重只靠冷却；冷却键是 `(did, iid)`，同一条规则里的多个场景互不干扰。场景执行复用 `MiotService` 的家庭白名单校验和场景台账，与 CLI 手动触发落同一形状，仅 `source` 标成 `rule`、`source_id` 写 rule_id。
+
+**生成式动作（`generate`）**：`action.*` 动作可以带一个可选的 `generate` 块，执行前先调一次 omni 观测画面生成文本，再把文本替换进 `params` 的 `{{result}}` 占位符下发。`prompt` 只写「要生成什么」（例如按着装与性别真诚夸一句），输出契约由代码固定为 `{"result":"<text>"}`，不写进 prompt；`max_chars` 同时写进系统提示词与代码截断。`params` 非空时必须含 `{{result}}`，空 `params` 等价于 `["{{result}}"]`；没配 `generate` 却出现 `{{result}}` 会被拒——拼错 `generat` 时 pydantic 会当未知字段丢掉，音箱就会把字面量念出来。
+
+观测源按 `generate.sources` → 触发相机 → 规则条件里的相机顺序回退；达标槽没有触发相机，带 `generate` 时必须显式配 `sources`。一次最多看 3 路，取每路最近一帧缩成 JPEG crop 直调 omni（温度 0.5），不走主动查询链路、不写查询日志、不占引擎推理锁。生成式动作强制 `idempotent=false` + `cooldown_minutes >= 1`：结果每次不同，幂等比对没有意义，去重只能靠冷却。
+
+生成失败（无源 / 无帧 / 模型错误 / 返回非法 JSON / 返回空串）时不进设备下发、不落冷却、不写动作台账，规则日志记 `generate_failed: <code>`。同一 `(rule_id, did, iid)` 的生成在途时后续触发直接跳过，避免同一画面叠多次调用。同一槽的动作按顺序执行，前一条失败不阻塞后一条，但生成调用会阻塞排在它后面的动作——生成式动作应单独放，或排在槽内最后。
 
 **冷却时间戳的落地判据是「指令是否可能已执行」，不是「是否成功」**：
 
@@ -142,6 +148,7 @@
 | 修改规则状态机逻辑（触发条件/抗抖/duration 窗口） | `rule/runner.py`（`RuleRunner`）     |
 | 修改规则 CRUD 校验逻辑                            | `rule/service.py`（`RuleService`）   |
 | 修改 STATIC 规则执行逻辑                          | `rule/runner.py`（设备动作执行部分） |
+| 修改生成式动作的取帧 / 生成 / 解析                | `perception/generate.py`             |
 | 修改 DYNAMIC 规则 prompt 组装                     | `rule/runner.py`（prompt 组装部分）  |
 | 修改规则数据结构                                  | `rule/schema.py`                     |
 | 修改规则 API 端点                                 | `rule/router.py`                     |
@@ -154,7 +161,7 @@
 
 **上游**：`PerceptionEngineProxy`（`perception/client.py`）每次推理后把本轮实际下发到各摄像头的规则的 True/False 经 `RuleService.update_state` 上报（驱动 `RuleRunner` 状态机；未下发到某摄像头的规则不参与其状态推退）。详见 [感知流水线](perception-pipeline.md)。
 
-**下游**：STATIC 规则直接调 `MiotProxy`（`miot/client.py`）；DYNAMIC 规则经 `AgentDispatcher` 投给 OpenClaw Agent，Agent 调 `miloco-devices` Skill 执行。详见 [设备控制](device-control.md)。
+**下游**：STATIC 规则直接调 `MiotProxy`（`miot/client.py`）；带 `generate` 的动作先经 `PerceptionService.generate_text` 调一次 omni，生成失败则不下发；DYNAMIC 规则经 `AgentDispatcher` 投给 OpenClaw Agent，Agent 调 `miloco-devices` Skill 执行。详见 [设备控制](device-control.md)。
 
 **共享**：规则通过必填的 `task_id` 字段 FK CASCADE 挂到 task（应用层 + DB NOT NULL 双保险校验 task 存在）；event 规则的「当期达标静默」依赖关联任务的 record 状态。DYNAMIC 规则回调经 `dispatch_event("rule", ...)` 投递，`AgentDispatcher` 保证单飞和批量合并。详见 [任务管理](task-management.md)、[Agent 集成](openclaw-integration.md)。
 
