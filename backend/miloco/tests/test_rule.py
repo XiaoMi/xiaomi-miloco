@@ -6521,6 +6521,36 @@ def test_validate_generate_allows_session_exit_with_rule_cameras():
     _validate_rule_consistency(rule)
 
 
+def test_validate_generate_requires_sources_on_broadcast_duration():
+    """duration 的 ENTERED 从 _evaluate_duration 出，那条链不带 trigger_dids。
+
+    而且窗口填满的那一轮可以是 False 周期，当前周期也没有触发相机可借，
+    所以广播 + duration + generate 不配 sources 必然 no_source。
+    """
+    from miloco.rule.service import _validate_rule_consistency
+
+    rule = _make_static_rule(
+        rule_id="",
+        actions=[_generated_action()],
+        condition=RuleCondition(perceive_device_ids=[], query="有人坐在书桌前"),
+    )
+    rule.duration_seconds = 60
+    with pytest.raises(
+        ValidationException,
+        match=r"actions\[0\].*generate requires explicit generate\.sources",
+    ):
+        _validate_rule_consistency(rule)
+
+
+def test_validate_generate_allows_duration_with_rule_cameras():
+    """duration 规则有规则相机可回退，不配 sources 是合法的。"""
+    from miloco.rule.service import _validate_rule_consistency
+
+    rule = _make_static_rule(rule_id="", actions=[_generated_action()])
+    rule.duration_seconds = 60
+    _validate_rule_consistency(rule)
+
+
 def test_validate_generate_with_sources_passes_without_cameras():
     from miloco.rule.service import _validate_rule_consistency
 

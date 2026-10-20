@@ -1728,7 +1728,13 @@ class RuleRunner:
                 slot_name,
             )
             return False
-        rule = rules[0]
+        # 优先挑带相机条件的规则：强制 fire 没有上游边沿，也就没有 trigger_dids，
+        # generate 只能靠代表 rule 的相机回退。按名单顺序取第一条会把没有相机的
+        # iot 规则（no_source）或另一房间的相机推给这条动作。
+        rule = next(
+            (r for r in rules if r.condition.perceive_device_ids),
+            rules[0],
+        )
         if event is RuleEvent.EXITED:
             # 重新配置的强制 on_exit 与手动注入都从这里出 session。不撤的话 timer
             # 到点会在 off 态喂真, 把条件锁死。

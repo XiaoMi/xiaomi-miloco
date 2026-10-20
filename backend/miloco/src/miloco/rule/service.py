@@ -451,13 +451,17 @@ def _validate_rule_consistency(rule: Rule) -> None:
             # no_source：
             # - 非 omni（iot / record）：喂数据的路径不带 trigger_dids，相机
             #   条件也被 _validate_condition_against_dnf 强制留空；
+            # - duration 规则：ENTERED 只从 _evaluate_duration 出，那条链不带
+            #   trigger_dids（guard 延迟释放复用的也是这份 payload）。而且窗口
+            #   填满的那一轮可以是 False 周期，当前周期也没有触发相机可借；
             # - omni 的 session 退出槽：EXITED 的 trigger_dids 恒为空（见
             #   RuleRunner.update_state 的说明），只剩规则相机可回退。
-            # omni 的进入 / 事件槽不能拒：空 perceive_device_ids 是「广播到
-            # 全部相机」的合法写法，命中那一刻 trigger_dids 就是命中的那台。
+            # omni 的瞬时进入 / 事件槽不能拒：空 perceive_device_ids 是「广播
+            # 到全部相机」的合法写法，命中那一刻 trigger_dids 就是命中的那台。
             # guard 规则到不了这里（_validate_guard 拒绝所有动作字段）。
             fires_without_trigger_dids = (
                 rule.resolved_source_type != OMNI_SOURCE_TYPE
+                or rule.duration_seconds
                 or (
                     slot_name == "on_exit_actions"
                     and rule.resolved_direction is RuleDirection.SESSION
