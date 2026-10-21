@@ -23,15 +23,37 @@ from miloco.task.state_machine import (
 )
 
 
+class _Clock:
+    """可手动推进的单调时钟 —— 超时用例不 sleep。"""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class Harness:
-    def __init__(self, satisfied: dict[str, bool | None] | None = None):
+    def __init__(
+        self,
+        satisfied: dict[str, bool | None] | None = None,
+        *,
+        timeout: float = 60.0,
+        clock: _Clock | None = None,
+    ):
         self.satisfied = satisfied or {}
         self.dispatched: list[tuple[str, ActionSlot]] = []
         self.tracked: list[tuple[TransitionOutcome, TaskSignal]] = []
+        self.clock = clock or _Clock()
         self.sm = TaskStateMachine(
             is_condition_satisfied=lambda rid: self.satisfied.get(rid, False),
             dispatch_action=lambda t, s, _p=None: self.dispatched.append((t, s)),
             track=lambda o, s: self.tracked.append((o, s)),
+            defer_blocked_enter_timeout_sec=timeout,
+            clock=self.clock,
         )
 
 
@@ -265,6 +287,175 @@ def test_suspend_clears_pending_enter():
     h.sm.suspend("t1")
     h.satisfied["g"] = True
     assert h.sm.release_pending_enters("t1") == []
+
+
+# ── 挂起超时 ──────────────────────────────────────────────────────
+# deadline = 最近一次被拦下观测 + 超时, 每次重问续期。到期条目在释放口丢弃,
+# 不补发, 也不留在挂起表里。
+
+
+def test_blocked_event_is_released_before_deadline():
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(59.9)
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [signal]
+
+
+def test_blocked_event_expires_at_deadline():
+    """到点即作废（边界取 >=），不能在超时秒数上再补发一次。"""
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(60.0)
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+    assert h.dispatched == []
+    assert h.sm.release_pending_enters("t1") == []
+    assert [o for o, _ in h.tracked].count(TransitionOutcome.EXPIRED_BLOCKED_ENTER) == 1
+
+
+def test_blocked_event_expires_while_guard_stays_false():
+    """前提一直不成立时条目也要清掉 —— 否则它会永远留在挂起表里。"""
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(60.0)
+    assert h.sm.release_pending_enters("t1") == []
+    assert h.tracked[-1][0] is TransitionOutcome.EXPIRED_BLOCKED_ENTER
+
+
+def test_blocked_event_expires_while_condition_is_unknown():
+    """主条件未就绪时过期判定也要生效 —— 不能停在「继续等」分支里。"""
+    h = Harness({"a": None, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(60.0)
+    assert h.sm.release_pending_enters("t1") == []
+    assert h.tracked[-1][0] is TransitionOutcome.EXPIRED_BLOCKED_ENTER
+
+
+def test_requestion_refreshes_deadline():
+    """只要还在被观测（每次重问都是一次新观测），超时就不该生效。"""
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a", payload={"caption": "首次"})
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(50.0)
+    assert (
+        h.sm.handle(_entered("a", payload={"caption": "重问"}))
+        is TransitionOutcome.BLOCKED_BY_GUARD
+    )
+
+    h.clock.advance(50.0)  # t=100，早于第二次观测的 deadline=110
+    h.satisfied["g"] = True
+    released = h.sm.release_pending_enters("t1")
+    # 续期只刷新 deadline，信号仍是首次观测的那条（session 起点按首次成立计）。
+    assert len(released) == 1
+    assert released[0] is signal
+
+
+def test_requestion_past_deadline_refreshes_instead_of_expiring():
+    """过期只在释放口检查: 中间没被检查时, 超时后的重问仍是一次新观测。"""
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a", payload={"caption": "首次"})
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(60.0)
+    assert (
+        h.sm.handle(_entered("a", payload={"caption": "超时后重问"}))
+        is TransitionOutcome.BLOCKED_BY_GUARD
+    )
+    assert all(o is not TransitionOutcome.EXPIRED_BLOCKED_ENTER for o, _ in h.tracked)
+
+    h.clock.advance(10.0)
+    h.satisfied["g"] = True
+    released = h.sm.release_pending_enters("t1")
+    assert len(released) == 1
+    assert released[0] is signal
+
+
+def test_expired_enter_is_replaced_by_the_next_observation():
+    """过期后新的重问是一次新观测: 用新信号, 而不是旧的那条。"""
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    old = _entered("a", payload={"caption": "旧"})
+    assert h.sm.handle(old) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(60.0)
+    assert h.sm.release_pending_enters("t1") == []
+
+    new = _entered("a", payload={"caption": "新"})
+    assert h.sm.handle(new) is TransitionOutcome.BLOCKED_BY_GUARD
+    h.clock.advance(10.0)
+    h.satisfied["g"] = True
+    released = h.sm.release_pending_enters("t1")
+    # TaskSignal.payload 是 compare=False, 用列表相等分辨不出新旧信号。
+    assert len(released) == 1
+    assert released[0] is new
+
+
+def test_zero_timeout_never_defers():
+    """0 = 不补发: 被拦下的进入直接丢弃, 前提之后成立也不释放。
+
+    但实况评估不受影响 —— 前提成立后新来一次进入仍可正常 fire。
+    """
+    h = Harness({"a": True, "g": False}, timeout=0.0)
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(10_000.0)
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+    assert all(o is not TransitionOutcome.EXPIRED_BLOCKED_ENTER for o, _ in h.tracked)
+
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.EVENT_FIRED
+
+
+def test_negative_timeout_never_expires():
+    """负数 = 不设上限: 前提晚多久成立都还能补发。"""
+    h = Harness({"a": True, "g": False}, timeout=-1.0)
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(365 * 24 * 3600.0)
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [signal]
+
+
+def test_blocked_session_expires_without_entering():
+    h = Harness({"s": True, "g": False})
+    h.sm.register_task("t1", {"s": RuleDirection.SESSION, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("s")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(60.0)
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+    assert h.sm.runtime_state("t1") is TaskRuntimeState.OFF
+    assert h.tracked[-1][0] is TransitionOutcome.EXPIRED_BLOCKED_ENTER
+
+
+def test_reconfigure_preserves_the_original_deadline():
+    """重配保留挂起项, 但不等于续期 —— deadline 原样保留。"""
+    h = Harness({"a": True, "g": False})
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert h.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.clock.advance(30.0)
+    h.sm.reconfigure("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    h.clock.advance(30.0)  # t=60, 与首次观测的 deadline 相同
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+    assert h.tracked[-1][0] is TransitionOutcome.EXPIRED_BLOCKED_ENTER
 
 
 # ── session 型 task 的前提 ────────────────────────────────────────

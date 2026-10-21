@@ -117,6 +117,26 @@ def test_set_value_coerces_bool(isolated_config):
     assert data["server"]["tls_verify"] is True
 
 
+def test_set_value_coerces_float(isolated_config):
+    """rule 的挂起时限是 _SCHEMA_PATHS 的第一条 float 路径。"""
+    set_value("rule.defer_blocked_enter_timeout_sec", "30")
+    data = json.loads(isolated_config.read_text())
+    value = data["rule"]["defer_blocked_enter_timeout_sec"]
+    assert value == 30.0
+    assert isinstance(value, float)
+
+
+def test_set_value_rejects_bad_float():
+    with pytest.raises(ValueError, match="浮点数"):
+        set_value("rule.defer_blocked_enter_timeout_sec", "abc")
+
+
+def test_rule_timeout_default_is_60():
+    cfg = load_config()
+    assert cfg["rule"]["defer_blocked_enter_timeout_sec"] == 60.0
+    assert "rule.defer_blocked_enter_timeout_sec" in known_paths()
+
+
 def test_set_value_rejects_unknown_path():
     with pytest.raises(ValueError):
         set_value("server.unknown", "value")

@@ -75,6 +75,7 @@ camera:
 rule:
   log_ttl: 30                  # 天
   default_duration_ratio: 0.6  # duration_seconds 窗口 True 比例默认阈值，未显式 --duration-ratio 时生效
+  defer_blocked_enter_timeout_sec: 60.0  # 进入被前提拦下的挂起时限(秒)，每次重问续期；0=不挂起，负数=不限时
 
 # 感知管线配置
 perception:
