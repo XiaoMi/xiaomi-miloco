@@ -1,9 +1,9 @@
 {
   "avatar": {
-    "cropTitle": "Adjust avatar",
+    "cropTitle": "Adjust photo",
     "cropHint": "Drag to move · scroll or slider to zoom",
     "cropZoom": "Zoom",
-    "cropConfirm": "Confirm",
+    "cropConfirm": "Done",
     "cancel": "Cancel"
   }
 }

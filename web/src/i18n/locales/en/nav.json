@@ -1,21 +1,21 @@
 {
   "nav": {
     "aria": "Main navigation",
-    "home": "Overview",
-    "homeHint": "A glance at home",
+    "home": "Home",
+    "homeHint": "Right now",
     "devices": "Devices",
-    "devicesHint": "Manage Xiaomi Home devices",
+    "devicesHint": "Devices & scenes",
     "family": "Family",
-    "familyHint": "Manage family members",
+    "familyHint": "People & profiles",
     "tasks": "Tasks",
-    "tasksHint": "Manage family tasks",
-    "scenes": "Scene Rules",
-    "scenesHint": "Trigger automations on detection",
+    "tasksHint": "Tracked for you",
+    "scenes": "Rules",
+    "scenesHint": "See it, do it",
     "activity": "Activity",
-    "activityHint": "Review what happened",
+    "activityHint": "What happened",
     "usage": "Models",
-    "usageHint": "Model & token usage",
-    "loginMiot": "Tap to sign in to Xiaomi Home",
+    "usageHint": "Models & usage",
+    "loginMiot": "Sign in",
     "bound": "Connected"
   }
 }

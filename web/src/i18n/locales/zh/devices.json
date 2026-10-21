@@ -1,17 +1,17 @@
 {
   "devices": {
-    "title": "家里的设备",
-    "unassigned": "未分配",
-    "emptyState": "还没有设备 · 米家绑定后会自动出现",
+    "title": "设备",
+    "unassigned": "未分房间",
+    "emptyState": "还没有设备 · 绑定米家后会自动出现",
     "countUnit": "{{n}} 个",
-    "onCount": " · {{n}} 开着",
-    "offlineCount": " · {{n}} 离线",
+    "onCount": " · {{n}} 个开着",
+    "offlineCount": " · {{n}} 个离线",
     "scenesHeading": "场景 · 一键",
-    "sceneTriggered": "已触发\"{{name}}\"",
-    "sceneTriggerFailed": "场景触发失败",
+    "sceneTriggered": "已执行「{{name}}」",
+    "sceneTriggerFailed": "场景执行失败",
     "watchCamera": "看 {{name}}",
     "liveView": "{{name}} 实时画面",
-    "loadingStream": "拉流中…",
+    "loadingStream": "加载画面中…",
     "close": "关闭"
   }
 }

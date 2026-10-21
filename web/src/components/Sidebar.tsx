@@ -141,11 +141,8 @@ export function Sidebar({
   // 才是可按版本关闭的 naggy 提示。此前红点也跟 banner 共用 dismiss，导致"确认过某版本后红点
   // 就再也不冒"；用户要的是"更新版本存在红点就在"，故解耦：红点看 hasUpdate、banner 看 dismiss。
   const showDot = hasUpdate;
-  const versionText = t("update.versionLabel", {
-    version: __APP_VERSION__.startsWith("v")
-      ? __APP_VERSION__
-      : `v${__APP_VERSION__}`,
-  });
+  // 版本号只显示裸版本
+  const versionText = `${__APP_VERSION__}`;
   // 整个底部账号 row 当 hit area:onClick 转发给内部 MiotAccountButton 的
   // button DOM 触发同款交互(已绑 toggle popover / 未绑 onBind)。住户不用瞄准
   // 32x32 头像那一小点,点 row 任意位置都行。wrapperRef 传给 MiotAccountButton
@@ -186,6 +183,46 @@ export function Sidebar({
           />
         </svg>
         <span className="text-title text-text-primary">Miloco</span>
+        {/* 版本号：紧跟品牌名右侧（住户诉求：原在左下角太不起眼 / 与账号挤在一起）。
+            整行仍复用原来的升级入口——有新版时点它 = 确认该版本并打开升级弹窗，右上角挂提示点。
+            slim 版升级 = 整体替换 App 包，没有在线一键升级，只显示版本号。 */}
+        {slim ? (
+          <span
+            className="truncate text-caption-mono text-text-tertiary"
+            title={versionText}
+          >
+            {versionText}
+          </span>
+        ) : (
+          <button
+            type="button"
+            onClick={requestOpenUpgrade}
+            aria-label={
+              hasUpdate
+                ? t("update.footerUpdateAria", { version: upgradeInfo!.latest })
+                : t("update.footerCheckAria")
+            }
+            title={
+              hasUpdate
+                ? t("update.footerUpdateAria", { version: upgradeInfo!.latest })
+                : t("update.footerCheckAria")
+            }
+            className="relative inline-flex items-center gap-1 min-w-0 rounded px-1 py-0.5 text-caption-mono text-text-tertiary hover:text-text-primary transition-colors"
+          >
+            <span className="truncate">{versionText}</span>
+            {showDot && (
+              <span
+                aria-hidden
+                className="shrink-0 rounded-full bg-brand-primary"
+                style={{
+                  width: 5,
+                  height: 5,
+                  boxShadow: "0 0 0 3px var(--color-brand-soft)",
+                }}
+              />
+            )}
+          </button>
+        )}
       </header>
 
       {/* Tab 列表 */}
@@ -297,48 +334,6 @@ export function Sidebar({
           </button>
         )}
       </div>
-
-      {/* 版本号页脚：低频元信息置于侧栏底部（07-design 无位置硬规，元数据用
-          caption/tertiary）。v 前缀 + "版本" 标注，明确其为版本而非裸数字。
-          **整行始终可点**：有新版时点击直接进升级确认（右上角挂提示点，复用 StatusRibbon/
-          banner 的 5px 点 + 3px brand-soft 环）；无新版时点击 = 现查一次更新（结果在弹窗里给：
-          最新 / 无法检查 / dev）。是否弹确认 vs 检查由 UpgradeNotice 据 info 决定，本组件只
-          发意图（requestOpenUpgrade），确认某版本也由 UpgradeNotice 落。 */}
-      {slim ? (
-        // slim 版升级 = 整体替换 App 包，没有在线一键升级，故只显示版本号。
-        <div className="w-full flex items-start justify-between gap-1 px-3 pb-2 pt-1 text-caption-mono text-text-tertiary">
-          <span className="truncate">{versionText}</span>
-        </div>
-      ) : (
-      <button
-        type="button"
-        onClick={requestOpenUpgrade}
-        aria-label={
-          hasUpdate
-            ? t("update.footerUpdateAria", { version: upgradeInfo!.latest })
-            : t("update.footerCheckAria")
-        }
-        title={
-          hasUpdate
-            ? t("update.footerUpdateAria", { version: upgradeInfo!.latest })
-            : t("update.footerCheckAria")
-        }
-        className="w-full flex items-start justify-between gap-1 px-3 pb-2 pt-1 text-caption-mono text-text-tertiary hover:text-text-primary transition-colors"
-      >
-        <span className="truncate">{versionText}</span>
-        {showDot && (
-          <span
-            aria-hidden
-            className="shrink-0 rounded-full bg-brand-primary"
-            style={{
-              width: 5,
-              height: 5,
-              boxShadow: "0 0 0 3px var(--color-brand-soft)",
-            }}
-          />
-        )}
-      </button>
-      )}
     </aside>
   );
 }

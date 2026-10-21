@@ -1132,12 +1132,12 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
         <div className="mt-2.5 sm:ml-[82px] px-3.5 py-2.5 rounded-lg bg-info-bg text-caption" onClick={(e) => e.stopPropagation()}>
           <div className="flex items-baseline justify-between">
             <span className="text-info">
-              ✓ {t("activity.feedbackSaved", "反馈已记录，数据已保存到本地")}
-              {packPath && <>，<button type="button" onClick={() => { const i = packPath.lastIndexOf("/"); if (i > 0) revealDir(packPath.substring(0, i)).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal", "点击打开所在文件夹")}</button></>}
-              ，<a href={FEEDBACK_FORM_URL} target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink", "前往提交")}</a>
+              ✓ {t("activity.feedbackSaved")}
+              {packPath && <>，<button type="button" onClick={() => { const i = packPath.lastIndexOf("/"); if (i > 0) revealDir(packPath.substring(0, i)).catch(() => {}); }} className="text-info underline hover:opacity-80">{t("activity.feedbackReveal")}</button></>}
+              ，<a href={FEEDBACK_FORM_URL} target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink")}</a>
             </span>
             <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="flex-shrink-0 ml-3 text-[11px] text-text-tertiary hover:text-brand-primary transition-colors">
-              {t("activity.feedbackModify", "修改反馈信息")}
+              {t("activity.feedbackModify")}
             </button>
           </div>
           {packPath && (
@@ -1154,7 +1154,7 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
           onClick={(e) => { e.stopPropagation(); setOpen(true); }}
           className="inline-flex items-center gap-1 px-3 py-[5px] text-caption text-text-tertiary bg-transparent border border-border rounded-md hover:text-brand-primary hover:border-brand-primary hover:bg-brand-soft transition-colors"
         >
-          <span className="text-[11px]">⚑</span> {t("activity.feedbackButton", "反馈")}
+          <span className="text-[11px]">⚑</span> {t("activity.feedbackButton")}
         </button>
       </div>
     );
@@ -1165,7 +1165,7 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
     return (
       <div className="mt-2.5 sm:ml-[82px] flex items-center gap-2 px-3.5 py-2.5 rounded-lg bg-bg-tertiary text-caption text-text-secondary" onClick={(e) => e.stopPropagation()}>
         <span className="inline-block w-3 h-3 border-2 border-border border-t-brand-primary rounded-full animate-spin" />
-        {t("activity.feedbackSubmitting", "正在打包感知数据...")}
+        {t("activity.feedbackSubmitting")}
       </div>
     );
   }
@@ -1175,10 +1175,10 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
     return (
       <div className="mt-2.5 sm:ml-[82px]" onClick={(e) => e.stopPropagation()}>
         <div className="px-3.5 py-2.5 rounded-lg text-caption" style={{ background: "rgba(220,38,38,.06)", color: "#DC2626" }}>
-          ✗ {t("activity.feedbackError", "提交失败，请重试")}
+          ✗ {t("activity.feedbackError")}
         </div>
         <button type="button" onClick={() => setStatus("idle")} className="mt-1.5 text-caption text-text-tertiary hover:text-text-secondary">
-          {t("activity.feedbackRetry", "重试")}
+          {t("activity.feedbackRetry")}
         </button>
       </div>
     );
@@ -1188,7 +1188,7 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
   return (
     <div className="mt-2.5 sm:ml-[82px] p-3.5 rounded-[10px] bg-bg-primary border border-border" onClick={(e) => e.stopPropagation()}>
       <div className="text-[13px] font-semibold text-text-primary mb-2.5">
-        {t("activity.feedbackTitle", "反馈感知问题")}
+        {t("activity.feedbackTitle")}
       </div>
 
       <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackErrorType")}</div>
@@ -1209,21 +1209,21 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
         ))}
       </div>
 
-      <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackText", "补充说明（可选）")}</div>
+      <div className="text-caption text-text-tertiary mb-1">{t("activity.feedbackText")}</div>
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder={t("activity.feedbackPlaceholder", "如：识别错了，是爸爸不是爷爷")}
+        placeholder={t("activity.feedbackPlaceholder")}
         className="w-full h-[52px] px-2.5 py-2 border border-border rounded-lg text-[13px] bg-bg-secondary text-text-primary resize-none focus:outline-none focus:border-brand-primary transition-colors"
       />
 
       <label className="flex items-center gap-1.5 mt-2 text-caption text-text-tertiary cursor-pointer">
         <input type="checkbox" checked={includeGallery} onChange={(e) => setIncludeGallery(e.target.checked)} className="accent-brand-primary w-[13px] h-[13px]" />
-        {t("activity.feedbackGallery", "包含人员画廊（可能含人脸数据，默认不上传）")}
+        {t("activity.feedbackGallery")}
       </label>
 
       <div className="mt-2 px-2.5 py-1.5 rounded-md text-[11px] text-text-tertiary" style={{ background: "rgba(217,119,6,.06)" }}>
-        ⚠ {t("activity.feedbackPrivacy", "提交反馈将收集相关音视频和感知数据并保存到本地")}
+        ⚠ {t("activity.feedbackPrivacy")}
       </div>
 
       <div className="flex justify-end items-center gap-1.5 mt-2.5">
@@ -1232,10 +1232,10 @@ function FeedbackSection({ eventId, hasFeedback, packPath, onSubmitted }: {
           onClick={() => { setOpen(false); setConfirmedResubmit(false); setSelected(new Set()); setText(""); setIncludeGallery(false); }}
           className="px-3.5 py-[5px] text-caption text-text-secondary rounded-md hover:bg-bg-tertiary transition-colors"
         >
-          {t("activity.feedbackCancel", "取消")}
+          {t("activity.feedbackCancel")}
         </button>
         <button type="button" onClick={handleSubmit} className="px-4 py-[5px] text-caption font-medium text-white bg-brand-primary rounded-md hover:bg-brand-accent transition-colors">
-          {t("activity.feedbackSubmit", "打包数据")}
+          {t("activity.feedbackSubmit")}
         </button>
       </div>
     </div>
@@ -1694,7 +1694,7 @@ function OnDemandRow({ log, onOpenLightbox, deviceNames }: {
         <TimeLabel timestamp={log.timestamp} />
         <div className="min-w-0 sm:order-2">
           <div className="text-body text-text-primary font-semibold break-words whitespace-pre-line">Q: {log.query}</div>
-          <div className="text-body text-text-secondary break-words whitespace-pre-line mt-0.5">A: {log.answer || <span className="text-text-tertiary italic">{t("activity.odNoAnswer", "推理失败，无答案")}</span>}</div>
+          <div className="text-body text-text-secondary break-words whitespace-pre-line mt-0.5">A: {log.answer || <span className="text-text-tertiary italic">{t("activity.odNoAnswer")}</span>}</div>
           <div className="text-caption-mono text-text-tertiary mt-1">
             {log.sources.map((did) => deviceNames[did] ? `${deviceNames[did]}(${did})` : did).join(", ")}
           </div>
@@ -1797,7 +1797,7 @@ function OnDemandFeedback({ logId, feedbackDone, feedbackPack, onSubmitted }: {
               ，<a href={FEEDBACK_FORM_URL} target="_blank" rel="noopener noreferrer" className="text-info underline hover:opacity-80">{t("activity.feedbackSubmitLink")}</a>
             </span>
             <button type="button" onClick={() => { setConfirmedResubmit(true); setOpen(true); }} className="flex-shrink-0 ml-3 text-[11px] text-text-tertiary hover:text-brand-primary transition-colors">
-              {t("activity.feedbackModify", "修改反馈信息")}
+              {t("activity.feedbackModify")}
             </button>
           </div>
           {feedbackPack?.path && (

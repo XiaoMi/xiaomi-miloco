@@ -73,7 +73,7 @@ describe("i18n 接线 smoke", () => {
 
   it("切 en 后取到英文", async () => {
     await i18n.changeLanguage("en");
-    expect(i18n.t("nav.home")).toBe("Overview");
+    expect(i18n.t("nav.home")).toBe("Home");
   });
 
   it("未知 key 回退为 key 本身(不抛错)", () => {

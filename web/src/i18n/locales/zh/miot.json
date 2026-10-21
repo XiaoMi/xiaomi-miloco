@@ -1,6 +1,6 @@
 {
   "miot": {
     "opFail": "操作失败（{{op}}）",
-    "unassigned": "未分配"
+    "unassigned": "未分房间"
   }
 }

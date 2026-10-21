@@ -2,13 +2,13 @@
   "actions": {
     "filterEvents": "Events",
     "filterActions": "Actions",
-    "emptyFilter": "Check \"Events\" or \"Actions\" to see records",
-    "resultSuccess": "OK",
+    "emptyFilter": "Tick “Events” or “Actions” to see records",
+    "resultSuccess": "Success",
     "resultFailed": "Failed",
     "typeSetProperty": "Set property",
-    "typeCallAction": "Call action",
+    "typeCallAction": "Run action",
     "typeSceneTrigger": "Trigger scene",
-    "typeUnknown": "Unknown action",
-    "limitHint": "Showing the latest 500 actions only"
+    "typeUnknown": "Other action",
+    "limitHint": "Showing the latest 500 actions"
   }
 }

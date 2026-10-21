@@ -1,27 +1,15 @@
 {
-  "lang": {
-    "label": "语言",
-    "zh": "中文",
-    "en": "English",
-    "pageTitle": "我的家"
-  },
-  "theme": {
-    "toLight": "切换为明亮",
-    "toDark": "切换为暗色"
-  },
+  "lang": {"label": "语言", "zh": "中文", "en": "English", "pageTitle": "我的家"},
+  "theme": {"toLight": "切换到浅色", "toDark": "切换到深色"},
   "common": {
     "retry": "重试",
     "loading": "加载中…",
-    "switchFailed": "切换失败，稍后再试",
+    "switchFailed": "切换失败，请重试",
     "expand": "展开",
     "collapse": "收起",
     "notification": "通知",
     "close": "关闭",
-    "errorToast": "{{label}}，稍后再试"
+    "errorToast": "{{label}}，请重试"
   },
-  "perfView": {
-    "title": "性能调试",
-    "subtitle": "debug view",
-    "back": "返回主应用"
-  }
+  "perfView": {"title": "性能调试", "subtitle": "调试视图", "back": "返回"}
 }

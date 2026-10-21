@@ -403,22 +403,25 @@ def test_rule_only_system_prompt_override_empty_uses_builtin():
 
 
 def test_global_system_prompt_appended_to_rule_only():
-    """global_system_prompt 非空 → 追加「# 全局感知须知」，内置内容全部保留。"""
+    """global_system_prompt 非空 → **原样**追加（段落标题由住户自己写），内置内容全部保留。"""
     scene = SceneDescriptor(route='video', rule_only=True, has_audio=False, has_speech=False)
+    user_text = '# 家庭须知\n\n- 始终关注门口地面\n- 忽略电视屏幕内容'
     engine = {
         'rule_only_system_prompt': '',
-        'global_system_prompt': '全局：始终关注门口地面；忽略电视屏幕内容。',
+        'global_system_prompt': user_text,
     }
     with patch('miloco.config.get_settings') as mock_gs:
         _patch_engine_settings(mock_gs, engine)
         sp = build_system_prompt(scene, camera_prompt='本机位：忽略窗外')
     assert '规则判定引擎' in sp, '内置角色保留'
     assert '["规则id"]' in sp, '内置 schema 保留'
-    assert '# 全局感知须知' in sp
     assert '始终关注门口地面' in sp
     assert '本机位：忽略窗外' in sp
+    # 原样追加：住户写的标题原封不动，代码不再多包一层「# 全局感知须知」
+    assert '# 家庭须知' in sp
+    assert '# 全局感知须知' not in sp
     # 全局段在 camera_prompt 之前（全局对所有机位相同 → 与内置段同为共享前缀）
-    assert sp.index('# 全局感知须知') < sp.index('本机位：忽略窗外')
+    assert sp.index('# 家庭须知') < sp.index('本机位：忽略窗外')
 
 
 def test_global_system_prompt_empty_not_injected():
@@ -428,7 +431,7 @@ def test_global_system_prompt_empty_not_injected():
             mock_gs, {'rule_only_system_prompt': '', 'global_system_prompt': '   '}
         )
         sp = build_system_prompt(scene)
-    assert '# 全局感知须知' not in sp
+    assert '全局感知' not in sp
 
 
 def test_global_system_prompt_not_str_ignored():
@@ -439,18 +442,19 @@ def test_global_system_prompt_not_str_ignored():
             mock_gs, {'rule_only_system_prompt': '', 'global_system_prompt': ['x']}
         )
         sp = build_system_prompt(scene)
-    assert '# 全局感知须知' not in sp
+    assert '全局感知' not in sp
 
 
 def test_global_system_prompt_appended_to_full_perception():
-    """全量感知（非 rule_only）也追加全局感知须知。"""
+    """全量感知（非 rule_only）也原样追加住户写的全局提示。"""
     scene = SceneDescriptor(route='video', has_identity=False, stream=False, has_audio=False, has_speech=False)
     with patch('miloco.config.get_settings') as mock_gs:
-        _patch_engine_settings(mock_gs, {'global_system_prompt': '全局：注意地面水渍'})
+        _patch_engine_settings(mock_gs, {'global_system_prompt': '# 留意\n\n注意地面水渍'})
         sp = build_system_prompt(scene, include_home_profile=False)
     assert '家庭场景理解智能助手' in sp
-    assert '# 全局感知须知' in sp
+    assert '# 留意' in sp
     assert '注意地面水渍' in sp
+    assert '# 全局感知须知' not in sp
 
 
 def test_override_wins_over_global_system_prompt():

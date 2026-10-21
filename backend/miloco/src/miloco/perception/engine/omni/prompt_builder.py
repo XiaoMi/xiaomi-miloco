@@ -188,7 +188,7 @@ def build_query_prompt(
     # 的补充指导与实时感知一致。
     global_prompt = _global_system_prompt()
     if global_prompt:
-        parts.append("# 全局感知须知\n\n" + global_prompt)
+        parts.append(global_prompt)
     # query 不接 crop(v1 范围外);走 _effective_panorama_short_edge() 兜掉历史 config.json 里
     # 可能残留的 0(早期哨兵),否则 _encode_video_mp4 会算出 scale=0 崩掉按需查询。
     video_b64, media_info = _encode_batch_video(
@@ -720,11 +720,13 @@ def build_system_prompt(
                 parts.append(home_profile)
     # 全局感知系统提示词（web「设置」页配置，热读）——住户对全部机位生效的补充指导
     # （关注的场景 / 通用判定口径 / 全局约束），不替代内置的角色 / 总原则 / schema /
-    # 字段说明。放在 camera_prompt 之前：它对所有机位相同，与内置段一起构成跨机位的
-    # 共享前缀（camera_prompt 逐机位不同，保持最后）。
+    # 字段说明。**原样追加**：段落标题由住户自己写（想分节就写 `# 标题`），代码不再包一层
+    # 「# 全局感知须知」——多包一层会让住户自己写的首个标题变成二级标题，层级也乱。
+    # 放在 camera_prompt 之前：它对所有机位相同，与内置段一起构成跨机位的共享前缀
+    # （camera_prompt 逐机位不同，保持最后）。
     global_prompt = _global_system_prompt()
     if global_prompt:
-        parts.append("# 全局感知须知\n\n" + global_prompt)
+        parts.append(global_prompt)
     # camera_prompt — 低频变动，放在 system prompt 尾部 → prefix cache 能命中前面的共享前缀
     note = camera_prompt.strip() if camera_prompt else ""
     if note:
@@ -1563,9 +1565,12 @@ def _global_system_prompt() -> str:
     读取 ``perception.engine.global_system_prompt``（settings.yaml 默认 / config.json /
     admin ``PUT /api/admin/perception-config`` 写盘后经 reset_settings 热读；下个感知窗口
     生效，免重启）。与 ``_rule_only_system_prompt_override`` 的区别：本项是**追加**——
-    内置角色 / 总原则 / schema / 字段说明全部保留，只在其后补一段「# 全局感知须知」
-    （位于逐机位 ``camera_prompt`` 之前）；覆盖项非空时仍以覆盖项为准（全量替换，
-    不追加本项）。
+    内置角色 / 总原则 / schema / 字段说明全部保留，只在其后**原样**补上住户写的内容
+    （位于逐机位 ``camera_prompt`` 之前，段落之间用空行分隔）；覆盖项非空时仍以覆盖项为准
+    （全量替换，不追加本项）。
+
+    段落标题由住户自己在内容里写（如 ``# 全局感知须知``），代码不额外包标题或分节，
+    写什么就原样进 system prompt。
 
     只认非空 ``str``（其余类型一律视为未设置，防御配置误写）。
     """

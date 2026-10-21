@@ -1,27 +1,15 @@
 {
-  "lang": {
-    "label": "Language",
-    "zh": "中文",
-    "en": "English",
-    "pageTitle": "My Home"
-  },
-  "theme": {
-    "toLight": "Switch to light",
-    "toDark": "Switch to dark"
-  },
+  "lang": {"label": "Language", "zh": "中文", "en": "English", "pageTitle": "My Home"},
+  "theme": {"toLight": "Switch to light", "toDark": "Switch to dark"},
   "common": {
     "retry": "Retry",
     "loading": "Loading…",
-    "switchFailed": "Couldn't switch, try again later",
+    "switchFailed": "Couldn't switch. Try again.",
     "expand": "Expand",
     "collapse": "Collapse",
     "notification": "Notifications",
     "close": "Close",
-    "errorToast": "{{label}}, try again later"
+    "errorToast": "{{label}}. Try again."
   },
-  "perfView": {
-    "title": "Performance",
-    "subtitle": "debug view",
-    "back": "Back to app"
-  }
+  "perfView": {"title": "Performance", "subtitle": "debug view", "back": "Back"}
 }

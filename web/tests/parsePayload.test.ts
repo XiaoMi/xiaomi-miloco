@@ -27,56 +27,56 @@ describe("parsePayload — 米家 OAuth base64 payload 解析", () => {
     expect(out).toEqual({ code: "abc", state: "xyz" });
   });
 
-  it("空字符串 → 错误「授权码为空」", () => {
+  it("空字符串 → 错误「请先复制授权码」", () => {
     expect(parsePayload("")).toEqual({
-      error: "授权码为空，请从授权页复制后粘贴",
+      error: "请先复制授权码再粘贴",
     });
     expect(parsePayload("   ")).toEqual({
-      error: "授权码为空，请从授权页复制后粘贴",
+      error: "请先复制授权码再粘贴",
     });
   });
 
   it("非合法 base64 → 错误「不是合法的 base64」", () => {
     const out = parsePayload("not!base64@@@");
     expect(out).toHaveProperty("error");
-    expect((out as { error: string }).error).toContain("base64");
+    expect((out as { error: string }).error).toContain("授权码不对");
   });
 
   it("base64 解出来不是 JSON → 错误「内容解析失败」", () => {
     const raw = btoa("just plain text not json");
     const out = parsePayload(raw);
     expect(out).toHaveProperty("error");
-    expect((out as { error: string }).error).toContain("解析");
+    expect((out as { error: string }).error).toContain("读不出来");
   });
 
   it("JSON 缺 code 字段 → 错误「缺少 code 或 state」", () => {
     const raw = makePayload({ state: "xyz" });
     const out = parsePayload(raw);
-    expect(out).toEqual({ error: "授权码缺少 code 或 state 字段" });
+    expect(out).toEqual({ error: "授权码不完整，请重新复制" });
   });
 
   it("JSON 缺 state 字段 → 错误「缺少 code 或 state」", () => {
     const raw = makePayload({ code: "abc" });
     const out = parsePayload(raw);
-    expect(out).toEqual({ error: "授权码缺少 code 或 state 字段" });
+    expect(out).toEqual({ error: "授权码不完整，请重新复制" });
   });
 
   it("JSON code 字段是数字（类型错误）→ 错误「缺少 code 或 state」", () => {
     const raw = makePayload({ code: 123, state: "xyz" });
     const out = parsePayload(raw);
-    expect(out).toEqual({ error: "授权码缺少 code 或 state 字段" });
+    expect(out).toEqual({ error: "授权码不完整，请重新复制" });
   });
 
   it("JSON code 是空字符串 → 错误「code 或 state 为空」", () => {
     const raw = makePayload({ code: "  ", state: "xyz" });
     const out = parsePayload(raw);
-    expect(out).toEqual({ error: "授权码 code 或 state 为空" });
+    expect(out).toEqual({ error: "授权码不完整，请重新复制" });
   });
 
   it("JSON state 是空字符串 → 错误「code 或 state 为空」", () => {
     const raw = makePayload({ code: "abc", state: "" });
     const out = parsePayload(raw);
-    expect(out).toEqual({ error: "授权码 code 或 state 为空" });
+    expect(out).toEqual({ error: "授权码不完整，请重新复制" });
   });
 
   it("真实小米 OAuth 回调 payload 结构（含 union_id 等多余字段也 OK）", () => {

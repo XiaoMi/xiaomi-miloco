@@ -50,13 +50,26 @@ const DEFAULTS: PerceptionConfig = {
   perception_verbose: DEFAULT_PERCEPTION_VERBOSE,
 };
 
+// 开关类说明里用 "\n" 分条（"开：…" / "关：…"），直接塞进 <p> 会被 HTML 折成一行，
+// 几条约束挤在一起很难读。这里按行拆成多行渲染，条目之间自然换行。
+function HintLines({ text, className }: { text: string; className?: string }) {
+  return (
+    <div className={className}>
+      {text.split("\n").map((line, i) => (
+        <div key={i}>{line}</div>
+      ))}
+    </div>
+  );
+}
+
 // 全局感知系统提示词长度上限：与后端 PerceptionConfigBody 的 max_length 对齐，
 // 前端先挡住以免用户写完才吃 422。
 const GLOBAL_PROMPT_MAX = 8000;
 
 const SHORT_EDGE_OPTIONS = [360, 512, 768, 1080] as const;
 const FPS_OPTIONS = [1, 2, 3] as const;
-const WINDOW_MIN = 2;
+// 推理窗口可选范围（秒）：每个窗口截 1~10 秒画面送去推理。
+const WINDOW_MIN = 1;
 const WINDOW_MAX = 10;
 // slider 顺序即 URGENCY_RANK,index == pydantic Literal 顺序 → 双向 O(1) 映射。
 const URGENCY_LEVELS: readonly MinSuggestionUrgency[] = ["low", "medium", "high"] as const;
@@ -80,6 +93,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
   const [windowSize, setWindowSize] = useState(DEFAULTS.window_size);
   // Smart Crop 用户开关。与分辨率档正交（各自独立 dirty / 各自独立生效），
   // 不是第五个分辨率档 —— crop 视频的短边本身也按所选档等比跟随。
+  // slim（独立 App）不呈现这项（见下方 smartCropShown），保存时也不提交，避免把住户
+  // 原本开着的裁切因为"界面上看不到"而静默写成关。
   const [smartCrop, setSmartCrop] = useState(DEFAULTS.smart_crop_enabled === true);
   const [minUrgency, setMinUrgency] = useState<MinSuggestionUrgency>(
     DEFAULT_MIN_URGENCY,
@@ -159,13 +174,16 @@ export function SettingsDrawer({ open, onClose }: Props) {
   // 故置灰 + 换 hint，避免呈现「看着能动、实则后端不裁」的控件。
   // 老后端不返 smart_crop_available → undefined → 同样置灰。
   const smartCropAvailable = config?.smart_crop_available === true;
+  // 这一项是否呈现 / 参与保存：slim 版直接不显示（住户诉求：设置项太多），
+  // 同时 dirty 与 PUT 都不带上它，免得"看不到的字段"被当成改过 / 写回默认值。
+  const smartCropShown = !slim && smartCropAvailable;
   const perceptionDirty =
     config != null &&
     (videoShortEdge !== config.video_short_edge ||
       omniFps !== config.omni_fps ||
       windowSize !== config.window_size ||
-      // 不可用时恒 false：置灰的开关不该产出待保存改动
-      (smartCropAvailable && smartCrop !== (config.smart_crop_enabled === true)) ||
+      // 不可用 / 不呈现时恒 false：置灰的开关不该产出待保存改动
+      (smartCropShown && smartCrop !== (config.smart_crop_enabled === true)) ||
       minUrgency !== (config.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY) ||
       perceptionInput !== normalizePerceptionInput(config.perception_input) ||
       imageLastFrameOnly !== (config.image_last_frame_only === true) ||
@@ -200,8 +218,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
           video_short_edge: videoShortEdge,
           omni_fps: omniFps,
           window_size: windowSize,
-          // 只在发版级开关放开时才提交,不可用时不往后端写一个用户按不动的值
-          ...(smartCropAvailable ? { smart_crop_enabled: smartCrop } : {}),
+          // 只在「呈现且发版级开关放开」时才提交:不可用 / 不呈现时不往后端写一个
+          // 用户看不到也按不动的值。
+          ...(smartCropShown ? { smart_crop_enabled: smartCrop } : {}),
           min_suggestion_urgency: minUrgency,
           global_system_prompt: globalPrompt.trim(),
           ...buildPerceptionInputPayload(perceptionInput, imageLastFrameOnly),
@@ -325,9 +344,14 @@ export function SettingsDrawer({ open, onClose }: Props) {
             <>
               {/* 分辨率 */}
               <div className="space-y-2.5">
-                <label className="text-body font-medium text-text-primary block">
-                  {t("settings.videoShortEdge")}
-                </label>
+                <div>
+                  <label className="text-body font-medium text-text-primary block">
+                    {t("settings.videoShortEdge")}
+                  </label>
+                  <p className="text-caption text-text-tertiary mt-0.5">
+                    {t("settings.videoShortEdgeHint")}
+                  </p>
+                </div>
                 <div className="flex gap-2">
                   {SHORT_EDGE_OPTIONS.map((v) => (
                     <button
@@ -344,14 +368,12 @@ export function SettingsDrawer({ open, onClose }: Props) {
                     </button>
                   ))}
                 </div>
-                <p className="text-caption text-text-tertiary">
-                  {t("settings.videoShortEdgeHint")}
-                </p>
               </div>
 
               {/* 智能裁切增强（Smart Crop）——独立开关，不是第五个分辨率档：
                   分辨率决定「多清晰」，裁切决定「看哪一块」，两者叠加生效
-                  （crop 视频短边按上面所选档等比跟随）。 */}
+                  （crop 视频短边按上面所选档等比跟随）。slim 版不呈现这一项。 */}
+              {!slim && (
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
                   <label className="text-body font-medium text-text-primary">
@@ -376,11 +398,17 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   </button>
                 </div>
                 <p className="text-caption text-text-tertiary">
-                  {smartCropAvailable
-                    ? t("settings.smartCropHint")
-                    : t("settings.smartCropUnavailable")}
+                  {smartCropAvailable ? (
+                    <HintLines
+                      text={t("settings.smartCropHint")}
+                      className="text-caption text-text-tertiary leading-relaxed"
+                    />
+                  ) : (
+                    t("settings.smartCropUnavailable")
+                  )}
                 </p>
               </div>
+              )}
 
               {/* 帧率（omni 采样率，slim 不跑 omni）*/}
               {!slim && (
@@ -410,7 +438,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
               </div>
               )}
 
-              {/* 感知窗口 */}
+              {/* 推理窗口：每个窗口截多长的一段画面送去推理（1~10s）。 */}
               <div className="space-y-2.5">
                 <div className="flex items-center justify-between">
                   <label className="text-body font-medium text-text-primary">
@@ -432,10 +460,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
                     background: `linear-gradient(to right, var(--color-brand-primary, #ff6900) ${((windowSize - WINDOW_MIN) / (WINDOW_MAX - WINDOW_MIN)) * 100}%, var(--color-border, #e5e5e5) ${((windowSize - WINDOW_MIN) / (WINDOW_MAX - WINDOW_MIN)) * 100}%)`,
                   }}
                 />
-                <div className="flex justify-between text-caption text-text-tertiary">
-                  <span>{WINDOW_MIN} {t("settings.windowSizeUnit")}</span>
-                  <span>{WINDOW_MAX} {t("settings.windowSizeUnit")}</span>
-                </div>
+                <p className="text-caption text-text-tertiary">
+                  {t("settings.windowSizeHint", { min: WINDOW_MIN, max: WINDOW_MAX })}
+                </p>
               </div>
 
               {/* 感知输入：图片/视频 + 图片是否只送末帧。只对 rule_only（slim 走这条）
@@ -443,9 +470,14 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   保存后下个感知窗口生效，不需要重启引擎。 */}
               {slim && (
               <div className="space-y-2.5">
-                <label className="text-body font-medium text-text-primary block">
-                  {t("settings.perceptionInput")}
-                </label>
+                <div>
+                  <label className="text-body font-medium text-text-primary block">
+                    {t("settings.perceptionInput")}
+                  </label>
+                  <p className="text-caption text-text-tertiary mt-0.5">
+                    {t("settings.perceptionInputHint")}
+                  </p>
+                </div>
                 <div className="flex gap-2">
                   {PERCEPTION_INPUT_MODES.map((m) => (
                     <button
@@ -461,15 +493,12 @@ export function SettingsDrawer({ open, onClose }: Props) {
                     >
                       {t(
                         m === "image"
-                          ? "settings.perceptionInputImage"
-                          : "settings.perceptionInputVideo",
+                          ? "settings.perceptionFormatImage"
+                          : "settings.perceptionFormatVideo",
                       )}
                     </button>
                   ))}
                 </div>
-                <p className="text-caption text-text-tertiary leading-relaxed">
-                  {t("settings.perceptionInputHint")}
-                </p>
 
                 {perceptionInput === "image" ? (
                   <div className="space-y-2 pt-1">
@@ -494,9 +523,10 @@ export function SettingsDrawer({ open, onClose }: Props) {
                         />
                       </button>
                     </div>
-                    <p className="text-caption text-text-tertiary leading-relaxed">
-                      {t("settings.imageLastFrameOnlyHint")}
-                    </p>
+                    <HintLines
+                      text={t("settings.imageLastFrameOnlyHint")}
+                      className="text-caption text-text-tertiary leading-relaxed"
+                    />
                   </div>
                 ) : (
                   <p className="text-caption text-text-tertiary leading-relaxed">
@@ -506,8 +536,9 @@ export function SettingsDrawer({ open, onClose }: Props) {
 
                 {/* 详细判定输出（verbose）：与图片/视频、单帧/多帧都正交，故放在三元之外。
                     开 = 让模型逐条给出 hit 与不限字数的 reason，排查"该命中没命中 /
-                    不该命中却命中"；关（默认）= 只回命中规则的 id 数组，判定更快。 */}
-                <div className="space-y-2 border-t border-border pt-2.5">
+                    不该命中却命中"；关（默认）= 只回命中规则的 id 数组，判定更快。
+                    与上面「只看最后一帧」之间只用一段空白间距分隔（不再画分割线）。 */}
+                <div className="space-y-2 pt-4">
                   <div className="flex items-center justify-between">
                     <label className="text-body font-medium text-text-primary">
                       {t("settings.perceptionVerbose")}
@@ -529,9 +560,10 @@ export function SettingsDrawer({ open, onClose }: Props) {
                       />
                     </button>
                   </div>
-                  <p className="text-caption text-text-tertiary leading-relaxed">
-                    {t("settings.perceptionVerboseHint")}
-                  </p>
+                  <HintLines
+                    text={t("settings.perceptionVerboseHint")}
+                    className="text-caption text-text-tertiary leading-relaxed"
+                  />
                 </div>
               </div>
               )}
@@ -595,11 +627,13 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 <textarea
                   value={globalPrompt}
                   onChange={(e) => setGlobalPrompt(e.target.value)}
-                  rows={6}
+                  rows={5}
                   maxLength={GLOBAL_PROMPT_MAX}
                   placeholder={t("settings.globalPromptPlaceholder")}
                   className="w-full rounded-xl bg-bg-primary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary resize-y"
                 />
+                {/* 一句话说清：内容原样追加到系统提示词，不额外加段落标题——
+                    想分节就在内容里自己写 `# 标题`（输入框 placeholder 即示例）。 */}
                 <p className="text-caption text-text-tertiary leading-relaxed">
                   {t("settings.globalPromptHint")}
                 </p>
@@ -630,9 +664,14 @@ export function SettingsDrawer({ open, onClose }: Props) {
                   </button>
                 </div>
                 <p className="text-caption text-text-tertiary">
-                  {schedulerAvailable
-                    ? t("settings.autoScheduleHint")
-                    : t("settings.autoScheduleUnavailable")}
+                  {schedulerAvailable ? (
+                    <HintLines
+                      text={t("settings.autoScheduleHint")}
+                      className="text-caption text-text-tertiary leading-relaxed"
+                    />
+                  ) : (
+                    t("settings.autoScheduleUnavailable")
+                  )}
                 </p>
               </div>
               )}

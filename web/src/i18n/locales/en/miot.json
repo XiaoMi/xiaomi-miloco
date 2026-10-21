@@ -1,6 +1,6 @@
 {
   "miot": {
-    "opFail": "Couldn't complete the operation ({{op}})",
-    "unassigned": "Unassigned"
+    "opFail": "Failed ({{op}})",
+    "unassigned": "No room"
   }
 }

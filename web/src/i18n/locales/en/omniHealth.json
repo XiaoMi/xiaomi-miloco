@@ -1,25 +1,25 @@
 {
   "omniHealth": {
-    "configInvalid": "Omni configuration is invalid: {{message}}",
-    "retrying": "Omni service is unavailable ({{message}}). Retrying in {{seconds}}s…",
-    "retryingNoTime": "Omni service is unavailable ({{message}}). Retrying…",
+    "configInvalid": "Model config problem: {{message}}",
+    "retrying": "Model service is unreachable ({{message}}). Retrying… next try in {{seconds}}s",
+    "retryingNoTime": "Model service is unreachable ({{message}}). Retrying…",
     "retryNow": "Retry now",
     "retryingBtn": "Retrying…",
-    "cooldownBtn": "Cool down {{seconds}}s",
-    "goToConfig": "Fix in Model tab",
+    "cooldownBtn": "Cooling down {{seconds}}s",
+    "goToConfig": "Fix it on the Models page",
     "retryFailed": "Retry failed",
     "failuresCount": "{{n}} failures",
     "codes": {
-      "unreachable": "Couldn't reach the Omni service",
-      "timeout": "Omni service timed out",
-      "http_error": "Omni service returned an error",
-      "rate_limited": "Rate-limited by the provider",
-      "bad_key": "Invalid API key or insufficient permission",
-      "no_key": "API key not configured",
+      "unreachable": "Can't reach the model service",
+      "timeout": "Model service timed out",
+      "http_error": "Model service error",
+      "rate_limited": "Rate limited",
+      "bad_key": "API Key invalid or not allowed",
+      "no_key": "No API Key yet",
       "not_found": "Model or URL not found",
-      "rejected_authed": "Connected, but the request was rejected (model name or API key may be wrong)",
-      "bad_response": "Malformed response from Omni",
-      "cancelled": "Retry was interrupted"
+      "rejected_authed": "Connected, but the request was rejected (check model name and API Key)",
+      "bad_response": "Unexpected response format",
+      "cancelled": "Retry cancelled"
     }
   }
 }

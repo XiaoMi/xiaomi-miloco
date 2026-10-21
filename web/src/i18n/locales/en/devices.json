@@ -1,16 +1,16 @@
 {
   "devices": {
-    "title": "Home devices",
-    "unassigned": "Unassigned",
-    "emptyState": "No devices yet · They'll appear automatically after Xiaomi Home binding",
-    "countUnit": "{{n}} devices",
+    "title": "Devices",
+    "unassigned": "No room",
+    "emptyState": "No devices yet · they appear once Xiaomi Home is connected",
+    "countUnit": "{{n}}",
     "onCount": " · {{n}} on",
     "offlineCount": " · {{n}} offline",
-    "scenesHeading": "Scenes · One tap",
-    "sceneTriggered": "Triggered \"{{name}}\"",
-    "sceneTriggerFailed": "Couldn't trigger scene",
-    "watchCamera": "Watch {{name}}",
-    "liveView": "{{name}} live view",
+    "scenesHeading": "Scenes · one tap",
+    "sceneTriggered": "Ran “{{name}}”",
+    "sceneTriggerFailed": "Couldn't run the scene",
+    "watchCamera": "View {{name}}",
+    "liveView": "{{name}} live",
     "loadingStream": "Loading stream…",
     "close": "Close"
   }
