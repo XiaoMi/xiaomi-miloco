@@ -10,12 +10,14 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
 import math
 import threading
+import time
 from collections.abc import Callable, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from miloco.state.path import (
@@ -25,7 +27,14 @@ from miloco.state.path import (
     split_path,
     validate_segment,
 )
-from miloco.state.types import MISSING, Change, Entry, Node, StateValue
+from miloco.state.types import (
+    MISSING,
+    Change,
+    Entry,
+    ExpireAction,
+    Node,
+    StateValue,
+)
 from miloco.state.utils import format_dump
 from miloco.utils.time_utils import now_ms
 
@@ -44,6 +53,10 @@ _cascade_depth: ContextVar[int] = ContextVar("miloco_state_cascade_depth", defau
 Subscriber = tuple[int, tuple[str, ...], Callable[[Change], None]]
 
 
+def _monotonic_ms() -> int:
+    return time.monotonic_ns() // 1_000_000
+
+
 @dataclass(slots=True)
 class _Batch:
     """一次写入产生的变更。
@@ -54,11 +67,17 @@ class _Batch:
 
     source: str
     now: int
+    expires_at: int | None = None
+    expiration_deadline: int | None = None
+    on_expire: ExpireAction = "delete"
+    reason: str = "update"
     deletes: list[Change] = field(default_factory=list)
     upserts: list[Change] = field(default_factory=list)
+    expiration_paths: list[str] = field(default_factory=list)
     # 本次写入让几条路径在叶子与子树之间翻了形态。翻转会让订阅旧形态的消费方收到一个删除
     # 事件之后再也收不到，而边界由数据的类型决定、写入方并不声明，所以只能在这里数。
     flips: int = 0
+    created: int = 0
 
     def changes(self) -> list[Change]:
         return self.deletes + self.upserts
@@ -110,6 +129,15 @@ def _normalize(value: Any, depth: int) -> Any:
     return _normalize_scalar(value)
 
 
+def _validate_expiration(expires_in_ms: int | None, on_expire: ExpireAction) -> None:
+    if expires_in_ms is not None and (
+        type(expires_in_ms) is not int or expires_in_ms < 0
+    ):
+        raise ValueError("expires_in_ms 必须是非负整数或 None")
+    if on_expire not in ("delete", "retain"):
+        raise ValueError("on_expire 必须是 'delete' 或 'retain'")
+
+
 @dataclass(slots=True)
 class _MatchStats:
     """一条 pattern 的匹配结果。两个数一起才能分出「路径不存在」和「少写了 `**`」。"""
@@ -129,6 +157,7 @@ def _deleted(segments: tuple[str, ...], entry: Entry, batch: _Batch) -> Change:
         new=MISSING,
         source=batch.source,
         at=batch.now,
+        reason=batch.reason,
     )
 
 
@@ -170,15 +199,58 @@ def _build(
         old = None
     if old is None:
         batch.upserts.append(
-            Change(_join(segments), MISSING, value, batch.source, batch.now)
+            Change(
+                _join(segments), MISSING, value, batch.source, batch.now, batch.reason
+            )
         )
-        return Entry(value, batch.now, batch.now, batch.source)
+        batch.expiration_paths.append(_join(segments))
+        batch.created += 1
+        return Entry(
+            value,
+            batch.now,
+            batch.now,
+            batch.source,
+            batch.expires_at,
+            False,
+            batch.on_expire,
+        )
     if _same(old.value, value):
-        return Entry(value, old.last_changed, batch.now, batch.source)
+        batch.expiration_paths.append(_join(segments))
+        if old.expired or (old.expires_at is not None and old.expires_at <= batch.now):
+            # 过期后同值刷新会把读取视角从「不可见」切回「可见」。这条可见性边沿不补
+            # 事件，订阅方只能停在已过期，直到值真的变化才恢复。
+            batch.upserts.append(
+                Change(
+                    _join(segments),
+                    MISSING,
+                    value,
+                    batch.source,
+                    batch.now,
+                    batch.reason,
+                )
+            )
+        return Entry(
+            value,
+            old.last_changed,
+            batch.now,
+            batch.source,
+            batch.expires_at,
+            False,
+            batch.on_expire,
+        )
     batch.upserts.append(
-        Change(_join(segments), old.value, value, batch.source, batch.now)
+        Change(_join(segments), old.value, value, batch.source, batch.now, batch.reason)
     )
-    return Entry(value, batch.now, batch.now, batch.source)
+    batch.expiration_paths.append(_join(segments))
+    return Entry(
+        value,
+        batch.now,
+        batch.now,
+        batch.source,
+        batch.expires_at,
+        False,
+        batch.on_expire,
+    )
 
 
 def _prune(parents: list[dict[str, Node]], segments: tuple[str, ...]) -> None:
@@ -193,34 +265,64 @@ def _prune(parents: list[dict[str, Node]], segments: tuple[str, ...]) -> None:
         del parents[index - 1][segments[index - 1]]
 
 
-def _plain(node: dict[str, Node]) -> dict[str, Any]:
+def _is_expired(entry: Entry, now: int) -> bool:
+    return entry.expired or (
+        entry.expires_at is not None and entry.expires_at <= now
+    )
+
+
+def _plain(node: dict[str, Node], now: int) -> dict[str, Any]:
     """剥掉元数据的嵌套 dict。"""
     plain: dict[str, Any] = {}
     for key, child in node.items():
-        plain[key] = child.value if isinstance(child, Entry) else _plain(child)
+        if isinstance(child, Entry):
+            if not _is_expired(child, now):
+                plain[key] = child.value
+        else:
+            sub = _plain(child, now)
+            if sub:
+                plain[key] = sub
     return plain
 
 
-def _leaf_view(entry: Entry, with_meta: bool) -> Any:
+def _visible_entry(entry: Entry, now: int) -> Entry | None:
+    if not _is_expired(entry, now):
+        return entry
+    if entry.on_expire == "delete":
+        return None
+    if entry.expired:
+        return entry
+    return replace(entry, expired=True)
+
+
+def _leaf_view(entry: Entry, with_meta: bool, now: int) -> Any:
     # 带元数据时直接给出 `Entry` 而不是拆成 dict：叶子是不是 dict 决定了遍历结果的人能不能
     # 认出它，拆开之后叶子和子树就分不出来了。`Entry` 是 frozen 的，共享引用安全。
-    return entry if with_meta else entry.value
+    visible = _visible_entry(entry, now)
+    if visible is None:
+        return MISSING
+    if visible.expired and not with_meta:
+        return MISSING
+    return visible if with_meta else visible.value
 
 
 def _copy_leaves(
-    node: Node, key: str, out: dict, with_meta: bool, stats: _MatchStats
+    node: Node, key: str, out: dict, with_meta: bool, now: int, stats: _MatchStats
 ) -> None:
     """把 node 下的所有叶子按原结构写进 out[key]。"""
     if isinstance(node, Entry):
-        out[key] = _leaf_view(node, with_meta)
-        stats.leaves += 1
+        value = _leaf_view(node, with_meta, now)
+        if value is not MISSING:
+            out[key] = value
+            stats.leaves += 1
         return
     # 这里写的是 node 下的全部叶子，必然覆盖别的 pattern 在同一路径上收到的那部分，
     # 所以不必像 `_collect_matches` 那样往已有的子树里合并
     sub: dict[str, Any] = {}
     for child_key, child in node.items():
-        _copy_leaves(child, child_key, sub, with_meta, stats)
-    out[key] = sub
+        _copy_leaves(child, child_key, sub, with_meta, now, stats)
+    if sub:
+        out[key] = sub
 
 
 def _collect_matches(
@@ -229,6 +331,7 @@ def _collect_matches(
     index: int,
     out: dict,
     with_meta: bool,
+    now: int,
     stats: _MatchStats,
 ) -> None:
     """把 node 下匹配 pattern[index:] 的叶子按原路径写进 out。
@@ -238,7 +341,7 @@ def _collect_matches(
     segment = pattern[index]
     if segment == "**":
         for key, child in node.items():
-            _copy_leaves(child, key, out, with_meta, stats)
+            _copy_leaves(child, key, out, with_meta, now, stats)
         return
 
     if segment == "*":
@@ -252,8 +355,10 @@ def _collect_matches(
     for key, child in children:
         if is_last:
             if isinstance(child, Entry):
-                out[key] = _leaf_view(child, with_meta)
-                stats.leaves += 1
+                value = _leaf_view(child, with_meta, now)
+                if value is not MISSING:
+                    out[key] = value
+                    stats.leaves += 1
             else:
                 # 末段的语义是「这一层的叶子」，中间节点不收。记下来，好让调用方知道
                 # 自己少写了 `**`，而不是拿到一个和「路径不存在」一样的空结果
@@ -262,7 +367,7 @@ def _collect_matches(
             # 多个 pattern 共用一个 out：已经收进来的子树要接着往里写，另起一个再赋值会把
             # 前一个 pattern 的结果整个盖掉
             sub = out.setdefault(key, {})
-            _collect_matches(child, pattern, index + 1, sub, with_meta, stats)
+            _collect_matches(child, pattern, index + 1, sub, with_meta, now, stats)
             if not sub:
                 del out[key]
 
@@ -277,6 +382,10 @@ class StateStore:
         # 订阅序号单调递增，只用来比先后，不复用不回收
         self._sub_seq = 0
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._expiration_heap: list[tuple[int, str]] = []
+        self._expiration_by_path: dict[str, int] = {}
+        self._expiration_handle: asyncio.TimerHandle | None = None
+        self._scheduled_expire_at: int | None = None
         # 每次真实的启停切换加一，幂等调用不加。停止前排队的 _dispatch 靠它作废。
         self._generation = 0
         self._leaf_count = 0
@@ -294,14 +403,26 @@ class StateStore:
 
     # ---- 写 ----
 
-    def set(self, path: str, value: Any, *, source: str) -> bool:
+    def set(
+        self,
+        path: str,
+        value: Any,
+        *,
+        source: str,
+        expires_in_ms: int | None = None,
+        on_expire: ExpireAction = "delete",
+    ) -> bool:
         """写入。恒为替换：原子树下未被新值覆盖的叶子会被删除，想局部更新就写更深的路径。
+
+        `expires_in_ms` 缺省表示永久有效；指定后到期默认删除并通知订阅方。`retain` 策略保留
+        元数据供查询方识别过期，但普通 `get` / 快照不再返回该值。
 
         返回这一笔有没有进树。撞上叶子上限时整笔被拒却**不抛异常**（理由见 MAX_LEAVES
         那段注释），调用方只能靠这个返回值知道；级联深度超限同样返回假。判定在锁内做，
         不会把别的写入方撞的上限算到自己头上。删除类操作不涨叶子、撞不上这道闸，所以
         `delete` / `clear` 没有对应的返回值。
         """
+        _validate_expiration(expires_in_ms, on_expire)
         depth = self._next_cascade_depth("set", path)
         if depth is None:
             return False
@@ -309,7 +430,14 @@ class StateStore:
             # 取时间必须在锁内：放锁外时先取到时间的线程可能后提交，树里最终那个值会带上比
             # 前一个值更旧的时间戳，按时间戳判新鲜度的消费方会把最新值当过期的丢掉
             rejected_before = self._rejected_leaf_limit
-            changes = self._apply(path, value, source, now_ms())
+            now = now_ms()
+            expires_at = None if expires_in_ms is None else now + expires_in_ms
+            expiration_deadline = (
+                None if expires_in_ms is None else _monotonic_ms() + expires_in_ms
+            )
+            changes = self._apply(
+                path, value, source, now, expires_at, expiration_deadline, on_expire
+            )
             landed = self._rejected_leaf_limit == rejected_before
             self._enqueue(changes, depth)
         return landed
@@ -350,10 +478,26 @@ class StateStore:
             )
         return None
 
-    def _commit(self, path: str, value: Any, *, source: str) -> list[Change]:
+    def _commit(
+        self,
+        path: str,
+        value: Any,
+        *,
+        source: str,
+        expires_in_ms: int | None = None,
+        on_expire: ExpireAction = "delete",
+    ) -> list[Change]:
         """写入并返回本次变更，不投递。数据结构层单测的入口。"""
+        _validate_expiration(expires_in_ms, on_expire)
         with self._lock:
-            return self._apply(path, value, source, now_ms())
+            now = now_ms()
+            expires_at = None if expires_in_ms is None else now + expires_in_ms
+            expiration_deadline = (
+                None if expires_in_ms is None else _monotonic_ms() + expires_in_ms
+            )
+            return self._apply(
+                path, value, source, now, expires_at, expiration_deadline, on_expire
+            )
 
     def _commit_delete(self, path: str, *, source: str) -> list[Change]:
         """删除并返回本次变更，不投递。数据结构层单测的入口。"""
@@ -365,7 +509,16 @@ class StateStore:
         with self._lock:
             return self._clear(source, now_ms())
 
-    def _apply(self, path: str, value: Any, source: str, now: int) -> list[Change]:
+    def _apply(
+        self,
+        path: str,
+        value: Any,
+        source: str,
+        now: int,
+        expires_at: int | None = None,
+        expiration_deadline: int | None = None,
+        on_expire: ExpireAction = "delete",
+    ) -> list[Change]:
         """校验 → diff → 提交。必须在锁内调用。
 
         校验全部前置在 `_normalize`，构造新节点这一段不会再抛异常；最后一步的挂载是单次
@@ -373,12 +526,17 @@ class StateStore:
         """
         segments = split_path(path)
         normalized = _normalize(value, len(segments))
-        batch = _Batch(source=source, now=now)
+        batch = _Batch(
+            source=source,
+            now=now,
+            expires_at=expires_at,
+            expiration_deadline=expiration_deadline,
+            on_expire=on_expire,
+        )
         old_node = self._locate_for_write(segments, batch)
         new_node = _build(normalized, old_node, segments, batch)
 
-        added = sum(1 for change in batch.upserts if change.old is MISSING)
-        total = self._leaf_count + added - len(batch.deletes)
+        total = self._leaf_count + batch.created - len(batch.deletes)
         if total > MAX_LEAVES:
             self._rejected_leaf_limit += 1
             # 只报一次：撑爆树的来源通常是高频的，而这条日志在锁内，按写入频率打会把所有
@@ -395,9 +553,30 @@ class StateStore:
 
         self._attach(segments, new_node)
         self._leaf_count = total
+        for change in batch.deletes:
+            self._expiration_by_path.pop(change.path, None)
+        for expiration_path in batch.expiration_paths:
+            self._expiration_by_path.pop(expiration_path, None)
+            if batch.expiration_deadline is not None:
+                self._expiration_by_path[expiration_path] = batch.expiration_deadline
+                heapq.heappush(
+                    self._expiration_heap,
+                    (batch.expiration_deadline, expiration_path),
+                )
+        self._compact_expiration_heap()
+        if batch.expiration_deadline is not None:
+            self._request_expiration_reschedule_locked()
         if batch.flips:
             self._record_shape_flips(batch.flips, path)
         return batch.changes()
+
+    def _compact_expiration_heap(self) -> None:
+        if len(self._expiration_heap) <= max(64, len(self._expiration_by_path) * 2):
+            return
+        self._expiration_heap = [
+            (expires_at, path) for path, expires_at in self._expiration_by_path.items()
+        ]
+        heapq.heapify(self._expiration_heap)
 
     def _record_shape_flips(self, count: int, path: str) -> None:
         """必须在锁内调用。只报第一条：形态在两种之间来回抖时，按写入频率打日志会把所有
@@ -442,7 +621,9 @@ class StateStore:
         else:
             parents[-1][segments[-1]] = node
 
-    def _remove(self, path: str, source: str, now: int) -> list[Change]:
+    def _remove(
+        self, path: str, source: str, now: int, *, reason: str = "delete"
+    ) -> list[Change]:
         segments = split_path(path)
         parents = [self._root]
         for segment in segments[:-1]:
@@ -453,11 +634,13 @@ class StateStore:
         node = parents[-1].get(segments[-1])
         if node is None:
             return []
-        batch = _Batch(source=source, now=now)
+        batch = _Batch(source=source, now=now, reason=reason)
         _collect_deletes(node, segments, batch)
         del parents[-1][segments[-1]]
         _prune(parents, segments)
         self._leaf_count -= len(batch.deletes)
+        for change in batch.deletes:
+            self._expiration_by_path.pop(change.path, None)
         return batch.changes()
 
     def _clear(self, source: str, now: int) -> list[Change]:
@@ -467,13 +650,132 @@ class StateStore:
         没有漂过。说树的内容的那几个告警标志跟着复位；记「这条生命里发生过多少」的那些
         计数不复位。
         """
-        batch = _Batch(source=source, now=now)
+        batch = _Batch(source=source, now=now, reason="clear")
         _collect_deletes(self._root, (), batch)
         self._root = {}
         self._leaf_count = 0
+        self._expiration_heap.clear()
+        self._expiration_by_path.clear()
+        self._request_expiration_reschedule_locked()
         self._warned_leaf_limit = False
         self._warned_shape_flip = False
         return batch.changes()
+
+    def _request_expiration_reschedule_locked(self) -> None:
+        loop = self._loop
+        if loop is None:
+            return
+        generation = self._generation
+        try:
+            loop.call_soon_threadsafe(
+                self._reschedule_expiration,
+                loop,
+                generation,
+            )
+        except RuntimeError:
+            self._expiration_handle = None
+            self._scheduled_expire_at = None
+
+    def _reschedule_expiration(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        generation: int,
+    ) -> None:
+        with self._lock:
+            if self._loop is not loop or self._generation != generation:
+                return
+            now = _monotonic_ms()
+            while self._expiration_heap:
+                expires_at, path = self._expiration_heap[0]
+                entry = self._locate(split_path(path))
+                if (
+                    not isinstance(entry, Entry)
+                    or self._expiration_by_path.get(path) != expires_at
+                    or entry.expired
+                ):
+                    heapq.heappop(self._expiration_heap)
+                    continue
+                break
+
+            if not self._expiration_heap:
+                if self._expiration_handle is not None:
+                    self._expiration_handle.cancel()
+                self._expiration_handle = None
+                self._scheduled_expire_at = None
+                return
+
+            expires_at = self._expiration_heap[0][0]
+            if (
+                self._expiration_handle is not None
+                and not self._expiration_handle.cancelled()
+                and self._scheduled_expire_at == expires_at
+            ):
+                return
+            if self._expiration_handle is not None:
+                self._expiration_handle.cancel()
+            self._scheduled_expire_at = expires_at
+            self._expiration_handle = loop.call_later(
+                max(0, (expires_at - now) / 1000),
+                self._expire_due,
+                loop,
+                generation,
+            )
+
+    def _expire_due(self, loop: asyncio.AbstractEventLoop, generation: int) -> None:
+        changes: list[Change] = []
+        with self._lock:
+            if self._loop is not loop or self._generation != generation:
+                return
+            monotonic_now = _monotonic_ms()
+            now = now_ms()
+            while (
+                self._expiration_heap and self._expiration_heap[0][0] <= monotonic_now
+            ):
+                expires_at, path = heapq.heappop(self._expiration_heap)
+                entry = self._locate(split_path(path))
+                if (
+                    not isinstance(entry, Entry)
+                    or self._expiration_by_path.get(path) != expires_at
+                    or entry.expired
+                ):
+                    continue
+                self._expiration_by_path.pop(path, None)
+                if entry.on_expire == "delete":
+                    changes.extend(
+                        self._remove(path, "state_expire", now, reason="expire")
+                    )
+                    continue
+                self._replace_entry(
+                    path,
+                    replace(entry, expired=True),
+                )
+                changes.append(
+                    Change(
+                        path,
+                        entry.value,
+                        entry.value,
+                        "state_expire",
+                        now,
+                        "expire",
+                    )
+                )
+            self._expiration_handle = None
+            self._scheduled_expire_at = None
+            self._enqueue(changes, 1)
+        self._reschedule_expiration(loop, generation)
+
+    def _replace_entry(self, path: str, entry: Entry) -> None:
+        segments = split_path(path)
+        node: Node = self._root
+        for segment in segments[:-1]:
+            if not isinstance(node, dict):
+                return
+            child = node.get(segment)
+            if child is None:
+                return
+            node = child
+        if isinstance(node, dict) and isinstance(node.get(segments[-1]), Entry):
+            node[segments[-1]] = entry
 
     # ---- 读 ----
 
@@ -485,11 +787,14 @@ class StateStore:
         """
         segments = split_path(path)
         with self._lock:
+            now = now_ms()
             node = self._locate(segments)
             if isinstance(node, Entry):
+                if _is_expired(node, now):
+                    return default
                 return node.value
             if isinstance(node, dict):
-                return _plain(node)
+                return _plain(node, now)
         return default
 
     def get_entry(self, path: str) -> Entry | None:
@@ -497,7 +802,9 @@ class StateStore:
         segments = split_path(path)
         with self._lock:
             node = self._locate(segments)
-        return node if isinstance(node, Entry) else None
+            if not isinstance(node, Entry):
+                return None
+            return _visible_entry(node, now_ms())
 
     def snapshot(
         self, pattern: str | Sequence[str], *, with_meta: bool = False
@@ -525,9 +832,10 @@ class StateStore:
         parsed = [parse_pattern(item) for item in patterns]
         result: dict[str, Any] = {}
         with self._lock:
+            now = now_ms()
             for text, segments in zip(patterns, parsed):
                 stats = _MatchStats()
-                _collect_matches(self._root, segments, 0, result, with_meta, stats)
+                _collect_matches(self._root, segments, 0, result, with_meta, now, stats)
                 if not stats.leaves and stats.skipped_subtrees:
                     raise ValueError(
                         f"pattern {text!r} 只命中中间节点、一片叶子都没收到；"
@@ -611,6 +919,7 @@ class StateStore:
             # 不跟着复位，start 不改变树
             self._warned_not_started = False
             self._warned_pending = False
+            self._request_expiration_reschedule_locked()
 
     def stop(self) -> None:
         """停止投递。已排队的 `_dispatch` 靠 generation 作废，不必逐个取消。"""
@@ -618,6 +927,10 @@ class StateStore:
             if self._loop is None:
                 logger.warning("StateStore already stopped")
                 return
+            if self._expiration_handle is not None:
+                self._expiration_handle.cancel()
+            self._expiration_handle = None
+            self._scheduled_expire_at = None
             self._loop = None
             self._generation += 1
 
