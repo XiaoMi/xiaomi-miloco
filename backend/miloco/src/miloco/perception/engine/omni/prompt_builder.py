@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from fractions import Fraction
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -2043,7 +2044,10 @@ def _encode_prepared_video_mp4(
     # When the capture-window duration is known, use the real sampling rate
     # (frame_count / duration_s) instead of the config-derived fps, so the
     # container duration matches the actual capture span. See #560.
-    eff_rate = prepared.sampling_fps if prepared.duration_s > 0 else float(fps)
+    if prepared.duration_s > 0:
+        eff_rate = Fraction(len(frames), 1) / Fraction(prepared.duration_s).limit_denominator(10000)
+    else:
+        eff_rate = Fraction(int(fps), 1)
     target_w = prepared.width
     target_h = prepared.height
 

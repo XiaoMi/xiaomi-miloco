@@ -3804,7 +3804,6 @@ def test_video_mp4_container_duration_uses_window_not_config_fps():
 
     import av
     import numpy as np
-
     from miloco.perception.engine.omni.prompt_builder import _encode_video
 
     n_frames = 8
