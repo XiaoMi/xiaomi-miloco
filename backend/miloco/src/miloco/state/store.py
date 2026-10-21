@@ -77,6 +77,7 @@ class _Batch:
     # 本次写入让几条路径在叶子与子树之间翻了形态。翻转会让订阅旧形态的消费方收到一个删除
     # 事件之后再也收不到，而边界由数据的类型决定、写入方并不声明，所以只能在这里数。
     flips: int = 0
+    created: int = 0
 
     def changes(self) -> list[Change]:
         return self.deletes + self.upserts
@@ -203,6 +204,7 @@ def _build(
             )
         )
         batch.expiration_paths.append(_join(segments))
+        batch.created += 1
         return Entry(
             value,
             batch.now,
@@ -528,8 +530,7 @@ class StateStore:
         old_node = self._locate_for_write(segments, batch)
         new_node = _build(normalized, old_node, segments, batch)
 
-        added = sum(1 for change in batch.upserts if change.old is MISSING)
-        total = self._leaf_count + added - len(batch.deletes)
+        total = self._leaf_count + batch.created - len(batch.deletes)
         if total > MAX_LEAVES:
             self._rejected_leaf_limit += 1
             # 只报一次：撑爆树的来源通常是高频的，而这条日志在锁内，按写入频率打会把所有
@@ -557,7 +558,8 @@ class StateStore:
                     (batch.expiration_deadline, expiration_path),
                 )
         self._compact_expiration_heap()
-        self._request_expiration_reschedule_locked()
+        if batch.expiration_deadline is not None:
+            self._request_expiration_reschedule_locked()
         if batch.flips:
             self._record_shape_flips(batch.flips, path)
         return batch.changes()

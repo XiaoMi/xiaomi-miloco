@@ -86,6 +86,21 @@ def test_refreshing_value_keeps_expiration_heap_bounded():
     assert len(store._expiration_heap) <= 64
 
 
+def test_writes_without_expiration_skip_reschedule(monkeypatch):
+    store = StateStore()
+    reschedules = 0
+
+    def record_reschedule():
+        nonlocal reschedules
+        reschedules += 1
+
+    monkeypatch.setattr(store, "_request_expiration_reschedule_locked", record_reschedule)
+
+    store._commit("iot/device/online", True, source="sensor")
+
+    assert reschedules == 0
+
+
 async def test_delete_with_pending_expiration_clears_scheduling_state():
     store = StateStore()
     store.start()
@@ -127,6 +142,25 @@ async def test_refreshing_expired_retained_value_notifies_revival():
         ("open", "open", "expire"),
         (MISSING, "open", "update"),
     ]
+
+    store.stop()
+
+
+async def test_refreshing_expired_retained_value_does_not_inflate_leaf_count():
+    store = StateStore()
+    store.start()
+
+    for _ in range(3):
+        store.set(
+            "event/door",
+            "open",
+            source="sensor",
+            expires_in_ms=10,
+            on_expire="retain",
+        )
+        await wait_for_expiration()
+
+    assert store.stats()["leaves"] == 1
 
     store.stop()
 

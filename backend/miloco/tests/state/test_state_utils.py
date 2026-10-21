@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from miloco.state import Entry, StateStore, flatten
 from miloco.state.utils import format_dump
@@ -96,6 +98,34 @@ def test_dump_gives_value_source_and_two_ages_for_each_leaf(clock):
     rows = dump_rows(format_dump(store.snapshot("**", with_meta=True), NOW))
 
     assert rows == {"iot/dev1/prop/2.1": "26  src=miot changed=12.3s reported=12.3s"}
+
+
+def test_dump_shows_expiration_timestamp(clock):
+    store = StateStore()
+    store.set("event/door", "open", source="sensor", expires_in_ms=5_000)
+
+    rows = dump_rows(format_dump(store.snapshot("**", with_meta=True), NOW))
+
+    assert rows["event/door"].endswith("expires_at=1754890005000")
+
+
+async def test_dump_marks_expired_retained_values(clock):
+    store = StateStore()
+    store.start()
+    store.set(
+        "event/door",
+        "open",
+        source="sensor",
+        expires_in_ms=10,
+        on_expire="retain",
+    )
+    await asyncio.sleep(0.05)
+
+    rows = dump_rows(format_dump(store.snapshot("**", with_meta=True), NOW + 10))
+
+    assert rows["event/door"].endswith("expires_at=1754890000010 EXPIRED")
+
+    store.stop()
 
 
 def test_dump_header_counts_the_leaves(clock):
