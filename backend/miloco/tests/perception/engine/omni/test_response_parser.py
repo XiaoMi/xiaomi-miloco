@@ -583,3 +583,60 @@ class TestParseTierCVerifyResponse:
     def test_non_numeric_confidence_defaults_zero(self):
         out = parse_tier_c_verify_response(_wrap('{"same_person": true, "confidence": "high"}'))
         assert out["confidence"] == 0.0
+
+
+# =============================================================================
+# 场景联动「动态 TTS」：命中条目里的 tts 文案
+# =============================================================================
+
+
+class TestMatchedRulesTts:
+    def test_compact_object_form_carries_tts(self):
+        """紧凑模式：命中条目是 {id, tts} 对象——命中与文案一次拿全。"""
+        raw = [{"id": "d7d9e5", "tts": "今天这身蓝色外套很精神"}]
+        out = _parse_matched_rules(raw, {"d7d9e5": "rule-1"}, {"rule-1"})
+        assert len(out) == 1
+        assert out[0].rule_id == "rule-1"
+        assert out[0].tts == "今天这身蓝色外套很精神"
+
+    def test_plain_string_items_still_work(self):
+        """没开动态 TTS 的规则仍以字符串 id 出现在同一数组里。"""
+        raw = ["d7d9e5", {"id": "aa11bb", "tts": "夸一句"}]
+        mapping = {"d7d9e5": "rule-1", "aa11bb": "rule-2"}
+        out = _parse_matched_rules(raw, mapping, {"rule-2"})
+        assert [r.rule_id for r in out] == ["rule-1", "rule-2"]
+        assert out[0].tts == ""
+        assert out[1].tts == "夸一句"
+
+    def test_tts_dropped_for_rules_without_dynamic_enabled(self):
+        # 模型多吐了 tts 字段：不在本窗动态 TTS 规则集合里 → 当噪音丢掉
+        raw = [{"rule_id": "d7d9e5", "hit": True, "reason": "看到", "tts": "不该采用"}]
+        out = _parse_matched_rules(raw, {"d7d9e5": "rule-1"}, set())
+        assert out[0].tts == ""
+
+    def test_tts_truncated_and_whitespace_trimmed(self):
+        raw = [{"id": "d7d9e5", "tts": "  " + "夸" * 300 + "  "}]
+        out = _parse_matched_rules(raw, {"d7d9e5": "rule-1"}, {"rule-1"})
+        assert len(out[0].tts) == 200
+        assert not out[0].tts.startswith(" ")
+
+    def test_verbose_hit_false_ignores_tts(self):
+        raw = [
+            {"rule_id": "d7d9e5", "hit": False, "reason": "没人", "tts": "不该有"},
+            {"rule_id": "aa11bb", "hit": True, "reason": "看到", "tts": "夸一句"},
+        ]
+        mapping = {"d7d9e5": "rule-1", "aa11bb": "rule-2"}
+        out = _parse_matched_rules(raw, mapping, {"rule-1", "rule-2"})
+        assert [r.rule_id for r in out] == ["rule-2"]
+        assert out[0].tts == "夸一句"
+
+    def test_parse_omni_response_top_level_array_with_tts(self):
+        """rule_only 顶层裸数组（含 tts）走完整 parse 路径也拿得到文案。"""
+        content = json.dumps([{"id": "d7d9e5", "tts": "出门顺利"}], ensure_ascii=False)
+        out = parse_omni_response(_wrap(content), {"d7d9e5": "rule-1"}, {"rule-1"})
+        assert out.matched_rules[0].tts == "出门顺利"
+
+    def test_try_extract_matched_rules_streaming(self):
+        buf = '[{"id":"d7d9e5","tts":"夸一句"}]'
+        out = try_extract_matched_rules(buf, {"d7d9e5": "rule-1"}, {"rule-1"})
+        assert out is not None and out[0].tts == "夸一句"

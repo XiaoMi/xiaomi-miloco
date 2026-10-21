@@ -55,6 +55,11 @@ class FieldSpec:
     schema_literal_rule_only_compact: str | None = None
     schema_literal_rule_only_verbose: str | None = None
     spec_md_rule_only_compact: str | None = None
+    # rule_only + 本窗有动态 TTS 规则：命中条目多一个 tts 字段（四个变体互相独立）。
+    schema_literal_rule_only_compact_tts: str | None = None
+    schema_literal_rule_only_verbose_tts: str | None = None
+    spec_md_rule_only_compact_tts: str | None = None
+    spec_md_rule_only_verbose_tts: str | None = None
 
     def spec_for(self, route: str, rule_only: bool = False) -> str:
         if rule_only and self.spec_md_rule_only is not None:
@@ -64,9 +69,23 @@ class FieldSpec:
         return self.spec_md
 
     def spec_for_mode(
-        self, route: str, rule_only: bool = False, verbose: bool = False
+        self,
+        route: str,
+        rule_only: bool = False,
+        verbose: bool = False,
+        tts_rules: bool = False,
     ) -> str:
-        """按 ``verbose`` 再叠一层选择：紧凑模式优先用紧凑文案，缺省退回详细版。"""
+        """按 ``verbose`` / ``tts_rules`` 再叠一层选择：紧凑模式优先用紧凑文案，缺省退回详细版。
+
+        rule_only 的四个变体（紧凑/详细 × 有无动态 TTS）互相独立：tts 变体缺省时退回
+        非 tts 变体，保证只开 tts 也不会丢字段说明。
+        """
+        if rule_only and tts_rules and verbose:
+            if self.spec_md_rule_only_verbose_tts is not None:
+                return self.spec_md_rule_only_verbose_tts
+        if rule_only and tts_rules and not verbose:
+            if self.spec_md_rule_only_compact_tts is not None:
+                return self.spec_md_rule_only_compact_tts
         if not verbose:
             if rule_only and self.spec_md_rule_only_compact is not None:
                 return self.spec_md_rule_only_compact
@@ -216,6 +235,30 @@ MATCHED_RULES = FieldSpec(
 - rule_id（短 id，如 d7d9e5）原样照抄，不要补全成完整 UUID、不要改大小写；严禁自创或合并；该段为空则输出 []。
 - hit=true 必须在 reason 里给出本轮画面的直接证据，**不限字数**：写清看到什么、为什么成立；证据不全 / 靠推测 / 模糊 → hit=false，并在 reason 里说明卡在哪一条证据。
 - 数组直接就是全部输出，不要用对象包裹、不要加任何其它字段。""",
+    # ---- 场景联动「动态 TTS」变体：规则行带 tts 要求时，命中条目多一个 tts 字段 ----
+    # 紧凑模式（默认）：元素从字符串 id 升级为对象 {id, tts}——必须在规则**命中**的同一个
+    # JSON 容器里给出文案，解析层才能「命中 + 文案」一次拿全，不用为播报再跑一轮模型。
+    schema_literal_rule_only_compact_tts=(
+        '[{"id":"规则id","tts":"播报文案"}|"规则id"]'
+    ),
+    spec_md_rule_only_compact_tts="""## 命中规则（JSON 数组）
+- 输出一个 JSON 数组，只列**命中**规则；没有命中就给 []。元素两种形态：
+  - 规则行带 tts 要求（该规则要动态播报）且本条命中 → 对象 `{"id":"规则id","tts":"播报文案"}`；
+  - 其余命中规则 → 直接写 id 字符串。
+- 带 tts 要求的规则**只有命中时**才写 tts：tts 是按本轮画面写的一句播报（见下方 tts 说明）；没命中就不放该规则，更不要为它写 tts。
+- id（短 id，如 d7d9e5）从「# 待判断规则」原样照抄，不要补全成完整 UUID、不要改大小写；严禁自创或合并。
+- 只依据画面里【直接看到】的证据；看不清 / 模糊 / 拿不准 → 不列（不猜测、不凑数）。
+- 不要输出任何其它字段、不要解释（数组直接就是全部输出）。""",
+    # 详细模式：对象数组，命中条目多 tts。
+    schema_literal_rule_only_verbose_tts=(
+        '[{"rule_id":"规则id","hit":true|false,"reason":"判断依据","tts":"播报文案"}]'
+    ),
+    spec_md_rule_only_verbose_tts="""## 命中规则（JSON 数组）
+- 对「# 待判断规则」**逐条**判断，每条都输出 hit 与 reason（命中与未命中都列，便于排查漏报/误报）。
+- rule_id（短 id，如 d7d9e5）原样照抄，不要补全成完整 UUID、不要改大小写；严禁自创或合并；该段为空则输出 []。
+- hit=true 必须在 reason 里给出本轮画面的直接证据，**不限字数**；证据不全 / 靠推测 / 模糊 → hit=false，并在 reason 里说明卡在哪一条证据。
+- 带 tts 要求的规则**且 hit=true** 时，额外输出 tts：按 tts 要求写的一句播报文案；没命中不要写 tts。
+- 数组直接就是全部输出，不要用对象包裹。""",
 )
 
 SUGGESTIONS = FieldSpec(
@@ -288,9 +331,14 @@ class SceneDescriptor:
     # 见 PerceptionConfig.rule_only —— 该模式同时剥离了音频与身份链路，此处只管 schema。
     rule_only: bool = False
     # 详细判定输出（``perception.engine.verbose``，默认 False）：False = 只回命中规则的 id，
-    # 不产出 reason（省掉每窗最大的一块输出 token）；True = 逐条给出 hit + 不限字数的 reason，
-    # 供排查漏报/误报。同一个开关同时切换 schema 字面量与「# 字段说明」文案（单一来源）。
+    # 不产出 reason（省掉每窗最大的一块输出 token）；True = 逐条给出**全部规则**的 hit + 不限
+    # 字数的 reason（命中与否都列，排查漏报/误报用）。同一个开关同时切换 schema 字面量与
+    # 「# 字段说明」文案（单一来源）。
     verbose: bool = False
+    # 本窗是否有规则开了「场景联动 → 动态 TTS」：有才把 tts 字段加进 rule_only 的 schema /
+    # 字段说明（没有时要播报的规则，多写这一层只会诱导模型多吐字段）。规则行里的 tts 要求
+    # 由 prompt_builder._render_rule_conditions 逐规则写。
+    tts_rules: bool = False
 
     def selected_fields(self) -> list[FieldSpec]:
         if self.rule_only:
@@ -321,11 +369,18 @@ def render_schema(scene: SceneDescriptor) -> str:
     **顶层数组**——紧凑模式 ``["规则id"]``，详细模式 ``[{"rule_id","hit","reason"}]``。
     """
     if scene.rule_only:
-        literal = (
-            MATCHED_RULES.schema_literal_rule_only_verbose
-            if scene.verbose
-            else MATCHED_RULES.schema_literal_rule_only_compact
-        )
+        if scene.tts_rules:
+            literal = (
+                MATCHED_RULES.schema_literal_rule_only_verbose_tts
+                if scene.verbose
+                else MATCHED_RULES.schema_literal_rule_only_compact_tts
+            )
+        else:
+            literal = (
+                MATCHED_RULES.schema_literal_rule_only_verbose
+                if scene.verbose
+                else MATCHED_RULES.schema_literal_rule_only_compact
+            )
         return literal or "[]"
     return (
         "{"
@@ -343,6 +398,15 @@ PET_NAMING_SPEC = """## 宠物称呼（据 pet_identities 派生）
 - suggestions：event / action 指称宠物同上（high 直呼 / mid 疑似 / 否则泛称）；涉及"某只宠物的约定或禁忌"（家庭档案显式记录）须该宠物以 high 列入 pet_identities 确认在场才成立"""
 
 
+# 动态 TTS 文案的写作纪律（仅 rule_only 且本窗有 tts 规则时追加）。集中一处维护，
+# schema 里的 tts 字段只负责"在哪放"，说什么、怎么写由这一段管。
+TTS_SPEC_RULE_ONLY = """## tts（播报文案）
+- 只给规则行里带 tts 要求、且本条**命中**的规则写 tts；其余条目不要写。
+- 按该规则的 tts 要求、**结合本轮画面里直接看到的内容**来写：要求里点名的细节（如衣着、动作、手里拿着什么）必须来自本轮画面，画面里看不到的就不要提、不要编。
+- 力求口语化、可直接朗读（不超过约 40 字）；不写"播报文案："之类的前缀标签，不用表情符号 / Markdown / 换行。
+- 看不清 / 拿不准的画面细节一律不提（宁可写得简单，也不写错）。"""
+
+
 def render_field_spec(scene: SceneDescriptor) -> str:
     """按场景拼出「# 字段说明」正文（各字段 ``## 字段名`` 块；audio 路由取 audio 变体）。
 
@@ -350,9 +414,13 @@ def render_field_spec(scene: SceneDescriptor) -> str:
     matched_rules 对宠物的称呼，集中一处维护，见 ``PET_NAMING_SPEC``）。
     """
     blocks = [
-        f.spec_for_mode(scene.route, scene.rule_only, scene.verbose)
+        f.spec_for_mode(
+            scene.route, scene.rule_only, scene.verbose, scene.tts_rules
+        )
         for f in scene.selected_fields()
     ]
+    if scene.rule_only and scene.tts_rules:
+        blocks.append(TTS_SPEC_RULE_ONLY)
     if scene.has_pets and scene.route == "video" and not scene.rule_only:
         blocks.append(PET_NAMING_SPEC)
     return "\n\n".join(blocks)

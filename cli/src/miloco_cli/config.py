@@ -150,7 +150,8 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
     "perception.engine.verbose": (
         bool,
         False,
-        "感知模型是否输出详细判定依据（默认 false：只回命中规则 id 数组，省 token 更快）",
+        "感知模型是否输出详细判定依据（默认 false：只回命中规则 id 数组，省 token 更快）；"
+        "true 时逐条列出**所有**规则的命中与否 + 不限字数的原因",
     ),
     # 判定理由输出语言：auto(默认) = 跟随界面语言（MILOCO_APP_LANG → 系统 locale → 英文）；
     # zh / en = 固定。热读。

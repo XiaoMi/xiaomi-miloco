@@ -13,12 +13,17 @@ from typing import Any
 from miloco.perception.engine.types import OmniOutput
 from miloco.perception.types import CaptionEntry, MatchedRule, Speech, Suggestion
 
+# 单条动态 TTS 文案长度上限：与 miloco.miot.voice.MAX_TTS_LEN 同一口径（这里不 import
+# miot 侧模块——解析层是纯函数，不该为个常量把设备链路的依赖拖进来）。
+MAX_TTS_LEN = 200
+
 logger = logging.getLogger(__name__)
 
 
 def parse_omni_response(
     raw: dict[str, Any],
     rule_name_to_id: "dict[str, str] | None" = None,
+    tts_rule_ids: "set[str] | None" = None,
 ) -> OmniOutput:
     """Parse raw omni model response into OmniOutput (RealtimePerceptionResult).
 
@@ -39,7 +44,7 @@ def parse_omni_response(
     if not isinstance(parsed, (dict, list)):
         return _fallback("Response is not an object")
 
-    return _build_output(_as_field_map(parsed), rule_name_to_id)
+    return _build_output(_as_field_map(parsed), rule_name_to_id, tts_rule_ids)
 
 
 def _as_field_map(parsed: Any) -> dict:
@@ -372,6 +377,7 @@ def _extract_content(raw: dict) -> str | None:
 def _build_output(
     parsed: dict,
     rule_name_to_id: "dict[str, str] | None" = None,
+    tts_rule_ids: "set[str] | None" = None,
 ) -> OmniOutput:
     caption = _parse_caption(parsed.get("caption"))
     # pet_identities 是 prompt 侧的宠物称呼唯一真源（caption / suggestions / matched_rules 据其
@@ -387,7 +393,9 @@ def _build_output(
             sorted(_sanitize_for_log(n) for n in pet_high),
             sorted(_sanitize_for_log(n) for n in pet_mid),
         )
-    matched_rules = _parse_matched_rules(parsed.get("matched_rules"), rule_name_to_id)
+    matched_rules = _parse_matched_rules(
+        parsed.get("matched_rules"), rule_name_to_id, tts_rule_ids
+    )
     speeches = _parse_speeches(parsed.get("speeches"))
     env_sounds = _parse_env_sounds(parsed.get("env_sounds"))
     suggestions = _parse_suggestions(parsed.get("suggestions"))
@@ -436,7 +444,8 @@ def _resolve_rule_ref(
     ``rule_id`` 现为**短 id**（完整 UUID 前 6 位小写十六进制，如 ``d7d9e5``），模型偶尔会
     全大写回抄 → 精确匹配失败后再折叠大小写试一次。只做大小写折叠、不做子串模糊：
     ``raw_id`` 可能是单字符，子串匹配会误命中任意 key。"""
-    raw_id = str(item.get("rule_id", "") or "").strip()
+    # ``rule_id`` 是主键；紧凑模式 + 动态 TTS 的对象形态用更短的 ``id``（省输出 token）。
+    raw_id = str(item.get("rule_id") or item.get("id") or "").strip()
     if raw_id:
         if mapping is None:
             return raw_id
@@ -476,6 +485,7 @@ def _parse_pet_identities(raw: Any) -> tuple[set[str], set[str]]:
 def _parse_matched_rules(
     raw: Any,
     rule_name_to_id: "dict[str, str] | None" = None,
+    tts_rule_ids: "set[str] | None" = None,
 ) -> list[MatchedRule]:
     """``matched_rules`` → ``list[MatchedRule]``。
 
@@ -485,6 +495,11 @@ def _parse_matched_rules(
     - 旧格式：同上但多包一层 ``{"matched_rules": [...]}``（模型偶发），此处拆掉；
     - 字符串条目：紧凑模式只回 id，故没有 reason / hit 可供判定，**只要 id 能在本窗规则里
       对上就视为命中**（对不上仍按幻觉丢弃）。
+
+    ``tts_rule_ids``：本窗开着「动态 TTS」的规则（完整 rule_id）。只有它们的条目才收
+    ``tts`` 文案——模型偶发给别的规则多吐一个 tts 字段时按噪音丢掉（不在 prompt 里问就不该
+    被采用）。动态文案与命中同在一条数组元素里（不另开字段）：命中即拿到文案，不用为它多
+    一次往返，也避开了「路径型文本拼接」之类的取巧约定。
     """
     if isinstance(raw, dict):
         # 兼容模型把字段再包一层 {"matched_rules": [...]}
@@ -527,7 +542,17 @@ def _parse_matched_rules(
             )
             continue
         reason = str(item.get("reason", ""))
-        if _reason_negates(reason):
+        # 动态 TTS 文案（仅本窗真开了动态 TTS 的规则才收；空 / 非串一律当没有）。
+        tts = ""
+        if tts_rule_ids and rid in tts_rule_ids:
+            raw_tts = item.get("tts")
+            if isinstance(raw_tts, str):
+                tts = raw_tts.strip()[:MAX_TTS_LEN]
+        # 紧凑模式 + 动态 TTS 的对象形态 ``{"id": ..., "tts": ...}``：命中条目不写 reason
+        # （命中与否由"出现在数组里"表达），reason 为空是正常形态、不能进下面的否定判定
+        # （空串没有否定语义，但显式兜住更清楚）。``id`` 是这套形态的标识键。
+        compact_tts_entry = "id" in item and not item.get("reason")
+        if not compact_tts_entry and _reason_negates(reason):
             # reason 与 hit 自相矛盾 / reason 明确否定：模型要么把否定结论写进 reason
             # 却漏写或误写 hit（如「画面中只有床铺和家具，并没有人在床上读书」），
             # 要么把 hit=false 直接写进 reason 文本（旧格式残留）。reason 是判断依据的
@@ -543,6 +568,7 @@ def _parse_matched_rules(
                 rule_id=rid,
                 rule_name=name,
                 reason=reason,
+                tts=tts,
             )
         )
     return result
@@ -706,6 +732,7 @@ def try_extract_speeches(buffer: str) -> list[Speech] | None:
 def try_extract_matched_rules(
     buffer: str,
     rule_name_to_id: "dict[str, str] | None" = None,
+    tts_rule_ids: "set[str] | None" = None,
 ) -> list[MatchedRule] | None:
     """从流式缓冲区里尽早取出 ``matched_rules``。
 
@@ -718,7 +745,7 @@ def try_extract_matched_rules(
         raw = _try_extract_top_array(buffer)
     if raw is None:
         return None
-    return _parse_matched_rules(raw, rule_name_to_id)
+    return _parse_matched_rules(raw, rule_name_to_id, tts_rule_ids)
 
 
 def try_extract_suggestions(buffer: str) -> list[Suggestion] | None:
@@ -732,6 +759,7 @@ def try_extract_suggestions(buffer: str) -> list[Suggestion] | None:
 def parse_omni_response_from_text(
     text: str,
     rule_name_to_id: "dict[str, str] | None" = None,
+    tts_rule_ids: "set[str] | None" = None,
 ) -> OmniOutput:
     """Parse accumulated streaming text directly into OmniOutput.
 
@@ -747,7 +775,7 @@ def parse_omni_response_from_text(
     if not isinstance(parsed, (dict, list)):
         return _fallback("Response is not an object")
 
-    return _build_output(_as_field_map(parsed), rule_name_to_id)
+    return _build_output(_as_field_map(parsed), rule_name_to_id, tts_rule_ids)
 
 
 def parse_tier_c_verify_response(raw: dict[str, Any]) -> dict[str, Any]:

@@ -5,7 +5,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
@@ -19,6 +19,30 @@ from miloco.schema.common_schema import NormalResponse
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix='/scene-tasks', tags=['SceneTasks'])
+
+
+@router.get(
+    '/voice-devices', summary='List speakers for TTS', response_model=NormalResponse
+)
+async def list_scene_voice_devices(
+    current_user: str = Depends(verify_token),
+    refresh: bool = Query(True, description='true = 先从米家云刷新设备表'),
+):
+    """可选音响列表（动态 TTS 用），与自动化场景列表同口径：只含已启用家庭内的设备。
+
+    默认 refresh=true——web 进入场景联动设置页即调用，新绑定的音箱不必等下一轮设备刷新。
+    """
+    logger.info(
+        'List scene voice devices - User: %s, refresh: %s', current_user, refresh
+    )
+    devices = await get_manager().scene_task_service.list_voice_devices(
+        refresh=refresh
+    )
+    return NormalResponse(
+        code=0,
+        message=f'Retrieved {len(devices)} voice devices',
+        data=[d.model_dump() for d in devices],
+    )
 
 
 @router.get('', summary='List Scene Tasks', response_model=NormalResponse)
@@ -38,8 +62,10 @@ async def create_scene_task(
     current_user: str = Depends(verify_token),
 ):
     logger.info(
-        'Create scene task - User: %s, description: %s, enter_scene: %s, exit_scene: %s',
+        'Create scene task - User: %s, description: %s, enter_scene: %s, '
+        'exit_scene: %s, enter_tts: %s, exit_tts: %s',
         current_user, req.description, req.enter_scene_id, req.exit_scene_id,
+        req.enter_tts_device_id, req.exit_tts_device_id,
     )
     view = await get_manager().scene_task_service.create(req)
     return NormalResponse(

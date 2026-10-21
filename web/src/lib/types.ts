@@ -800,8 +800,9 @@ export interface Task {
 }
 
 // ── 场景联动任务（scene_task，web「场景联动」tab）──────────────────
-// 一条 state 模式 rule 的 enter / exit 各挂一个米家自动化场景：感知命中规则
-// 直接 trigger_scene，完全不经过 agent。后端 /api/scene-tasks 返回的视图。
+// 一条 state 模式 rule 的 enter / exit 各挂一组动作：触发米家自动化场景、用指定音响
+// 播报 TTS（可同时设置）。感知命中规则直接执行，完全不经过 agent。
+// 后端 /api/scene-tasks 返回的视图。
 export interface SceneTask {
   taskId: string;
   description: string;
@@ -814,24 +815,50 @@ export interface SceneTask {
   // 进入条件（自然语言；退出 = 条件不再满足并持续 exitDebounceSeconds）
   query: string;
   // 该规则的场景补充说明（场景细节 / 注意事项：要关注什么、目标区域、什么算/不算）。
-  // null/空 = 不注入。随规则下发给 omni。
+  // null/空 = 不注入。随规则下发给 omni。动态播报的写作要求不在这里（见 ttsPrompt）。
   sceneNotes?: string | null;
   perceiveDeviceIds: string[];
-  // 进入 / 退出时触发的场景（null = 该方向不联动）
+  // 进入 / 退出时触发的自动化场景（null = 该方向不触发自动化）
   enterSceneId?: string | null;
   enterSceneName?: string | null;
   exitSceneId?: string | null;
   exitSceneName?: string | null;
-  // 场景触发冷却（分钟）；进入确认时间（秒，条件持续满足这么久才触发进入场景，
+  // 进入 / 退出时的 TTS 播报（null = 该方向不播报）
+  enterTts?: SceneTts | null;
+  exitTts?: SceneTts | null;
+  // 场景/播报触发冷却（分钟）；进入确认时间（秒，条件持续满足这么久才触发进入动作，
   // 0 = 立即触发）；退出确认时间（秒）；最长驻留（秒，到期强制退出）
   cooldownMinutes?: number | null;
   enterDebounceSeconds: number;
   exitDebounceSeconds: number;
   maxDwellSeconds?: number | null;
+  // 动态 TTS 开着但动态文案当前拿不到（感知未开纯场景触发 / 引擎未就绪）→ 播报会退回
+  // 兜底文案。后端在每个任务上给出，页面据此提示。
+  dynamicTtsReady: boolean;
+}
+
+// 一个方向的 TTS 播报配置。
+export interface SceneTts {
+  deviceId: string | null;
+  deviceName: string | null;
+  // true = 播报文案由 LLM 按画面动态生成（ttsPrompt 是写作要求）；
+  // false = 固定文案（ttsText）
+  ttsContent: boolean;
+  ttsPrompt?: string | null;
+  ttsText?: string | null;
+}
+
+// 可选音响（GET /api/scene-tasks/voice-devices，进入页面即刷新）。
+export interface SceneVoiceDevice {
+  did: string;
+  name: string;
+  roomName: string | null;
+  online: boolean;
 }
 
 // 创建 / 更新场景联动任务的入参（后端 SceneTaskCreateRequest / UpdateRequest）。
 // 更新（PATCH）只提交显式提供的字段，故全部可选；创建时三个必填字段齐全。
+// enterTts / enterTtsDeviceId 必须同时提交（null 表示移除该方向的播报）。
 export interface SceneTaskInput {
   description?: string;
   perceiveDeviceIds?: string[];
@@ -840,11 +867,21 @@ export interface SceneTaskInput {
   sceneNotes?: string | null;
   enterSceneId?: string | null;
   exitSceneId?: string | null;
+  enterTtsDeviceId?: string | null;
+  enterTts?: SceneTtsInput | null;
+  exitTtsDeviceId?: string | null;
+  exitTts?: SceneTtsInput | null;
   cooldownMinutes?: number;
   enterDebounceSeconds?: number;
   exitDebounceSeconds?: number;
   maxDwellSeconds?: number | null;
   enabled?: boolean;
+}
+
+export interface SceneTtsInput {
+  ttsContent: boolean;
+  ttsPrompt?: string | null;
+  ttsText?: string | null;
 }
 
 // ── 升级检测 / 一键升级（对齐 backend /api/admin/upgrade/*、/version） ──

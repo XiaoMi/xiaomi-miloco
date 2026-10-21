@@ -127,7 +127,12 @@ async def test_early_matched_rules_meta_passed_to_update_state(proxy):
     finally:
         executor.shutdown(wait=True)
 
-    assert seen == [{"trigger_room": "客厅", "trigger_dids": ["cam-001"], "caption": "", "device_name": "小米摄像机"}]
+    # tts_text：命中帧上的动态播报文案（规则没开动态 TTS → 空串），随 update_state 一并
+    # 交给 runner；开着的规则才有内容（见 test_early_matched_rules_passes_tts_text）。
+    assert seen == [{
+        "trigger_room": "客厅", "trigger_dids": ["cam-001"], "caption": "",
+        "device_name": "小米摄像机", "tts_text": "",
+    }]
 
 
 async def test_early_send_registers_pair_even_if_update_state_raises(proxy):
@@ -212,6 +217,7 @@ async def test_final_matched_rules_meta_passed_to_update_state(proxy):
             "caption": "",
             "device_name": "",
             "cycle_source_states": {"cam-002": True},
+            "tts_text": "",
         }
     ]
 

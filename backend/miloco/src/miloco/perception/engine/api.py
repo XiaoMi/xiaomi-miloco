@@ -1031,6 +1031,14 @@ class PerceptionEngine(BasePerceptionEngine):
                         scene_notes=(
                             r.get("condition", {}).get("scene_notes") or None
                         ),
+                        # 动态 TTS（web「场景联动」逐规则配置）：开着才让模型在命中时
+                        # 随命中产出一句播报文案；写作指引空白归一到 None（用内置默认）。
+                        tts_enabled=bool(
+                            r.get("condition", {}).get("tts_enabled", False)
+                        ),
+                        tts_prompt=(
+                            r.get("condition", {}).get("tts_prompt") or None
+                        ),
                     )
                     for r in dispatched
                 ]

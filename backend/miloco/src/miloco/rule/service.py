@@ -34,6 +34,7 @@ from miloco.miot.filter import allowed_home_ids, filter_by_home
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
     SCENE_IID,
+    SCENE_TTS_IID,
     Rule,
     RuleExecuteResult,
     RuleLifecycle,
@@ -155,24 +156,30 @@ def _validate_rule_consistency(rule: Rule) -> None:
             # 与 runner._execute_action 同口径:三种形态之外一律拒。少了这道,
             # `scene.1.2` / `prop.2` 这类写法能建成功,运行期每次 fire 只在
             # rule_log 里留一条 invalid_iid,规则永远是哑的。
-            if a.iid != SCENE_IID and parse_device_iid(a.iid) is None:
+            if (
+                a.iid not in (SCENE_IID, SCENE_TTS_IID)
+                and parse_device_iid(a.iid) is None
+            ):
                 raise ValidationException(
                     f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): iid must be "
-                    f"'{SCENE_IID}', 'prop.<siid>.<piid>' or "
+                    f"'{SCENE_IID}', '{SCENE_TTS_IID}', 'prop.<siid>.<piid>' or "
                     f"'action.<siid>.<aiid>'"
                 )
-            # 幂等分支会跳过判定直接下发,等于没有去重(原因见 SCENE_IID)。
-            if a.iid == SCENE_IID and a.idempotent:
+            # 幂等分支会跳过判定直接下发,等于没有去重(原因见 SCENE_IID)。TTS 同理:
+            # 音箱没有"当前念到哪句"可读,幂等比对无从做起。
+            if a.iid in (SCENE_IID, SCENE_TTS_IID) and a.idempotent:
                 raise ValidationException(
                     f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
-                    f"iid={SCENE_IID} requires idempotent=false"
+                    f"iid={a.iid} requires idempotent=false"
                 )
-            # 冷却是场景唯一的去重手段,而 runner 把 0 当「无冷却」——填 0 会让
-            # 每次 fire 都真触发一次场景,正是执行侧闸门要防的那种。
-            if a.iid == SCENE_IID and (a.cooldown_minutes or 0) < 1:
+            # 冷却是场景 / 播报唯一的去重手段,而 runner 把 0 当「无冷却」——填 0 会让
+            # 每次 fire 都真触发一次,正是执行侧闸门要防的那种。
+            if a.iid in (SCENE_IID, SCENE_TTS_IID) and (
+                a.cooldown_minutes or 0
+            ) < 1:
                 raise ValidationException(
                     f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
-                    f"iid={SCENE_IID} requires cooldown_minutes >= 1"
+                    f"iid={a.iid} requires cooldown_minutes >= 1"
                 )
             if not a.idempotent and a.cooldown_minutes is None:
                 raise ValidationException(
@@ -323,6 +330,46 @@ class RuleService:
                 f"available: {', '.join(sorted(scenes)) or '(none)'}"
             )
 
+    async def _validate_tts_actions(self, rule: Rule) -> None:
+        """TTS 动作的 did 必须是真实存在、可播报的音箱 did。
+
+        音箱列表与场景列表同源同口径（已启用家庭内的智能音箱），运行期要能播得出来
+        才算合法——抄错一位的 did 规则能建成功、命中后每次都播报失败，住户看不到原因。
+        列表为空（未绑定音响 / 云端刷新失败）时**放行**：TTS 只是附加动作，不该因为一次
+        云端抖动把自动化配置也挡住，播不出来会落 rule_log。
+        """
+        wanted = {
+            a.did
+            for slot in (rule.actions, rule.on_enter_actions, rule.on_exit_actions)
+            for a in slot
+            if a.iid == SCENE_TTS_IID
+        }
+        if not wanted:
+            return
+        from miloco.miot.voice import filter_voice_devices
+
+        try:
+            voices = filter_voice_devices(
+                self._miot_proxy._kv_repo,
+                (await self._miot_proxy.get_voice_devices()) or {},
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("voice device list unavailable, skip TTS did check: %s", e)
+            return
+        if not voices:
+            logger.warning(
+                "voice device list is empty, skip TTS did check for %s",
+                ', '.join(sorted(wanted)),
+            )
+            return
+        invalid = sorted(wanted - set(voices))
+        if invalid:
+            raise ValidationException(
+                f"Invalid or not-allowed speaker (TTS) device IDs: "
+                f"{', '.join(invalid)}; "
+                f"available: {', '.join(sorted(voices))}"
+            )
+
     def _fill_default_duration_ratio(self, rule: Rule) -> None:
         """未显式指定时回填 settings.rule.default_duration_ratio。
 
@@ -358,6 +405,7 @@ class RuleService:
         _validate_rule_consistency(rule)
         self._validate_on_target_desc_compat(rule)
         await self._validate_scene_ids(rule)
+        await self._validate_tts_actions(rule)
 
         rule_id = self._repo.create(rule)
         if not rule_id:
@@ -412,6 +460,7 @@ class RuleService:
         _validate_rule_consistency(rule)
         self._validate_on_target_desc_compat(rule)
         await self._validate_scene_ids(rule)
+        await self._validate_tts_actions(rule)
 
         success = self._repo.update(rule)
         if success:
@@ -486,6 +535,10 @@ class RuleService:
                 existing.condition.scene_notes = (
                     cond_update.scene_notes or None
                 )
+            # tts_enabled 显式置 false 就是关掉动态 TTS（合法新值，同 scene_notes 的
+            # "出现即覆盖"语义；None = 不动）。
+            if "tts_enabled" in cond_fields and cond_update.tts_enabled is not None:
+                existing.condition.tts_enabled = cond_update.tts_enabled
 
         # list 字段：CLI 用 [] 表达"清空"；不传 → 不动。
         if "actions" in fields and update.actions is not None:
@@ -538,6 +591,7 @@ class RuleService:
         # PATCH)都会 400 —— 规则坏掉的那一刻正好把「先关掉它」这条路堵死。
         if {"actions", "on_enter_actions", "on_exit_actions"} & fields:
             await self._validate_scene_ids(existing)
+            await self._validate_tts_actions(existing)
 
         success = self._repo.update(existing)
         if success:
@@ -603,16 +657,19 @@ class RuleService:
         caption: str = "",
         device_name: str = "",
         cycle_source_states: dict[str, bool] | None = None,
+        tts_text: str = "",
     ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
         See :meth:`RuleRunner.update_state`. Returns the resulting
         ``TriggerOutcome`` (surfaced in the resident activity log).
+        ``tts_text`` 是模型在本命中帧上给出的动态播报文案（规则开了动态 TTS 时才有）。
         """
         return await self._runner.update_state(
             rule_id, source_did, current_bool, context, trigger_room, trigger_dids,
             caption=caption, device_name=device_name,
             cycle_source_states=cycle_source_states,
+            tts_text=tts_text,
         )
 
     # ---- Logs ----

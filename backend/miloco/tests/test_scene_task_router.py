@@ -209,3 +209,106 @@ def test_missing_task_returns_404(client, svc):
     # ResourceNotFoundException 走业务错误码（HTTP 200 + code=2001），与其余 router 同口径
     assert r.status_code == 200
     assert r.json()['code'] == 2001
+
+# ---- 动态 TTS：请求解析 + 音响列表 ----
+
+
+def test_create_scene_task_with_tts(client, svc):
+    svc.create = AsyncMock(
+        return_value=SceneTaskView(
+            task_id='scene_tts',
+            description='出门夸夸',
+            status='active',
+            created_at='2026-01-01T00:00:00+08:00',
+            rule_id='rule-tts',
+            enabled=True,
+            query='准备出门',
+            perceive_device_ids=['cam-001'],
+            enter_tts={
+                'device_id': 'spk-1',
+                'device_name': '客厅音箱',
+                'tts_content': True,
+                'tts_prompt': '夸穿搭',
+            },
+            exit_debounce_seconds=60,
+        ),
+    )
+    r = client.post(
+        '/api/scene-tasks',
+        json={
+            'description': '出门夸夸',
+            'perceive_device_ids': ['cam-001'],
+            'query': '准备出门',
+            'enter_tts_device_id': 'spk-1',
+            'enter_tts': {
+                'tts_content': True,
+                'tts_prompt': '夸穿搭',
+                'tts_text': '兜底一句',
+            },
+        },
+    )
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert data['enter_tts']['device_id'] == 'spk-1'
+    assert data['enter_tts']['tts_content'] is True
+    req = svc.create.await_args.args[0]
+    assert req.enter_tts_device_id == 'spk-1'
+    assert req.enter_tts.tts_prompt == '夸穿搭'
+    assert req.enter_tts.tts_text == '兜底一句'
+
+
+def test_create_rejects_tts_device_without_slot(client, svc):
+    r = client.post(
+        '/api/scene-tasks',
+        json={
+            'description': 'x',
+            'perceive_device_ids': ['cam-001'],
+            'query': '准备出门',
+            'enter_scene_id': 'scene-1',
+            'enter_tts_device_id': 'spk-1',
+        },
+    )
+    assert r.status_code == 422
+    svc.create.assert_not_awaited()
+
+
+def test_update_with_tts_null_means_remove(client, svc):
+    svc.update = AsyncMock(
+        return_value=SceneTaskView(
+            task_id='scene_task_1',
+            description='x',
+            status='active',
+            created_at='2026-01-01T00:00:00+08:00',
+            rule_id='rule-1',
+            enabled=True,
+            query='q',
+            perceive_device_ids=['cam-001'],
+            exit_debounce_seconds=60,
+        ),
+    )
+    r = client.patch(
+        '/api/scene-tasks/scene_task_1',
+        json={'enter_tts_device_id': None, 'enter_tts': None},
+    )
+    assert r.status_code == 200
+    req = svc.update.await_args.args[1]
+    assert req.enter_tts_device_id is None
+    assert req.enter_tts is None
+
+
+def test_list_voice_devices(client, svc):
+    from miloco.scene_task.schema import SceneVoiceDevice
+
+    svc.list_voice_devices = AsyncMock(
+        return_value=[
+            SceneVoiceDevice(did='spk-1', name='客厅音箱', room_name='客厅', online=True)
+        ]
+    )
+    r = client.get('/api/scene-tasks/voice-devices')
+    assert r.status_code == 200
+    data = r.json()['data']
+    assert data == [
+        {'did': 'spk-1', 'name': '客厅音箱', 'room_name': '客厅', 'online': True}
+    ]
+    # 默认 refresh=true：进入设置页即从云端刷新
+    assert svc.list_voice_devices.await_args.kwargs['refresh'] is True

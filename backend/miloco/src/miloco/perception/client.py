@@ -561,6 +561,9 @@ class PerceptionEngineProxy:
                     trigger_room=r.room_name,
                     trigger_dids=r.source_device_ids,
                     caption="", device_name=r.device_name,
+                    # 规则开了动态 TTS 时，模型随命中一起给出的播报文案；没开随时为空串
+                    # （update_state 只在真的派发 ENTERED 时才会用到它）。
+                    tts_text=r.tts,
                 )
 
         @_on_main_loop
@@ -899,6 +902,7 @@ class PerceptionEngineProxy:
                     cycle_source_states=cycle_source_states_by_rule.get(
                         matched_rule.rule_id
                     ),
+                    tts_text=matched_rule.tts,
                 )
                 main_loop_pending.discard(matched_rule.rule_id)
                 outcomes_by_rule.setdefault(matched_rule.rule_id, []).append(outcome)

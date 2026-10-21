@@ -98,13 +98,24 @@ def _rule_name_to_id(context: OmniContext) -> dict[str, str]:
     return mapping
 
 
+def _tts_rule_ids(context: OmniContext) -> set[str]:
+    """本窗开着「动态 TTS」的规则（完整 rule_id 集合），供解析层只收这些规则的 tts 文案。
+
+    返回空集 = 本窗没有任何规则要动态文案；解析层据此连字段都不看（普通规则 / 非场景联动
+    路径零开销）。
+    """
+    return {rc.rule_id for rc in context.rule_conditions if rc.tts_enabled}
+
+
 async def run_omni(
     edge_packet: IdentityPacket, context: OmniContext, config: OmniConfig
 ) -> OmniOutput:
     """Run Omni layer: build prompt → call model → parse response."""
     payload = build_prompt(edge_packet, context)
     raw_response = await call_omni(payload, config)
-    output = parse_omni_response(raw_response, _rule_name_to_id(context))
+    output = parse_omni_response(
+        raw_response, _rule_name_to_id(context), _tts_rule_ids(context)
+    )
     output.usage = extract_usage(raw_response)
     return output
 
@@ -115,7 +126,9 @@ async def run_omni_batch(
     """Run Omni layer for multiple devices in the same room."""
     payload = build_batch_prompt(edge_packets, context)
     raw_response = await call_omni(payload, config)
-    output = parse_omni_response(raw_response, _rule_name_to_id(context))
+    output = parse_omni_response(
+        raw_response, _rule_name_to_id(context), _tts_rule_ids(context)
+    )
     output.usage = extract_usage(raw_response)
     return output
 
@@ -217,7 +230,9 @@ async def run_omni_fused(
     # 中途抛异常 → mark_dispatched 已置 inflight=True 的 track 漏清(永不 GC、永不重派,直到进程重启)。
     delivered = False
     try:
-        omni_output = parse_omni_response(raw_response, _rule_name_to_id(context))
+        omni_output = parse_omni_response(
+            raw_response, _rule_name_to_id(context), _tts_rule_ids(context)
+        )
         omni_output.usage = extract_usage(raw_response)
 
         # 抽 identity_assignments 并写回 state（仅当有 candidate 才有意义）
@@ -498,6 +513,7 @@ async def run_omni_stream(
         on_early_matched_rules,
         on_early_suggestions,
         rule_name_to_id=_rule_name_to_id(context),
+        tts_rule_ids=_tts_rule_ids(context),
     )
 
 
@@ -519,6 +535,7 @@ async def run_omni_batch_stream(
         on_early_matched_rules,
         on_early_suggestions,
         rule_name_to_id=_rule_name_to_id(context),
+        tts_rule_ids=_tts_rule_ids(context),
     )
 
 
@@ -529,6 +546,7 @@ async def _stream_and_parse(
     on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]] | None,
     on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None,
     rule_name_to_id: "dict[str, str] | None" = None,
+    tts_rule_ids: "set[str] | None" = None,
 ) -> OmniOutput:
     """Stream omni response, extract actionable fields early, then parse full output."""
     buffer = ""
@@ -567,7 +585,9 @@ async def _stream_and_parse(
                     await on_early_speeches(result)
 
         if not matched_rules_done:
-            result = try_extract_matched_rules(buffer, rule_name_to_id)
+            result = try_extract_matched_rules(
+                buffer, rule_name_to_id, tts_rule_ids
+            )
             if result is not None:
                 matched_rules_done = True
                 logger.info(
@@ -590,7 +610,9 @@ async def _stream_and_parse(
                 if on_early_suggestions and result:
                     await on_early_suggestions(result)
 
-    output = parse_omni_response_from_text(buffer, rule_name_to_id)
+    output = parse_omni_response_from_text(
+        buffer, rule_name_to_id, tts_rule_ids
+    )
     if usage_out:
         output.usage = dict(usage_out)
     return output

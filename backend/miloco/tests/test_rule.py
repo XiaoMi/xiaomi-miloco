@@ -4636,3 +4636,120 @@ class TestRuleSceneCooldownFloor:
         )
         rule = _make_static_rule(rule_id="", actions=[good])
         assert await service.create_rule(rule) == "new-rule-id"
+
+
+# ---- TTS action（iid=SCENE_TTS_IID，did 位置放音箱 did）----
+
+
+def _make_tts_action(device_id="spk-1", cooldown=5, text=None):
+    from miloco.rule.schema import SCENE_TTS_IID
+
+    return RuleAction(
+        did=device_id, iid=SCENE_TTS_IID, idempotent=False,
+        cooldown_minutes=cooldown, tts_text=text,
+    )
+
+
+class TestRuleRunnerTtsAction:
+    """TTS 动作与场景动作同一套冷却语义，真正下发交给 miot.voice.speak（按 spec 解析
+    play-text）。"""
+
+    @pytest.mark.asyncio
+    async def test_tts_action_delegates_with_text(self, runner, monkeypatch):
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=(True, None))
+        monkeypatch.setattr("miloco.miot.voice.speak", spy)
+        result = await runner._execute_action("rule-tts", _make_tts_action())
+        assert result.result is True
+        # 直接调用 _execute_action 时没有本帧动态文案 → 无静态兜底则 skipped
+        assert result.skipped is True
+        spy.assert_not_awaited()
+
+        dynamic = await runner._execute_tts_action(
+            "rule-tts", _make_tts_action(), "今天这身很好看"
+        )
+        assert dynamic.result is True
+        assert dynamic.skipped is False
+        spy.assert_awaited_once()
+        assert spy.await_args.args[2] == "今天这身很好看"
+        assert spy.await_args.kwargs["source"] == "rule"
+
+    @pytest.mark.asyncio
+    async def test_tts_action_falls_back_to_static_text(self, runner, monkeypatch):
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=(True, None))
+        monkeypatch.setattr("miloco.miot.voice.speak", spy)
+        result = await runner._execute_action(
+            "rule-tts", _make_tts_action(text="出门顺利")
+        )
+        assert result.result is True and result.skipped is False
+        assert spy.await_args.args[2] == "出门顺利"
+
+    @pytest.mark.asyncio
+    async def test_tts_action_requires_dedup_guard(self, runner):
+        from miloco.rule.schema import SCENE_TTS_IID
+
+        bad = RuleAction(did="spk-1", iid=SCENE_TTS_IID, idempotent=True)
+        result = await runner._execute_tts_action("rule-bad", bad, "你好")
+        assert result.result is False
+        assert "tts action requires" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_tts_cooldown_skips_within_window(self, runner, monkeypatch):
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=(True, None))
+        monkeypatch.setattr("miloco.miot.voice.speak", spy)
+        action = _make_tts_action()
+        first = await runner._execute_tts_action("rule-cd-tts", action, "一")
+        second = await runner._execute_tts_action("rule-cd-tts", action, "二")
+        assert first.skipped is False
+        assert second.skipped is True
+        assert spy.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_tts_failure_not_cooled_down(self, runner, monkeypatch):
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=(False, "device offline"))
+        monkeypatch.setattr("miloco.miot.voice.speak", spy)
+        action = _make_tts_action()
+        first = await runner._execute_tts_action("rule-fail-tts", action, "一")
+        second = await runner._execute_tts_action("rule-fail-tts", action, "一")
+        assert first.result is False and first.error == "device offline"
+        assert second.skipped is False
+        assert spy.await_count == 2
+
+
+class TestRuleServiceTtsValidation:
+    """TTS 动作的音箱 did 也必须在 CRUD 期校验（同场景 id），否则命中后每次都播不出来。"""
+
+    @pytest.mark.asyncio
+    async def test_unknown_speaker_rejected(self, service, mock_miot_proxy):
+        mock_miot_proxy.get_voice_devices = AsyncMock(
+            return_value={"spk-1": SimpleNamespace(home_id=MOCK_HOME_ID)}
+        )
+        rule = _make_static_rule(rule_id="", actions=[_make_tts_action("spk-typo")])
+        with pytest.raises(
+            ValidationException, match=r"Invalid or not-allowed speaker"
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_known_speaker_accepted(self, service, mock_miot_proxy):
+        mock_miot_proxy.get_voice_devices = AsyncMock(
+            return_value={"spk-1": SimpleNamespace(home_id=MOCK_HOME_ID)}
+        )
+        rule = _make_static_rule(rule_id="", actions=[_make_tts_action("spk-1")])
+        await service.create_rule(rule)  # 不抛即通过
+
+    @pytest.mark.asyncio
+    async def test_empty_speaker_list_does_not_block(
+        self, service, mock_miot_proxy
+    ):
+        """音响列表为空（未绑定 / 云端抖动）时放行：TTS 只是附加动作，不该挡下配置。"""
+        mock_miot_proxy.get_voice_devices = AsyncMock(return_value={})
+        rule = _make_static_rule(rule_id="", actions=[_make_tts_action("spk-x")])
+        await service.create_rule(rule)

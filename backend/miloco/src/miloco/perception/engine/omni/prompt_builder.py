@@ -474,7 +474,11 @@ def _render_rule_conditions(context: OmniContext) -> str | None:
     - ``target_scene`` 是这条规则要检测的目标场景描述（内部字段仍是 ``condition.query``，
       只在 prompt 里换成对模型更直白的名字；它描述"要找什么"，不是当前画面）；
     - ``scene_notes`` 是该规则可选的场景补充说明 / 注意事项（住户在 web「场景联动」逐规则
-      配置），**仅在该规则配了时才出现**；它与规则同处一条 JSON，模型无需跨段对应即可拿到。
+      配置），**仅在该规则配了时才出现**；它与规则同处一条 JSON，模型无需跨段对应即可拿到；
+    - ``tts`` 是该规则「命中时要播报什么」的要求（住户在 web「场景联动」配的动态 TTS），
+      **仅在该规则开了动态播报时才出现**。命中时模型随命中一起产出一句文案（见
+      field_registry 的 tts 字段说明）——文案与命中同在一个 JSON 容器里返回，「命中即触发的
+      自动化」和「命中即播报的 TTS」拿的是同一帧结论，不需要为播报再跑一轮模型。
 
     结构化 JSONL 取代旧的 ``- <name>：<query>`` 纯文本拼接：字段边界显式，模型不会把
     "规则名里带冒号 / 描述里带换行" 与分隔符混淆，名称与 id 都能被精准提取。
@@ -509,6 +513,11 @@ def _render_rule_conditions(context: OmniContext) -> str | None:
         ctx_text = (rc.scene_notes or "").strip()
         if ctx_text:
             item["scene_notes"] = ctx_text
+        # 动态 TTS 要求：只在开了动态播报的规则上加一个字段（同一条 JSON 行，模型无需跨段
+        # 对应）。内容就是住户填的写作指引——说什么、什么语气、要提到哪些画面细节。
+        tts_text = (rc.tts_prompt or "").strip()
+        if rc.tts_enabled:
+            item["tts"] = tts_text or "用一句自然、亲切的话结合本轮画面描述或夸赞"
         lines.append("- "+json.dumps(item, ensure_ascii=False))
     return "\n".join(lines)
 
@@ -559,6 +568,8 @@ def _build_payload(
         has_pets=(False if rule_only else _has_pets_for_scene()),
         rule_only=rule_only,
         verbose=_perception_verbose(),
+        # 有规则开了动态 TTS → 输出 schema 才加 tts 字段（逐规则要求写在规则行里）
+        tts_rules=any(rc.tts_enabled for rc in context.rule_conditions),
     )
     if rule_only:
         include_home_profile = False
@@ -847,7 +858,9 @@ def _build_user_content(
     # 拆成独立 message）。规则用新「# 待判断规则」格式，与 fused 一致。
     parts: list[str] = []
     is_video = _resolve_route(packets) == "video"
-    # matched_rules 仅 video 路由有（audio-only 剥离）→ audio 不下发「# 待判断规则」段
+    # matched_rules 仅 video 路由有（audio-only 剥离）→ audio 不下发「# 待判断规则」段。
+    # rule_only 也走这里：pipeline 已剥离音频（恒视频路由），它同样要靠这段知道自己该判
+    # 哪些规则——漏了下发时模型只能回空数组，规则联动失效。
     if is_video:
         rule_conditions = _render_rule_conditions(context)
         if rule_conditions:

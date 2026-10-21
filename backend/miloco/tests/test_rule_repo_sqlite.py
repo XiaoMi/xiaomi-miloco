@@ -546,3 +546,39 @@ class TestRuleRepoCorruptedRow:
         logs = log_repo.get_all()
         assert len(logs) == 1
         assert logs[0].id == good_log.id
+
+
+def test_tts_action_and_condition_flags_round_trip(rule_repo):
+    """场景联动的 TTS 配置能落库再读回：``scene_tts`` 动作（含静态兜底文案）与
+    ``condition.tts_enabled``（存在 condition JSON blob 里，零迁移）。"""
+    from miloco.rule.schema import SCENE_TTS_IID
+
+    rule = Rule(
+        name=f"[test_task] tts {uuid.uuid4()}",
+        task_id="test_task",
+        mode=RuleMode.STATE,
+        lifecycle=RuleLifecycle.PERMANENT,
+        condition=RuleCondition(
+            perceive_device_ids=["cam-001"],
+            query="准备出门",
+            scene_notes="## 动态播报要求\n- 进入时：夸穿搭",
+            tts_enabled=True,
+        ),
+        on_enter_actions=[
+            RuleAction(
+                did="speaker-1", iid=SCENE_TTS_IID, idempotent=False,
+                cooldown_minutes=5, tts_text="兜底一句",
+            )
+        ],
+        on_exit_actions=[],
+        exit_debounce_seconds=0,
+    )
+    rule_id = rule_repo.create(rule)
+    back = rule_repo.get_by_id(rule_id)
+    assert back is not None
+    assert back.condition.tts_enabled is True
+    assert back.condition.scene_notes == "## 动态播报要求\n- 进入时：夸穿搭"
+    action = back.on_enter_actions[0]
+    assert action.iid == SCENE_TTS_IID
+    assert action.did == "speaker-1"
+    assert action.tts_text == "兜底一句"

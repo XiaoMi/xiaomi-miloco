@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 from miloco.database.rule_repo import RuleRepo
 from miloco.database.task_repo import TaskNotFound, TaskRepo
-from miloco.rule.schema import SCENE_IID
+from miloco.rule.schema import SCENE_IID, SCENE_TTS_IID
 from miloco.task.schema import (
     BackendSyncResult,
     BackendSyncRuleResult,
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 def _action_desc(a) -> str:
     """event 模式的动作展示串。场景没有 value/params,只按 iid 渲染会变成
     ``scene=None``,且同规则装两个场景时两行完全一样。"""
-    if a.iid == SCENE_IID:
+    if a.iid in (SCENE_IID, SCENE_TTS_IID):
         return f"{a.iid}:{a.did}"
     return f"{a.iid}={a.value if a.value is not None else a.params}"
 
@@ -51,7 +51,7 @@ def _action_desc_short(a) -> str:
     值可能是整段 TTS 文案,而前端按「；」把摘要串切成短句显示
     (TasksPage.splitActions),文案里的分号会把一条动作切成几行残句。
     """
-    return f"{a.iid}:{a.did}" if a.iid == SCENE_IID else a.iid
+    return f"{a.iid}:{a.did}" if a.iid in (SCENE_IID, SCENE_TTS_IID) else a.iid
 
 
 class TaskService:

@@ -683,6 +683,25 @@ class MiotProxy:
             await self.refresh_devices()
         return self._device_info_dict
 
+    async def refresh_voice_devices(self) -> dict[str, MIoTDeviceInfo] | None:
+        """强制从云端刷新设备表，返回其中可播报（音箱 / 屏显 / 电视类）的设备。
+
+        场景联动「进入设置页刷新音响列表」用：新买的音箱要立刻出现在可选列表里，
+        不能等 refresh_devices 的下一次周期。刷新失败返回 None（调用方保留旧值）。
+        """
+        from miloco.miot.voice import find_voice_devices
+
+        devices = await self.refresh_devices()
+        if devices is None:
+            return None
+        return find_voice_devices(devices)
+
+    async def get_voice_devices(self) -> dict[str, MIoTDeviceInfo]:
+        """可播报设备（音箱 / 屏显 / 电视类），来自进程内设备缓存（必要时补齐）。"""
+        from miloco.miot.voice import find_voice_devices
+
+        return find_voice_devices(await self.get_devices())
+
     async def _on_lan_device_changed(self, did: str, info: MIoTLanDeviceInfo) -> None:
         # refresh_cameras deep-copies SDK state, so post-init lan_online
         # changes only reach _camera_info_dict via this hook.

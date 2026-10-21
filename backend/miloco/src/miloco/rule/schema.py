@@ -54,6 +54,12 @@ class RuleEvent(str, Enum):
     STILL_OUT = "STILL_OUT"
     # duration record 累计达标瞬间触发（rule engine 内部 timer 驱动，与 condition diff 无关）
     TARGET_FIRED = "TARGET_FIRED"
+    # 场景联动专用：进入/退出那一刻要执行「动态 TTS」动作（说一句话），由 runner 单独一次
+    # fire 执行——只当该方向挂了 TTS 动作时才派发，普通规则不会出现这两个事件。与
+    # ENTERED / EXITED 分开是为了让「触发自动化」不被 TTS 的生成 / 播放延迟（含弱网重试）
+    # 拖着：同一个进入/退出边沿可能先后收到 ENTERED 与 ON_ENTERED 两次 fire。
+    ON_ENTERED = "ON_ENTERED"
+    ON_EXITED = "ON_EXITED"
 
 
 class TriggerOutcome(str, Enum):
@@ -111,6 +117,19 @@ iid 解析，也没法做幂等比对——只能靠冷却去重。``did`` 借�
 冷却槽、互相把对方压掉。
 """
 
+SCENE_TTS_IID = "scene_tts"
+"""``iid`` 哨兵值：这条 action 向音箱播报一段（可选动态生成的）TTS 文案。
+
+与 ``scene`` 同一套借位做法：``did`` 位置放音箱 did（不是 siid/aiid），`params`
+留空；说话文本完全不进 RuleAction —— 它要么是静态的 ``RuleAction.tts_text``，
+要么由感知模型在命中时动态生成（``RuleCondition.tts_enabled``，存在
+``MatchedRule.tts`` 里随命中帧带过来，见 ``RuleRunner._dispatch_event``）。
+
+真正下发时由 ``RuleRunner._execute_tts_action`` 按音箱的 spec 解析出
+``play-text`` 的 ``action.<siid>.<aiid>`` 再走设备直控，冷却键按
+``(音箱 did, "scene_tts")`` 隔离，与场景动作互不干扰。
+"""
+
 
 def parse_device_iid(iid: str) -> tuple[bool, int, int] | None:
     """拆 ``prop.<siid>.<piid>`` / ``action.<siid>.<aiid>``。
@@ -151,9 +170,16 @@ class RuleAction(BaseModel):
           {"did": "<scene_id>", "iid": "scene",
            "idempotent": false, "cooldown_minutes": 5}
 
+    - **TTS speak** (non-idempotent, must declare a cooldown)::
+
+          {"did": "<speaker_did>", "iid": "scene_tts",
+           "tts_text": "<可选：静态文案；空 = 由感知模型动态生成>",
+           "idempotent": false, "cooldown_minutes": 5}
+
     The shapes are distinguished by ``iid`` (``prop.`` / ``action.`` prefix, or
-    the bare ``scene`` sentinel) and by which payload field is set (``value`` /
-    ``params`` / neither). There is no ``type`` field on RuleAction itself.
+    the ``scene`` / ``scene_tts`` sentinels) and by which payload field is set
+    (``value`` / ``params`` / ``tts_text`` / neither). There is no ``type``
+    field on RuleAction itself.
 
     Validation note: ``idempotent=False`` requires ``cooldown_minutes``, and
     ``iid=scene`` requires ``idempotent=False``. Service / cli layers enforce
@@ -167,12 +193,23 @@ class RuleAction(BaseModel):
     iid: str = Field(
         ...,
         description=(
-            "prop.{siid}.{piid} / action.{siid}.{aiid} / 'scene' (did=scene_id)"
+            "prop.{siid}.{piid} / action.{siid}.{aiid} / 'scene' (did=scene_id) / "
+            "'scene_tts' (did=speaker_did)"
         ),
     )
     value: Any = Field(None, description="Property value (for prop.* iid)")
     params: list[Any] | None = Field(
         None, description="Action params (for action.* iid)"
+    )
+    # 仅 iid == SCENE_TTS_IID 时有意义。None / 未设置 = 动态 TTS（文案由感知模型按本轮画面
+    # 生成，见 RuleCondition.tts_enabled）；非空 = 静态文案兜底（模型没给文案时用它，直接调试
+    # 触发 / 旧数据 / 生成失败都能播）。
+    tts_text: str | None = Field(
+        None,
+        description=(
+            "Static TTS text (for iid='scene_tts'); None = generated dynamically "
+            "from the matched frame"
+        ),
     )
     idempotent: bool = Field(
         True,
@@ -205,6 +242,17 @@ class RuleCondition(BaseModel):
         description=(
             "Per-rule scene notes injected into the omni prompt (scene-specific "
             "details / cautions / judging hints); None/empty = not injected"
+        ),
+    )
+    # 场景联动「动态 TTS」：为 True 时该规则在命中帧上额度外地生成一句播报文案
+    # （matched_rules 里多一个 "tts" 字段，见 field_registry.MATCHED_RULES）。它随命中帧
+    # 一起到达，故 ENTERED 那一刻文案已在手——不必再调一次模型，自动化触发与 TTS 播报可
+    # 同时执行。未命中 / 未退出时没有文案，由 runner 直接跳过 TTS 动作（不阻塞自动化）。
+    tts_enabled: bool = Field(
+        False,
+        description=(
+            "Ask omni to generate a TTS line on each hit frame (scenario "
+            "automation in the web UI); the text rides on MatchedRule.tts"
         ),
     )
 
@@ -320,6 +368,8 @@ class RuleConditionUpdate(BaseModel):
     scene_notes: str | None = Field(
         None, validation_alias=AliasChoices("scene_notes", "system_context")
     )
+    # 动态 TTS 开关（同 RuleCondition.tts_enabled，语义见该字段）。
+    tts_enabled: bool | None = Field(None)
 
 
 class RuleUpdate(BaseModel):
@@ -346,6 +396,32 @@ class RuleUpdate(BaseModel):
     duration_seconds: int | None = Field(None, ge=1)
     duration_ratio: float | None = Field(None, gt=0.0, le=1.0)
     max_dwell_seconds: int | None = Field(None, ge=1)
+
+
+class SceneTtsSlot(BaseModel):
+    """场景联动一个方向（进入 / 退出）的 TTS 播报配置。
+
+    与 ``RuleAction(iid=SCENE_TTS_IID)`` 是同一份配置的两种视图：存储层是一条
+    RuleAction（``did`` = 音箱 did、``cooldown_minutes`` = 冷却、``tts_text`` = 静态文案
+    兜底），``tts_content`` / ``prompt`` 则落在 ``RuleCondition.tts_enabled`` 与
+    ``scene_notes`` 里（不进 RuleAction）。web「场景联动」抽屉直接编辑本模型。
+    """
+
+    tts_content: bool = Field(
+        False, description="真 = 用感知模型按本轮画面动态生成文案（动态 TTS）"
+    )
+    tts_prompt: str | None = Field(
+        None,
+        max_length=800,
+        description=(
+            "动态文案的生成要求（住户填的写作指引：说什么、什么语气、哪些画面细节要提到）"
+        ),
+    )
+    tts_text: str | None = Field(
+        None,
+        max_length=500,
+        description="静态兜底文案：模型没给出文案时用它；为 None 则跳过播报",
+    )
 
 
 class RuleTriggerRequest(BaseModel):

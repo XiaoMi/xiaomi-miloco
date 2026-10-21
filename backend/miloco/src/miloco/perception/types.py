@@ -267,6 +267,13 @@ class MatchedRule(BaseModel):
     device_name: str = Field(default="", description="Human-readable camera name (set by engine; not from model)")
     time_window: str = Field(default="", description="Picture capture window [HH:MM:SS-HH:MM:SS] (engine-injected)")
     caption: str = Field(default="", description="Caption from same-window CaptionEntry (attached before text build)")
+    # 场景联动「动态 TTS」：该规则开着动态播报时，模型在命中帧上随命中一起产出的一句播报
+    # 文案（rule_only 输出里的 "tts" 字段）。空串 = 本帧没有文案（规则未开动态 TTS，或
+    # 模型没给）——runner 据此直接把 TTS 动作判为跳过，不阻塞自动化触发。
+    tts: str = Field(
+        default="",
+        description="Model-generated TTS line for scene rules (empty when absent)",
+    )
 
 
 class Speech(BaseModel):

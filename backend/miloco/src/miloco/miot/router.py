@@ -320,6 +320,45 @@ async def get_device_status(
     )
 
 
+@router.get(
+    path="/voice-devices",
+    summary="List speaker devices that can play TTS",
+    response_model=NormalResponse,
+)
+async def list_voice_devices(
+    current_user: str = Depends(verify_token),
+    refresh: bool = Query(True, description="true = 先从米家云刷新设备表"),
+):
+    """可播报设备（音箱 / 屏显 / 电视类），供场景联动「动态 TTS」选择设备。
+
+    与场景列表同口径：只返回**已启用家庭**内的设备。默认 refresh=true——进入场景联动
+    设置页即刷新，避免新买的音箱要等下一轮设备刷新才出现；刷新失败时回落缓存，接口不报错。
+    """
+    logger.info("List voice devices - User: %s, refresh: %s", current_user, refresh)
+    from miloco.miot.voice import filter_voice_devices
+
+    devices = None
+    if refresh:
+        devices = await manager.miot_proxy.refresh_voice_devices()
+    if devices is None:
+        devices = await manager.miot_proxy.get_voice_devices()
+    devices = filter_voice_devices(manager.kv_repo, devices or {})
+    data = [
+        {
+            "did": d.did,
+            "name": d.name,
+            "home_id": getattr(d, "home_id", None),
+            "room_name": getattr(d, "room_name", None),
+            "model": getattr(d, "model", None),
+            "online": bool(getattr(d, "online", False)),
+        }
+        for d in sorted(devices.values(), key=lambda x: (x.name or "", x.did))
+    ]
+    return NormalResponse(
+        code=0, message=f"Retrieved {len(data)} voice devices", data=data
+    )
+
+
 @router.post(
     path="/scenes",
     summary="Create a manual scene (not yet implemented)",

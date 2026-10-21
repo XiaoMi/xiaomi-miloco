@@ -10,6 +10,7 @@ user content 无身份名册 / 无家庭档案、pipeline 跳过 tracker/身份�
 """
 
 import json
+import json as _json
 from unittest.mock import AsyncMock, patch
 
 import cv2
@@ -654,3 +655,91 @@ async def test_batch_rule_only_never_instantiates_tracker():
     dev = room.device_results['cam-1']
     assert dev.gate_packet.trigger.audio_active is False
     assert dev.identity_packet.targets == []
+
+# ---- 场景联动「动态 TTS」：规则行带 tts 要求、命中条目回 tts ----
+
+
+def test_rule_only_no_tts_schema_unchanged():
+    """本窗没有动态 TTS 规则 → schema 保持裸 id 数组（不多一层对象、不多一个字段）。"""
+    scene = SceneDescriptor(route='video', rule_only=True, tts_rules=False)
+    assert render_schema(scene) == '["规则id"]'
+
+
+def test_rule_only_compact_tts_schema():
+    scene = SceneDescriptor(route='video', rule_only=True, tts_rules=True)
+    schema = render_schema(scene)
+    assert '"tts"' in schema and '"id"' in schema, schema
+    # 仍兼容普通命中条目的裸 id 形态
+    assert '|"规则id"' in schema
+    assert 'reason' not in schema and 'hit' not in schema
+
+
+def test_rule_only_verbose_tts_schema():
+    scene = SceneDescriptor(route='video', rule_only=True, tts_rules=True, verbose=True)
+    schema = render_schema(scene)
+    assert '"rule_id"' in schema and '"tts"' in schema and '"hit"' in schema
+
+
+def test_rule_only_tts_field_spec_added():
+    scene = SceneDescriptor(route='video', rule_only=True, tts_rules=True)
+    spec = __import__(
+        'miloco.perception.engine.omni.field_registry', fromlist=['render_field_spec']
+    ).render_field_spec(scene)
+    assert '## tts（播报文案）' in spec
+    # 没开动态 TTS 时不出现
+    plain = __import__(
+        'miloco.perception.engine.omni.field_registry', fromlist=['render_field_spec']
+    ).render_field_spec(SceneDescriptor(route='video', rule_only=True))
+    assert '## tts' not in plain
+
+
+def test_rule_line_carries_tts_requirement_only_when_enabled():
+    ep = _make_packet()
+    ctx = OmniContext(
+        rule_only=True,
+        rule_conditions=[
+            RuleCondition(
+                rule_id='dresscode', rule_name='出门夸夸', query='准备出门',
+                tts_enabled=True, tts_prompt='结合我的穿搭夸一句',
+            ),
+            RuleCondition(rule_id='plain', rule_name='普通规则', query='有人在家'),
+        ],
+    )
+    payload = build_prompt(ep, ctx)
+    uc = payload['user_content']
+    assert '# 待判断规则' in uc, 'rule_only 也要下发待判断规则段'
+    lines = [_json.loads(ln[2:]) for ln in uc.splitlines() if ln.startswith('- {')]
+    # rule_id 在 prompt 里是短 id（同一窗内唯一），按 rule_name 对回原规则
+    by_name = {ln['rule_name']: ln for ln in lines}
+    assert by_name['出门夸夸']['tts'] == '结合我的穿搭夸一句'
+    assert 'tts' not in by_name['普通规则']
+    # system prompt 也切到 tts 版（schema + 字段说明）
+    sp = payload['system_prompt']
+    assert '"tts"' in sp
+    assert '## tts（播报文案）' in sp
+
+
+def test_rule_only_tts_end_to_end_parse():
+    """rule_only + 动态 TTS：模型输出 {id, tts} 对象数组 → MatchedRule 带文案。"""
+    import asyncio
+
+    from miloco.perception.engine.omni.prompt_builder import agent_rule_ids
+    from miloco.perception.engine.omni.response_parser import parse_omni_response
+
+    ctx = OmniContext(
+        rule_only=True,
+        rule_conditions=[
+            RuleCondition(
+                rule_id='abcdef123456', rule_name='出门夸夸', query='准备出门',
+                tts_enabled=True, tts_prompt='夸穿搭',
+            ),
+        ],
+    )
+    short = agent_rule_ids(ctx)['abcdef123456']
+    raw = {'choices': [{'message': {'content': _json.dumps(
+        [{'id': short, 'tts': '今天这身蓝色外套很精神'}], ensure_ascii=False
+    )}}]}
+    out = parse_omni_response(raw, {short: 'abcdef123456'}, {'abcdef123456'})
+    assert out.matched_rules[0].rule_id == 'abcdef123456'
+    assert out.matched_rules[0].tts == '今天这身蓝色外套很精神'
+    assert not asyncio.iscoroutine(out)

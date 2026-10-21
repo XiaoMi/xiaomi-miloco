@@ -98,6 +98,12 @@ event 模式只监听 False→True 的翻转，适合"检测到 X 这件事发�
 
 **STATIC 动作三种形态**：`iid` 决定形态——`prop.<siid>.<piid>` 走属性直控（带 `value`），`action.<siid>.<aiid>` 走 method call（带 `params`，如 TTS），`scene` 触发米家场景（`did` 位置放 scene_id，无 `value`/`params`）。场景读不到当前值，无法做幂等比对，所以强制 `idempotent=false` + `cooldown_minutes`，去重只靠冷却；冷却键是 `(did, iid)`，同一条规则里的多个场景互不干扰。场景执行复用 `MiotService` 的家庭白名单校验和场景台账，与 CLI 手动触发落同一形状，仅 `source` 标成 `rule`、`source_id` 写 rule_id。
 
+**场景联动（web「场景联动」tab）**：`SceneTaskService` 把「task 占位 + state 规则」组合成一个单元，进入 / 退出各挂一组动作，可同时配两类：触发米家自动化场景（`iid="scene"`，`did` 放 scene_id）与用指定音响播报 TTS（`iid="scene_tts"`，`did` 放音箱 did，`tts_text` 是静态兜底文案）。
+
+动态 TTS 的文案由感知模型在命中帧上**随命中一起**生成（不另调一次模型）：规则 `condition.tts_enabled=true` 时，「# 待判断规则」JSONL 行多一个 `tts` 要求字段（住户在 web 填的写作指引，存在 `scene_notes` 的「## 动态播报要求」段里），rule_only 模式的输出 schema 相应变成 `[{"id","tts"}|"id"]`（详细模式为对象数组多一个 `tts`）。命中 → `MatchedRule.tts` → `client.update_state(tts_text=...)` → runner 在 ENTERED 时刻另派一次 `ON_ENTERED` fire 执行 TTS 动作。**自动化场景走 ENTERED、TTS 走 ON_ENTERED**：两者从同一个命中帧同时出发，RTT 不同但互不阻塞——模型没给文案（或没开动态 TTS）时 TTS 直接判 skipped，自动化照常触发。
+
+真正下发时 `miloco.miot.voice.speak` 按音箱 spec 找 `play-text` 的 `action.<siid>.<aiid>`（绝不硬编码 iid；`execute-text-directive` 是小爱指令、不是逐字播报，不选），并落 action_ledger（`source=rule`）。可播报设备与场景列表同口径：只取已启用家庭内、urn 品类为 speaker/screen/tv/projector 的设备（`/api/scene-tasks/voice-devices?refresh=true`，进入 web 设置页即从云端刷新）。
+
 **query 措辞校验**：`RuleService` 在创建和更新规则时拒绝以"检测到"/"识别到"/"感知到"等断言性词汇开头的 query。这类措辞被注入 Omni prompt 后，VLM 会把 query 当成已发生事实而非待判断条件，导致连续误触发。query 应改写为进行时状态描述（如"有人坐在书房桌前"而非"检测到有人进入书房"）。
 
 ### 如果我要修改规则相关功能

@@ -46,6 +46,6 @@
     "imageLastFrameOnly": "Send only the last frame",
     "imageLastFrameOnlyHint": "On (default) = send only the last frame of the window — fewer tokens and faster, enough for static state rules. Off = send every frame, steadier for action/gesture rules.",
     "perceptionVerbose": "Verbose judging output",
-    "perceptionVerboseHint": "When on, the model reports every rule's hit/miss plus an unlimited-length rationale — useful for investigating missed or spurious triggers. When off (default) it returns only the ids of matched rules, which is faster and cheaper."
+    "perceptionVerboseHint": "When on, the model reports every scene rule's hit/miss plus an unlimited-length rationale — matched and unmatched rules are all listed, useful for investigating missed or spurious triggers. When off (default) it returns only the ids of matched rules, which is faster and cheaper."
   }
 }

@@ -26,7 +26,7 @@
 
 **场景 3 — 家庭面板操作**：用户在浏览器打开家庭面板"设备"标签，按房间浏览设备列表，点击开关或滑块直接发起控制请求。
 
-**场景 4 — 音箱 TTS**：Agent 需要向用户播报提醒，通过 `miloco-devices` Skill 找到房间内的音箱设备，调用 `play-text` 动作完成播报。
+**场景 4 — 音箱 TTS**：Agent 需要向用户播报提醒，通过 `miloco-devices` Skill 找到房间内的音箱设备，调用 `play-text` 动作完成播报。场景联动（规则 STATIC 动作 `iid="scene_tts"`）不经过 Agent，由 `miloco.miot.voice.speak` 按设备 spec 解析 `play-text` 的 `action.<siid>.<aiid>` 后直发——不同音箱的 siid/aiid 不同，不能硬编码。
 
 ### 能力边界
 

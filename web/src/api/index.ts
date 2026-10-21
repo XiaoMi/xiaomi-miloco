@@ -41,6 +41,7 @@ import type {
   Scene,
   SceneTask,
   SceneTaskInput,
+  SceneVoiceDevice,
   ScopeCamera,
   ScopeHome,
   Task,
@@ -56,6 +57,7 @@ import type {
   UpgradeStatus,
 } from "@/lib/types";
 export type { ScopeHome };
+export type { SceneTts, SceneTtsInput } from "@/lib/types";
 
 const impl: typeof realImpl = realImpl;
 
@@ -352,6 +354,11 @@ export async function deleteSceneTask(taskId: string): Promise<void> {
 }
 
 /** 调试：手动触发一次进入场景（不依赖感知命中）。 */
+// 可选音响（动态 TTS 用）：进入场景联动设置页即调用，后端会先从米家云刷新设备表。
+export async function listSceneVoiceDevices(): Promise<SceneVoiceDevice[]> {
+  return impl.realListSceneVoiceDevices();
+}
+
 export async function triggerSceneTask(taskId: string): Promise<void> {
   return impl.realTriggerSceneTask(taskId);
 }
@@ -371,6 +378,12 @@ export async function controlDeviceProp(
 }
 
 // ── 场景 ──────────────────────────────────────────────────
+// 作废家庭信息缓存（含自动化场景列表）。场景联动页进入时调用：自动化场景列表要像音响
+// 列表一样每次都拿最新的，不能等 5s 的去重缓存过期。
+export function invalidateHomeCache(): void {
+  impl.invalidateMiotHomeCache();
+}
+
 export async function listScenes(homeId?: HomeId): Promise<Scene[]> {
   if (!isPrimary(homeId)) return [];
   return impl.realListScenes();

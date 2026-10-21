@@ -28,6 +28,9 @@ import type {
   Scene,
   SceneTask,
   SceneTaskInput,
+  SceneTts,
+  SceneTtsInput,
+  SceneVoiceDevice,
   ScopeCamera,
   ScopeHome,
   Task,
@@ -121,11 +124,19 @@ function fetchMiotHome(): Promise<Normal<MiotHome>> {
   return homeCache;
 }
 
+// 主动作废 home 缓存（场景联动页「刷新自动化 / 音响列表」用）：5s TTL 是首屏并发
+// 去重用的，但住户刚在米家建好的自动化场景必须立刻可选——强制刷新时先清掉它，
+// 下一次 listScenes 就会真的去 backend 再取一遍。
+export function invalidateMiotHomeCache(): void {
+  homeCache = null;
+  homeCacheTs = 0;
+}
+
 // PUT 后写穿 cache:把 cache 直接换成新一轮的 fetch promise,不等下次 caller
 // 触发 fetch。同时盖掉可能仍 in-flight 的旧 promise(它会 resolve 出 PUT 前的
 // 旧数据)。这样新 caller(典型:status.reload 紧接着 switchScopeHome)拿到的
 // 就是 PUT 后的数据,消除"罕见 race 读旧值"窗口。
-function invalidateMiotHomeCache(): void {
+function refreshMiotHomeCache(): void {
   const fresh = apiFetch<Normal<MiotHome>>("/api/miot/home");
   homeCache = fresh;
   homeCacheTs = Date.now();
@@ -1195,9 +1206,9 @@ export async function realSwitchScopeHome(homeId: string): Promise<void> {
     body: JSON.stringify({ home_id: homeId }),
   });
   // 写后立即 invalidate + 主动 prefetch homeCache:消除"PUT 后立即调 status.reload()
-  // 但拿到 in-flight 旧 promise"的 race 窗口。invalidateMiotHomeCache 内部把 cache
+  // 但拿到 in-flight 旧 promise"的 race 窗口。refreshMiotHomeCache 内部把 cache
   // 直接换成新一轮 fetch promise,新 caller 等的就是 PUT 后的数据。
-  invalidateMiotHomeCache();
+  refreshMiotHomeCache();
 }
 
 // ── 米家 scope 摄像头（启用 / 禁用全集）────────────────────────
@@ -1273,7 +1284,7 @@ export async function realToggleScopeCamera(
     }),
   });
   // 写后立即 invalidate + 主动 prefetch homeCache(同 switchScopeHome 同款消 race)。
-  invalidateMiotHomeCache();
+  refreshMiotHomeCache();
 }
 
 // 拾音开关走独立端点 PUT /api/miot/scope/cameras/voice（不复用相机启用端点：
@@ -2191,7 +2202,15 @@ export async function realUpdateRuleQuery(
 }
 
 // ── 场景联动任务（/api/scene-tasks，web「场景联动」tab）────────────────
-// 感知命中规则 → 直接触发米家自动化场景（trigger_scene），不经 agent。
+// 感知命中规则 → 直接触发米家自动化场景 / 用音响播报 TTS，不经 agent。
+interface BackendSceneTts {
+  device_id?: string | null;
+  device_name?: string | null;
+  tts_content: boolean;
+  tts_prompt?: string | null;
+  tts_text?: string | null;
+}
+
 interface BackendSceneTask {
   task_id: string;
   description: string;
@@ -2208,15 +2227,32 @@ interface BackendSceneTask {
   enter_scene_name?: string | null;
   exit_scene_id?: string | null;
   exit_scene_name?: string | null;
+  enter_tts?: BackendSceneTts | null;
+  exit_tts?: BackendSceneTts | null;
   cooldown_minutes?: number | null;
   enter_debounce_seconds: number;
   exit_debounce_seconds: number;
   max_dwell_seconds?: number | null;
+  dynamic_tts_ready?: boolean;
+}
+
+interface BackendSceneVoiceDevice {
+  did: string;
+  name: string;
+  room_name?: string | null;
+  online?: boolean;
 }
 
 // 前端输入是 camelCase，backend SceneTaskCreateRequest / UpdateRequest 是 snake_case
 // 且 extra=forbid —— 不转换直接发会 422（missing perceive_device_ids + 一串
 // extra_forbidden）。只带显式提供的字段（PATCH 按 model_fields_set 合并）。
+function toSceneTtsPayload(tts: SceneTtsInput): Record<string, unknown> {
+  const p: Record<string, unknown> = { tts_content: tts.ttsContent };
+  if (tts.ttsPrompt !== undefined) p.tts_prompt = tts.ttsPrompt;
+  if (tts.ttsText !== undefined) p.tts_text = tts.ttsText;
+  return p;
+}
+
 function toSceneTaskPayload(input: SceneTaskInput): Record<string, unknown> {
   const p: Record<string, unknown> = {};
   if (input.description !== undefined) p.description = input.description;
@@ -2229,6 +2265,16 @@ function toSceneTaskPayload(input: SceneTaskInput): Record<string, unknown> {
   }
   if (input.enterSceneId !== undefined) p.enter_scene_id = input.enterSceneId;
   if (input.exitSceneId !== undefined) p.exit_scene_id = input.exitSceneId;
+  // TTS 的「音响 did」与「播报配置」必须成对提交：两者都是 undefined 就不带（不动），
+  // 都是 null 就表示移除该方向的播报。
+  if (input.enterTtsDeviceId !== undefined || input.enterTts !== undefined) {
+    p.enter_tts_device_id = input.enterTtsDeviceId ?? null;
+    p.enter_tts = input.enterTts ? toSceneTtsPayload(input.enterTts) : null;
+  }
+  if (input.exitTtsDeviceId !== undefined || input.exitTts !== undefined) {
+    p.exit_tts_device_id = input.exitTtsDeviceId ?? null;
+    p.exit_tts = input.exitTts ? toSceneTtsPayload(input.exitTts) : null;
+  }
   if (input.cooldownMinutes !== undefined) {
     p.cooldown_minutes = input.cooldownMinutes;
   }
@@ -2241,6 +2287,17 @@ function toSceneTaskPayload(input: SceneTaskInput): Record<string, unknown> {
   if (input.maxDwellSeconds !== undefined) p.max_dwell_seconds = input.maxDwellSeconds;
   if (input.enabled !== undefined) p.enabled = input.enabled;
   return p;
+}
+
+function mapSceneTts(t: BackendSceneTts | null | undefined): SceneTts | null {
+  if (!t || !t.device_id) return null;
+  return {
+    deviceId: t.device_id,
+    deviceName: t.device_name ?? null,
+    ttsContent: !!t.tts_content,
+    ttsPrompt: t.tts_prompt ?? null,
+    ttsText: t.tts_text ?? null,
+  };
 }
 
 function mapSceneTask(t: BackendSceneTask): SceneTask {
@@ -2260,16 +2317,33 @@ function mapSceneTask(t: BackendSceneTask): SceneTask {
     enterSceneName: t.enter_scene_name ?? null,
     exitSceneId: t.exit_scene_id ?? null,
     exitSceneName: t.exit_scene_name ?? null,
+    enterTts: mapSceneTts(t.enter_tts),
+    exitTts: mapSceneTts(t.exit_tts),
     cooldownMinutes: t.cooldown_minutes ?? null,
     enterDebounceSeconds: t.enter_debounce_seconds ?? 0,
     exitDebounceSeconds: t.exit_debounce_seconds,
     maxDwellSeconds: t.max_dwell_seconds ?? null,
+    dynamicTtsReady: t.dynamic_tts_ready ?? true,
   };
 }
 
 export async function realListSceneTasks(): Promise<SceneTask[]> {
   const r = await apiFetch<Normal<BackendSceneTask[]>>("/api/scene-tasks");
   return (r.data ?? []).map(mapSceneTask);
+}
+
+// 可选音响：每次进入场景联动设置页都带 refresh=true 从米家云刷新，避免新绑定的音箱
+// 迟迟不出现在列表里（与自动化场景列表同一诉求）。
+export async function realListSceneVoiceDevices(): Promise<SceneVoiceDevice[]> {
+  const r = await apiFetch<Normal<BackendSceneVoiceDevice[]>>(
+    "/api/scene-tasks/voice-devices?refresh=true",
+  );
+  return (r.data ?? []).map((d) => ({
+    did: d.did,
+    name: d.name,
+    roomName: d.room_name ?? null,
+    online: !!d.online,
+  }));
 }
 
 export async function realCreateSceneTask(
@@ -2286,7 +2360,7 @@ export async function realCreateSceneTask(
   return mapSceneTask(r.data);
 }
 
-// PATCH 只提交显式提供的字段；null = 清空该方向场景（后端校验不能两个方向都空）。
+// PATCH 只提交显式提供的字段；null = 清空该方向（后端校验不能两个方向都空）。
 export async function realUpdateSceneTask(
   taskId: string,
   patch: SceneTaskInput,
@@ -2319,7 +2393,8 @@ export async function realDeleteSceneTask(taskId: string): Promise<void> {
   );
 }
 
-// 调试入口：手动触发一次进入场景（不依赖感知命中）。
+// 调试入口：手动触发一次进入动作（不依赖感知命中）。
+// 动态播报没有「本轮画面」，会播该动作配置的兜底文案；没配兜底则不播。
 export async function realTriggerSceneTask(
   taskId: string,
 ): Promise<void> {

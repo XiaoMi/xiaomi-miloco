@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   getFeatures,
   getHomeStatus,
+  invalidateHomeCache,
   listActivity,
   listOnDemandLogs,
   listCameras,
@@ -541,6 +542,12 @@ function MainApp() {
             cameras={scopeCameras.data ?? []}
             loading={sceneTasks.loading}
             onChanged={() => sceneTasks.reload()}
+            // 进入场景联动页 / 打开抽屉时强制刷新「自动化场景 + 相机」：
+            // 先作废前端 5s 去重缓存再 reload，住户刚在米家建的自动化不必等缓存过期。
+            onRefreshSources={async () => {
+              invalidateHomeCache();
+              await Promise.all([scenes.reload(), scopeCameras.reload()]);
+            }}
           />
         );
       }

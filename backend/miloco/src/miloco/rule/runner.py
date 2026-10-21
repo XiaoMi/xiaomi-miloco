@@ -46,6 +46,7 @@ from miloco.node_monitor import NodeName, get_monitor
 from miloco.observability.metrics_client import get_metrics_client
 from miloco.rule.schema import (
     SCENE_IID,
+    SCENE_TTS_IID,
     Rule,
     RuleAction,
     RuleActionExecuteResult,
@@ -144,6 +145,10 @@ def build_rule_callbacks_text(callbacks: list[RuleTriggerCallback]) -> str | Non
 StaticSlot = tuple[Literal["static"], list[RuleAction]]
 DynamicSlot = tuple[Literal["dynamic"], str]
 Slot = StaticSlot | DynamicSlot | None
+
+
+def _is_tts_action(action: RuleAction) -> bool:
+    return action.iid == SCENE_TTS_IID
 
 
 _FIRE_PREAMBLE_WITH_RECORD = """**处理流程**：（按时间序 1→2→3 执行；以下 CLI 前缀均省略 miloco-cli task record）
@@ -437,6 +442,7 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         cycle_source_states: Mapping[str, bool] | None = None,
+        tts_text: str = "",
     ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
@@ -448,6 +454,9 @@ class RuleRunner:
         matched frame (room name + device ids of the camera that saw it). They
         ride along to the Agent callback on ENTERED and never participate in
         state aggregation; EXITED fires with them empty.
+
+        ``tts_text`` 是模型在命中帧上随命中一起给出的动态播报文案（规则开了动态 TTS 时
+        才有）。它只在本帧真的派发 ENTERED（且该规则挂了 TTS 动作）时被用上，否则丢弃。
         """
         async with get_monitor().track_async(NodeName.RULE, "update") as h:
             h.add_input(1)
@@ -483,7 +492,8 @@ class RuleRunner:
                     if did not in observed_states
                 )
                 dur_outcome = self._evaluate_duration(
-                    rule, effective_state, source_did, context, caption, device_name
+                    rule, effective_state, source_did, context, caption, device_name,
+                    tts_text=tts_text,
                 )
                 # out() 对 duration 规则一律取 dur_outcome，其非空由本块位置维持——静态类型
                 # 推不出来，失效后又会被 aggregate_outcomes 的 .get(o, -1) 兜底静默吞掉。
@@ -552,7 +562,7 @@ class RuleRunner:
             event = RuleEvent.ENTERED if new_rule_state else RuleEvent.EXITED
             dispatch_outcome = await self._dispatch_event(
                 rule, event, source_did, context, trigger_room, trigger_dids,
-                caption=caption, device_name=device_name,
+                caption=caption, device_name=device_name, tts_text=tts_text,
             )
             h.add_output(1)
             if event == RuleEvent.EXITED:
@@ -646,6 +656,7 @@ class RuleRunner:
         context: str,
         caption: str = "",
         device_name: str = "",
+        tts_text: str = "",
     ) -> TriggerOutcome:
         """每个采样周期采样一次 OR 聚合状态；窗口 True 比例达阈值即 fire。
 
@@ -749,6 +760,11 @@ class RuleRunner:
                 },
                 caption=caption, device_name=device_name,
             )
+            # 进入确认时间（duration 前置门槛）达标也是真正的「进入」：动态 TTS 与上面的
+            # 自动化同时派发。文案取本帧的 tts_text（窗口达标那一帧模型给出的那句）。
+            self._spawn_tts_fire(
+                rule, RuleEvent.ON_ENTERED, sources, context, tts_text,
+            )
             if rule.mode == RuleMode.STATE:
                 self._schedule_target_timer_if_needed(rule, sources, context)
                 self._schedule_dwell_timer_if_needed(rule, sources, context)
@@ -768,6 +784,7 @@ class RuleRunner:
         trigger_dids: list[str] | None = None,
         caption: str = "",
         device_name: str = "",
+        tts_text: str = "",
     ) -> TriggerOutcome:
         """Translate a diff event into an action-layer fire (with state-mode
         debounce on EXITED).
@@ -775,7 +792,12 @@ class RuleRunner:
         Returns the resulting ``TriggerOutcome`` for the ENTERED path (``FIRED``
         only when it actually spawns a fire). EXITED / suppressed paths return
         ``NOT_FIRED`` — for duration rules the caller ignores this and uses
-        ``_evaluate_duration``."""
+        ``_evaluate_duration``.
+
+        TTS 动作（``scene_tts``）不跟自动化触发挤在同一个 fire 里：它在 ENTERED / EXITED
+        时刻另派一个 ``ON_ENTERED`` / ``ON_EXITED`` fire 去说那句话（``tts_text`` 或静态
+        兜底文案）。两件事互不阻塞——文案没生成出来时 TTS 直接跳过，自动化照常触发。
+        """
         state = self._ensure_state(rule.id)
         if event == RuleEvent.ENTERED:
             # 进入分支瞬间锚定 wall-clock 作为 actual_started_at —— 与 actual_exited_at
@@ -831,6 +853,11 @@ class RuleRunner:
                 extra_metadata={"actual_started_at": actual_started_at},
                 caption=caption, device_name=device_name,
             )
+            # 动态 TTS：与自动化触发同时执行（独立 fire，先派发）。文案来自本命中帧；
+            # 规则没开动态 TTS / 模型没给时 tts_text 为空 → TTS 动作判 skipped，不挡自动化。
+            self._spawn_tts_fire(
+                rule, RuleEvent.ON_ENTERED, sources, context, tts_text,
+            )
             self._schedule_target_timer_if_needed(rule, sources, context)
             if rule.mode == RuleMode.STATE:
                 self._schedule_dwell_timer_if_needed(rule, sources, context)
@@ -859,6 +886,10 @@ class RuleRunner:
         self._clear_pending_source_enter(rule.id)
 
         delay = rule.exit_debounce_seconds
+        # 退出方向的 TTS 与「开始排程退出」同时派发：退出边沿已被确认（只是还要等
+        # debounce），文案要求的是「离开时说的话」，此刻播报最贴切。期间若条件翻回 True
+        # 导致 debounce 被取消，自动化不会触发，但这句话已经说出去了（可接受的噪声）。
+        self._spawn_tts_fire(rule, RuleEvent.ON_EXITED, [source_did], context, "")
         # 真实退出时刻：debounce 调度的此刻才是用户实际离开的时间；
         # _debounced_exit fire 时的 wall-clock 已经晚了 delay 秒
         actual_exited_at = ms_to_iso_local(now_ms())
@@ -958,17 +989,42 @@ class RuleRunner:
         extra_metadata: dict | None = None,
         caption: str = "",
         device_name: str = "",
+        tts_text: str = "",
     ) -> None:
         """Schedule a fire as a background task; record handle to prevent GC."""
         task = asyncio.create_task(
             self._fire_safely(
                 rule, event, sources, context, str(uuid.uuid4()),
                 trigger_room, trigger_dids, extra_metadata,
-                caption=caption, device_name=device_name,
+                caption=caption, device_name=device_name, tts_text=tts_text,
             )
         )
         self._fire_tasks.add(task)
         task.add_done_callback(self._fire_tasks.discard)
+
+    def _spawn_tts_fire(
+        self,
+        rule: Rule,
+        event: RuleEvent,
+        sources: list[str],
+        context: str,
+        tts_text: str,
+    ) -> None:
+        """该方向挂了 TTS 动作时才派发 ON_ENTERED / ON_EXITED fire（否则零开销）。"""
+        if not any(_is_tts_action(a) for a in self._tts_slot(rule, event)):
+            return
+        self._spawn_fire(
+            rule, event, sources, context, tts_text=tts_text,
+        )
+
+    @staticmethod
+    def _tts_slot(rule: Rule, event: RuleEvent) -> list[RuleAction]:
+        """``ON_ENTERED`` / ``ON_EXITED`` 对应方向的全部动作（仅取其中的 TTS 动作执行）。"""
+        if event == RuleEvent.ON_ENTERED:
+            return list(rule.on_enter_actions)
+        if event == RuleEvent.ON_EXITED:
+            return list(rule.on_exit_actions)
+        return []
 
     async def _fire_safely(
         self,
@@ -982,12 +1038,13 @@ class RuleRunner:
         extra_metadata: dict | None = None,
         caption: str = "",
         device_name: str = "",
+        tts_text: str = "",
     ) -> None:
         try:
             await self._fire(
                 rule, event, sources, context, execute_id,
                 trigger_room, trigger_dids, extra_metadata,
-                caption=caption, device_name=device_name,
+                caption=caption, device_name=device_name, tts_text=tts_text,
             )
         except Exception:
             logger.exception(
@@ -1393,8 +1450,13 @@ class RuleRunner:
         actual_exited_at: str | None = None,
         caption: str = "",
         device_name: str = "",
+        tts_text: str = "",
     ) -> RuleExecuteResult | None:
-        """Pick the slot for (mode, event), execute, write log."""
+        """Pick the slot for (mode, event), execute, write log.
+
+        ``tts_text`` 只服务于 ON_ENTERED / ON_EXITED（场景联动的动态 TTS）：每个 TTS
+        动作优先用它，为空时退回该动作的静态 ``tts_text``，再为空则判 skipped。
+        """
         slot = self._select_slot(rule, event)
         if slot is None:
             logger.debug(
@@ -1421,7 +1483,12 @@ class RuleRunner:
         )
 
         if kind == "static":
-            action_results = [await self._execute_action(rule.id, a) for a in value]
+            action_results: list[RuleActionExecuteResult] = []
+            for a in value:
+                if _is_tts_action(a):
+                    action_results.append(await self._execute_tts_action(rule.id, a, tts_text))
+                else:
+                    action_results.append(await self._execute_action(rule.id, a))
             ok_all = all(r.result for r in action_results)
             # 状态规则：ENTERED/EXITED 交替即新一轮驻留周期——清掉对向场景动作
             # 的冷却，避免上一轮进入（或退出）的冷却吞掉本轮配对方向（进入/退出
@@ -1476,12 +1543,18 @@ class RuleRunner:
         ``actions`` vs ``action_descriptions``; state mode looks at
         ``on_*_actions`` vs ``on_*_desc`` per direction. Validation enforces
         these as mutually exclusive.
+
+        TTS 拆分：ENTERED / EXITED 的静态 slot 里剔除 ``scene_tts`` 动作（它们由
+        ``ON_ENTERED`` / ``ON_EXITED`` 那次 fire 执行，见 ``_spawn_tts_fire``）——只剩
+        TTS 动作时该事件无槽可做，返回 None；``ON_ENTERED`` / ``ON_EXITED`` 则只取 TTS
+        动作，没有就返回 None。
         """
         if rule.mode == RuleMode.EVENT:
             if event != RuleEvent.ENTERED:
                 return None
             if rule.actions:
-                return ("static", rule.actions)
+                remaining = [a for a in rule.actions if not _is_tts_action(a)]
+                return ("static", remaining) if remaining else None
             if not rule.action_descriptions:
                 return None
             joined = "\n".join(
@@ -1490,15 +1563,20 @@ class RuleRunner:
             return ("dynamic", joined)
 
         # state mode
+        if event in (RuleEvent.ON_ENTERED, RuleEvent.ON_EXITED):
+            tts_actions = [a for a in self._tts_slot(rule, event) if _is_tts_action(a)]
+            return ("static", tts_actions) if tts_actions else None
         if event == RuleEvent.ENTERED:
-            if rule.on_enter_actions:
-                return ("static", rule.on_enter_actions)
+            remaining = [a for a in rule.on_enter_actions if not _is_tts_action(a)]
+            if remaining:
+                return ("static", remaining)
             if rule.on_enter_desc:
                 return ("dynamic", rule.on_enter_desc)
             return None
         if event == RuleEvent.EXITED:
-            if rule.on_exit_actions:
-                return ("static", rule.on_exit_actions)
+            remaining = [a for a in rule.on_exit_actions if not _is_tts_action(a)]
+            if remaining:
+                return ("static", remaining)
             if rule.on_exit_desc:
                 return ("dynamic", rule.on_exit_desc)
             return None
@@ -1615,6 +1693,60 @@ class RuleRunner:
             error=None if success else "scene_trigger_failed",
         )
 
+    async def _execute_tts_action(
+        self, rule_id: str, action: RuleAction, dynamic_text: str = ""
+    ) -> RuleActionExecuteResult:
+        """在音箱上播报一句话（``iid`` 为 SCENE_TTS_IID，``did`` 位置是音箱 did）。
+
+        文案优先级：本次命中帧的动态文案 ``dynamic_text`` > 动作的静态 ``tts_text``。
+        两者都空 = 模型没给出文案（规则没开动态 TTS、模型漏写、或退出方向本就没有文案）
+        → 判 **skipped** 成功：自动化触发不受影响，也不该把这次触发记成失败。
+
+        与场景动作一样靠冷却限频（冷却键 ``(音箱 did, scene_tts)``，与场景动作互不干扰）。
+        """
+        if action.idempotent or (action.cooldown_minutes or 0) < 1:
+            logger.error(
+                "Rule %s tts action %s has no dedup guard "
+                "(idempotent=%s, cooldown_minutes=%s), refusing to dispatch",
+                rule_id, action.did, action.idempotent, action.cooldown_minutes,
+            )
+            return RuleActionExecuteResult(
+                action=action,
+                result=False,
+                error=(
+                    "tts action requires idempotent=false "
+                    "and cooldown_minutes >= 1"
+                ),
+            )
+
+        text = (dynamic_text or "").strip() or (action.tts_text or "").strip()
+        if not text:
+            logger.info(
+                "Rule %s tts action %s: no text for this fire, skipping",
+                rule_id, action.did,
+            )
+            return RuleActionExecuteResult(
+                action=action, result=True, skipped=True
+            )
+
+        if self._in_cooldown(rule_id, action):
+            return RuleActionExecuteResult(
+                action=action, result=True, skipped=True
+            )
+
+        from miloco.miot.voice import speak
+
+        success, err = await speak(
+            self._miot_proxy, action.did, text, source="rule", source_id=rule_id
+        )
+        if success:
+            self._mark_cooldown(rule_id, action)
+        logger.info(
+            "TTS fire: rule=%s did=%s success=%s len=%d",
+            rule_id, action.did, success, len(text),
+        )
+        return RuleActionExecuteResult(action=action, result=success, error=err)
+
     async def _execute_action(
         self, rule_id: str, action: RuleAction
     ) -> RuleActionExecuteResult:
@@ -1636,6 +1768,9 @@ class RuleRunner:
         # 场景没有 siid/aiid 可拆，必须在 iid 解析之前分流。
         if action.iid == SCENE_IID:
             return await self._execute_scene_action(rule_id, action)
+        # TTS 同理：did 是音箱 did、iid 是哨兵，speak 内部再按 spec 解析 play-text。
+        if action.iid == SCENE_TTS_IID:
+            return await self._execute_tts_action(rule_id, action)
 
         # 白名单式判定：三种形态之外一律报错。少了这道，`scene.1.2` 会掉进
         # 「不是 prop. 就当 action.」的兜底，拿 scene_id 当 did 发出去。

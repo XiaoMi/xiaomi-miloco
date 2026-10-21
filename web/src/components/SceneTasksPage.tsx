@@ -1,21 +1,28 @@
 /**
  * 场景联动页——独立「场景联动」Tab 的主视图。
  *
- * 场景联动任务 = 一条 state 规则把「感知命中」直接接到「米家自动化场景」：
- *   - 进入：条件 query 变为满足并持续 enterDebounceSeconds（进入确认时间）→
- *     触发进入场景（如识别到床上有人看书 → 开灯）
- *   - 退出：条件不再满足并持续 exitDebounceSeconds → 触发退出场景（如关灯）；
- *     或配置 maxDwellSeconds 后「到期自动退出」（如开灯 1 分钟后自动关灯）
+ * 场景联动任务 = 一条 state 规则把「感知命中」直接接到两类动作（进入 / 退出各可同时配）：
+ *   - 触发米家自动化场景（如识别到床上有人看书 → 开灯）
+ *   - 用指定音响播报一段 TTS——文案可以是固定文本，也可以由 LLM 按画面动态生成
+ *     （如每天出门前根据穿搭夸一句）
+ *   - 进入：条件 query 变为满足并持续 enterDebounceSeconds（进入确认时间）→ 执行
+ *   - 退出：条件不再满足并持续 exitDebounceSeconds → 执行；或配置 maxDwellSeconds 后
+ *     「到期自动退出」
  * 命中 / 抗抖 / 冷却完全复用规则引擎，**不经过 agent**（后端 /api/scene-tasks）。
  * 本页负责创建 / 编辑 / 启停 / 删除，并提供「手动触发」调试入口。
+ *
+ * 进入本页（挂载）时会把自动化场景列表与可选音响列表都从后端重新拉一遍（force refresh）
+ * ——住户刚在米家新建的场景 / 音箱不必等整页刷新就能选到。打开任意抽屉时再刷新一次，
+ * 保证列表永远是打开那一刻的最新状态。
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { modalPortal } from "@/lib/modalPortal";
 import {
   createSceneTask,
   deleteSceneTask,
+  listSceneVoiceDevices,
   setSceneTaskEnabled,
   triggerSceneTask,
   updateSceneTask,
@@ -26,10 +33,19 @@ import {
   IconHelp,
   IconPencil,
   IconPlus,
+  IconRefresh,
   IconTrash,
+  IconVolume,
   IconX,
 } from "@/lib/icons";
-import type { Scene, SceneTask, SceneTaskInput, ScopeCamera } from "@/lib/types";
+import type {
+  Scene,
+  SceneTask,
+  SceneTaskInput,
+  SceneTts,
+  SceneVoiceDevice,
+  ScopeCamera,
+} from "@/lib/types";
 import { toast } from "./Toast";
 
 interface Props {
@@ -38,6 +54,8 @@ interface Props {
   cameras: ScopeCamera[];
   loading: boolean;
   onChanged: () => void | Promise<void>;
+  /** 重新拉取相机 / 场景等页面级数据（tab 挂载时与打开抽屉时调用，避开缓存）。 */
+  onRefreshSources?: () => void | Promise<void>;
 }
 
 // 轻量开关——on=品牌色 / off=中性边框色，无障碍 role="switch"。
@@ -89,7 +107,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 const inputCls =
   "w-full rounded-lg bg-bg-primary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary";
 
-// 场景下拉：value "" = 该方向不联动。
+// 自动化场景下拉：value "" = 该方向不触发自动化。
 function SceneSelect({
   value,
   scenes,
@@ -117,7 +135,47 @@ function SceneSelect({
   );
 }
 
-// 表单草稿（数字字段以字符串承载，保存时统一解析）。
+// 音响下拉：value "" = 该方向不播报。
+function SpeakerSelect({
+  value,
+  speakers,
+  noneLabel,
+  onChange,
+}: {
+  value: string;
+  speakers: SceneVoiceDevice[];
+  noneLabel: string;
+  onChange: (v: string) => void;
+}) {
+  // 已配置的音箱不在（最新）列表里时也要能显示出来——否则住户会以为自己没配。
+  const missing = value && !speakers.some((s) => s.did === value);
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className={`${inputCls} ${value ? "" : "text-text-tertiary"}`}
+    >
+      <option value="">{noneLabel}</option>
+      {missing && <option value={value}>{value}</option>}
+      {speakers.map((s) => (
+        <option key={s.did} value={s.did}>
+          {s.name}
+          {s.roomName ? ` · ${s.roomName}` : ""}
+          {s.online ? "" : " (离线)"}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+// 一个方向的 TTS 草稿。
+interface TtsDraft {
+  deviceId: string;
+  content: boolean; // true = 动态生成，false = 固定文案
+  prompt: string;
+  text: string;
+}
+
 interface Draft {
   description: string;
   query: string;
@@ -125,11 +183,30 @@ interface Draft {
   cameraDids: string[];
   enterSceneId: string;
   exitSceneId: string;
+  enterTts: TtsDraft;
+  exitTts: TtsDraft;
   cooldownMinutes: string;
   enterDebounceSeconds: string;
   exitDebounceSeconds: string;
   maxDwellSeconds: string;
   enabled: boolean;
+}
+
+const emptyTts = (): TtsDraft => ({
+  deviceId: "",
+  content: true,
+  prompt: "",
+  text: "",
+});
+
+function ttsFromView(tts: SceneTts | null | undefined): TtsDraft {
+  if (!tts || !tts.deviceId) return emptyTts();
+  return {
+    deviceId: tts.deviceId,
+    content: tts.ttsContent,
+    prompt: tts.ttsPrompt ?? "",
+    text: tts.ttsText ?? "",
+  };
 }
 
 function draftFromTask(task: SceneTask): Draft {
@@ -140,6 +217,8 @@ function draftFromTask(task: SceneTask): Draft {
     cameraDids: [...task.perceiveDeviceIds],
     enterSceneId: task.enterSceneId ?? "",
     exitSceneId: task.exitSceneId ?? "",
+    enterTts: ttsFromView(task.enterTts),
+    exitTts: ttsFromView(task.exitTts),
     cooldownMinutes: String(task.cooldownMinutes ?? 1),
     enterDebounceSeconds: String(task.enterDebounceSeconds ?? 0),
     exitDebounceSeconds: String(task.exitDebounceSeconds),
@@ -156,6 +235,8 @@ export function emptyDraft(): Draft {
     cameraDids: [],
     enterSceneId: "",
     exitSceneId: "",
+    enterTts: emptyTts(),
+    exitTts: emptyTts(),
     cooldownMinutes: "1",
     enterDebounceSeconds: "0",
     exitDebounceSeconds: "0",
@@ -172,7 +253,34 @@ const num = (s: string): number | null => {
 const sameIds = (a: string[], b: string[]): boolean =>
   a.length === b.length && a.every((x, i) => x === b[i]);
 
-// 编辑模式只提交真正改过的字段：PATCH 语义下显式 null = 清空该方向场景，
+// 草稿里的 TTS → 提交载荷。没选音响 = 该方向不播报（null）。
+function ttsPayload(t: TtsDraft): {
+  deviceId: string | null;
+  tts: { ttsContent: boolean; ttsPrompt: string | null; ttsText: string | null } | null;
+} {
+  if (!t.deviceId) return { deviceId: null, tts: null };
+  return {
+    deviceId: t.deviceId,
+    tts: {
+      ttsContent: t.content,
+      // 动态模式带「播报要求」；固定模式不需要（但仍保留住户写过的文字，方便切回来）。
+      ttsPrompt: t.prompt.trim() || null,
+      ttsText: t.text.trim() || null,
+    },
+  };
+}
+
+const sameTts = (a: TtsDraft, b: SceneTts | null | undefined): boolean => {
+  const bv = ttsFromView(b);
+  return (
+    a.deviceId === bv.deviceId &&
+    a.content === bv.content &&
+    a.prompt.trim() === bv.prompt.trim() &&
+    a.text.trim() === bv.text.trim()
+  );
+};
+
+// 编辑模式只提交真正改过的字段：PATCH 语义下显式 null = 清空该方向动作，
 // 未动过的字段绝不能随请求发出去（否则会把用户没碰的配置清掉）。
 function buildPatch(draft: Draft, task: SceneTask): SceneTaskInput {
   const patch: SceneTaskInput = {};
@@ -193,6 +301,16 @@ function buildPatch(draft: Draft, task: SceneTask): SceneTaskInput {
   }
   if ((enterId ?? null) !== (task.enterSceneId ?? null)) patch.enterSceneId = enterId;
   if ((exitId ?? null) !== (task.exitSceneId ?? null)) patch.exitSceneId = exitId;
+  const enterTts = ttsPayload(draft.enterTts);
+  if (!sameTts(draft.enterTts, task.enterTts)) {
+    patch.enterTtsDeviceId = enterTts.deviceId;
+    patch.enterTts = enterTts.tts;
+  }
+  const exitTts = ttsPayload(draft.exitTts);
+  if (!sameTts(draft.exitTts, task.exitTts)) {
+    patch.exitTtsDeviceId = exitTts.deviceId;
+    patch.exitTts = exitTts.tts;
+  }
   if (cooldown !== null && cooldown !== task.cooldownMinutes) patch.cooldownMinutes = cooldown;
   if (enterDebounce !== null && enterDebounce !== task.enterDebounceSeconds) {
     patch.enterDebounceSeconds = enterDebounce;
@@ -206,6 +324,8 @@ function buildPatch(draft: Draft, task: SceneTask): SceneTaskInput {
 }
 
 export function buildInput(draft: Draft): SceneTaskInput {
+  const enterTts = ttsPayload(draft.enterTts);
+  const exitTts = ttsPayload(draft.exitTts);
   return {
     description: draft.description.trim(),
     query: draft.query.trim(),
@@ -213,6 +333,10 @@ export function buildInput(draft: Draft): SceneTaskInput {
     perceiveDeviceIds: [...draft.cameraDids],
     enterSceneId: draft.enterSceneId || null,
     exitSceneId: draft.exitSceneId || null,
+    enterTtsDeviceId: enterTts.deviceId,
+    enterTts: enterTts.tts,
+    exitTtsDeviceId: exitTts.deviceId,
+    exitTts: exitTts.tts,
     cooldownMinutes: num(draft.cooldownMinutes) ?? 1,
     enterDebounceSeconds: num(draft.enterDebounceSeconds) ?? 0,
     exitDebounceSeconds: num(draft.exitDebounceSeconds) ?? 0,
@@ -221,18 +345,142 @@ export function buildInput(draft: Draft): SceneTaskInput {
   };
 }
 
+// ── 一个方向的 TTS 编辑块 ─────────────────────────────────────────
+
+function TtsEditor({
+  draft,
+  speakers,
+  speakersLoading,
+  title,
+  deviceLabel,
+  hint,
+  onChange,
+}: {
+  draft: TtsDraft;
+  speakers: SceneVoiceDevice[];
+  speakersLoading: boolean;
+  title: string;
+  deviceLabel: string;
+  hint: string;
+  onChange: (patch: Partial<TtsDraft>) => void;
+}) {
+  const { t } = useTranslation();
+  const on = !!draft.deviceId;
+  return (
+    <Section title={title}>
+      <div className="flex items-center gap-2">
+        <IconVolume
+          width={15}
+          height={15}
+          className={on ? "text-brand-primary shrink-0" : "text-text-tertiary shrink-0"}
+        />
+        <div className="flex-1 min-w-0">
+          <SpeakerSelect
+            value={draft.deviceId}
+            speakers={speakers}
+            noneLabel={
+              speakersLoading
+                ? t("sceneTasks.speakersLoading")
+                : t("sceneTasks.noTtsDevice")
+            }
+            onChange={(v) => onChange({ deviceId: v })}
+          />
+        </div>
+      </div>
+      <p className="text-caption text-text-tertiary leading-relaxed mt-1.5">{hint}</p>
+      {speakers.length === 0 && !speakersLoading && (
+        <p className="text-caption text-warning mt-1">{t("sceneTasks.noSpeakers")}</p>
+      )}
+
+      {on && (
+        <div className="mt-2.5 space-y-2 rounded-lg border border-border bg-bg-primary/60 p-2.5">
+          <div className="flex items-center gap-4">
+            {(
+              [
+                [true, t("sceneTasks.ttsDynamic")],
+                [false, t("sceneTasks.ttsFixed")],
+              ] as const
+            ).map(([val, label]) => (
+              <label
+                key={String(val)}
+                className="inline-flex items-center gap-1.5 text-caption text-text-secondary cursor-pointer"
+              >
+                <input
+                  type="radio"
+                  name={`tts-mode-${title}`}
+                  checked={draft.content === val}
+                  onChange={() => onChange({ content: val })}
+                  className="accent-brand-primary"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          {draft.content ? (
+            <>
+              <label className="block">
+                <span className="text-caption text-text-secondary block mb-1">
+                  {deviceLabel}
+                </span>
+                <textarea
+                  value={draft.prompt}
+                  onChange={(e) => onChange({ prompt: e.target.value })}
+                  rows={3}
+                  maxLength={800}
+                  placeholder={t("sceneTasks.ttsPromptPlaceholder")}
+                  className={`${inputCls} resize-y`}
+                />
+              </label>
+              <label className="block">
+                <span className="text-caption text-text-secondary block mb-1">
+                  {t("sceneTasks.ttsFallbackLabel")}
+                </span>
+                <input
+                  value={draft.text}
+                  onChange={(e) => onChange({ text: e.target.value })}
+                  maxLength={200}
+                  placeholder={t("sceneTasks.ttsFallbackPlaceholder")}
+                  className={inputCls}
+                />
+              </label>
+            </>
+          ) : (
+            <label className="block">
+              <span className="text-caption text-text-secondary block mb-1">
+                {t("sceneTasks.ttsTextLabel")}
+              </span>
+              <textarea
+                value={draft.text}
+                onChange={(e) => onChange({ text: e.target.value })}
+                rows={2}
+                maxLength={200}
+                placeholder={t("sceneTasks.ttsTextPlaceholder")}
+                className={`${inputCls} resize-none`}
+              />
+            </label>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
 // ── 创建 / 编辑抽屉 ──────────────────────────────────────────────
 
 function SceneTaskDrawer({
   task,
   scenes,
   cameraOptions,
+  speakers,
+  speakersLoading,
   onClose,
   onChanged,
 }: {
   task: SceneTask | null; // null = 新建
   scenes: Scene[];
   cameraOptions: ScopeCamera[];
+  speakers: SceneVoiceDevice[];
+  speakersLoading: boolean;
   onClose: () => void;
   onChanged: () => void | Promise<void>;
 }) {
@@ -265,7 +513,26 @@ function SceneTaskDrawer({
     if (!draft.description.trim()) return t("sceneTasks.errName");
     if (!draft.query.trim()) return t("sceneTasks.errQuery");
     if (draft.cameraDids.length === 0) return t("sceneTasks.errCamera");
-    if (!draft.enterSceneId && !draft.exitSceneId) return t("sceneTasks.errScene");
+    const hasAction =
+      draft.enterSceneId ||
+      draft.exitSceneId ||
+      draft.enterTts.deviceId ||
+      draft.exitTts.deviceId;
+    if (!hasAction) return t("sceneTasks.errScene");
+    for (const [label, tts] of [
+      ["enter", draft.enterTts],
+      ["exit", draft.exitTts],
+    ] as const) {
+      if (!tts.deviceId) continue;
+      if (tts.content && !tts.prompt.trim() && !tts.text.trim()) {
+        return t("sceneTasks.errTtsPrompt", {
+          side: t(`sceneTasks.${label}`),
+        });
+      }
+      if (!tts.content && !tts.text.trim()) {
+        return t("sceneTasks.errTtsText", { side: t(`sceneTasks.${label}`) });
+      }
+    }
     return null;
   };
 
@@ -432,7 +699,7 @@ function SceneTaskDrawer({
             <textarea
               value={draft.sceneNotes}
               onChange={(e) => set({ sceneNotes: e.target.value })}
-              rows={4}
+              rows={3}
               maxLength={8000}
               placeholder={t("sceneTasks.sceneNotesPlaceholder")}
               className={`${inputCls} resize-y`}
@@ -442,7 +709,11 @@ function SceneTaskDrawer({
             </p>
           </Section>
 
-          <div className="grid grid-cols-1 gap-4">
+          {/* 进入动作：自动化场景 + TTS 可同时设置 */}
+          <div className="space-y-4 rounded-xl border border-border p-3.5">
+            <div className="text-body font-semibold text-text-primary">
+              {t("sceneTasks.enterSection")}
+            </div>
             <Section title={t("sceneTasks.enterSceneLabel")}>
               <SceneSelect
                 value={draft.enterSceneId}
@@ -454,7 +725,24 @@ function SceneTaskDrawer({
                 {t("sceneTasks.enterHint")}
               </p>
             </Section>
+            <TtsEditor
+              draft={draft.enterTts}
+              speakers={speakers}
+              speakersLoading={speakersLoading}
+              title={t("sceneTasks.enterTtsLabel")}
+              deviceLabel={t("sceneTasks.ttsPromptLabel")}
+              hint={t("sceneTasks.enterTtsHint")}
+              onChange={(p) =>
+                set({ enterTts: { ...draft.enterTts, ...p } })
+              }
+            />
+          </div>
 
+          {/* 退出动作：同上 */}
+          <div className="space-y-4 rounded-xl border border-border p-3.5">
+            <div className="text-body font-semibold text-text-primary">
+              {t("sceneTasks.exitSection")}
+            </div>
             <Section title={t("sceneTasks.exitSceneLabel")}>
               <SceneSelect
                 value={draft.exitSceneId}
@@ -466,6 +754,15 @@ function SceneTaskDrawer({
                 {t("sceneTasks.exitHint")}
               </p>
             </Section>
+            <TtsEditor
+              draft={draft.exitTts}
+              speakers={speakers}
+              speakersLoading={speakersLoading}
+              title={t("sceneTasks.exitTtsLabel")}
+              deviceLabel={t("sceneTasks.ttsPromptLabel")}
+              hint={t("sceneTasks.exitTtsHint")}
+              onChange={(p) => set({ exitTts: { ...draft.exitTts, ...p } })}
+            />
           </div>
 
           <div className="grid grid-cols-2 gap-3">
@@ -629,17 +926,68 @@ function SceneTaskDrawer({
           )}
         </div>
       </div>
-    </div>
-);
+    </div>,
+  );
 }
 
 // ── 页面主视图 ────────────────────────────────────────────────────
 
-export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: Props) {
+export function SceneTasksPage({
+  tasks,
+  scenes,
+  cameras,
+  loading,
+  onChanged,
+  onRefreshSources,
+}: Props) {
   const { t } = useTranslation();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null | undefined>(undefined);
   const [createOpen, setCreateOpen] = useState(false);
+  const [speakers, setSpeakers] = useState<SceneVoiceDevice[]>([]);
+  const [speakersLoading, setSpeakersLoading] = useState(false);
+  const [refreshingSources, setRefreshingSources] = useState(false);
+
+  // 可选音响：进入页面即从米家云刷新（后端 refresh=true），进入 / 打开抽屉也再刷一次。
+  const loadSpeakers = async () => {
+    setSpeakersLoading(true);
+    try {
+      setSpeakers(await listSceneVoiceDevices());
+    } catch {
+      // 拉不到音响列表不该挡住页面：退化成「暂时没有可选音响」提示，动作仍可保存。
+      setSpeakers((prev) => prev);
+    } finally {
+      setSpeakersLoading(false);
+    }
+  };
+
+  // 页面级数据（自动化场景 / 相机）刷新：与音响一起，避开前端 5s 缓存与后端旧列表。
+  const refreshSources = async () => {
+    setRefreshingSources(true);
+    try {
+      await onRefreshSources?.();
+    } finally {
+      setRefreshingSources(false);
+    }
+  };
+
+  const refreshAll = () => {
+    void loadSpeakers();
+    void refreshSources();
+  };
+
+  useEffect(() => {
+    // tab 挂载：自动化 + 音响列表都重新拉一遍，避免缓存里少了刚建好的场景 / 音箱。
+    refreshAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 打开任意抽屉：再刷新一次（列表 = 打开那一刻的最新状态）。
+  const openDrawer = (taskId: string | null) => {
+    refreshAll();
+    if (taskId === null) setCreateOpen(true);
+    else setEditId(taskId);
+  };
 
   // 多通道相机按物理 did 去重（规则按整台相机绑定）。
   const cameraOptions = useMemo(() => {
@@ -654,11 +1002,23 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
   const list = tasks ?? [];
   const empty = !loading && list.length === 0;
   const editing = editId !== undefined ? (list.find((x) => x.taskId === editId) ?? null) : undefined;
+  const hasDynamicTts = list.some(
+    (x) => x.enterTts?.ttsContent || x.exitTts?.ttsContent,
+  );
+  const dynamicWarning = hasDynamicTts && list.some((x) => !x.dynamicTtsReady);
 
-  const sceneName = (t: SceneTask, key: "enterSceneId" | "exitSceneId") => {
-    const id = key === "enterSceneId" ? t.enterSceneId : t.exitSceneId;
-    const name = key === "enterSceneId" ? t.enterSceneName : t.exitSceneName;
-    return name ?? id ?? "";
+  // 一个方向的展示文案：自动化场景名 / 播报音响名（都有则并列）。
+  const actionLabel = (task: SceneTask, side: "enter" | "exit"): string => {
+    const sceneId = side === "enter" ? task.enterSceneId : task.exitSceneId;
+    const sceneName = side === "enter" ? task.enterSceneName : task.exitSceneName;
+    const tts = side === "enter" ? task.enterTts : task.exitTts;
+    const parts: string[] = [];
+    if (sceneId) parts.push(sceneName ?? sceneId);
+    if (tts?.deviceId) {
+      const speaker = tts.deviceName ?? speakers.find((s) => s.did === tts.deviceId)?.name ?? tts.deviceId;
+      parts.push(t("sceneTasks.ttsAction", { name: speaker }));
+    }
+    return parts.join(" + ");
   };
 
   const toggle = async (task: SceneTask) => {
@@ -695,15 +1055,37 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
               {t("sceneTasks.hint")}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            className="shrink-0 inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-caption font-semibold border border-border bg-bg-primary text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
-          >
-            <IconPlus width={14} height={14} />
-            {t("sceneTasks.add")}
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={refreshAll}
+              disabled={refreshingSources || speakersLoading}
+              title={t("sceneTasks.refreshSourcesHint")}
+              aria-label={t("sceneTasks.refreshSourcesHint")}
+              className="inline-flex items-center gap-1.5 h-9 px-2.5 rounded-lg text-caption border border-border bg-bg-primary text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors disabled:opacity-60"
+            >
+              <IconRefresh
+                width={14}
+                height={14}
+                className={refreshingSources || speakersLoading ? "animate-spin" : ""}
+              />
+            </button>
+            <button
+              type="button"
+              onClick={() => openDrawer(null)}
+              className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg text-caption font-semibold border border-border bg-bg-primary text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
+            >
+              <IconPlus width={14} height={14} />
+              {t("sceneTasks.add")}
+            </button>
+          </div>
         </div>
+
+        {dynamicWarning && (
+          <div className="mx-5 mt-2 rounded-lg bg-warning-bg border border-warning/30 px-3 py-2 text-caption text-warning leading-relaxed">
+            {t("sceneTasks.dynamicTtsUnavailable")}
+          </div>
+        )}
 
         {loading && !tasks ? (
           <div className="text-body text-text-secondary py-10 px-5 text-center">
@@ -720,7 +1102,7 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
             </div>
             <button
               type="button"
-              onClick={() => setCreateOpen(true)}
+              onClick={() => openDrawer(null)}
               className="mt-4 inline-flex items-center gap-1.5 text-caption px-3 py-1.5 rounded-md border border-border bg-bg-primary text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
             >
               <IconPlus width={15} height={15} />
@@ -736,7 +1118,7 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
                 <div key={task.taskId} className="group flex items-center gap-3 py-3">
                   <button
                     type="button"
-                    onClick={() => setEditId(task.taskId)}
+                    onClick={() => openDrawer(task.taskId)}
                     className="min-w-0 flex-1 text-left rounded-md -mx-2 px-2 py-1 hover:bg-bg-tertiary/50 transition-colors"
                   >
                     <div className="flex items-center gap-2 min-w-0">
@@ -759,11 +1141,11 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
                     </div>
                     <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                       <span className="text-caption text-text-secondary">
-                        {sceneName(task, "enterSceneId") || t("sceneTasks.noScene")}
+                        {actionLabel(task, "enter") || t("sceneTasks.noScene")}
                       </span>
                       <span className="text-caption text-text-tertiary">→</span>
                       <span className="text-caption text-text-secondary">
-                        {sceneName(task, "exitSceneId") || t("sceneTasks.noScene")}
+                        {actionLabel(task, "exit") || t("sceneTasks.noScene")}
                       </span>
                       <span className="text-caption text-text-tertiary num ml-1">
                         {t("sceneTasks.cameraCount", {
@@ -784,8 +1166,14 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
                           })}
                         </span>
                       )}
+                      {(task.enterTts?.ttsContent || task.exitTts?.ttsContent) && (
+                        <span className="inline-flex items-center gap-1 text-caption text-brand-primary bg-brand-soft px-1.5 py-0.5 rounded">
+                          <IconVolume width={11} height={11} />
+                          {t("sceneTasks.dynamicTtsBadge")}
+                        </span>
+                      )}
                       {task.sceneNotes && (
-                        <span className="text-caption text-brand-primary bg-brand-soft px-1.5 py-0.5 rounded">
+                        <span className="text-caption text-text-secondary bg-bg-tertiary px-1.5 py-0.5 rounded">
                           {t("sceneTasks.sceneNotesBadge")}
                         </span>
                       )}
@@ -803,7 +1191,7 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
                   />
                   <button
                     type="button"
-                    onClick={() => setEditId(task.taskId)}
+                    onClick={() => openDrawer(task.taskId)}
                     aria-label={t("family.edit")}
                     className="shrink-0 p-2 rounded-md text-text-tertiary hover:text-text-primary hover:bg-bg-tertiary transition-colors"
                   >
@@ -821,6 +1209,8 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
           task={null}
           scenes={scenes}
           cameraOptions={cameraOptions}
+          speakers={speakers}
+          speakersLoading={speakersLoading}
           onClose={() => setCreateOpen(false)}
           onChanged={onChanged}
         />
@@ -831,6 +1221,8 @@ export function SceneTasksPage({ tasks, scenes, cameras, loading, onChanged }: P
           task={editing}
           scenes={scenes}
           cameraOptions={cameraOptions}
+          speakers={speakers}
+          speakersLoading={speakersLoading}
           onClose={() => setEditId(undefined)}
           onChanged={onChanged}
         />

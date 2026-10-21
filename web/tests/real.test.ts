@@ -29,6 +29,8 @@ import {
   realUpdateTaskDescription,
   realCreateSceneTask,
   realUpdateSceneTask,
+  realListSceneTasks,
+  realListSceneVoiceDevices,
   _resetUsageStatsCache,
 } from "@/api/real";
 
@@ -700,5 +702,95 @@ describe("场景联动写接口 — camelCase 输入 → snake_case 契约", () 
       enter_scene_id: "scene-A",
       max_dwell_seconds: 60,
     });
+  });
+
+  it("动态 TTS：音响 did 与播报配置成对提交（null = 移除该方向播报）", async () => {
+    const cap = captureFetch();
+    await realUpdateSceneTask("scene_abc123", {
+      enterTtsDeviceId: "spk-1",
+      enterTts: { ttsContent: true, ttsPrompt: "夸穿搭", ttsText: "兜底" },
+      exitTtsDeviceId: null,
+      exitTts: null,
+    });
+    expect(cap.body).toEqual({
+      enter_tts_device_id: "spk-1",
+      enter_tts: { tts_content: true, tts_prompt: "夸穿搭", tts_text: "兜底" },
+      exit_tts_device_id: null,
+      exit_tts: null,
+    });
+  });
+
+  it("TTS 方向没动（undefined）时不进 body，避免误清配置", async () => {
+    const cap = captureFetch();
+    await realUpdateSceneTask("scene_abc123", { query: "有人准备出门" });
+    expect(cap.body).toEqual({ query: "有人准备出门" });
+  });
+});
+
+describe("场景联动读接口 — TTS 视图映射 / 音响列表", () => {
+  it("列表：enter_tts / exit_tts 映射成 camelCase，缺省方向为 null", async () => {
+    globalThis.fetch = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          code: 0,
+          message: "ok",
+          data: [
+            {
+              task_id: "t1",
+              description: "出门夸夸",
+              status: "active",
+              created_at: "2026-01-01T00:00:00+08:00",
+              rule_id: "r1",
+              enabled: true,
+              query: "准备出门",
+              perceive_device_ids: ["cam-1"],
+              enter_tts: {
+                device_id: "spk-1",
+                device_name: "客厅音箱",
+                tts_content: true,
+                tts_prompt: "夸穿搭",
+                tts_text: null,
+              },
+              exit_tts: null,
+              exit_debounce_seconds: 60,
+              dynamic_tts_ready: false,
+            },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    ) as unknown as typeof fetch;
+    const [task] = await realListSceneTasks();
+    expect(task.enterTts).toEqual({
+      deviceId: "spk-1",
+      deviceName: "客厅音箱",
+      ttsContent: true,
+      ttsPrompt: "夸穿搭",
+      ttsText: null,
+    });
+    expect(task.exitTts).toBeNull();
+    expect(task.dynamicTtsReady).toBe(false);
+  });
+
+  it("音响列表：进入即带 refresh=true（与自动化场景列表同一刷新诉求）", async () => {
+    let url = "";
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      url = typeof input === "string" ? input : input.toString();
+      return new Response(
+        JSON.stringify({
+          code: 0,
+          message: "ok",
+          data: [
+            { did: "spk-1", name: "客厅音箱", room_name: "客厅", online: true },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as unknown as typeof fetch;
+    const devices = await realListSceneVoiceDevices();
+    expect(url).toBe("/api/scene-tasks/voice-devices?refresh=true");
+    expect(devices).toEqual([
+      { did: "spk-1", name: "客厅音箱", roomName: "客厅", online: true },
+    ]);
   });
 });

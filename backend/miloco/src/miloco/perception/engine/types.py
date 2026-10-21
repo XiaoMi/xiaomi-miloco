@@ -281,6 +281,12 @@ class RuleCondition:
     # prompt 的「# 待判断规则」JSONL 行（scene_notes 字段，见
     # prompt_builder._render_rule_conditions）。None/空 = 该规则无补充细则。
     scene_notes: str | None = None
+    # 该规则开了「动态 TTS」：命中时模型要随命中一起产出一句播报文案（同一 JSON 行里多一个
+    # tts 要求字段；命中条目里回一个 tts）。False = 普通规则，prompt / 输出都不带 tts。
+    tts_enabled: bool = False
+    # 动态文案的写作指引（住户填的：说什么、什么语气、哪些画面细节要提到）。None/空 =
+    # 用内置默认要求。
+    tts_prompt: str | None = None
 
 
 @dataclass
