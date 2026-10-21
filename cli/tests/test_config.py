@@ -329,3 +329,55 @@ def test_central_hub_gateways_in_known_paths():
     paths = known_paths()
     assert "miot.central_hub_enabled" in paths
     assert "miot.central_hub_gateways" in paths
+
+
+# ─── 写路径遇损坏文件拒绝覆盖（issue #569） ─────────────────────────────────
+
+
+def test_set_values_corrupt_config_refuses_and_preserves_bytes(isolated_config):
+    """损坏文件 + config set → 拒绝写盘，原字节原样保留。"""
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    original = '{ "server": { "token": "tok-half-written"'
+    isolated_config.write_text(original)
+
+    with pytest.raises(ValueError, match="拒绝写入"):
+        set_value("server.url", "http://192.168.1.9:1810")
+
+    assert isolated_config.read_text() == original
+
+
+def test_set_values_non_object_config_refuses(isolated_config):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    original = "[1, 2, 3]"
+    isolated_config.write_text(original)
+
+    with pytest.raises(ValueError, match="拒绝写入"):
+        set_value("server.token", "tok-x")
+
+    assert isolated_config.read_text() == original
+
+
+def test_set_values_valid_config_preserves_other_sections(isolated_config):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text(
+        json.dumps(
+            {"server": {"token": "tok-keep"}, "model": {"omni": {"api_key": "sk"}}}
+        )
+    )
+
+    set_value("server.url", "http://192.168.1.9:1810")
+
+    data = json.loads(isolated_config.read_text())
+    assert data["server"]["token"] == "tok-keep"
+    assert data["server"]["url"] == "http://192.168.1.9:1810"
+    assert data["model"]["omni"]["api_key"] == "sk"
+
+
+def test_set_values_empty_file_initializes(isolated_config):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text("")
+
+    set_value("server.token", "tok-new")
+
+    data = json.loads(isolated_config.read_text())
+    assert data["server"]["token"] == "tok-new"
