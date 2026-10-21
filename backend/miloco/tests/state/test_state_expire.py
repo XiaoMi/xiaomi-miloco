@@ -86,6 +86,74 @@ def test_refreshing_value_keeps_expiration_heap_bounded():
     assert len(store._expiration_heap) <= 64
 
 
+async def test_delete_with_pending_expiration_clears_scheduling_state():
+    store = StateStore()
+    store.start()
+    store.set("event/door", "open", source="sensor", expires_in_ms=30)
+    store.delete("event/door", source="sensor")
+    await wait_for_expiration()
+
+    assert store._expiration_by_path == {}
+
+    store.stop()
+
+
+async def test_refreshing_expired_retained_value_notifies_revival():
+    store = StateStore()
+    store.start()
+    seen: list = []
+    store.subscribe("event/**", seen.append)
+
+    store.set(
+        "event/door",
+        "open",
+        source="sensor",
+        expires_in_ms=10,
+        on_expire="retain",
+    )
+    await wait_for_expiration()
+    store.set(
+        "event/door",
+        "open",
+        source="sensor",
+        expires_in_ms=1000,
+        on_expire="retain",
+    )
+    await asyncio.sleep(0)
+
+    assert store.get("event/door") == "open"
+    assert [(change.old, change.new, change.reason) for change in seen] == [
+        (MISSING, "open", "update"),
+        ("open", "open", "expire"),
+        (MISSING, "open", "update"),
+    ]
+
+    store.stop()
+
+
+async def test_get_hides_retained_value_after_expiration_even_if_wall_clock_moves_back(
+    monkeypatch,
+):
+    store = StateStore()
+    store.start()
+    current_time = 1_000_000
+    monkeypatch.setattr("miloco.state.store.now_ms", lambda: current_time)
+
+    store.set(
+        "event/door",
+        "open",
+        source="sensor",
+        expires_in_ms=10,
+        on_expire="retain",
+    )
+    await wait_for_expiration()
+    monkeypatch.setattr("miloco.state.store.now_ms", lambda: current_time - 100)
+
+    assert store.get("event/door") is MISSING
+
+    store.stop()
+
+
 def test_restart_on_another_event_loop_ignores_old_reschedule_callback():
     store = StateStore()
     old_errors: list[BaseException | None] = []

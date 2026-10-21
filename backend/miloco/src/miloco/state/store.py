@@ -214,6 +214,19 @@ def _build(
         )
     if _same(old.value, value):
         batch.expiration_paths.append(_join(segments))
+        if old.expired or (old.expires_at is not None and old.expires_at <= batch.now):
+            # 过期后同值刷新会把读取视角从「不可见」切回「可见」。这条可见性边沿不补
+            # 事件，订阅方只能停在已过期，直到值真的变化才恢复。
+            batch.upserts.append(
+                Change(
+                    _join(segments),
+                    MISSING,
+                    value,
+                    batch.source,
+                    batch.now,
+                    batch.reason,
+                )
+            )
         return Entry(
             value,
             old.last_changed,
@@ -618,6 +631,8 @@ class StateStore:
         del parents[-1][segments[-1]]
         _prune(parents, segments)
         self._leaf_count -= len(batch.deletes)
+        for change in batch.deletes:
+            self._expiration_by_path.pop(change.path, None)
         return batch.changes()
 
     def _clear(self, source: str, now: int) -> list[Change]:
@@ -767,7 +782,9 @@ class StateStore:
             now = now_ms()
             node = self._locate(segments)
             if isinstance(node, Entry):
-                if node.expires_at is not None and node.expires_at <= now:
+                if node.expired or (
+                    node.expires_at is not None and node.expires_at <= now
+                ):
                     return default
                 return node.value
             if isinstance(node, dict):
