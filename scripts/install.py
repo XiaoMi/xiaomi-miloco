@@ -1268,19 +1268,24 @@ class Installer:
             ),
         )
 
-        self._write_model_config(model_name, base_url, api_key)
-        self.ui.step_ok(self.ui.i18n.t("model.config_saved"))
+        if self._write_model_config(model_name, base_url, api_key):
+            self.ui.step_ok(self.ui.i18n.t("model.config_saved"))
+        else:
+            self.ui.step_skip(self.ui.i18n.t("model.config_not_saved"))
 
     def _quick_configure_mimo(self) -> None:
         self.ui.step(self.ui.i18n.t("model.mimo_quick"))
-        self._write_model_config(
+        if self._write_model_config(
             "mimo-v2.6-flash",
             "https://api.xiaomimimo.com/v1",
             self.omni_api_key or "",
-        )
-        self.ui.step_ok(self.ui.i18n.t("model.config_saved"))
+        ):
+            self.ui.step_ok(self.ui.i18n.t("model.config_saved"))
+        else:
+            self.ui.step_skip(self.ui.i18n.t("model.config_not_saved"))
 
-    def _write_model_config(self, model: str, base_url: str, api_key: str) -> None:
+    def _write_model_config(self, model: str, base_url: str, api_key: str) -> bool:
+        """写 model.omni.*；返回是否真正落盘（拒绝写盘时调用方不得打成功提示）。"""
         for field_name, value in [
             ("model", model),
             ("base_url", base_url),
@@ -1309,12 +1314,13 @@ class Installer:
             config_path = self.miloco_home / "config.json"
             config = self._read_config_for_write(config_path)
             if config is None:
-                return
+                return False
             omni = config.setdefault("model", {}).setdefault("omni", {})
             omni["model"] = model
             omni["base_url"] = base_url
             omni["api_key"] = api_key
             self._atomic_write_config(config_path, config)
+        return True
 
     def _get_current_config(self) -> tuple[str, str, str]:
         values: list[str] = []

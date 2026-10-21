@@ -67,6 +67,7 @@
   "model.reconfigure_option": "重新配置",
   "model.keep_current": "保持当前配置",
   "model.config_saved": "模型配置已保存",
+  "model.config_not_saved": "模型配置未保存（config.json 读不懂，已拒绝写入以保护其他配置段；请恢复备份后重新运行安装）",
   "model.keep_option": "保持不变",
   "model.enter_model": "model: ",
   "model.enter_base_url": "base_url: ",

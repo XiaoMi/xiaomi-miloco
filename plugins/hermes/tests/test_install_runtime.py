@@ -437,3 +437,41 @@ def test_write_model_config_fallback_preserves_other_sections(
     assert data["server"]["token"] == "tok-keep"
     assert data["model"]["omni"]["api_key"] == "sk-key"
     assert data["model"]["omni"]["base_url"] == "https://api.xiaomimimo.com/v1"
+
+
+def test_write_model_config_returns_false_when_refused(installer, tmp_path, monkeypatch):
+    """拒绝写盘时必须返回 False，调用方据此跳过「模型配置已保存」成功提示。"""
+    inst, ui = _installer_for(installer, tmp_path)
+    config = tmp_path / "config.json"
+    original = "NOT JSON {{{"
+    config.write_text(original, encoding="utf-8")
+
+    real_run = installer.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:3] == ["miloco-cli", "config", "set"]:
+            raise subprocess.CalledProcessError(1, cmd)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+
+    saved = inst._write_model_config("m", "http://u", "sk")
+
+    assert saved is False
+    assert config.read_text(encoding="utf-8") == original
+    assert "install.config_unparsable" in ui.warnings
+
+
+def test_write_model_config_returns_true_on_success(installer, tmp_path, monkeypatch):
+    inst, _ = _installer_for(installer, tmp_path)
+
+    real_run = installer.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:3] == ["miloco-cli", "config", "set"]:
+            return subprocess.CompletedProcess(cmd, 0)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+
+    assert inst._write_model_config("m", "http://u", "sk") is True

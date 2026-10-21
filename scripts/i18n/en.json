@@ -67,6 +67,7 @@
   "model.reconfigure_option": "Reconfigure",
   "model.keep_current": "Keeping current configuration",
   "model.config_saved": "Model configuration saved",
+  "model.config_not_saved": "Model configuration NOT saved (config.json unreadable, write refused to protect other sections; restore a backup and re-run)",
   "model.keep_option": "Keep as-is",
   "model.enter_model": "model: ",
   "model.enter_base_url": "base_url: ",
