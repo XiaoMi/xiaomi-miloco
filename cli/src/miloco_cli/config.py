@@ -5,11 +5,9 @@
   > ``$MILOCO_HOME/config.json`` > 默认值。
 - Token 由 miloco 后端 bootstrap 写入 ``server.token``，CLI 不应覆盖。
 
-schema 白名单与类型由常量 ``_SCHEMA_PATHS`` 维护。新增字段时按段同步：核心段
-（``debug`` / ``server`` / ``agent`` / ``model``）同步 ``settings.schema.json``；其余段
-（``perception`` / ``rule`` / ``camera`` …）schema.json 按设计不覆盖（见
-``knowledge/06-dev-guide/dev-guide.md``），以 ``settings.yaml`` + ``settings.py`` 的
-pydantic 模型为准。
+schema 白名单与类型由常量 ``_SCHEMA_PATHS`` 维护。新增字段时，先在此处声明 CLI
+可编辑范围；``settings.schema.json`` 覆盖核心段及按需纳入的非核心字段，但不是完整
+设置模型。完整字段定义以 ``settings.yaml`` + ``settings.py`` 的 pydantic 模型为准。
 
 默认值（元组第 2 项）一律对齐后端**实际生效**的默认值：``settings.yaml`` 里有该 key 就取
 yaml 的值，没有才取 ``settings.py`` 对应 pydantic 字段的默认值。对齐由
