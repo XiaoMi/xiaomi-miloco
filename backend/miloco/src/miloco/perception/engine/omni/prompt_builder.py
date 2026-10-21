@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import base64
 import logging
-from fractions import Fraction
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import TYPE_CHECKING, Literal
 
 import av
