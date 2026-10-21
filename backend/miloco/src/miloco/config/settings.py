@@ -308,6 +308,11 @@ class RuleSettings(BaseModel):
             "规则创建时未显式指定 --duration-ratio 则使用此值"
         ),
     )
+    guard_pending_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0.0,
+        description="guard 拦截的主规则进入信号最多保留多久（秒）",
+    )
 
 
 class PerceptionCollectSettings(BaseModel):

@@ -304,6 +304,7 @@ class RuleRunner:
         rule_log_repo: RuleLogRepo,
         sample_interval_seconds: float = 3.0,
         task_record_service: "TaskRecordService | None" = None,
+        guard_pending_timeout_seconds: float = 60.0,
     ):
         self._rules: dict[str, Rule] = {r.id: r for r in rules if r.id}
         self._miot_proxy = miot_proxy
@@ -327,6 +328,7 @@ class RuleRunner:
 
         # `sample_interval` 锁在 init，避免运行中 settings 漂移。
         self._sample_interval = sample_interval_seconds
+        self._guard_pending_timeout_seconds = guard_pending_timeout_seconds
 
         # task 状态机。为 None 时全部走旧的「rule 自己 fire」路径 —— 只有不装
         # 状态机的单测会留 None; 线上每个名下有 rule 的 task 都装。
@@ -350,6 +352,10 @@ class RuleRunner:
         self._iot_source: IotSource | None = None
 
         logger.info("RuleRunner init, rules: %d", len(self._rules))
+
+    @property
+    def guard_pending_timeout_seconds(self) -> float:
+        return self._guard_pending_timeout_seconds
 
     # ---- record 源接线 ----
 

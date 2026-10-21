@@ -18,6 +18,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from miloco.config import SETTINGS_SCHEMA, get_settings, reset_settings
 from miloco.config.settings import MilocoSettings
+from pydantic import ValidationError
 
 
 @pytest.fixture(autouse=True)
@@ -156,6 +157,24 @@ def test_notify_dedup_window_negative_loads_not_rejected(monkeypatch) -> None:
     monkeypatch.setenv("MILOCO_NOTIFY__DEDUP_WINDOW_SEC", "-5")
     reset_settings()
     assert get_settings().notify.dedup_window_sec == -5.0
+
+
+def test_guard_pending_timeout_defaults_to_one_minute() -> None:
+    assert get_settings().rule.guard_pending_timeout_seconds == 60.0
+
+
+def test_guard_pending_timeout_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("MILOCO_RULE__GUARD_PENDING_TIMEOUT_SECONDS", "90")
+    reset_settings()
+    assert get_settings().rule.guard_pending_timeout_seconds == 90.0
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_guard_pending_timeout_rejects_non_positive(monkeypatch, value) -> None:
+    monkeypatch.setenv("MILOCO_RULE__GUARD_PENDING_TIMEOUT_SECONDS", str(value))
+    reset_settings()
+    with pytest.raises(ValidationError):
+        get_settings()
 
 
 def test_directory_paths_derive_from_miloco_home(tmp_path: Path) -> None:

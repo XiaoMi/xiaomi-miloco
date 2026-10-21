@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -93,6 +94,13 @@ class TaskSignal:
     # 派发时原样交回动作层的上下文。状态机不解释它。
     # compare=False: payload 常是 dict / 模型对象, 带进 __hash__ 会炸。
     payload: object | None = field(default=None, compare=False)
+
+
+@dataclass(frozen=True)
+class PendingEnter:
+    signal: TaskSignal
+    created_at: float
+    expired: bool = False
 
 
 @dataclass
@@ -207,17 +215,21 @@ class TaskStateMachine:
         dispatch_action: Callable[[str, ActionSlot, object | None], None],
         track: Callable[[TransitionOutcome, TaskSignal], None] | None = None,
         on_forget: Callable[[str], None] | None = None,
+        pending_enter_timeout_seconds: float = 60.0,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._is_condition_satisfied = is_condition_satisfied
         self._dispatch_action = dispatch_action
         self._track = track or (lambda outcome, signal: None)
         self._on_forget = on_forget or (lambda task_id: None)
+        self._pending_enter_timeout_seconds = pending_enter_timeout_seconds
+        self._clock = clock or time.monotonic
 
         # handle(dispatch=False) 期间关掉派发 —— 见 handle 的 docstring
         self._dispatching = True
         self._topologies: dict[str, TaskTopology] = {}
         self._states: dict[str, TaskRuntimeState] = {}
-        self._pending_enters: dict[str, dict[str, TaskSignal]] = {}
+        self._pending_enters: dict[str, dict[str, PendingEnter]] = {}
         self._queues: dict[str, deque[TaskSignal]] = {}
         self._wakeups: dict[str, asyncio.Event] = {}
         self._consumers: dict[str, asyncio.Task] = {}
@@ -372,13 +384,25 @@ class TaskStateMachine:
             self._pending_enters.pop(signal.task_id, None)
             return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
+        existing = self._pending_enters.get(signal.task_id, {}).get(signal.rule_id)
+        if (
+            topology.is_session_type
+            and existing is not None
+            and self._pending_enter_expired(existing)
+        ):
+            self._mark_pending_enter_expired(signal.task_id, signal.rule_id, existing)
+            return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
+
         unmet = self._unmet_guards(topology)
         if unmet:
             # 条件层锁存后不会再产生同一条 false→true 边沿，因此先保存信号，等前提
             # 满足后由上游释放。保存原始信号也意味着 session 的起点按主条件首次成立
             # 计，而不是按前提恢复时刻计。
             pending = self._pending_enters.setdefault(signal.task_id, {})
-            if signal.rule_id not in pending:
+            if existing is not None and self._pending_enter_expired(existing):
+                pending.pop(signal.rule_id, None)
+                existing = None
+            if existing is None:
                 logger.info(
                     "task %s 的进入被前提拦下 (rule=%s): %s",
                     signal.task_id,
@@ -392,7 +416,8 @@ class TaskStateMachine:
                     signal.rule_id,
                     ", ".join(f"{rid}={why}" for rid, why in unmet),
                 )
-            pending.setdefault(signal.rule_id, signal)
+            if existing is None:
+                pending[signal.rule_id] = PendingEnter(signal, self._clock())
             return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
 
         if not topology.is_session_type:
@@ -427,9 +452,21 @@ class TaskStateMachine:
             return []
 
         releasable: list[TaskSignal] = []
-        for rule_id, signal in list(pending.items()):
+        for rule_id, pending_enter in list(pending.items()):
+            signal = pending_enter.signal
             direction = topology.directions.get(rule_id)
             if direction not in (RuleDirection.ENTER, RuleDirection.SESSION):
+                pending.pop(rule_id, None)
+                continue
+            if pending_enter.expired:
+                if topology.is_session_type:
+                    continue
+                pending.pop(rule_id, None)
+                continue
+            if self._pending_enter_expired(pending_enter):
+                self._mark_pending_enter_expired(task_id, rule_id, pending_enter)
+                if topology.is_session_type:
+                    continue
                 pending.pop(rule_id, None)
                 continue
             condition_state = self._is_condition_satisfied(rule_id)
@@ -464,6 +501,35 @@ class TaskStateMachine:
         if not pending:
             self._pending_enters.pop(task_id, None)
         return releasable
+
+    def _pending_enter_expired(self, pending_enter: PendingEnter) -> bool:
+        return pending_enter.expired or (
+            self._pending_enter_age(pending_enter) >= self._pending_enter_timeout_seconds
+        )
+
+    def _mark_pending_enter_expired(
+        self, task_id: str, rule_id: str, pending_enter: PendingEnter
+    ) -> PendingEnter:
+        if pending_enter.expired:
+            return pending_enter
+        logger.info(
+            "task %s 的进入因 guard pending 超时未触发 "
+            "(rule=%s, waited=%.3fs, timeout=%.3fs)",
+            task_id,
+            rule_id,
+            self._pending_enter_age(pending_enter),
+            self._pending_enter_timeout_seconds,
+        )
+        expired = PendingEnter(
+            signal=pending_enter.signal,
+            created_at=pending_enter.created_at,
+            expired=True,
+        )
+        self._pending_enters[task_id][rule_id] = expired
+        return expired
+
+    def _pending_enter_age(self, pending_enter: PendingEnter) -> float:
+        return self._clock() - pending_enter.created_at
 
     def clear_pending_enters(self, task_id: str, rule_id: str | None = None) -> None:
         pending = self._pending_enters.get(task_id)
@@ -592,8 +658,8 @@ class TaskStateMachine:
             pending = self._pending_enters.get(task_id)
             if pending is not None:
                 pending = {
-                    rule_id: signal
-                    for rule_id, signal in pending.items()
+                    rule_id: pending_enter
+                    for rule_id, pending_enter in pending.items()
                     if new_topology.directions.get(rule_id)
                     in (RuleDirection.ENTER, RuleDirection.SESSION)
                 }
