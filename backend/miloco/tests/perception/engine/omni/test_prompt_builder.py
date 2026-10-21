@@ -3823,6 +3823,7 @@ def test_video_mp4_container_duration_uses_window_not_config_fps():
         audio_clip=audio,
         sample_rate=16000,
         frame_info=frame_info,
+        trigger=None,
     )
 
     b64, info = _encode_video(packet)
