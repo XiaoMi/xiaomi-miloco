@@ -4,6 +4,8 @@
 """
 
 import importlib.util
+import json
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -292,3 +294,146 @@ def test_resolve_uninstall_home_from_pointer_without_runtime(
     pointer.write_text(f"MILOCO_HOME='{home}'\n", encoding="utf-8")
 
     assert installer._resolve_uninstall_home() == home
+
+
+# ─── 安装器兜底写者：读不懂 config.json 必须拒绝写盘（issue #569） ──────────
+#
+# 背景：安装器优先调 `miloco-cli config set`，子进程失败（CLI 不存在 / 退出码
+# 非 0）就落进手写的读-改-写兜底。这两处兜底原来把「读失败」当空基底，深合并
+# 退化成整体覆盖——而 CLI 改为严格拒绝后，损坏文件场景反而必然落进兜底，
+# 一次升级就把 server.token / model.omni.api_key 全清掉。
+
+
+class _FakeI18n:
+    def t(self, key: str, *args: str) -> str:
+        return key
+
+
+class _FakeUI:
+    def __init__(self) -> None:
+        self.i18n = _FakeI18n()
+        self.warnings: list[str] = []
+
+    def warn(self, msg: str) -> None:
+        self.warnings.append(msg)
+
+
+def _installer_for(installer, tmp_path):
+    ui = _FakeUI()
+    inst = installer.Installer.__new__(installer.Installer)
+    inst.ui = ui
+    inst.miloco_home = tmp_path
+    return inst, ui
+
+
+def test_fallback_write_config_corrupt_refuses_and_preserves_bytes(
+    installer, tmp_path
+):
+    inst, ui = _installer_for(installer, tmp_path)
+    config = tmp_path / "config.json"
+    original = '{ "server": { "token": "tok-half-written"'
+    config.write_text(original, encoding="utf-8")
+
+    inst._fallback_write_config("/usr/bin/python3")
+
+    assert config.read_text(encoding="utf-8") == original
+    assert "install.config_unparsable" in ui.warnings
+
+
+def test_fallback_write_config_non_object_refuses(installer, tmp_path):
+    inst, ui = _installer_for(installer, tmp_path)
+    config = tmp_path / "config.json"
+    original = "[1, 2, 3]"
+    config.write_text(original, encoding="utf-8")
+
+    inst._fallback_write_config("/usr/bin/python3")
+
+    assert config.read_text(encoding="utf-8") == original
+    assert "install.config_not_object" in ui.warnings
+
+
+def test_fallback_write_config_preserves_other_sections(installer, tmp_path):
+    inst, _ = _installer_for(installer, tmp_path)
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"server": {"token": "tok-keep"}, "model": {"omni": {"api_key": "sk"}}}),
+        encoding="utf-8",
+    )
+
+    inst._fallback_write_config("/usr/bin/python3")
+
+    data = json.loads(config.read_text(encoding="utf-8"))
+    assert data["server"]["python_bin"] == "/usr/bin/python3"
+    assert data["server"]["token"] == "tok-keep"
+    assert data["model"]["omni"]["api_key"] == "sk"
+
+
+def test_fallback_write_config_missing_file_initializes(installer, tmp_path):
+    inst, _ = _installer_for(installer, tmp_path)
+    config = tmp_path / "config.json"
+
+    inst._fallback_write_config("/usr/bin/python3")
+
+    data = json.loads(config.read_text(encoding="utf-8"))
+    assert data["server"]["python_bin"] == "/usr/bin/python3"
+
+
+def test_fallback_write_config_empty_file_initializes(installer, tmp_path):
+    inst, _ = _installer_for(installer, tmp_path)
+    config = tmp_path / "config.json"
+    config.write_text("", encoding="utf-8")
+
+    inst._fallback_write_config("/usr/bin/python3")
+
+    data = json.loads(config.read_text(encoding="utf-8"))
+    assert data["server"]["python_bin"] == "/usr/bin/python3"
+
+
+def test_write_model_config_fallback_refuses_on_corrupt(
+    installer, tmp_path, monkeypatch
+):
+    """CLI 严格拒绝 → 兜底触发 → 兜底也必须拒绝，且原字节保留。"""
+    inst, ui = _installer_for(installer, tmp_path)
+    config = tmp_path / "config.json"
+    original = "NOT JSON {{{"
+    config.write_text(original, encoding="utf-8")
+
+    real_run = installer.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:3] == ["miloco-cli", "config", "set"]:
+            raise subprocess.CalledProcessError(1, cmd)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+
+    inst._write_model_config("mimo-v2.6-flash", "https://api.xiaomimimo.com/v1", "sk-key")
+
+    assert config.read_text(encoding="utf-8") == original
+    assert "install.config_unparsable" in ui.warnings
+
+
+def test_write_model_config_fallback_preserves_other_sections(
+    installer, tmp_path, monkeypatch
+):
+    inst, _ = _installer_for(installer, tmp_path)
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps({"server": {"token": "tok-keep"}}), encoding="utf-8"
+    )
+
+    real_run = installer.subprocess.run
+
+    def fake_run(cmd, *args, **kwargs):
+        if cmd[:3] == ["miloco-cli", "config", "set"]:
+            raise subprocess.CalledProcessError(1, cmd)
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(installer.subprocess, "run", fake_run)
+
+    inst._write_model_config("mimo-v2.6-flash", "https://api.xiaomimimo.com/v1", "sk-key")
+
+    data = json.loads(config.read_text(encoding="utf-8"))
+    assert data["server"]["token"] == "tok-keep"
+    assert data["model"]["omni"]["api_key"] == "sk-key"
+    assert data["model"]["omni"]["base_url"] == "https://api.xiaomimimo.com/v1"

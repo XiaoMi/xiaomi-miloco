@@ -5,6 +5,7 @@ import json
 import pytest
 
 from miloco_cli.config import (
+    _read_raw,
     atomic_write,
     get_value,
     known_paths,
@@ -380,4 +381,85 @@ def test_set_values_empty_file_initializes(isolated_config):
     set_value("server.token", "tok-new")
 
     data = json.loads(isolated_config.read_text())
+    assert data["server"]["token"] == "tok-new"
+
+
+# ─── 读路径可观测性 + 目录项 fsync 降级（review 跟进） ───────────────────────
+
+
+def test_read_raw_corrupt_warns_on_stderr(isolated_config, capsys):
+    """读路径宽容但不能静默：损坏文件按默认值展示时，stderr 要有 warning。
+
+    否则 `config show` 满屏默认值无任何提示，用户误判「配置真的丢了」，
+    与 `config set` 的拒绝报错自相矛盾。
+    """
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text("NOT JSON {{{")
+
+    data = _read_raw()
+
+    assert data == {}
+    err = capsys.readouterr().err
+    assert "warning: config.json 解析失败" in err
+
+
+def test_read_raw_non_object_warns_on_stderr(isolated_config, capsys):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text("[1, 2, 3]")
+
+    data = _read_raw()
+
+    assert data == {}
+    assert "warning: config.json 顶层不是 JSON 对象" in capsys.readouterr().err
+
+
+def test_read_raw_valid_file_is_silent(isolated_config, capsys):
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    isolated_config.write_text(json.dumps({"server": {"token": "tok"}}))
+
+    _read_raw()
+
+    assert capsys.readouterr().err == ""
+
+
+def test_atomic_write_survives_dir_fsync_failure(isolated_config, monkeypatch):
+    """目录项 fsync 失败（EINVAL 等）只是保险降级，不应当写失败。
+
+    目录句柄用假 fd 模拟，保证 Windows（打不开目录句柄）也能走到同一分支。
+    """
+    import os as _os
+
+    from miloco_cli import config as config_mod
+
+    isolated_config.parent.mkdir(parents=True, exist_ok=True)
+    real_fsync = _os.fsync
+    real_open = _os.open
+    real_close = _os.close
+    parent = str(isolated_config.parent)
+    state = {"n": 0}
+
+    def fake_fsync(fd):
+        state["n"] += 1
+        if state["n"] == 1:
+            return real_fsync(fd)
+        raise OSError("EINVAL simulated on directory fsync")
+
+    def fake_open(p, flags, *args, **kwargs):
+        if str(p) == parent:
+            return 4242  # 假目录句柄
+        return real_open(p, flags, *args, **kwargs)
+
+    def fake_close(fd):
+        if fd == 4242:
+            return None
+        return real_close(fd)
+
+    monkeypatch.setattr(config_mod.os, "fsync", fake_fsync)
+    monkeypatch.setattr(config_mod.os, "open", fake_open)
+    monkeypatch.setattr(config_mod.os, "close", fake_close)
+
+    atomic_write(isolated_config, {"server": {"token": "tok-new"}})
+
+    assert state["n"] >= 2
+    data = json.loads(isolated_config.read_text(encoding="utf-8"))
     assert data["server"]["token"] == "tok-new"

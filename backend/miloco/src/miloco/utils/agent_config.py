@@ -105,7 +105,12 @@ def _atomic_write_json(path: Path, data: dict[str, Any]) -> None:
         except OSError:
             return
         try:
-            os.fsync(dir_fd)
+            try:
+                os.fsync(dir_fd)
+            except OSError as e:
+                # rename 已成功、数据已落盘：目录项 fsync 失败只是保险降级，
+                # 不能反过来让调用方以为写失败（还会跳过 reset_settings）。
+                logger.warning("目录项 fsync 失败（数据已落盘，仅掉电保险降级）: %s", e)
         finally:
             os.close(dir_fd)
     except BaseException:

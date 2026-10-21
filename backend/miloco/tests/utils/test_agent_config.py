@@ -111,3 +111,72 @@ def test_ensure_backend_token_persists_when_config_missing(tmp_path):
     token = ensure_backend_token()
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["server"]["token"] == token
+
+
+def test_ensure_backend_token_non_object_config_does_not_crash(tmp_path):
+    """顶层非对象（[1,2,3]）：启动降级分支必须真的能起服务。
+
+    settings 读路径对非对象 warn + {} 后，ensure_backend_token 的降级分支
+    两种损坏形态都成立——不会在 bootstrap 里裸崩 ValueError。
+    """
+    path = _config_path(tmp_path)
+    original = "[1, 2, 3]"
+    path.write_text(original, encoding="utf-8")
+
+    token = ensure_backend_token()
+
+    assert token
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_update_shared_config_survives_dir_fsync_failure(tmp_path, monkeypatch):
+    """目录项 fsync 失败只是保险降级：写盘成功且 reset_settings 照常执行。
+
+    模拟部分文件系统对目录 fd 返回 EINVAL：第一次 fsync 是数据页（放行），
+    第二次是目录项（抛 OSError）。rename 已成功、数据已落盘，调用方不应
+    看到「写失败」，进程内 settings 缓存也必须刷新。
+
+    目录句柄用假 fd 模拟，保证 Windows（打不开目录句柄）也能走到同一分支。
+    """
+    import os as _os
+
+    from miloco.utils import agent_config
+
+    path = _config_path(tmp_path)
+    path.write_text(json.dumps({"server": {"token": "tok-old"}}), encoding="utf-8")
+
+    real_fsync = _os.fsync
+    real_open = _os.open
+    real_close = _os.close
+    state = {"n": 0}
+
+    def fake_fsync(fd):
+        state["n"] += 1
+        if state["n"] == 1:
+            return real_fsync(fd)
+        raise OSError("EINVAL simulated on directory fsync")
+
+    def fake_open(p, flags, *args, **kwargs):
+        if str(p) == str(tmp_path):
+            return 4242  # 假目录句柄
+        return real_open(p, flags, *args, **kwargs)
+
+    def fake_close(fd):
+        if fd == 4242:
+            return None
+        return real_close(fd)
+
+    monkeypatch.setattr(agent_config.os, "fsync", fake_fsync)
+    monkeypatch.setattr(agent_config.os, "open", fake_open)
+    monkeypatch.setattr(agent_config.os, "close", fake_close)
+
+    merged = update_shared_config(server={"token": "tok-new"})
+
+    assert merged["server"]["token"] == "tok-new"
+    assert state["n"] >= 2  # 确实走到了目录项 fsync 失败分支
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["server"]["token"] == "tok-new"
+    # reset_settings() 未被跳过：缓存刷新后立刻能读到新值
+    from miloco.config.settings import get_settings
+
+    assert get_settings().server.token == "tok-new"
