@@ -188,6 +188,29 @@ async def test_get_hides_retained_value_after_expiration_even_if_wall_clock_move
     store.stop()
 
 
+async def test_get_subtree_hides_retained_value_after_expiration_even_if_wall_clock_moves_back(
+    monkeypatch,
+):
+    store = StateStore()
+    store.start()
+    current_time = 1_000_000
+    monkeypatch.setattr("miloco.state.store.now_ms", lambda: current_time)
+
+    store.set(
+        "event/door",
+        "open",
+        source="sensor",
+        expires_in_ms=10,
+        on_expire="retain",
+    )
+    await wait_for_expiration()
+    monkeypatch.setattr("miloco.state.store.now_ms", lambda: current_time - 100)
+
+    assert store.get("event") == {}
+
+    store.stop()
+
+
 def test_restart_on_another_event_loop_ignores_old_reschedule_callback():
     store = StateStore()
     old_errors: list[BaseException | None] = []

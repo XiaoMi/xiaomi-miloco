@@ -265,12 +265,18 @@ def _prune(parents: list[dict[str, Node]], segments: tuple[str, ...]) -> None:
         del parents[index - 1][segments[index - 1]]
 
 
+def _is_expired(entry: Entry, now: int) -> bool:
+    return entry.expired or (
+        entry.expires_at is not None and entry.expires_at <= now
+    )
+
+
 def _plain(node: dict[str, Node], now: int) -> dict[str, Any]:
     """剥掉元数据的嵌套 dict。"""
     plain: dict[str, Any] = {}
     for key, child in node.items():
         if isinstance(child, Entry):
-            if child.expires_at is None or child.expires_at > now:
+            if not _is_expired(child, now):
                 plain[key] = child.value
         else:
             sub = _plain(child, now)
@@ -280,7 +286,7 @@ def _plain(node: dict[str, Node], now: int) -> dict[str, Any]:
 
 
 def _visible_entry(entry: Entry, now: int) -> Entry | None:
-    if entry.expires_at is None or entry.expires_at > now:
+    if not _is_expired(entry, now):
         return entry
     if entry.on_expire == "delete":
         return None
@@ -784,9 +790,7 @@ class StateStore:
             now = now_ms()
             node = self._locate(segments)
             if isinstance(node, Entry):
-                if node.expired or (
-                    node.expires_at is not None and node.expires_at <= now
-                ):
+                if _is_expired(node, now):
                     return default
                 return node.value
             if isinstance(node, dict):
