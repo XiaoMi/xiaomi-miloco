@@ -1893,6 +1893,7 @@ def _encode_video(
         identity_packet.sample_rate,
         fps=identity_packet.frame_info.fps,
         short_edge=short_edge,
+        duration_s=_window_duration_s(identity_packet.frame_info),
     )
 
 
@@ -2002,11 +2003,13 @@ def _encode_video_mp4(
     sample_rate: int,
     fps: int,
     short_edge: int = _VIDEO_SHORT_EDGE,
+    duration_s: float = 0.0,
 ) -> tuple[str | None, LocalMediaInfo | None]:
     prepared = _prepare_omni_visual_frames(
         frames,
         fps=fps,
         short_edge=short_edge,
+        duration_s=duration_s,
     )
     if prepared is None:
         return None, None
@@ -2037,6 +2040,10 @@ def _encode_prepared_video_mp4(
 
     frames = prepared.frames
     fps = prepared.fps
+    # When the capture-window duration is known, use the real sampling rate
+    # (frame_count / duration_s) instead of the config-derived fps, so the
+    # container duration matches the actual capture span. See #560.
+    eff_rate = prepared.sampling_fps if prepared.duration_s > 0 else float(fps)
     target_w = prepared.width
     target_h = prepared.height
 
@@ -2046,7 +2053,7 @@ def _encode_prepared_video_mp4(
     try:
         container = av.open(tmp_path, "w")
 
-        v_stream = container.add_stream("h264", rate=fps)
+        v_stream = container.add_stream("h264", rate=eff_rate)
         v_stream.width = target_w
         v_stream.height = target_h
         v_stream.pix_fmt = "yuv420p"
@@ -2060,7 +2067,11 @@ def _encode_prepared_video_mp4(
         has_audio = audio_clip is not None and audio_clip.size >= _AAC_FRAME_SIZE
         if has_audio:
             # Pad audio with silence to match video duration to avoid corrupt mp4
-            video_duration_samples = int(len(frames) / fps * sample_rate)
+            video_duration_samples = (
+                int(round(prepared.duration_s * sample_rate))
+                if prepared.duration_s > 0
+                else int(len(frames) / fps * sample_rate)
+            )
             if audio_clip.size < video_duration_samples:
                 audio_clip = np.pad(audio_clip, (0, video_duration_samples - audio_clip.size))
             a_stream = container.add_stream("aac", rate=sample_rate)

@@ -3788,3 +3788,55 @@ class TestPersonCropInject:
         )
         assert imgs[-1] == guide + 1, _dbg     # 引导语紧跟的那张，仍是 video 前最后一张
         assert self._note_idx(content) < guide, _dbg  # 人像注入整段在引导语之前
+
+
+def test_video_mp4_container_duration_uses_window_not_config_fps():
+    """Regression for #560 (video path).
+
+    The mp4 container duration must follow the real capture window
+    (sampling_fps = frame_count / duration_s), not frame_count / config_fps.
+    8 frames delivered over a 4-second window with config fps=1 must yield a
+    ~4-second container, not 8 seconds.
+    """
+    import base64 as b64mod
+    import io
+    from types import SimpleNamespace
+
+    import av
+    import numpy as np
+
+    from miloco.perception.engine.omni.prompt_builder import _encode_video
+
+    n_frames = 8
+    window_s = 4.0
+    config_fps = 1  # misleading config-derived fps
+
+    frames = [np.zeros((64, 64, 3), np.uint8) for _ in range(n_frames)]
+    audio = np.zeros(16000 * int(window_s), np.int16)
+
+    frame_info = SimpleNamespace(
+        fps=config_fps,
+        start_timestamp=0.0,
+        end_timestamp=window_s * 1000.0,  # ms
+    )
+    packet = SimpleNamespace(
+        all_frames=frames,
+        audio_clip=audio,
+        sample_rate=16000,
+        frame_info=frame_info,
+    )
+
+    b64, info = _encode_video(packet)
+    assert b64 is not None
+    assert info is not None
+
+    # Decode the mp4 and check its container duration.
+    mp4_bytes = b64mod.b64decode(b64)
+    with av.open(io.BytesIO(mp4_bytes)) as container:
+        duration = float(container.duration / av.time_base)
+
+    # Should be ~4s (the real capture window), not ~8s (frame_count / config_fps).
+    assert abs(duration - window_s) < 0.5, (
+        f"mp4 container duration {duration:.2f}s != expected {window_s:.2f}s "
+        f"(would be {n_frames / config_fps:.2f}s if config fps were used)"
+    )
