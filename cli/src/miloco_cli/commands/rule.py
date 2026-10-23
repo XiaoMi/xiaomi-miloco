@@ -1061,8 +1061,9 @@ def _cooldown_fields(a: dict) -> tuple[str | None, float | None]:
     """返回 (来源字段, 秒数)。
 
     ``cooldown_seconds`` 优先于 ``cooldown_minutes``；字段存在但不是数值时
-    秒数返回 ``None``，留给后端 pydantic 收敛或 400。bool 走数值语义
-    （``False`` = 0），与后端 ``int`` 字段的宽松解析保持一致。
+    秒数返回 ``None``，留给后端 pydantic 收敛或 400。bool 由
+    ``_validate_actions`` 先拦——后端宽松模式会把它收成 0/1，但把
+    true/false 写进时长字段是配置错误；这里的数值解释只作兜底。
     """
     seconds = a.get("cooldown_seconds")
     if seconds is not None:
@@ -1083,13 +1084,17 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
         # 只对数值比较：agent 可能把数字写成 "5"，直接比会 TypeError traceback，
         # 破坏 _exit_error 的干净报错；字符串形态交给后端 pydantic 收敛或 400。
         cooldown_source, cooldown_seconds = _cooldown_fields(a)
-        # 两个冷却字段在后端都是 int：小数（0.5 秒 / 0.5 分钟）和负秒必被
-        # pydantic 拒。三种动作形态共用同一份本地检查，不留一种形态穿透到
-        # 后端 400。分钟负值不拦——后端无下限，运行期按「不冷却」处理，是
-        # 存量语义；字符串形态仍交给后端 pydantic 收敛。
+        # 两个冷却字段在后端声明为 int：小数（0.5 秒 / 0.5 分钟）、负秒和
+        # bool 都在本地干净报错。bool 这一条是 CLI 刻意比后端严——pydantic
+        # 宽松模式会把 true/false 静默收成 1/0，但把布尔写进时长字段几乎必然
+        # 是配置错误，与其让 agent 拿到「配置成功」的 1 秒冷却，不如本地拒。
+        # 分钟负值不拦——后端无下限，运行期按「不冷却」处理，是存量语义；
+        # 字符串形态仍交给后端 pydantic 收敛。
         for field in ("cooldown_seconds", "cooldown_minutes"):
             raw = a.get(field)
-            if isinstance(raw, float) and not raw.is_integer():
+            if isinstance(raw, bool) or (
+                isinstance(raw, float) and not raw.is_integer()
+            ):
                 _exit_error(f"{flag_name}[{i}]: {field} must be an integer")
         raw_seconds = a.get("cooldown_seconds")
         if isinstance(raw_seconds, (int, float)) and raw_seconds < 0:

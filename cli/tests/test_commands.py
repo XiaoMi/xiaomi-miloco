@@ -2759,12 +2759,14 @@ def test_rule_create_scene_action_rejects_zero_seconds(runner):
         ({"cooldown_minutes": 0.5}, "cooldown_minutes must be an integer"),
         # 1.5 秒不触发 <1 的下限检查，但后端 int 字段照样拒。
         ({"cooldown_seconds": 1.5}, "cooldown_seconds must be an integer"),
+        # 布尔不是整数；后端宽松模式会收成 1 秒，本地刻意拒。
+        ({"cooldown_seconds": True}, "cooldown_seconds must be an integer"),
     ],
 )
-def test_rule_create_scene_action_rejects_fractional_cooldown(
+def test_rule_create_scene_action_rejects_non_integer_cooldown(
     runner, cooldown, message
 ):
-    """小数冷却后端 int 字段必拒，按字段级约束在本地拦下。"""
+    """非整数冷却（小数、布尔）按字段级约束在本地拦下。"""
     action = json.dumps(
         {
             "did": "1792764217947197440",
@@ -2895,9 +2897,8 @@ def test_rule_create_generate_action_prompt_at_max_length_passes(runner):
     assert result.exit_code == 0, result.output + (result.stderr or "")
 
 
-@pytest.mark.parametrize("cooldown", [1, True])
-def test_rule_create_generate_action_accepts_numeric_cooldown(runner, cooldown):
-    """bool 按数值语义走（True=1 放，False=0 拒），与后端 int 收敛一致。"""
+def test_rule_create_generate_action_accepts_integer_cooldown(runner):
+    """整数分钟按数值语义放行；bool 由非整数分支拒。"""
     action = json.dumps(
         {
             "did": "speaker-1",
@@ -2905,7 +2906,7 @@ def test_rule_create_generate_action_accepts_numeric_cooldown(runner, cooldown):
             "params": ["{{result}}"],
             "generate": {"prompt": "看"},
             "idempotent": False,
-            "cooldown_minutes": cooldown,
+            "cooldown_minutes": 1,
         },
         ensure_ascii=False,
     )
@@ -2915,7 +2916,7 @@ def test_rule_create_generate_action_accepts_numeric_cooldown(runner, cooldown):
 
     assert result.exit_code == 0, result.output + (result.stderr or "")
     body = mock.call_args[0][1]
-    assert body["actions"][0]["cooldown_minutes"] == cooldown
+    assert body["actions"][0]["cooldown_minutes"] == 1
 
 
 @pytest.mark.parametrize(
@@ -2982,8 +2983,7 @@ def test_rule_create_generate_action_rejects_bad_fields(runner, generate, expect
         ),
         (
             {"idempotent": False, "cooldown_minutes": False},
-            "generate requires cooldown_seconds (0 allowed) "
-            "or cooldown_minutes >= 1",
+            "cooldown_minutes must be an integer",
         ),
         (
             {"idempotent": False, "cooldown_minutes": 30, "params": ["没有占位符"]},
@@ -3046,12 +3046,13 @@ def test_rule_create_generate_action_accepts_seconds(runner, seconds):
     [
         ({"cooldown_minutes": 0.5}, "cooldown_minutes must be an integer"),
         ({"cooldown_seconds": 0.5}, "cooldown_seconds must be an integer"),
+        ({"cooldown_minutes": True}, "cooldown_minutes must be an integer"),
     ],
 )
-def test_rule_create_generate_action_rejects_fractional_cooldown(
+def test_rule_create_generate_action_rejects_non_integer_cooldown(
     runner, cooldown, message
 ):
-    """generate 与其它形态共用同一份数值检查，小数冷却不下发。"""
+    """generate 与其它形态共用同一份数值检查，非整数冷却不下发。"""
     action = json.dumps(
         {
             "did": "speaker-1",
@@ -3112,6 +3113,9 @@ def test_rule_create_plain_tts_accepts_zero_seconds(runner):
         ({"cooldown_seconds": -1}, "cooldown_seconds must be >= 0"),
         ({"cooldown_seconds": 0.5}, "cooldown_seconds must be an integer"),
         ({"cooldown_minutes": 0.5}, "cooldown_minutes must be an integer"),
+        # 布尔不是整数；true 在后端宽松模式下会变成 1，本地刻意拒。
+        ({"cooldown_seconds": True}, "cooldown_seconds must be an integer"),
+        ({"cooldown_minutes": False}, "cooldown_minutes must be an integer"),
         # 秒字段合法不代表分钟字段合法：后端会解析每个字段。
         (
             {"cooldown_seconds": 15, "cooldown_minutes": 0.5},
