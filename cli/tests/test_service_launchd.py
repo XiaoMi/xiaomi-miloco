@@ -966,9 +966,9 @@ def test_install_script_launchd_label_matches_service():
 
     install_py = Path(__file__).resolve().parents[2] / "scripts" / "install.py"
     m = re.search(
-        r'^    LAUNCHD_LABEL = "([^"]+)"', install_py.read_text(encoding="utf-8"), re.M
+        r'^_LAUNCHD_LABEL = "([^"]+)"', install_py.read_text(encoding="utf-8"), re.M
     )
-    assert m, "scripts/install.py 里找不到 LAUNCHD_LABEL"
+    assert m, "scripts/install.py 里找不到 _LAUNCHD_LABEL"
     assert m.group(1) == service._LAUNCHD_LABEL
 
 
