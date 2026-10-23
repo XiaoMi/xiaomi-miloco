@@ -179,7 +179,7 @@ class GenerateSpec(BaseModel):
     )
     max_chars: int = Field(
         default=30, ge=1, le=200, strict=True,
-        description="生成文本上限；同时写进系统提示词与代码截断",
+        description="生成文本目标上限；写进系统提示词，代码截断留有容差并优先收尾在句末标点",
     )
 
 

@@ -41,6 +41,18 @@ SHORT_EDGE = 640
 LONG_EDGE = 1280
 JPEG_QUALITY = 85
 
+# 提示词要求「不超过 max_chars 个字」，但模型常把标点排除在「字」外（一句
+# 35 字的话实际会有近 40 个字符），也可能轻微超写。硬截在 max_chars 会把
+# 最后一句话切在词中间，TTS 听起来就是播报不全；先留 5 个字符的软容差。
+TRUNCATION_MARGIN = 5
+
+# 为了收在完整的一句话上，软容差之外再看最多 5 个字符找句末标点（35 字
+# 档位的最终硬上限是 45）。找不到句末标点时仍退回 max_chars + 5，不把
+# 无标点的长句无条件放宽。
+SENTENCE_LOOKAHEAD = 5
+SENTENCE_ENDS = frozenset("。！？!?")
+SENTENCE_CLOSERS = frozenset("”’」』）)】》〉")
+
 # 固定的 JSON 契约。prompt 里只能写「生成什么」，格式要求写在这里，避免每个
 # 调用方各写一份、解析器还得兼容多种字段名。
 GENERATE_SYSTEM_PROMPT = """你是画面观察与文案生成助手。
@@ -82,6 +94,36 @@ def _jpeg_b64(frame: np.ndarray) -> str:
         [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY],
     )
     return base64.b64encode(buf.tobytes()).decode("ascii") if ok else ""
+
+
+def _truncate_for_tts(text: str, max_chars: int) -> str:
+    """按 ``max_chars`` 截断，优先收尾在完整的一句上。
+
+    软上限是 ``max_chars + TRUNCATION_MARGIN``：模型把标点排除在「字」外
+    时通常会多写几个字符，落在这里的文案原样保留。
+
+    超出软上限时，在 ``max_chars + TRUNCATION_MARGIN + SENTENCE_LOOKAHEAD``
+    以内倒着找最后一个句末标点；找到就收在它（及其后的收尾引号/括号）之后。
+    句末标点早于 ``max(2, max_chars // 2)`` 的不采用——宁可硬切，也不为
+    对齐一个很早的句号把文案砍得过短。一个句末标点都没有时退回软上限硬切。
+
+    返回值长度不超过 ``max_chars + TRUNCATION_MARGIN + SENTENCE_LOOKAHEAD``。
+    """
+    soft = max_chars + TRUNCATION_MARGIN
+    if len(text) <= soft:
+        return text
+
+    window = text[: soft + SENTENCE_LOOKAHEAD]
+    floor = max(2, max_chars // 2)
+    for i in range(len(window) - 1, floor - 1, -1):
+        if window[i] not in SENTENCE_ENDS:
+            continue
+        end = i + 1
+        # 句号后紧跟的右引号/右括号一起保留，避免 TTS 文本里落单。
+        while end < len(window) and window[end] in SENTENCE_CLOSERS:
+            end += 1
+        return window[:end].rstrip()
+    return text[:soft].rstrip()
 
 
 async def generate_text(
@@ -152,4 +194,4 @@ async def generate_text(
     text = " ".join(data["result"].split())
     if not text:
         raise GenerateError("empty_result")
-    return text[:max_chars]
+    return _truncate_for_tts(text, max_chars)

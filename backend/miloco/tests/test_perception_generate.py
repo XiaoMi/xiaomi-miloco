@@ -101,16 +101,117 @@ async def test_generate_skips_sources_without_frames_and_caps_at_three(omni):
     assert len(omni["calls"][-1]["payload"]["crops"]) == 1
 
 
+@pytest.mark.parametrize(
+    ("text", "max_chars", "expected"),
+    [
+        # 软上限（max_chars + 5）以内原样保留
+        ("你好世界", 10, "你好世界"),
+        ("一二三四五六七八九十一二三四五", 10, "一二三四五六七八九十一二三四五"),
+        # 没有句末标点：退回软上限硬切
+        ("一二三四五六七八九十一二三四五六七八九十", 10,
+         "一二三四五六七八九十一二三四五"),
+        # 逗号不是句末标点
+        ("一二三四五六七八九十一二三四五，尾巴", 10,
+         "一二三四五六七八九十一二三四五"),
+        # 句末标点落在软上限上：多带一个字符收在句号后
+        ("一二三四五六七八九十一二三四五。尾巴", 10,
+         "一二三四五六七八九十一二三四五。"),
+        # 句末标点落在 lookahead 末端：仍然收在标点后
+        ("一二三四五六七八九十一二三四五六七八。尾巴", 10,
+         "一二三四五六七八九十一二三四五六七八。"),
+        # 半角感叹号同样识别
+        ("一二三四五六七八九十一二三四五!尾巴", 10,
+         "一二三四五六七八九十一二三四五!"),
+        # 多个句末标点取最后一个
+        ("一二三四五。六七八九十一。尾巴尾巴尾巴", 10,
+         "一二三四五。六七八九十一。"),
+        # 太早的句号不采用，按软上限硬切
+        ("短句。后面很长很长很长很长很长很长", 10,
+         "短句。后面很长很长很长很长很长"),
+        # 句号后的收尾引号一起保留
+        ("一二三四五六七八九十。”后面很长很长", 10,
+         "一二三四五六七八九十。”"),
+        # 省略号不是句末标点
+        ("一二三四五六七八九十……后面很长很长", 10,
+         "一二三四五六七八九十……后面很"),
+        # 开头就是句号时不能只返回一个标点
+        ("。你好世界一二三四五六七八", 3, "。你好世界一二三"),
+        # 35 字档位：句号落在 lookahead 内，保留完整一句（44 字）
+        ("离镜头最近的女生留着黑色长直发，戴着眼镜，穿白色长袖上衣，神情专注，"
+         "整个人显得干净大方。", 35,
+         "离镜头最近的女生留着黑色长直发，戴着眼镜，穿白色长袖上衣，神情专注，"
+         "整个人显得干净大方。"),
+        # 35 字档位：无句末标点时仍只到软上限 40
+        ("字" * 80, 35, "字" * 40),
+        # 35 字档位：句号正好在软上限上
+        ("字" * 39 + "。" + "字" * 20, 35, "字" * 39 + "。"),
+        # 35 字档位：句号在软上限之后一格（事故同形）
+        ("字" * 40 + "。", 35, "字" * 40 + "。"),
+        # 35 字档位：句号在 lookahead 末端
+        ("字" * 44 + "。", 35, "字" * 44 + "。"),
+        # 35 字档位：句号超出 lookahead 时退回软上限
+        ("字" * 45 + "。", 35, "字" * 40),
+        ("字" * 49 + "。" + "字" * 20, 35, "字" * 40),
+    ],
+)
+def test_truncate_for_tts(text, max_chars, expected):
+    assert generate_mod._truncate_for_tts(text, max_chars) == expected
+
+
 @pytest.mark.asyncio
 async def test_generate_collapses_whitespace_and_truncates(omni):
-    omni["state"]["raw"] = _raw(json.dumps({"result": "  你 好\n世界  "}))
+    omni["state"]["raw"] = _raw(json.dumps({"result": "  你好世界一二三四五六七八  "}))
 
     text = await generate_text(
         _Collector({"cam-1": _frame()}), prompt="看看", sources=["cam-1"],
         max_chars=3,
     )
 
-    assert text == "你 好"
+    # 没有句末标点：按软上限 max_chars + 5 = 8 硬切。
+    assert text == "你好世界一二三四"
+
+
+@pytest.mark.asyncio
+async def test_generate_keeps_slight_overshoot_intact(omni):
+    # 模型把标点排除在「字」外时，一句 35 字的话会有近 40 个字符；只要落在
+    # 容差内就原样返回，不能把完整的一句话切掉。
+    omni["state"]["raw"] = _raw(json.dumps({"result": "一二三四五六七八"}))
+
+    text = await generate_text(
+        _Collector({"cam-1": _frame()}), prompt="看看", sources=["cam-1"],
+        max_chars=3,
+    )
+
+    assert text == "一二三四五六七八"
+
+
+@pytest.mark.asyncio
+async def test_generate_prefers_sentence_end_over_hard_cut(omni):
+    sentence = (
+        "离镜头最近的女生留着黑色长直发，戴着眼镜，穿白色长袖上衣，神情专注，"
+        "整个人显得干净大方。"
+    )
+    omni["state"]["raw"] = _raw(json.dumps({"result": sentence}))
+
+    text = await generate_text(
+        _Collector({"cam-1": _frame()}), prompt="看看", sources=["cam-1"],
+        max_chars=35,
+    )
+
+    assert text == sentence
+    assert text.endswith("。")
+
+
+@pytest.mark.asyncio
+async def test_generate_hard_cuts_without_sentence_end(omni):
+    omni["state"]["raw"] = _raw(json.dumps({"result": "字" * 80}))
+
+    text = await generate_text(
+        _Collector({"cam-1": _frame()}), prompt="看看", sources=["cam-1"],
+        max_chars=35,
+    )
+
+    assert text == "字" * 40
 
 
 @pytest.mark.asyncio
