@@ -15,6 +15,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from scripts.tests._module_proxy import MergedModule
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 HERMES_TAG = "[miloco:home-profile]"
@@ -63,13 +65,15 @@ def _ensure_optional_deps() -> None:
 
 def _load_install_module():
     _ensure_optional_deps()
+    if str(SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS))
     spec = importlib.util.spec_from_file_location(
         "miloco_install_uninstall_tests", SCRIPTS / "install.py"
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module
+    return MergedModule(module, sys.modules["installer_uninstall"])
 
 
 install = _load_install_module()

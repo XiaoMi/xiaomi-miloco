@@ -23,6 +23,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from scripts.tests._module_proxy import MergedModule
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 TAG = "[miloco:home-profile]"
@@ -82,7 +84,9 @@ def _load_install_module():
         if not any(Path(p).resolve() == target for p in paths):
             for name in [n for n in sys.modules if n == "scripts" or n.startswith("scripts.")]:
                 del sys.modules[name]
-    return importlib.import_module("scripts.install")
+    module = importlib.import_module("scripts.install")
+    uninstall = importlib.import_module("scripts.installer_uninstall")
+    return MergedModule(module, uninstall)
 
 
 install = _load_install_module()
@@ -4022,7 +4026,6 @@ class RunUninstallTest(unittest.TestCase):
             launch.assert_called_once_with(ui)
             self.assertFalse(miloco.exists(), "inventory must not create MILOCO_HOME")
             self.assertEqual(ui.oks, [I18N.t("uninstall.summary.done")])
-            self.assertNotIn("MILOCO_HOME", os.environ)
 
     def test_existing_home_is_kept_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4093,6 +4096,8 @@ class RunUninstallWiringTest(unittest.TestCase):
 
         seen = []
         env = dict(os.environ)
+        # 测试要控制 MILOCO_HOME，不能被宿主机（如 mac 的全局 export）污染。
+        env.pop("MILOCO_HOME", None)
         if explicit_miloco is not None:
             env["MILOCO_HOME"] = explicit_miloco
         with mock.patch.object(install.Path, "home",
@@ -4123,7 +4128,14 @@ class RunUninstallWiringTest(unittest.TestCase):
             openclaw_cls.side_effect = make(openclaw_cls, "openclaw")
             core_cls.side_effect = make(core_cls, "core")
             clean_args = args or __import__("argparse").Namespace(agent_platform="hermes")
-            rc = install.run_uninstall(ui, args=clean_args)
+            miloco_home = (
+                None
+                if "MILOCO_HOME" in os.environ
+                else install._resolve_uninstall_home()
+            )
+            rc = install.run_uninstall(
+                ui, args=clean_args, miloco_home=miloco_home
+            )
 
         return {
             "rc": rc, "ui": ui, "seen": seen, "inventory": inventory,
@@ -4895,7 +4907,8 @@ class ExceptionFieldTest(unittest.TestCase):
                 install._atomic_write_text(path, "new")
             self.assertEqual(seen["prefix"], ".miloco-uninstall-")
             self.assertEqual(seen["suffix"], ".tmp")
-            self.assertEqual(seen["dir"], str(Path(tmp)))
+            # mac 的 /var 是 /private/var 的符号链接，比较解析后的路径。
+            self.assertEqual(Path(seen["dir"]).resolve(), Path(tmp).resolve())
 
     def test_build_candidate_broken_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:

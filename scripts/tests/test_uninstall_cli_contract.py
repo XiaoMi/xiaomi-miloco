@@ -34,6 +34,8 @@ import types
 import unittest
 from pathlib import Path
 
+from scripts.tests._module_proxy import MergedModule
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO_ROOT / "scripts"
 
@@ -96,7 +98,9 @@ def _load_install_module():
                 del sys.modules[name]
     import importlib
 
-    return importlib.import_module("scripts.install")
+    module = importlib.import_module("scripts.install")
+    uninstall = importlib.import_module("scripts.installer_uninstall")
+    return MergedModule(module, uninstall)
 
 
 install = _load_install_module()
