@@ -22,6 +22,8 @@ import type {
   HomeStatus,
   MiotAuthorizeResult,
   Features,
+  PerceptionLogEntry,
+  PerceptionLogResult,
   PerceptionCamera,
   Person,
   Pet,
@@ -927,6 +929,29 @@ export async function realDeviceSpecs(): Promise<
   return byDid;
 }
 
+/** 设备台账里的名称与房间（Activity 房间筛选 / 设备名映射用）。
+ *  只读 /api/miot/home（与 realListDevices 共用 5s 缓存），不逐台拉 /status：
+ *  78 台设备逐台拉状态要二十多秒，房间下拉不能等它。
+ *  未分配房间记为空串，与设备列表的「N rooms」口径一致，不进入房间选项。 */
+export interface DeviceDirectoryEntry {
+  did: string;
+  name: string;
+  room: string;
+}
+
+export async function realListDeviceDirectory(): Promise<DeviceDirectoryEntry[]> {
+  const r = await fetchMiotHome();
+  const unassigned = i18n.t("miot.unassigned");
+  return r.data.devices.map((d) => {
+    const room = cleanRoom(d.room);
+    return {
+      did: d.did,
+      name: cleanDeviceName(d.name),
+      room: room === unassigned ? "" : room,
+    };
+  });
+}
+
 export async function realListDevices(): Promise<Device[]> {
   const r = await fetchMiotHome();
   const devices = r.data.devices;
@@ -1461,6 +1486,59 @@ export async function realListActivity(opts?: {
       feedback_pack_size: e.feedback_pack_size,
     }),
   );
+}
+
+interface BackendPerceptionLog {
+  id: string;
+  t: string;
+  d: Record<string, string>;
+}
+
+/** 未设时间筛选时的兜底窗口，避免 perception_log 退化成 30 天全表查询。 */
+const PERCEPTION_FALLBACK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** 后端允许的单次查询硬上限；时间窗口仍是限制数据量的主防线。 */
+const PERCEPTION_MAX_ROWS = 1000;
+
+/**
+ * 读取原始视觉感知历史。
+ *
+ * 后端该接口按时间升序返回；前端统一转为倒序。过滤空 descriptions，避免把
+ * 无图、跳帧或调用失败产生的空推理占位展示成“事件”。这是普通只读 HTTP 查询，
+ * 不接触 miloco-cli perceive logs 使用的消费 cursor。
+ */
+export async function realListPerceptionLogs(opts?: {
+  since?: number;
+  before?: number;
+}): Promise<PerceptionLogResult> {
+  const before = opts?.before;
+  const clamped = opts?.since === undefined;
+  const since = opts?.since ?? (before ?? Date.now()) - PERCEPTION_FALLBACK_WINDOW_MS;
+  const params = new URLSearchParams();
+  // backend 的 after 是严格大于；减 1ms 可保留恰好落在起点的记录。
+  params.set("after", new Date(Math.max(0, since - 1)).toISOString());
+  if (before !== undefined) {
+    params.set("before", new Date(before).toISOString());
+  }
+  params.set("limit", String(PERCEPTION_MAX_ROWS));
+  const resp = await apiFetch<
+    Normal<{ logs: BackendPerceptionLog[]; count: number; total_inferences: number }>
+  >(`/api/perception/logs?${params.toString()}`);
+
+  const logs = resp.data.logs
+    .filter((entry) => Object.keys(entry.d ?? {}).length > 0)
+    .map((entry): PerceptionLogEntry => ({
+      id: entry.id,
+      timestamp: Date.parse(entry.t),
+      descriptions: entry.d,
+    }))
+    .filter((entry) => Number.isFinite(entry.timestamp))
+    .sort((a, b) => b.timestamp - a.timestamp);
+
+  return {
+    logs,
+    hasMore: resp.data.count >= PERCEPTION_MAX_ROWS,
+    clampedSince: clamped ? since : undefined,
+  };
 }
 
 // ── On-demand logs ──────────────────────────────────────────
