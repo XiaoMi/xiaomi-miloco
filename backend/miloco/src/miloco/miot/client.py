@@ -312,6 +312,9 @@ class MiotProxy:
 
         _settings = get_settings()
         self._frame_interval: int = _settings.camera.frame_interval
+        self._decoded_frame_interval: int = (
+            _settings.camera.decoded_frame_interval
+        )
         self._max_cache_images: int = _settings.camera.max_cache_images
         # Local central hub master switch + static gateway endpoints
         # (mDNS-independent, for environments where multicast can't reach it).
@@ -1000,12 +1003,17 @@ class MiotProxy:
         camera_id: str,
         channel: int,
         callback: Callable[[str, VideoFrame, int, int], Coroutine],
+        *,
+        full_rate: bool = False,
+        frame_interval_ms: int | None = None,
     ) -> int:
         if camera_id not in self._camera_img_managers:
             logger.warning("Camera %s not found in managers", camera_id)
             return -1
         instance = self._camera_img_managers[camera_id]
-        reg_id = await instance.register_decode_video_frame_stream(callback, channel)
+        reg_id = await instance.register_decode_video_frame_stream(
+            callback, channel, full_rate=full_rate, frame_interval_ms=frame_interval_ms
+        )
         logger.info(
             "Started decode video frame stream, camera_id: %s, channel: %s, reg_id: %d",
             camera_id,
@@ -1013,6 +1021,17 @@ class MiotProxy:
             reg_id,
         )
         return reg_id
+
+    async def set_camera_decode_video_frame_interval(
+        self, camera_id: str, channel: int, reg_id: int, frame_interval_ms: int
+    ) -> bool:
+        """Change the decode interval requested by a live registration."""
+        instance = self._camera_img_managers.get(camera_id)
+        if instance is None:
+            return False
+        return await instance.set_decode_video_frame_interval(
+            channel, reg_id, frame_interval_ms
+        )
 
     async def stop_camera_decode_video_stream(
         self, camera_id: str, channel: int, reg_id: int
@@ -1101,7 +1120,9 @@ class MiotProxy:
     ) -> MIoTCameraInstance | None:
         try:
             return await self._miot_client.create_camera_instance_async(
-                camera_info, frame_interval=self._frame_interval
+                camera_info,
+                frame_interval=self._frame_interval,
+                decoded_frame_interval=self._decoded_frame_interval,
             )
         except Exception as e:
             logger.error("Failed to get camera instance: %s", e)

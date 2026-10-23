@@ -30,6 +30,11 @@ from .types import MIoTCameraCodec, MIoTCameraFrameData
 _LOGGER = logging.getLogger(__name__)
 
 
+def _monotonic_ms() -> int:
+    """Monotonic host time in milliseconds for frame admission."""
+    return time.monotonic_ns() // 1_000_000
+
+
 # H.264 NAL unit types that contain an IDR coded slice.
 _H264_IDR_NAL_TYPE = 5
 # H.265 NAL unit types that mark a random-access point (IDR / CRA / BLA);
@@ -156,6 +161,7 @@ class MIoTMediaDecoder(threading.Thread):
     _main_loop: asyncio.AbstractEventLoop
     _running: bool
     _frame_interval: int
+    _decoded_frame_interval: int
     _enable_hw_accel: bool
     _enable_audio: bool
 
@@ -198,11 +204,13 @@ class MIoTMediaDecoder(threading.Thread):
         enable_hw_accel: bool = False,
         enable_audio: bool = False,
         main_loop: Optional[asyncio.AbstractEventLoop] = None,
+        decoded_frame_interval: int = 0,
     ) -> None:
         super().__init__()
         self._main_loop = main_loop or asyncio.get_running_loop()
         self._running = False
         self._frame_interval = frame_interval
+        self._decoded_frame_interval = max(0, decoded_frame_interval)
         self._enable_hw_accel = enable_hw_accel
         self._enable_audio = enable_audio
 
@@ -223,6 +231,7 @@ class MIoTMediaDecoder(threading.Thread):
         self._resampler = None  # type: ignore
 
         self._last_jpeg_ts = 0
+        self._last_decoded_frame_ts = 0
 
     def run(self) -> None:
         """Start the decoder."""
@@ -266,6 +275,14 @@ class MIoTMediaDecoder(threading.Thread):
     def push_audio_frame(self, frame_data: MIoTCameraFrameData) -> None:
         self._queue.put_audio(frame_data)
 
+    def set_decoded_frame_interval(self, interval_ms: int) -> None:
+        """Update BGR callback sampling without restarting the decoder.
+
+        Setting the interval to zero makes the very next decoded frame due,
+        which lets an interactive viewer enter full-rate mode immediately.
+        """
+        self._decoded_frame_interval = max(0, interval_ms)
+
     def detect_hwaccel(self):
         try:
             result = subprocess.run(
@@ -303,10 +320,20 @@ class MIoTMediaDecoder(threading.Thread):
         pkt = Packet(frame_data.data)
         frames: List[VideoFrame] = self._video_decoder.decode(pkt)  # type: ignore
         decoded_unix_ms = int(time.time() * 1000)
-        # Emit decoded frames as BGR numpy arrays (no rate limiting).
+        # Keep decoding every packet so inter-frame codec references remain valid,
+        # but avoid the expensive BGR conversion and asyncio dispatch above the
+        # configured callback rate. A zero interval preserves legacy behaviour.
         # Converting to ndarray HERE in the decoder thread avoids cross-thread
         # FFmpeg access — the main thread only ever sees numpy data.
-        if self._video_frame_callback and frames:
+        decoded_now_ms = _monotonic_ms()
+        decoded_frame_due = (
+            self._decoded_frame_interval <= 0
+            or self._last_decoded_frame_ts == 0
+            or decoded_now_ms - self._last_decoded_frame_ts
+            >= self._decoded_frame_interval
+        )
+        emitted_decoded_frame = False
+        if self._video_frame_callback and frames and decoded_frame_due:
             for frame in frames:
                 try:
                     # 像素转换(swscale)默认按 CPU 核数开满 slice 线程池,而上下文每帧
@@ -328,6 +355,9 @@ class MIoTMediaDecoder(threading.Thread):
                         decoded_unix_ms,
                     ),
                 )
+                emitted_decoded_frame = True
+        if emitted_decoded_frame:
+            self._last_decoded_frame_ts = decoded_now_ms
         # Rate-limited JPEG conversion for preview callback
         now_ts = int(time.time() * 1000)
         if now_ts - self._last_jpeg_ts >= self._frame_interval:

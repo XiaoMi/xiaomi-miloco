@@ -33,6 +33,9 @@
   #loading{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:#0a0a0a;color:#9ca3af;font-size:13px;pointer-events:none;transition:opacity .2s}
   #loading.hidden{opacity:0}
   main{position:relative}
+  /* 实时帧率被后端自动下调时的提示(嵌入卡也可见) */
+  #fpsnote{position:absolute;right:8px;bottom:6px;font-size:11px;line-height:1.4;color:#fbbf24;background:rgba(0,0,0,.6);padding:2px 6px;border-radius:4px;pointer-events:none;display:none;z-index:2}
+  #fpsnote.show{display:block}
 </style>
 
 <header>
@@ -56,6 +59,7 @@
   <canvas id="v" width="1280" height="720"></canvas>
   <video id="vmse" class="hidden" muted autoplay playsinline></video>
   <div id="loading"></div>
+  <div id="fpsnote"></div>
 </main>
 
 <!-- jmuxer:H.264 Annex-B NAL → fmp4 muxer,喂给 MSE 让 <video> 播。
@@ -94,6 +98,7 @@ const I18N = {
     pickCamFirst: "请先选择摄像头",
     missingToken: "缺少 token:经 /api/miot/watch 由后端注入,或 dev 期带 ?token=… query",
     connecting: "连接中…",
+    liveFpsDegraded: "当前 {fps} fps · 上限 {max}（主机负载高，已自动降低）",
     connectingCam: "正在连接摄像头…",
     disconnected: (code, reason) => `已断开 (${code})${reason ? " — " + reason : ""}`,
     wsError: "WebSocket 错误",
@@ -132,6 +137,7 @@ const I18N = {
     pickCamFirst: "Please pick a camera first",
     missingToken: "Missing token: injected by the backend via /api/miot/watch, or pass ?token=… in the URL during dev",
     connecting: "Connecting…",
+    liveFpsDegraded: "Now {fps} fps · max {max} (lowered automatically, host busy)",
     connectingCam: "Connecting to camera…",
     disconnected: (code, reason) => `Disconnected (${code})${reason ? " — " + reason : ""}`,
     wsError: "WebSocket error",
@@ -359,6 +365,24 @@ function findSpsNal(accessUnit, codec) {
   return null;
 }
 
+// 实时帧率:由嵌入方(HeroNow 帧率选择)经 ?fps= 传入;后端按 camera.live_max_fps 钳位。
+function liveFpsQuery() {
+  const fps = parseInt(params.get("fps") || "", 10);
+  return Number.isFinite(fps) && fps > 0 ? `&fps=${fps}` : "";
+}
+function showLiveFps(msg) {
+  const el = $("fpsnote");
+  if (!el) return;
+  if (msg.reason === "degraded" && msg.fps < msg.requested) {
+    el.textContent = t("liveFpsDegraded")
+      .replace("{fps}", String(msg.fps))
+      .replace("{max}", String(msg.requested));
+    el.classList.add("show");
+  } else if (msg.fps >= msg.requested) {
+    el.classList.remove("show");
+  }
+}
+
 function setState(text, isErr=false) {
   const el = $("state");
   el.textContent = text;
@@ -445,7 +469,8 @@ function connect() {
   const url = `${proto}://${location.host}/api/miot/ws/video_stream`
             + `?camera_id=${encodeURIComponent(camId)}`
             + `&channel=${encodeURIComponent(channel)}`
-            + `&token=${encodeURIComponent(token)}`;
+            + `&token=${encodeURIComponent(token)}`
+            + liveFpsQuery();
 
   setState(t("connecting"));
   ws = new WebSocket(url);
@@ -500,6 +525,8 @@ function onMessage(ev) {
       $("codec").textContent = codecHint + " / " + (msg.container || "annexb");
       // 收到 init 才是真"连上摄像头了"——后端已拿到该 cam 的流并广播了编码信息。
       setState(t("camConnectedWaiting"));
+    } else if (msg.type === "live_fps") {
+      showLiveFps(msg);
     } else if (msg.type === "error") {
       // 后端首帧看门狗判定连不上(camera_unreachable 等)→ 明确告知住户,不再死等。
       // serverWillClose 标志让随后的 close 事件不要再覆盖成"已断开 (1011)",保留这条
