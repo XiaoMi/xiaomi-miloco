@@ -174,6 +174,12 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "是否由 miloco 自动管理内置定时任务（感知摘要 / 家庭巡检 / Dreaming / 习惯洞察）；"
         "关闭后 agent 网关启动时会清除这些自动任务且不再重建",
     ),
+    "rule.defer_blocked_enter_timeout_sec": (
+        float,
+        60.0,
+        "进入被前提拦下后挂起的有效时长（秒）；每次重问续期，到期丢弃不补发。"
+        "0 = 不挂起（直接丢弃本次进入）；负数 = 不设上限，一直等到前提成立。重启生效",
+    ),
     "perception.engine.input.video_short_edge": (
         int,
         512,

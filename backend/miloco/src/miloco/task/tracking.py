@@ -31,6 +31,7 @@ _SUPPRESSED = frozenset(
         "already_off",
         "blocked_by_exit_condition",
         "blocked_by_guard",
+        "expired_blocked_enter",
         "not_in_session",
         "still_held",
     }
