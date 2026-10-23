@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 from miloco.perception.engine.config import OmniConfig
@@ -110,6 +112,28 @@ async def test_call_omni_success_records_success(monkeypatch):
     )
     await omni_client.call_omni(_payload(), _cfg())
     assert get_omni_circuit_breaker().snapshot().state == "ok"
+
+
+def test_kimi_audio_rejection_does_not_count_as_upstream_failure(monkeypatch):
+    cfg = _cfg()
+    cfg.model = "kimi-k2.6"
+    payload = {
+        **_payload(),
+        "audio_base64": "AUDIO",
+        "media_info": None,
+    }
+    monkeypatch.setattr(
+        omni_client.httpx,
+        "AsyncClient",
+        lambda *args, **kwargs: pytest.fail("Kimi audio must not reach HTTP"),
+    )
+
+    with pytest.raises(ValueError, match="Kimi.*does not support audio"):
+        asyncio.run(omni_client.call_omni(payload, cfg))
+
+    snapshot = get_omni_circuit_breaker().snapshot()
+    assert snapshot.state == "ok"
+    assert snapshot.consecutive_failures == 0
 
 
 async def test_call_omni_null_usage_still_records(monkeypatch):

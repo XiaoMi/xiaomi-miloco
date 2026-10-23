@@ -39,6 +39,10 @@ logger = logging.getLogger(__name__)
 _warned_non_flash_gemini: set[str] = set()
 
 
+class OmniCapabilityError(ValueError):
+    """Provider does not support the requested local input capability."""
+
+
 def _is_opencode_go_base_url(base_url: str) -> bool:
     """Return whether ``base_url`` is the official OpenCode Go endpoint."""
     parsed = urlparse(base_url)
@@ -228,6 +232,54 @@ class MiMoAdapter(OpenAICompatAdapter):
         }
         if stream:
             body["stream_options"] = {"include_usage": True}
+        return body
+
+
+class KimiAdapter(MiMoAdapter):
+    """Moonshot Kimi OpenAI-compatible adapter.
+
+    kimi-k2.6 manages its sampling defaults server-side and documents these
+    fields as non-modifiable.  Omit them for that model and explicitly disable
+    thinking so its response fits the realtime perception token/time budget.
+    Preserve configured sampling values and default thinking for other Kimi
+    models.
+    """
+
+    def build_video_block(self, video_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        """Use the minimal video block documented by Moonshot's official API."""
+        return {
+            "type": "video_url",
+            "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
+        }
+
+    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        """Reject audio before assembling a request Moonshot cannot accept."""
+        raise OmniCapabilityError("Kimi does not support audio input")
+
+    def build_request_body(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        body = super().build_request_body(
+            messages,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            stream=stream,
+        )
+        if "kimi-k2.6" in model.lower():
+            body.pop("temperature", None)
+            body.pop("top_p", None)
+            body["thinking"] = {"type": "disabled"}
+        else:
+            body.pop("thinking", None)
         return body
 
 
@@ -534,6 +586,7 @@ def adjust_fps_for_omni(fps: int, omni_fps: int) -> int:
 _DEFAULT_ADAPTER = MiMoAdapter()
 _QWEN_ADAPTER = QwenOmniAdapter()
 _GEMINI_ADAPTER = GeminiAdapter()
+_KIMI_ADAPTER = KimiAdapter()
 
 
 def get_adapter(model: str) -> OmniProviderAdapter:
@@ -549,4 +602,6 @@ def get_adapter(model: str) -> OmniProviderAdapter:
         return _QWEN_ADAPTER
     if "gemini" in name:
         return _GEMINI_ADAPTER
+    if "kimi" in name:
+        return _KIMI_ADAPTER
     return _DEFAULT_ADAPTER

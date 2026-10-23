@@ -31,6 +31,7 @@ from miloco.perception.engine.omni.error_classifier import (
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
     _collect_stream_response,
+    _trace_inference_params,
     call_omni,
     call_omni_stream,
     extract_usage,
@@ -45,7 +46,11 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_stream_prompt,
     format_person_label,
 )
-from miloco.perception.engine.omni.provider import build_request_headers, get_adapter
+from miloco.perception.engine.omni.provider import (
+    OmniCapabilityError,
+    build_request_headers,
+    get_adapter,
+)
 from miloco.perception.engine.omni.response_parser import (
     parse_identity_assignments,
     parse_omni_response,
@@ -199,6 +204,10 @@ async def run_omni_fused(
             visual_input_mode=visual_input_mode,
         )
         raw_response = await _call_omni_messages(payload["messages"], config, adapter=adapter)
+    except OmniCapabilityError as e:
+        if candidates:
+            await identity_engine.deliver_fused_failure(str(e))
+        raise
     except OmniError as e:
         # omni API / 网络错:_call_omni_messages 已在源头打日志(omni API 调用失败),
         # 这里只做 inflight track 清理 + 上抛,不重复打。
@@ -413,11 +422,7 @@ async def _call_omni_messages(
             latency_ms=latency_ms,
             error=error,
             model=config.model,
-            inference_params={
-                "temperature": config.temperature,
-                "top_p": config.top_p,
-                "max_tokens": config.max_completion_tokens,
-            },
+            inference_params=_trace_inference_params(body, config),
         )
 
 
