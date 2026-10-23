@@ -252,7 +252,11 @@ class RuleAction(BaseModel):
     )
     cooldown_minutes: int | None = Field(
         None,
-        description="Cooldown for non-idempotent actions; required when idempotent=False.",
+        description=(
+            "Cooldown for non-idempotent actions, in minutes; required when "
+            "idempotent=False and cooldown_seconds is absent. Ignored when "
+            "cooldown_seconds is present (keep it as a rollback fallback)."
+        ),
     )
     cooldown_seconds: int | None = Field(
         None,

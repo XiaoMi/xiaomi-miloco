@@ -2753,17 +2753,30 @@ def test_rule_create_scene_action_rejects_zero_seconds(runner):
     assert "iid=scene requires cooldown_seconds >= 1" in combined
 
 
-def test_rule_create_scene_action_rejects_fractional_minutes(runner):
-    """0.5 分钟折算成 30 秒，不能绕过 scene 的本地下限检查。"""
-    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_minutes":0.5}'
+@pytest.mark.parametrize(
+    ("cooldown", "message"),
+    [
+        ({"cooldown_minutes": 0.5}, "cooldown_minutes must be an integer"),
+        # 1.5 秒不触发 <1 的下限检查，但后端 int 字段照样拒。
+        ({"cooldown_seconds": 1.5}, "cooldown_seconds must be an integer"),
+    ],
+)
+def test_rule_create_scene_action_rejects_fractional_cooldown(
+    runner, cooldown, message
+):
+    """小数冷却后端 int 字段必拒，按字段级约束在本地拦下。"""
+    action = json.dumps(
+        {
+            "did": "1792764217947197440",
+            "iid": "scene",
+            "idempotent": False,
+            **cooldown,
+        }
+    )
     with patch("miloco_cli.client.api_post") as mock:
         result = runner.invoke(cli, _rule_create_argv(action))
     assert result.exit_code != 0
-    combined = result.output + (result.stderr or "")
-    assert (
-        "iid=scene requires cooldown_seconds >= 1 or cooldown_minutes >= 1"
-        in combined
-    )
+    assert message in (result.output + (result.stderr or ""))
     mock.assert_not_called()
 
 
@@ -3028,8 +3041,17 @@ def test_rule_create_generate_action_accepts_seconds(runner, seconds):
     assert body["actions"][0]["cooldown_seconds"] == seconds
 
 
-def test_rule_create_generate_action_rejects_fractional_minutes(runner):
-    """generate 的分钟下限是 60 秒；0.5 分钟折算后仍应本地拒。"""
+@pytest.mark.parametrize(
+    ("cooldown", "message"),
+    [
+        ({"cooldown_minutes": 0.5}, "cooldown_minutes must be an integer"),
+        ({"cooldown_seconds": 0.5}, "cooldown_seconds must be an integer"),
+    ],
+)
+def test_rule_create_generate_action_rejects_fractional_cooldown(
+    runner, cooldown, message
+):
+    """generate 与其它形态共用同一份数值检查，小数冷却不下发。"""
     action = json.dumps(
         {
             "did": "speaker-1",
@@ -3037,18 +3059,14 @@ def test_rule_create_generate_action_rejects_fractional_minutes(runner):
             "params": ["{{result}}"],
             "generate": {"prompt": "看"},
             "idempotent": False,
-            "cooldown_minutes": 0.5,
+            **cooldown,
         },
         ensure_ascii=False,
     )
     with patch("miloco_cli.client.api_post") as mock:
         result = runner.invoke(cli, _rule_create_argv(action))
-    combined = result.output + (result.stderr or "")
     assert result.exit_code != 0
-    assert (
-        "generate requires cooldown_seconds (0 allowed) "
-        "or cooldown_minutes >= 1" in combined
-    )
+    assert message in (result.output + (result.stderr or ""))
     mock.assert_not_called()
 
 
@@ -3086,6 +3104,40 @@ def test_rule_create_plain_tts_accepts_zero_seconds(runner):
         mock.return_value = {"code": 0, "data": {"rule_id": "r-tts-0"}}
         result = runner.invoke(cli, _rule_create_argv(action))
     assert result.exit_code == 0, result.output + (result.stderr or "")
+
+
+@pytest.mark.parametrize(
+    ("cooldown", "message"),
+    [
+        ({"cooldown_seconds": -1}, "cooldown_seconds must be >= 0"),
+        ({"cooldown_seconds": 0.5}, "cooldown_seconds must be an integer"),
+        ({"cooldown_minutes": 0.5}, "cooldown_minutes must be an integer"),
+        # 秒字段合法不代表分钟字段合法：后端会解析每个字段。
+        (
+            {"cooldown_seconds": 15, "cooldown_minutes": 0.5},
+            "cooldown_minutes must be an integer",
+        ),
+    ],
+)
+def test_rule_create_plain_tts_rejects_bad_cooldown_numbers(
+    runner, cooldown, message
+):
+    """普通 TTS 与其它形态共用同一份数值检查，坏值不下发。"""
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["你好"],
+            "idempotent": False,
+            **cooldown,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    assert message in (result.output + (result.stderr or ""))
+    mock.assert_not_called()
 
 
 def test_task_set_actions_passes_generate(runner):

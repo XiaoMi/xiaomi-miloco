@@ -1083,7 +1083,17 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
         # 只对数值比较：agent 可能把数字写成 "5"，直接比会 TypeError traceback，
         # 破坏 _exit_error 的干净报错；字符串形态交给后端 pydantic 收敛或 400。
         cooldown_source, cooldown_seconds = _cooldown_fields(a)
-        raw_minutes = a.get("cooldown_minutes")
+        # 两个冷却字段在后端都是 int：小数（0.5 秒 / 0.5 分钟）和负秒必被
+        # pydantic 拒。三种动作形态共用同一份本地检查，不留一种形态穿透到
+        # 后端 400。分钟负值不拦——后端无下限，运行期按「不冷却」处理，是
+        # 存量语义；字符串形态仍交给后端 pydantic 收敛。
+        for field in ("cooldown_seconds", "cooldown_minutes"):
+            raw = a.get(field)
+            if isinstance(raw, float) and not raw.is_integer():
+                _exit_error(f"{flag_name}[{i}]: {field} must be an integer")
+        raw_seconds = a.get("cooldown_seconds")
+        if isinstance(raw_seconds, (int, float)) and raw_seconds < 0:
+            _exit_error(f"{flag_name}[{i}]: cooldown_seconds must be >= 0")
         if a.get("iid") == SCENE_IID and a.get("idempotent") is not False:
             _exit_error(
                 f"{flag_name}[{i}]: iid={SCENE_IID} requires idempotent=false"
@@ -1092,16 +1102,7 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
             a.get("iid") == SCENE_IID
             and cooldown_source is not None
             and cooldown_seconds is not None
-            and (
-                cooldown_seconds < 1
-                # 分钟折算成秒后，0.5 分钟会变成 30 秒绕过上面的检查；后端
-                # int 字段必拒。按旧口径在本地拦下，保持报错干净。
-                or (
-                    cooldown_source == "cooldown_minutes"
-                    and isinstance(raw_minutes, (int, float))
-                    and float(raw_minutes) < 1
-                )
-            )
+            and cooldown_seconds < 1
         ):
             _exit_error(
                 f"{flag_name}[{i}]: iid={SCENE_IID} requires "
@@ -1145,14 +1146,6 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
                 _exit_error(
                     f"{flag_name}[{i}]: generate requires cooldown_seconds "
                     f"(0 allowed) or cooldown_minutes >= 1"
-                )
-            if (
-                cooldown_source == "cooldown_seconds"
-                and cooldown_seconds is not None
-                and cooldown_seconds < 0
-            ):
-                _exit_error(
-                    f"{flag_name}[{i}]: cooldown_seconds must be >= 0"
                 )
             params = a.get("params")
             if params is not None and (
