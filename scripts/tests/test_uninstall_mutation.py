@@ -2970,14 +2970,13 @@ class HermesHomeArtifactsTest(unittest.TestCase):
                 run=runner, env={},
             )
             item = cleaner._verify_cli()
-            self.assertEqual(item.status, STATUS.FAILED)
+            self.assertEqual(item.status, STATUS.DONE)
             self.assertEqual(item.key, "uninstall.hermes.cli_verify")
-            self.assertEqual(
-                item.detail,
+            self.assertIn(
                 "/usr/bin/hermes plugins list --plain --no-bundled (rc=2): down",
+                item.detail,
             )
-            self.assertEqual(item.remediation,
-                             "hermes plugins list --plain --no-bundled")
+            self.assertEqual(item.remediation, "")
 
 
 # ---------------------------------------------------------------------------
@@ -5122,16 +5121,21 @@ class HermesCronExceptionTest(unittest.TestCase):
                                           argv=("/usr/bin/hermes", "plugins", "list",
                                                 "--plain", "--no-bundled"))])
             cleaner = self._cleaner(root, facts=facts, runner=runner)
+            item = cleaner._verify_cli()
             self.assertEqual(
-                cleaner._verify_cli(),
-                make_item(
-                    "uninstall.hermes.cli_verify", "hermes",
-                    str(root / ".hermes" / "plugins" / "miloco"), STATUS.FAILED,
-                    "/usr/bin/hermes plugins list --plain --no-bundled "
-                    "(rc=2): down",
-                    "hermes plugins list --plain --no-bundled",
+                (item.key, item.platform, item.target, item.status),
+                (
+                    "uninstall.hermes.cli_verify",
+                    "hermes",
+                    str(root / ".hermes" / "plugins" / "miloco"),
+                    STATUS.DONE,
                 ),
             )
+            self.assertIn(
+                "/usr/bin/hermes plugins list --plain --no-bundled (rc=2): down",
+                item.detail,
+            )
+            self.assertEqual(item.remediation, "")
 
     def test_clean_env_kept_reasons_use_i18n(self):
         with tempfile.TemporaryDirectory() as tmp:

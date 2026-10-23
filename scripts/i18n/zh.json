@@ -201,6 +201,7 @@
   "uninstall.detail.home_deleted": "随数据目录一起删除",
   "uninstall.detail.plugin_dir_still_present": "插件目录仍然存在，删除未完成",
   "uninstall.detail.verify_cli_missing": "hermes CLI 不可用；插件目录已删除，config 残留交给 Hermes",
+  "uninstall.detail.verify_list_error": "无法读取 Hermes 插件列表；插件目录已删除，config 残留交给 Hermes：%1",
   "uninstall.detail.config_residue": "config 残留交给 Hermes 管理（plugins list 仍提到 miloco）",
   "uninstall.detail.plugin_still_installed": "miloco-openclaw-plugin 仍然存在",
   "uninstall.detail.not_a_list": "tools.alsoAllow 不是数组",

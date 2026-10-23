@@ -2218,21 +2218,18 @@ class HermesPluginCliTest(unittest.TestCase):
                 item.detail, I18N.t("uninstall.detail.config_residue")
             )
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIs(
+            item = (
                 self._cleaner(Path(tmp), FakeRunner([res(rc=2, stderr="nope")]))
                 ._verify_cli()
-                .status,
-                STATUS.FAILED,
             )
+            self.assertIs(item.status, STATUS.DONE)
+            self.assertIn("config residue left to Hermes", item.detail)
         with tempfile.TemporaryDirectory() as tmp:
-            self.assertIs(
-                self._cleaner(
-                    Path(tmp), FakeRunner([install.CommandFailed("k", "t", detail="x")])
-                )
-                ._verify_cli()
-                .status,
-                STATUS.FAILED,
-            )
+            item = self._cleaner(
+                Path(tmp), FakeRunner([install.CommandFailed("k", "t", detail="x")])
+            )._verify_cli()
+            self.assertIs(item.status, STATUS.DONE)
+            self.assertIn("config residue left to Hermes", item.detail)
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "plugins" / "miloco").mkdir(parents=True)

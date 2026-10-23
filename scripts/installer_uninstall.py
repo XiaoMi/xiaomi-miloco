@@ -1850,13 +1850,13 @@ class HermesCleaner(_PlatformCleaner):
             )
         present, error = self._plugins_present()
         if error:
+            # 插件目录已删（ground truth）：验证命令自身失败不推翻清理结果。
             return CleanupItem(
                 key,
                 "hermes",
                 target,
-                ItemStatus.FAILED,
-                error,
-                "hermes plugins list --plain --no-bundled",
+                ItemStatus.DONE,
+                self.i18n.t("uninstall.detail.verify_list_error", error),
             )
         if present:
             return CleanupItem(

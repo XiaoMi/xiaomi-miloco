@@ -201,6 +201,7 @@
   "uninstall.detail.home_deleted": "data directory will be deleted",
   "uninstall.detail.plugin_dir_still_present": "plugin directory still exists; removal did not complete",
   "uninstall.detail.verify_cli_missing": "hermes CLI unavailable; plugin directory removed, config residue left to Hermes",
+  "uninstall.detail.verify_list_error": "could not inspect Hermes plugin list; plugin directory removed, config residue left to Hermes: %1",
   "uninstall.detail.config_residue": "config residue left to Hermes (plugins list still mentions miloco)",
   "uninstall.detail.plugin_still_installed": "miloco-openclaw-plugin is still installed",
   "uninstall.detail.not_a_list": "tools.alsoAllow is not a list",
