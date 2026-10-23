@@ -55,6 +55,7 @@ user-facing text 仅在两个时机出现：
 2. 终态 §响应动作 同时含「触发后做什么」+「记录什么」：Y / N
 3. 每条装配提示「怎么改」字段给出用户可直接复述的短语：Y / N
 4. iot 规则的 iid 抄自本轮 `device spec` 输出，did / value 抄自本轮真实输出：Y / N / NA
+5. 带 generate 的动作：`action.*` + `idempotent:false` + `cooldown_minutes>=1` + `params` 含 `{{result}}`；达标槽、iot / record 规则、session 退出槽与 duration 规则显式配 `sources`：Y / N / NA
 ```
 
 ## 装配提示元规则
@@ -368,6 +369,7 @@ source=iot 时填，与 `--condition` 互斥（同时给会被拒）。四个 fl
 | 动作性质 | 装配 | fire 时谁执行 |
 |---|---|---|
 | 能 100% 写死（开关固定设备、播固定文本（音箱）） | action JSON | rule engine 直接执行 |
+| 播报内容需按当前画面生成（夸夸、按着装欢迎） | action JSON + `generate` | 先调一次 omni 生成文本，替换 `{{result}}` 后下发 |
 | 启动已有米家场景（用户原话是场景名或组合模式名） | action JSON（`iid` 固定 `scene`） | rule engine 直接触发 |
 | 需按运行时状态/上下文决定 | desc 文案（业务意图） | fire-agent 独立 turn 推理执行 |
 
@@ -383,6 +385,8 @@ source=iot 时填，与 `--condition` 互斥（同时给会被拒）。四个 fl
 5. 动作是固定调一个 handler（开灯/调温/拉帘 等设备控制类）→ action JSON
 
 **同一个槽只能全 action JSON 或全 desc。** 一个方向做多件事（触发场景 + 播报）→ 全部写成 action JSON（`--action` 重复传）；其中任一件需按上下文决策 → 整槽退化成 desc。
+
+播报文案由画面决定（"夸夸坐在对面的人"）仍算 action JSON，额外带 `generate`（见 §生成式动作），不要因此退化成 desc。
 
 通知类默认 desc；用户原话含引号台词且通道音箱 → action JSON（见例 10）。达标触发的通知按 §达标通知机制 三选一定位置。
 
@@ -663,6 +667,24 @@ session + duration record 三 desc 分工：
 
 1. 用户原话**含房间词** → 按房间词匹配，不反问
 2. **无房间词** → 默认装**第一候选** + **触发装配提示**（告知用户实际装到哪台，想换告诉我）
+
+### 生成式动作（`--action` JSON 的 `generate` 形态）
+
+播报文案不写死、要按当前画面生成时，仍用 `action.*` 动作 JSON，额外带 `generate`：
+
+```json
+{"did":"<音箱 DID>","iid":"action.<siid>.<aiid>",
+ "params":["{{result}}"],
+ "generate":{"prompt":"<要生成什么>","sources":["<相机 DID>"],"max_chars":30},
+ "idempotent":false,"cooldown_minutes":30}
+```
+
+- `prompt` 只写语义要求（观察谁、生成什么、语气），**不写 JSON 格式**——`{"result":"..."}` 契约由系统提示词固定。
+- `params` 必须含 `{{result}}`；省略 `params` 等价于 `["{{result}}"]`。
+- `sources` 省略时按「触发相机 → 规则 `--source`」回退；**达标槽没有触发相机；iot / record 规则没有触发相机、相机条件也被强制留空；session 退出槽的离开边沿不带触发相机；配了 `--duration-seconds` 的规则进入边沿只由时长评估产出、也不带触发相机。这四类下必须显式配 `sources`**。后端在 rule 写入时按这组判据拒绝（`task set-actions` 只对达标槽做同一检查，进入 / 退出槽不做来源推断）；CLI 本地只复刻字段级约束，跨字段判据以服务端为准。omni 规则的进入 / 事件槽不在此列：空相机条件是「广播到全部相机」的合法写法，命中时用命中的那台相机回退（配了 `--duration-seconds` 的除外）。
+- 只支持 `action.*`；必须 `idempotent:false` + `cooldown_minutes >= 1`。
+- 生成失败（无帧 / 模型错误 / 空结果）时不下发、不落冷却；同一 `(rule, did, iid)` 在途时后续触发跳过。
+- 同槽按顺序执行，生成会阻塞后面的动作——生成式动作单独放，或排在槽内最后。
 
 ---
 
@@ -1133,4 +1155,25 @@ miloco-cli rule create --task-id entry_welcome \
   --source <玄关摄像头 DID> \
   --exit-debounce-seconds 1800 \
   --on-enter-action '{"did":"<玄关音箱 DID>","iid":"action.<siid>.<aiid>","params":["欢迎回家"],"idempotent":false,"cooldown_minutes":5}'
+```
+
+### 例 16
+
+用户："我妈坐到我书房的椅子上时，根据她的穿着和长相用音箱真诚地夸她一句，30 字以内"
+
+推理：「坐下」到达/进入类瞬时事件 → §Rule?=Y；有进入观测、无退出观测 → §Rule.direction=session；要等离开才收尾，退出防抖取默认 → 触发装配提示；无累计/计数 → §Record?=N；现实事件触发 → §Schedule?=N；无信号兜底 → §Lifecycle=permanent；「用音箱」已明示通道 → §通道反问 跳过；文案不写死、要按当前画面生成 → §Rule.action = action JSON + `generate`（`prompt` 写「观察画面中最显著的人的着装和性别，生成一句真诚、不矫揉造作的夸赞」，`max_chars=30`，`sources` 显式配书房摄像头）；`idempotent:false` + `cooldown_minutes=30`（欢迎播报）；「书房」有房间词 → §感知设备按 room_name 匹配命中 1 台 → `--source <书房摄像头 DID>`；主语「我妈」→ person list 命中 1 → role/name + 触发装配提示；「书房的椅子」有强常识默认 → 触发装配提示
+
+```
+Rule?=Y · Schedule?=N · Record?=N · Lifecycle=permanent
+Rule.source=omni · direction=session · on_enter=action JSON + generate
+```
+
+```bash
+miloco-cli task create --task-id study_praise --description "有人落座书房时按外貌夸一句"
+miloco-cli rule create --task-id study_praise \
+  --name "[study_praise] 书房落座夸夸" \
+  --direction session \
+  --condition "有人坐在书房书桌前的椅子上；不含仅站在桌旁或从椅后经过" \
+  --source <书房摄像头 DID> \
+  --on-enter-action '{"did":"<书房音箱 DID>","iid":"action.<siid>.<aiid>","params":["{{result}}"],"generate":{"prompt":"观察画面中最显著的人的着装和性别，生成一句真诚、不矫揉造作的夸赞","sources":["<书房摄像头 DID>"],"max_chars":30},"idempotent":false,"cooldown_minutes":30}'
 ```

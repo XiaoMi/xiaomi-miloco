@@ -429,6 +429,31 @@ def test_self_initiated_action_rejects_unknown_slot(env):
     assert runner.dispatch_task_action("t1", "on_nonsense") is False
 
 
+def test_self_initiated_action_prefers_rule_with_cameras(env, monkeypatch):
+    """强制 fire 没有 trigger_dids，generate 只能靠代表 rule 的相机。
+
+    按名单顺序取第一条时，排在前面的无相机规则会把它推成 no_source。
+    """
+    no_cam = _rule("[t1] no-cam", mode=RuleMode.EVENT)
+    no_cam.condition = RuleCondition(perceive_device_ids=[], query="有人")
+    _service, runner, ids, _ = _build(
+        _ACTIONS, [_rule("[t1] omni", mode=RuleMode.EVENT), no_cam]
+    )
+    # get_all 按 created_at DESC 排，同一毫秒内的顺序不稳定；直接钉住迭代
+    # 顺序，让无相机的那条排前面。
+    runner._rules = {rid: runner._rules[rid] for rid in (ids[1], ids[0])}
+    captured: list[Rule] = []
+    monkeypatch.setattr(
+        RuleRunner,
+        "_spawn_fire",
+        lambda self, rule, *a, **kw: captured.append(rule),
+    )
+
+    assert runner.dispatch_task_action("t1", "on_exit") is True
+    assert captured[0].id == ids[0]
+    assert captured[0].condition.perceive_device_ids == ["cam1"]
+
+
 # ── runtime_state / lifecycle 进视图 ──────────────────────────────────
 
 
