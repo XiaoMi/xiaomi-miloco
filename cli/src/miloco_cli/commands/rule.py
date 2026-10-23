@@ -304,17 +304,17 @@ def rule_iot_diagnostics(pretty):
         "落 on_enter 还是 on_exit 由 --direction 决定，不用 --on-exit-action。\n"
         "设备控制（幂等）："
         "{\"did\":\"<id>\",\"iid\":\"prop.<siid>.<piid>\",\"value\":<v>,\"idempotent\":true}\n"
-        "通知/播报（必带冷却）："
+        "通知/播报（必带冷却；也可写 \"cooldown_seconds\":15，0=关闭）："
         "{\"did\":\"<id>\",\"iid\":\"action.<siid>.<aiid>\",\"params\":[\"<text>\"],"
         "\"idempotent\":false,\"cooldown_minutes\":10}\n"
         "按画面生成播报（仅 action.*，params 用 {{result}} 占位；"
-        "sources 省略时回退到触发相机）："
+        "sources 省略时回退到触发相机；冷却字段同上，seconds 优先）："
         "{\"did\":\"<id>\",\"iid\":\"action.<siid>.<aiid>\","
         "\"params\":[\"{{result}}\"],"
         "\"generate\":{\"prompt\":\"<生成要求>\",\"sources\":[\"<camera_did>\"],"
         "\"max_chars\":30},"
         "\"idempotent\":false,\"cooldown_minutes\":30}\n"
-        "触发米家场景（did 放 scene_id，必带冷却）："
+        "触发米家场景（did 放 scene_id，必带冷却，生效值 >= 1 秒）："
         "{\"did\":\"<scene_id>\",\"iid\":\"scene\","
         "\"idempotent\":false,\"cooldown_minutes\":5}"
     ),
@@ -1016,8 +1016,9 @@ def _parse_actions(raw_actions: tuple[str, ...], flag_name: str = "--action") ->
     ``--on-enter-action`` / ``--on-exit-action``); error messages mirror it
     verbatim so agents see guidance tied to the exact flag they invoked.
 
-    ``idempotent: false`` actions must declare ``cooldown_minutes`` to
-    avoid spamming notifications; ``iid: scene`` must be non-idempotent.
+    ``idempotent: false`` actions must declare ``cooldown_seconds`` or
+    ``cooldown_minutes`` to avoid spamming notifications; ``iid: scene`` must
+    be non-idempotent. ``cooldown_seconds`` wins when both are present.
     """
     parsed: list[dict] = []
     for raw in raw_actions:
@@ -1052,23 +1053,45 @@ def _has_result_placeholder(params: object) -> bool:
     )
 
 
+def _cooldown_fields(a: dict) -> tuple[str | None, float | None]:
+    """返回 (来源字段, 秒数)。
+
+    ``cooldown_seconds`` 优先于 ``cooldown_minutes``；字段存在但不是数值时
+    秒数返回 ``None``，留给后端 pydantic 收敛或 400。bool 走数值语义
+    （``False`` = 0），与后端 ``int`` 字段的宽松解析保持一致。
+    """
+    seconds = a.get("cooldown_seconds")
+    if seconds is not None:
+        return "cooldown_seconds", (
+            float(seconds) if isinstance(seconds, (int, float)) else None
+        )
+    minutes = a.get("cooldown_minutes")
+    if minutes is not None:
+        return "cooldown_minutes", (
+            float(minutes) * 60 if isinstance(minutes, (int, float)) else None
+        )
+    return None, None
+
+
 def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
     for i, a in enumerate(actions):
         # 冷却是场景唯一的去重手段，填 0 等于每次 fire 都真触发一次。
         # 只对数值比较：agent 可能把数字写成 "5"，直接比会 TypeError traceback，
         # 破坏 _exit_error 的干净报错；字符串形态交给后端 pydantic 收敛或 400。
-        cooldown = a.get("cooldown_minutes")
+        cooldown_source, cooldown_seconds = _cooldown_fields(a)
         if a.get("iid") == SCENE_IID and a.get("idempotent") is not False:
             _exit_error(
                 f"{flag_name}[{i}]: iid={SCENE_IID} requires idempotent=false"
             )
         if (
             a.get("iid") == SCENE_IID
-            and isinstance(cooldown, (int, float))
-            and cooldown < 1
+            and cooldown_source is not None
+            and cooldown_seconds is not None
+            and cooldown_seconds < 1
         ):
             _exit_error(
-                f"{flag_name}[{i}]: iid={SCENE_IID} requires cooldown_minutes >= 1"
+                f"{flag_name}[{i}]: iid={SCENE_IID} requires "
+                f"cooldown_seconds >= 1 or cooldown_minutes >= 1"
             )
 
         generate = a.get("generate")
@@ -1093,13 +1116,29 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
                     f"{flag_name}[{i}]: generate requires idempotent=false"
                 )
             # 与 scene 分支同一口径：只对数值比较。字符串形态（"30"）交给后端
-            # pydantic 收敛；bool 走数值语义（False=0 拒、True=1 放）。多排除
-            # bool 会让 JSON false 在本地漏过，反而不一致。
-            if cooldown is None or (
-                isinstance(cooldown, (int, float)) and cooldown < 1
+            # pydantic 收敛；bool 走数值语义（False=0）。cooldown_seconds 单独
+            # 出现即视为已声明，0 表示每次边沿都生成下发；旧字段仍要求 >= 1。
+            if cooldown_source is None:
+                _exit_error(
+                    f"{flag_name}[{i}]: generate requires cooldown_seconds "
+                    f"(0 allowed) or cooldown_minutes >= 1"
+                )
+            if (
+                cooldown_source == "cooldown_minutes"
+                and cooldown_seconds is not None
+                and cooldown_seconds < 60
             ):
                 _exit_error(
-                    f"{flag_name}[{i}]: generate requires cooldown_minutes >= 1"
+                    f"{flag_name}[{i}]: generate requires cooldown_seconds "
+                    f"(0 allowed) or cooldown_minutes >= 1"
+                )
+            if (
+                cooldown_source == "cooldown_seconds"
+                and cooldown_seconds is not None
+                and cooldown_seconds < 0
+            ):
+                _exit_error(
+                    f"{flag_name}[{i}]: cooldown_seconds must be >= 0"
                 )
             params = a.get("params")
             if params is not None and (
@@ -1150,9 +1189,10 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
                     f"{', '.join(sorted(unknown))}"
                 )
 
-        if a.get("idempotent") is False and cooldown is None:
+        if a.get("idempotent") is False and cooldown_source is None:
             _exit_error(
-                f"{flag_name}[{i}]: idempotent=false requires cooldown_minutes"
+                f"{flag_name}[{i}]: idempotent=false requires cooldown_seconds "
+                f"or cooldown_minutes"
             )
 
 

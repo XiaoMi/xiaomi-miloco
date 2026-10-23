@@ -492,7 +492,7 @@ class SQLiteConnector:
 
         actions / on_enter_actions / on_exit_actions store JSON lists of
         RuleAction objects ({did, iid, value/params, idempotent,
-        cooldown_minutes}).
+        cooldown_minutes/cooldown_seconds}).
 
         v2 form: task_id NOT NULL + FK CASCADE to task. Old v1 databases go
         through _migrate_v1_to_v2 table-rebuild.

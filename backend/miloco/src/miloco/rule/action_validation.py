@@ -51,9 +51,13 @@ def action_validation_error(action: RuleAction, where: str) -> str | None:
         return f"{prefix}: iid={SCENE_IID} requires idempotent=false"
 
     # 冷却是场景唯一的去重手段，而 runner 把 0 当「无冷却」——填 0 会让每次
-    # fire 都真触发一次场景，正是执行侧闸门要防的那种。
-    if action.iid == SCENE_IID and (action.cooldown_minutes or 0) < 1:
-        return f"{prefix}: iid={SCENE_IID} requires cooldown_minutes >= 1"
+    # fire 都真触发一次场景，正是执行侧闸门要防的那种。秒/分钟都接受，但生效值
+    # 必须 >= 1（cooldown_seconds=0 在这里同样拒绝）。
+    if action.iid == SCENE_IID and (action.effective_cooldown_seconds or 0) < 1:
+        return (
+            f"{prefix}: iid={SCENE_IID} requires "
+            f"cooldown_seconds >= 1 or cooldown_minutes >= 1"
+        )
 
     generate = action.generate
     if generate is None:
@@ -75,10 +79,15 @@ def action_validation_error(action: RuleAction, where: str) -> str | None:
                 f"got '{action.iid}'"
             )
         # 生成动作读不到「当前值」，幂等预检必然落空；只靠冷却去重。
+        # cooldown_seconds 单独出现即视为已声明（0 表示每次边沿都生成下发）；
+        # 旧字段仍要求 >= 1，避免把误填的 0 当成「关闭」。
         if action.idempotent:
             return f"{prefix}: generate requires idempotent=false"
-        if (action.cooldown_minutes or 0) < 1:
-            return f"{prefix}: generate requires cooldown_minutes >= 1"
+        if action.cooldown_seconds is None and (action.cooldown_minutes or 0) < 1:
+            return (
+                f"{prefix}: generate requires cooldown_seconds (0 allowed) "
+                f"or cooldown_minutes >= 1"
+            )
         # params 省略/为空等价于 ["{{result}}"]（runner 侧补）；非空时必须
         # 至少有一处占位，否则生成结果无处可去，设备只收到一份无关参数。
         if action.params and not _has_result_placeholder(action.params):
@@ -93,11 +102,18 @@ def action_validation_error(action: RuleAction, where: str) -> str | None:
         if generate.sources and any(not s.strip() for s in generate.sources):
             return f"{prefix}: generate.sources must not contain empty dids"
 
-    # idempotent=False 的 action 不会做「读现值后判跳过」，必须靠
-    # cooldown_minutes 限频；否则 runner 的冷却分支被 None 短路，每次 ENTERED
-    # 都重发。
-    if not action.idempotent and action.cooldown_minutes is None:
-        return f"{prefix}: idempotent=false requires cooldown_minutes"
+    # idempotent=False 的 action 不会做「读现值后判跳过」，必须靠冷却限频；
+    # 否则 runner 的冷却分支被 None 短路，每次 ENTERED 都重发。两个字段任一
+    # 出现都算声明——cooldown_minutes=0 的旧写法保持原口径（不在这里收紧）。
+    if (
+        not action.idempotent
+        and action.cooldown_seconds is None
+        and action.cooldown_minutes is None
+    ):
+        return (
+            f"{prefix}: idempotent=false requires cooldown_seconds "
+            f"or cooldown_minutes"
+        )
 
     return None
 

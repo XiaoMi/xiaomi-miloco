@@ -1316,6 +1316,23 @@ def test_set_actions_accepts_generate(real_db):
     )
 
 
+@pytest.mark.parametrize("seconds", [0, 15])
+def test_set_actions_accepts_generate_seconds(real_db, seconds):
+    """task 侧原始 dict 直接入库；秒字段（含 0）必须原样保留。"""
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    service = _service_with_rule_stub((30, 0))
+    _mk_task(service)
+    action = _generate_action(cooldown_minutes=None, cooldown_seconds=seconds)
+
+    assert service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_actions=[action])
+    )
+    stored = service.repo.get_boundary_actions("t1")
+    assert stored["on_enter_actions"][0]["cooldown_seconds"] == seconds
+    assert stored["on_enter_actions"][0]["cooldown_minutes"] is None
+
+
 def test_set_actions_target_generate_requires_sources(real_db):
     """达标 fire 没有触发相机与规则相机；不配 sources 写入时就该拒。
 
@@ -1401,8 +1418,17 @@ def test_set_actions_exit_generate_without_sources_passes(real_db):
         ({"iid": "prop.2.1"}, r"generate requires 'action\."),
         ({"iid": "scene", "did": "scene-1"}, r"generate requires 'action\."),
         ({"idempotent": True}, r"generate requires idempotent=false"),
-        ({"cooldown_minutes": None}, r"generate requires cooldown_minutes >= 1"),
-        ({"cooldown_minutes": 0}, r"generate requires cooldown_minutes >= 1"),
+        (
+            {"cooldown_minutes": None},
+            r"generate requires cooldown_seconds \(0 allowed\) "
+            r"or cooldown_minutes >= 1",
+        ),
+        (
+            {"cooldown_minutes": 0},
+            r"generate requires cooldown_seconds \(0 allowed\) "
+            r"or cooldown_minutes >= 1",
+        ),
+        ({"cooldown_minutes": None, "cooldown_seconds": -1}, r"动作格式非法"),
         ({"params": ["没有占位符"]}, r"requires at least one params item"),
         (
             {"generate": None, "params": ["{{result}}"]},

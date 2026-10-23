@@ -2108,14 +2108,18 @@ class RuleRunner:
 
     def _in_cooldown(self, rule_id: str, action: RuleAction) -> bool:
         """非幂等 action 是否还在冷却窗内。幂等 action 恒 False（走读现值比对）。"""
-        if action.idempotent or not action.cooldown_minutes:
+        if action.idempotent:
+            return False
+        cooldown_seconds = action.effective_cooldown_seconds
+        # None=未配置；0=显式关闭。两者都不该进入冷却判定。
+        if not cooldown_seconds:
             return False
         rs = self._state.get(rule_id)
         last_exec = (
             rs.action_cooldown.get((action.did, action.iid), 0)
             if rs is not None else 0
         )
-        if time.time() - last_exec >= action.cooldown_minutes * 60:
+        if time.time() - last_exec >= cooldown_seconds:
             return False
         logger.info(
             "Rule %s action %s %s in cooldown, skipping",
@@ -2125,7 +2129,7 @@ class RuleRunner:
 
     def _mark_cooldown(self, rule_id: str, action: RuleAction) -> None:
         """执行成功后记冷却起点。未确认成功的执行不能记（否则会静默吞掉重试）。"""
-        if action.idempotent or not action.cooldown_minutes:
+        if action.idempotent or not action.effective_cooldown_seconds:
             return
         self._ensure_state(rule_id).action_cooldown[
             (action.did, action.iid)
@@ -2145,15 +2149,18 @@ class RuleRunner:
         ``source`` 标成 rule、``source_id`` 写 rule_id，链路两列同 ``_execute_action``。
         """
         # service 校验只在 CRUD 走；runner 装载既有规则是直接从 repo 灌进来的，
-        # 库里混进 idempotent=true 或 cooldown<1 的场景行都会让 _in_cooldown 直接
+        # 库里混进 idempotent=true 或生效冷却<1 的场景行都会让 _in_cooldown 直接
         # 放行 → 每次 fire 都真触发一次场景，零限频。这里再挡一道。
-        if action.idempotent or (action.cooldown_minutes or 0) < 1:
+        cooldown_seconds = action.effective_cooldown_seconds
+        if action.idempotent or (cooldown_seconds or 0) < 1:
             logger.error(
                 "Rule %s scene action %s has no dedup guard "
-                "(idempotent=%s, cooldown_minutes=%s), refusing to dispatch",
+                "(idempotent=%s, cooldown_seconds=%s, cooldown_minutes=%s), "
+                "refusing to dispatch",
                 safe_log(rule_id),
                 safe_log(action.did),
                 safe_log(action.idempotent),
+                safe_log(cooldown_seconds),
                 safe_log(action.cooldown_minutes),
             )
             return RuleActionExecuteResult(
@@ -2161,7 +2168,7 @@ class RuleRunner:
                 result=False,
                 error=(
                     "scene action requires idempotent=false "
-                    "and cooldown_minutes >= 1"
+                    "and cooldown_seconds >= 1 (or cooldown_minutes >= 1)"
                 ),
             )
 
@@ -2217,8 +2224,9 @@ class RuleRunner:
         - Parse ``iid`` ("prop.<siid>.<piid>" / "action.<siid>.<aiid>")
         - Idempotent path (only meaningful for prop.* + value not None):
           query current value, skip if already at target.
-        - Cooldown path (idempotent=False with cooldown_minutes): skip if
-          inside the time window since last successful exec.
+        - Cooldown path (idempotent=False with an effective cooldown): skip if
+          inside the time window since last successful exec. ``cooldown_seconds``
+          takes precedence over ``cooldown_minutes``; 0 disables the window.
         - ``generate`` present: call the attached text generator once, replace
           ``{{result}}`` in ``params``, then continue on the normal dispatch
           path. Generation failure returns before any device call, so no

@@ -65,11 +65,33 @@ def _make_condition(device_ids=None, query="有人经过"):
 
 
 def _make_action(
-    did="device-001", iid="prop.2.1", value=True, idempotent=True, cooldown=None
+    did="device-001", iid="prop.2.1", value=True, idempotent=True, cooldown=None,
+    cooldown_seconds=None,
 ):
     return RuleAction(
-        did=did, iid=iid, value=value, idempotent=idempotent, cooldown_minutes=cooldown
+        did=did, iid=iid, value=value, idempotent=idempotent,
+        cooldown_minutes=cooldown, cooldown_seconds=cooldown_seconds,
     )
+
+
+def test_effective_cooldown_seconds_precedence():
+    """cooldown_seconds 优先；未配回退 minutes；0 是「已配置但关闭」。"""
+    assert RuleAction(
+        did="d", iid="action.1.1", cooldown_seconds=15
+    ).effective_cooldown_seconds == 15
+    assert RuleAction(
+        did="d", iid="action.1.1", cooldown_minutes=2
+    ).effective_cooldown_seconds == 120
+    assert RuleAction(
+        did="d", iid="action.1.1",
+        cooldown_minutes=10, cooldown_seconds=1,
+    ).effective_cooldown_seconds == 1
+    assert RuleAction(
+        did="d", iid="action.1.1", cooldown_seconds=0
+    ).effective_cooldown_seconds == 0
+    assert RuleAction(
+        did="d", iid="action.1.1"
+    ).effective_cooldown_seconds is None
 
 
 def _name(task_id, suffix="rule"):
@@ -1080,6 +1102,111 @@ class TestRuleRunnerActionExecution:
         ] = time.time() - 120
 
         result = await runner.trigger_rule("rule-cd2", TRIGGER_CONTEXT)
+        assert result.action_results[0].skipped is False
+
+    @pytest.mark.asyncio
+    async def test_cooldown_seconds_skips_within_window(
+        self, runner, mock_miot_proxy
+    ):
+        action = _make_action(idempotent=False, cooldown_seconds=15)
+        rule = _make_static_rule(
+            rule_id="rule-cds", name="cooldown-seconds", actions=[action]
+        )
+        runner.add_rule(rule)
+        runner.set_task_actions('test_task-rule-cds', {
+            'on_enter_actions': [{
+                'did': 'device-001', 'iid': 'prop.2.1', 'value': True,
+                'params': None, 'idempotent': False,
+                'cooldown_minutes': None, 'cooldown_seconds': 15,
+            }],
+            'on_enter_desc': None,
+        })
+
+        result1 = await runner.trigger_rule("rule-cds", TRIGGER_CONTEXT)
+        assert result1.action_results[0].skipped is False
+
+        result2 = await runner.trigger_rule("rule-cds", TRIGGER_CONTEXT)
+        assert result2.action_results[0].skipped is True
+
+    @pytest.mark.asyncio
+    async def test_cooldown_seconds_executes_after_window(
+        self, runner, mock_miot_proxy
+    ):
+        action = _make_action(idempotent=False, cooldown_seconds=15)
+        rule = _make_static_rule(
+            rule_id="rule-cds2", name="cooldown-seconds2", actions=[action]
+        )
+        runner.add_rule(rule)
+        runner.set_task_actions('test_task-rule-cds2', {
+            'on_enter_actions': [{
+                'did': 'device-001', 'iid': 'prop.2.1', 'value': True,
+                'params': None, 'idempotent': False,
+                'cooldown_minutes': None, 'cooldown_seconds': 15,
+            }],
+            'on_enter_desc': None,
+        })
+
+        await runner.trigger_rule("rule-cds2", TRIGGER_CONTEXT)
+        runner._ensure_state("rule-cds2").action_cooldown[
+            ("device-001", "prop.2.1")
+        ] = time.time() - 16
+
+        result = await runner.trigger_rule("rule-cds2", TRIGGER_CONTEXT)
+        assert result.action_results[0].skipped is False
+
+    @pytest.mark.asyncio
+    async def test_cooldown_seconds_zero_never_skips(
+        self, runner, mock_miot_proxy
+    ):
+        """0 是显式关闭：每次边沿都下发，不写冷却状态。"""
+        action = _make_action(idempotent=False, cooldown_seconds=0)
+        rule = _make_static_rule(
+            rule_id="rule-cd0", name="cooldown-zero", actions=[action]
+        )
+        runner.add_rule(rule)
+        runner.set_task_actions('test_task-rule-cd0', {
+            'on_enter_actions': [{
+                'did': 'device-001', 'iid': 'prop.2.1', 'value': True,
+                'params': None, 'idempotent': False,
+                'cooldown_minutes': None, 'cooldown_seconds': 0,
+            }],
+            'on_enter_desc': None,
+        })
+
+        first = await runner.trigger_rule("rule-cd0", TRIGGER_CONTEXT)
+        second = await runner.trigger_rule("rule-cd0", TRIGGER_CONTEXT)
+
+        assert first.action_results[0].skipped is False
+        assert second.action_results[0].skipped is False
+        assert runner._action_cooldown_state == {}
+
+    @pytest.mark.asyncio
+    async def test_cooldown_seconds_overrides_minutes(
+        self, runner, mock_miot_proxy
+    ):
+        """秒字段优先：minutes=10 不应把 1 秒窗撑到 10 分钟。"""
+        action = _make_action(
+            idempotent=False, cooldown=10, cooldown_seconds=1
+        )
+        rule = _make_static_rule(
+            rule_id="rule-cdov", name="cooldown-override", actions=[action]
+        )
+        runner.add_rule(rule)
+        runner.set_task_actions('test_task-rule-cdov', {
+            'on_enter_actions': [{
+                'did': 'device-001', 'iid': 'prop.2.1', 'value': True,
+                'params': None, 'idempotent': False,
+                'cooldown_minutes': 10, 'cooldown_seconds': 1,
+            }],
+            'on_enter_desc': None,
+        })
+
+        await runner.trigger_rule("rule-cdov", TRIGGER_CONTEXT)
+        runner._ensure_state("rule-cdov").action_cooldown[
+            ("device-001", "prop.2.1")
+        ] = time.time() - 2
+
+        result = await runner.trigger_rule("rule-cdov", TRIGGER_CONTEXT)
         assert result.action_results[0].skipped is False
 
     @pytest.mark.asyncio
@@ -2379,8 +2506,8 @@ class TestRuleServiceV3Validation:
     async def test_create_action_idempotent_false_without_cooldown_raises(
         self, service
     ):
-        """idempotent=False 必须配 cooldown_minutes，否则 runner 冷却分支被 None
-        短路掉，每次 ENTERED 都会重发 → 通知风暴。service 层必须拦下。"""
+        """idempotent=False 必须配冷却（seconds 或 minutes），否则 runner 冷却
+        分支被 None 短路掉，每次 ENTERED 都会重发 → 通知风暴。service 层必须拦下。"""
         bad = _make_action(
             did="speaker", iid="action.5.3", idempotent=False, cooldown=None
         )
@@ -2389,7 +2516,7 @@ class TestRuleServiceV3Validation:
         rule = _make_static_rule(rule_id="", actions=[bad])
         with pytest.raises(
             ValidationException,
-            match=r"actions\[0\].*idempotent=false requires cooldown_minutes",
+            match=r"actions\[0\].*idempotent=false requires cooldown_seconds or cooldown_minutes",
         ):
             await service.create_rule(rule)
 
@@ -2406,6 +2533,28 @@ class TestRuleServiceV3Validation:
         assert rid == "new-rule-id"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("seconds", [0, 15])
+    async def test_create_action_idempotent_false_with_seconds_passes(
+        self, service, seconds
+    ):
+        """秒字段单独出现即可；0 是显式关闭，不是「没配」。"""
+        good = _make_action(
+            did="speaker", iid="action.5.3", idempotent=False,
+            cooldown=None, cooldown_seconds=seconds,
+        )
+        rule = _make_static_rule(rule_id="", actions=[good])
+        rid = await service.create_rule(rule)
+        assert rid == "new-rule-id"
+
+    def test_action_negative_seconds_rejected_at_schema(self):
+        """ge=0 是 schema 级约束，负秒数连模型都构造不出来。"""
+        with pytest.raises(ValidationError):
+            _make_action(
+                did="speaker", iid="action.5.3", idempotent=False,
+                cooldown=None, cooldown_seconds=-1,
+            )
+
+    @pytest.mark.asyncio
     async def test_create_state_on_enter_action_idempotent_false_without_cooldown_raises(
         self, service
     ):
@@ -2416,7 +2565,7 @@ class TestRuleServiceV3Validation:
         rule = _make_state_rule(rule_id="", on_enter_actions=[bad])
         with pytest.raises(
             ValidationException,
-            match=r"on_enter_actions\[0\].*idempotent=false requires cooldown_minutes",
+            match=r"on_enter_actions\[0\].*idempotent=false requires cooldown_seconds or cooldown_minutes",
         ):
             await service.create_rule(rule)
 
@@ -2431,7 +2580,7 @@ class TestRuleServiceV3Validation:
         rule = _make_state_rule(rule_id="", on_exit_actions=[bad])
         with pytest.raises(
             ValidationException,
-            match=r"on_exit_actions\[0\].*idempotent=false requires cooldown_minutes",
+            match=r"on_exit_actions\[0\].*idempotent=false requires cooldown_seconds or cooldown_minutes",
         ):
             await service.create_rule(rule)
 
@@ -2449,7 +2598,7 @@ class TestRuleServiceV3Validation:
         update = RuleUpdate(actions=[bad])
         with pytest.raises(
             ValidationException,
-            match=r"actions\[0\].*idempotent=false requires cooldown_minutes",
+            match=r"actions\[0\].*idempotent=false requires cooldown_seconds or cooldown_minutes",
         ):
             await service.patch_rule("r1", update)
 
@@ -5257,9 +5406,18 @@ class TestRuleServiceSceneActionValidation:
         rule = _make_static_rule(rule_id="", actions=[bad])
         with pytest.raises(
             ValidationException,
-            match=r"actions\[0\].*iid=scene requires cooldown_minutes >= 1",
+            match=r"actions\[0\].*iid=scene requires cooldown_seconds >= 1 "
+            r"or cooldown_minutes >= 1",
         ):
             await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_scene_action_with_seconds_passes(self, service):
+        good = RuleAction(
+            did="scene-1", iid="scene", idempotent=False, cooldown_seconds=5
+        )
+        rule = _make_static_rule(rule_id="", actions=[good])
+        assert await service.create_rule(rule) == "new-rule-id"
 
     @pytest.mark.asyncio
     async def test_scene_action_on_enter_slot_validated(self, service):
@@ -5334,7 +5492,25 @@ class TestRuleRunnerSceneActionGuards:
         result = await runner._execute_action("rule-guard", bad)
 
         assert result.result is False
+        assert "cooldown_seconds >= 1" in result.error
         assert "cooldown_minutes >= 1" in result.error
+        spy.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_scene_action_zero_seconds_refused(self, runner, monkeypatch):
+        """秒字段的 0 同样不能绕过场景的零限频闸门。"""
+        from unittest.mock import AsyncMock as _AM
+
+        spy = _AM(return_value=True)
+        monkeypatch.setattr("miloco.miot.service._trigger_scene", spy)
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=False, cooldown_seconds=0
+        )
+
+        result = await runner._execute_action("rule-guard", bad)
+
+        assert result.result is False
+        assert "cooldown_seconds >= 1" in result.error
         spy.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -5545,14 +5721,30 @@ class TestRuleSceneCooldownFloor:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("bad_cooldown", [0, -1])
-    async def test_zero_or_negative_cooldown_rejected(self, service, bad_cooldown):
+    async def test_zero_or_negative_minutes_rejected(self, service, bad_cooldown):
         bad = RuleAction(
             did="scene-1", iid="scene", idempotent=False,
             cooldown_minutes=bad_cooldown,
         )
         rule = _make_static_rule(rule_id="", actions=[bad])
         with pytest.raises(
-            ValidationException, match=r"iid=scene requires cooldown_minutes >= 1"
+            ValidationException,
+            match=r"iid=scene requires cooldown_seconds >= 1 "
+            r"or cooldown_minutes >= 1",
+        ):
+            await service.create_rule(rule)
+
+    @pytest.mark.asyncio
+    async def test_zero_seconds_rejected(self, service):
+        """scene 的 seconds 同样不能是 0：冷却是它唯一的去重手段。"""
+        bad = RuleAction(
+            did="scene-1", iid="scene", idempotent=False, cooldown_seconds=0
+        )
+        rule = _make_static_rule(rule_id="", actions=[bad])
+        with pytest.raises(
+            ValidationException,
+            match=r"iid=scene requires cooldown_seconds >= 1 "
+            r"or cooldown_minutes >= 1",
         ):
             await service.create_rule(rule)
 
@@ -6455,6 +6647,22 @@ async def test_create_generate_action_passes(service):
     assert rid == "new-rule-id"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overrides", [
+    {"cooldown_minutes": None, "cooldown_seconds": 0},
+    {"cooldown_minutes": None, "cooldown_seconds": 15},
+    {"cooldown_minutes": 30, "cooldown_seconds": 0},
+])
+async def test_create_generate_action_accepts_seconds(service, overrides):
+    """generate 接受秒字段（含 0）；同时给 minutes 时 seconds 优先。"""
+    rid = await service.create_rule(
+        _make_static_rule(
+            rule_id="", actions=[_generated_action(**overrides)]
+        )
+    )
+    assert rid == "new-rule-id"
+
+
 class TestRuleServiceGenerateSourceExistence:
     """generate.sources 抄错一位 → 规则建成功但每次 fire 都 no_frame; 写入期就挡。"""
 
@@ -6654,8 +6862,16 @@ def test_validate_generate_with_sources_passes_without_cameras():
         ({"iid": "prop.2.1"}, r"generate requires 'action\."),
         ({"iid": "scene", "did": "scene-1"}, r"generate requires 'action\."),
         ({"idempotent": True}, r"generate requires idempotent=false"),
-        ({"cooldown_minutes": None}, r"generate requires cooldown_minutes >= 1"),
-        ({"cooldown_minutes": 0}, r"generate requires cooldown_minutes >= 1"),
+        (
+            {"cooldown_minutes": None},
+            r"generate requires cooldown_seconds \(0 allowed\) "
+            r"or cooldown_minutes >= 1",
+        ),
+        (
+            {"cooldown_minutes": 0},
+            r"generate requires cooldown_seconds \(0 allowed\) "
+            r"or cooldown_minutes >= 1",
+        ),
         ({"params": ["没有占位符"]}, r"requires at least one params item"),
         (
             {"generate": None, "params": ["{{result}}"]},
