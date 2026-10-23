@@ -14,7 +14,7 @@
  * - 每一枚徽标都是一个 `<button>`、整枚一个热区,角标是按钮内的指示符而非嵌套热区。
  */
 
-import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { BackendPropSpec } from "@/api/real";
@@ -56,8 +56,6 @@ const ICON = {
     </>
   ),
   unlink: <path d="M9 17H7A5 5 0 0 1 7 7h2M15 7h2a5 5 0 0 1 3.5 8.5M3 3l18 18" />,
-  /* 三条收窄的横线:说的就是折叠在做的事——把多条并成更少的行。 */
-  fold: <path d="M3 6h18M7 12h10M10 18h4" />,
 } as const;
 
 function Icon({ d, className }: { d: ReactNode; className?: string }) {
@@ -96,11 +94,6 @@ export function membersIdOf(key: string): string {
 export function firstMemberIdOf(key: string): string {
   return key + "-m0";
 }
-/** 强度分段控件的 id。「折叠动作」那枚按钮的 `aria-controls` 指它——两者是一组:关掉折叠
- *  时档位控件整个不渲染,那时那枚按钮也**不写** `aria-controls`(指向一个不存在的 id 是
- *  ARIA 作者错误,同成员表那条)。 */
-export const STRENGTH_CTL_ID = "fold-strength-ctl";
-
 function phaseName(phase: string | null, t: TFunction): string {
   if (phase === "exit") return t("actions.phaseExit");
   if (phase === "legacy") return t("actions.phaseLegacy");
@@ -255,6 +248,9 @@ export function FoldBadge({
         {phaseName(branch.phase, t)}
       </span>
       <StatusStrip actions={branch.actions} mini />
+      <span className="text-text-tertiary">
+        {t(toggleable ? (open ? "actions.displayCollapse" : "actions.displayExpand") : "actions.displayLocate", { n })}
+      </span>
       <span className="text-text-tertiary">
         <Icon d={toggleable && open ? ICON.chevron : ICON.target} className="w-3 h-3" />
       </span>
@@ -437,96 +433,50 @@ export function BranchRow({
   );
 }
 
-/* ── 折叠开关 ───────────────────────────────────────────────
-   一枚**真的开关**(`aria-pressed`),不是"切换视图"的普通按钮:它按下与弹起各对应一个
-   稳定的画法,读屏据此报告状态。关掉时强度控件整个不渲染——未折叠态没有"折叠强度"这回事,
-   留着它就是在问一个当前不成立的问题。 */
-export function FoldToggle({
-  folded,
-  onChange,
-}: {
-  folded: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  const { t } = useTranslation();
-  const label = t("actions.foldToggle");
-  return (
-    <button
-      type="button"
-      aria-pressed={folded}
-      {...(folded ? { "aria-controls": STRENGTH_CTL_ID } : {})}
-      onClick={() => onChange(!folded)}
-      title={t("actions.foldToggleTitle")}
-      aria-label={label}
-      className={`inline-flex items-center gap-1 text-caption px-2 py-0.5 rounded-md border transition-colors ${
-        folded
-          ? "border-brand-ring bg-brand-soft text-text-primary"
-          : "border-border text-text-secondary hover:bg-bg-tertiary"
-      }`}
-    >
-      <Icon d={ICON.fold} className="w-3.5 h-3.5" />
-      {label}
-    </button>
-  );
+export type ActivityDisplayMode = "individual" | "grouped" | "inline";
+
+/** 只针对当前可见动作；禁用不清空用户已保存的显示偏好。 */
+export function actionDisplayState(
+  mode: ActivityDisplayMode,
+  showActions: boolean,
+  actionCount: number,
+  hasActionGroups: boolean,
+) {
+  if (!showActions) return { disabled: true, hint: "actions.displayActionsHidden" };
+  if (actionCount === 0) return { disabled: true, hint: "actions.displayNoActions" };
+  return {
+    disabled: false,
+    hint: mode !== "individual" && !hasActionGroups
+      ? "actions.displayNoGroups"
+      : `actions.displayHint_${mode}`,
+  };
 }
 
-/* ── 强度分段控件 ───────────────────────────────────────────
-   两档是**两个离散的模式**,不是一个连续量,所以是分段控件而不是滑块:滑块唯一的优势是
-   它教得会,代价是用户拖的是自己正在读的内容;分段控件改档时同样会重排,但那是用户明确
-   点了一下的结果,重排可预期。 */
-export function StrengthToggle({
-  strength,
+/** 固定宽度的单个控件，选择后不再新增按钮或改变工具栏宽度。 */
+export function DisplayModeSelect({
+  mode,
   onChange,
+  disabled = false,
 }: {
-  strength: FoldStrength;
-  onChange: (s: FoldStrength) => void;
+  mode: ActivityDisplayMode;
+  onChange: (mode: ActivityDisplayMode) => void;
+  disabled?: boolean;
 }) {
   const { t } = useTranslation();
-  const items: { key: FoldStrength; label: string; title: string }[] = [
-    { key: "weak", label: t("actions.foldWeak"), title: t("actions.foldWeakTitle") },
-    { key: "strong", label: t("actions.foldStrong"), title: t("actions.foldStrongTitle") },
-  ];
-  // 单选组用 roving tabindex:未选中的那一档 tabIndex=-1,不在 Tab 序列里,靠方向键到达。
-  // 少了方向键,键盘用户就够不着另一档——那比用两个普通按钮更糟。
-  const onKeyDown = (e: ReactKeyboardEvent<HTMLSpanElement>) => {
-    const i = items.findIndex((x) => x.key === strength);
-    let next = -1;
-    if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = (i - 1 + items.length) % items.length;
-    else if (e.key === "ArrowRight" || e.key === "ArrowDown") next = (i + 1) % items.length;
-    else if (e.key === "Home") next = 0;
-    else if (e.key === "End") next = items.length - 1;
-    if (next < 0) return;
-    e.preventDefault();
-    onChange(items[next].key);
-    // 焦点跟着走:不然键盘用户改了档、焦点还停在原处,下一次方向键又从旧位置起算。
-    e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
-  };
   return (
-    <span
-      id={STRENGTH_CTL_ID}
-      role="radiogroup"
-      aria-label={t("actions.foldStrengthAria")}
-      onKeyDown={onKeyDown}
-      className="inline-flex rounded-md border border-border overflow-hidden"
-    >
-      {items.map((it) => (
-        <button
-          key={it.key}
-          type="button"
-          role="radio"
-          aria-checked={strength === it.key}
-          tabIndex={strength === it.key ? 0 : -1}
-          onClick={() => onChange(it.key)}
-          title={it.title}
-          className={`text-caption px-2 py-0.5 transition-colors ${
-            strength === it.key
-              ? "bg-brand-soft text-text-primary"
-              : "text-text-secondary hover:bg-bg-tertiary"
-          }`}
-        >
-          {it.label}
-        </button>
-      ))}
-    </span>
+    <label className="inline-flex items-center gap-2 shrink-0 whitespace-nowrap text-caption text-text-secondary">
+      {t("actions.displayMode")}
+      <select
+        value={mode}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.value as ActivityDisplayMode)}
+        aria-describedby="activity-display-hint"
+        className="w-36 bg-bg-primary border border-border rounded-md px-2 py-1 text-caption text-text-primary hover:border-border-strong focus:outline-none focus:border-brand-primary disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <option value="individual">{t("actions.displayIndividual")}</option>
+        <option value="grouped">{t("actions.displayGrouped")}</option>
+        <option value="inline">{t("actions.displayInline")}</option>
+      </select>
+    </label>
   );
 }
