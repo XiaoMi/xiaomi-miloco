@@ -73,8 +73,9 @@ _TOOLS = [
                 "   {\"did\":\"<id>\",\"iid\":\"action.<siid>.<aiid>\","
                 "\"params\":[\"<text>\"],\"idempotent\":false,"
                 "\"cooldown_minutes\":10}\n"
-                "   cooldown_seconds may be used instead (wins over "
-                "cooldown_minutes; 0 disables it).\n"
+                "   cooldown_seconds may be used alongside cooldown_minutes "
+                "(wins over it; 0 disables it). Keep cooldown_minutes as the "
+                "rollback fallback.\n"
                 "CLI strictly rejects idempotent=false without "
                 "cooldown_seconds or cooldown_minutes."
             ),

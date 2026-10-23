@@ -304,17 +304,20 @@ def rule_iot_diagnostics(pretty):
         "落 on_enter 还是 on_exit 由 --direction 决定，不用 --on-exit-action。\n"
         "设备控制（幂等）："
         "{\"did\":\"<id>\",\"iid\":\"prop.<siid>.<piid>\",\"value\":<v>,\"idempotent\":true}\n"
-        "通知/播报（必带冷却；也可写 \"cooldown_seconds\":15，0=关闭）："
+        "通知/播报（必带冷却；需要亚分钟时写 \"cooldown_seconds\":15，并保留 "
+        "\"cooldown_minutes\":1 作回滚兜底；0=关闭）："
         "{\"did\":\"<id>\",\"iid\":\"action.<siid>.<aiid>\",\"params\":[\"<text>\"],"
         "\"idempotent\":false,\"cooldown_minutes\":10}\n"
         "按画面生成播报（仅 action.*，params 用 {{result}} 占位；"
-        "sources 省略时回退到触发相机；冷却字段同上，seconds 优先）："
+        "sources 省略时回退到触发相机；冷却字段同上，seconds 优先，配秒时"
+        "保留 cooldown_minutes 作回滚兜底）："
         "{\"did\":\"<id>\",\"iid\":\"action.<siid>.<aiid>\","
         "\"params\":[\"{{result}}\"],"
         "\"generate\":{\"prompt\":\"<生成要求>\",\"sources\":[\"<camera_did>\"],"
         "\"max_chars\":30},"
         "\"idempotent\":false,\"cooldown_minutes\":30}\n"
-        "触发米家场景（did 放 scene_id，必带冷却，生效值 >= 1 秒）："
+        "触发米家场景（did 放 scene_id，必带冷却，生效值 >= 1 秒；配秒时"
+        "保留 cooldown_minutes 作回滚兜底）："
         "{\"did\":\"<scene_id>\",\"iid\":\"scene\","
         "\"idempotent\":false,\"cooldown_minutes\":5}"
     ),
@@ -1018,7 +1021,8 @@ def _parse_actions(raw_actions: tuple[str, ...], flag_name: str = "--action") ->
 
     ``idempotent: false`` actions must declare ``cooldown_seconds`` or
     ``cooldown_minutes`` to avoid spamming notifications; ``iid: scene`` must
-    be non-idempotent. ``cooldown_seconds`` wins when both are present.
+    be non-idempotent. ``cooldown_seconds`` wins when both are present; when
+    using seconds, keep ``cooldown_minutes`` as the rollback fallback.
     """
     parsed: list[dict] = []
     for raw in raw_actions:
@@ -1079,6 +1083,7 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
         # 只对数值比较：agent 可能把数字写成 "5"，直接比会 TypeError traceback，
         # 破坏 _exit_error 的干净报错；字符串形态交给后端 pydantic 收敛或 400。
         cooldown_source, cooldown_seconds = _cooldown_fields(a)
+        raw_minutes = a.get("cooldown_minutes")
         if a.get("iid") == SCENE_IID and a.get("idempotent") is not False:
             _exit_error(
                 f"{flag_name}[{i}]: iid={SCENE_IID} requires idempotent=false"
@@ -1087,7 +1092,16 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
             a.get("iid") == SCENE_IID
             and cooldown_source is not None
             and cooldown_seconds is not None
-            and cooldown_seconds < 1
+            and (
+                cooldown_seconds < 1
+                # 分钟折算成秒后，0.5 分钟会变成 30 秒绕过上面的检查；后端
+                # int 字段必拒。按旧口径在本地拦下，保持报错干净。
+                or (
+                    cooldown_source == "cooldown_minutes"
+                    and isinstance(raw_minutes, (int, float))
+                    and float(raw_minutes) < 1
+                )
+            )
         ):
             _exit_error(
                 f"{flag_name}[{i}]: iid={SCENE_IID} requires "

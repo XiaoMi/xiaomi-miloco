@@ -2753,6 +2753,20 @@ def test_rule_create_scene_action_rejects_zero_seconds(runner):
     assert "iid=scene requires cooldown_seconds >= 1" in combined
 
 
+def test_rule_create_scene_action_rejects_fractional_minutes(runner):
+    """0.5 分钟折算成 30 秒，不能绕过 scene 的本地下限检查。"""
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_minutes":0.5}'
+    with patch("miloco_cli.client.api_post") as mock:
+        result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    combined = result.output + (result.stderr or "")
+    assert (
+        "iid=scene requires cooldown_seconds >= 1 or cooldown_minutes >= 1"
+        in combined
+    )
+    mock.assert_not_called()
+
+
 def test_rule_create_scene_action_accepts_seconds(runner):
     action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_seconds":5}'
     with patch("miloco_cli.client.api_post") as mock:
@@ -3012,6 +3026,30 @@ def test_rule_create_generate_action_accepts_seconds(runner, seconds):
     assert result.exit_code == 0, result.output + (result.stderr or "")
     body = mock.call_args[0][1]
     assert body["actions"][0]["cooldown_seconds"] == seconds
+
+
+def test_rule_create_generate_action_rejects_fractional_minutes(runner):
+    """generate 的分钟下限是 60 秒；0.5 分钟折算后仍应本地拒。"""
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["{{result}}"],
+            "generate": {"prompt": "看"},
+            "idempotent": False,
+            "cooldown_minutes": 0.5,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        result = runner.invoke(cli, _rule_create_argv(action))
+    combined = result.output + (result.stderr or "")
+    assert result.exit_code != 0
+    assert (
+        "generate requires cooldown_seconds (0 allowed) "
+        "or cooldown_minutes >= 1" in combined
+    )
+    mock.assert_not_called()
 
 
 def test_rule_create_generate_action_rejects_negative_seconds(runner):

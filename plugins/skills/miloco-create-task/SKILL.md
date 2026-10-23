@@ -55,7 +55,7 @@ user-facing text 仅在两个时机出现：
 2. 终态 §响应动作 同时含「触发后做什么」+「记录什么」：Y / N
 3. 每条装配提示「怎么改」字段给出用户可直接复述的短语：Y / N
 4. iot 规则的 iid 抄自本轮 `device spec` 输出，did / value 抄自本轮真实输出：Y / N / NA
-5. 带 generate 的动作：`action.*` + `idempotent:false` + 冷却（`cooldown_seconds`，或 `cooldown_minutes>=1`）+ `params` 含 `{{result}}`；达标槽、iot / record 规则、session 退出槽与 duration 规则显式配 `sources`：Y / N / NA
+5. 带 generate 的动作：`action.*` + `idempotent:false` + 冷却（`cooldown_seconds` 与 `cooldown_minutes` 双写，或 `cooldown_minutes>=1`）+ `params` 含 `{{result}}`；达标槽、iot / record 规则、session 退出槽与 duration 规则显式配 `sources`：Y / N / NA
 ```
 
 ## 装配提示元规则
@@ -648,7 +648,7 @@ session + duration record 三 desc 分工：
 
 **选定设备之后必须跑 `device spec <did>` 拿 iid**：格式为 `prop.<siid>.<piid>`（属性直控）或 `action.<siid>.<aiid>`（method call，如 TTS），只能从 `device spec` 输出行首列直接复制真实数字。设备目录不作为 iid 的来源。
 
-**冷却取值**（`idempotent:false` 必配）：`cooldown_minutes` 紧急报警 1-5 / 日常提醒 5-30 / 欢迎播报 30-60；类别内下限=低频触发，上限=高频重复触发。需要亚分钟级时改用 `cooldown_seconds`（优先级高于 `cooldown_minutes`，两者同时出现以秒为准）；`cooldown_seconds: 0` 表示显式关闭冷却，只在确实要「每次边沿都下发」时使用。
+**冷却取值**（`idempotent:false` 必配）：`cooldown_minutes` 紧急报警 1-5 / 日常提醒 5-30 / 欢迎播报 30-60；类别内下限=低频触发，上限=高频重复触发。需要亚分钟级时配 `cooldown_seconds`，并**同时保留 `cooldown_minutes` 作回滚兜底**（新版本以秒为准；回滚到旧版本仍按分钟限频，不至于零限频），例如 15 秒写 `{"cooldown_seconds":15,"cooldown_minutes":1}`；`cooldown_seconds: 0` 表示显式关闭冷却，只在确实要「每次边沿都下发」时使用（此时 `cooldown_minutes` 同样建议配 1 作回滚兜底）。
 
 ### 动作场景（`--action` JSON 的 scene 形态）
 
@@ -661,7 +661,7 @@ session + duration record 三 desc 分工：
 形态：`{"did":"<scene_id>","iid":"scene","idempotent":false,"cooldown_minutes":<N>}`
 
 - `did` 放 `scene_id`；`iid` 是字面量 `scene`，不是 `prop.` / `action.`
-- `idempotent` 必须 `false`；冷却必须声明且生效值 ≥ 1 秒：`cooldown_seconds`（≥1）或 `cooldown_minutes`（≥1）二选一，取值同 §动作设备。`cooldown_seconds: 0` 在这里会被拒——场景读不到现值，冷却是唯一去重手段。
+- `idempotent` 必须 `false`；冷却必须声明且生效值 ≥ 1 秒：`cooldown_seconds`（≥1）或 `cooldown_minutes`（≥1），取值同 §动作设备；配秒时同时保留 `cooldown_minutes` 作回滚兜底。`cooldown_seconds: 0` 在这里会被拒——场景读不到现值，冷却是唯一去重手段。
 
 **目标设备消歧**（TTS/语音播报/单点提示音/警报音/局部光效）+ 候选 ≥ 2：
 
@@ -682,7 +682,7 @@ session + duration record 三 desc 分工：
 - `prompt` 只写语义要求（观察谁、生成什么、语气），**不写 JSON 格式**——`{"result":"..."}` 契约由系统提示词固定。
 - `params` 必须含 `{{result}}`；省略 `params` 等价于 `["{{result}}"]`。
 - `sources` 省略时按「触发相机 → 规则 `--source`」回退；**达标槽没有触发相机；iot / record 规则没有触发相机、相机条件也被强制留空；session 退出槽的离开边沿不带触发相机；配了 `--duration-seconds` 的规则进入边沿只由时长评估产出、也不带触发相机。这四类下必须显式配 `sources`**。后端在 rule 写入时按这组判据拒绝（`task set-actions` 只对达标槽做同一检查，进入 / 退出槽不做来源推断）；CLI 本地只复刻字段级约束，跨字段判据以服务端为准。omni 规则的进入 / 事件槽不在此列：空相机条件是「广播到全部相机」的合法写法，命中时用命中的那台相机回退（配了 `--duration-seconds` 的除外）。
-- 只支持 `action.*`；必须 `idempotent:false` + 冷却：`cooldown_seconds`（0 允许，表示每次边沿都生成下发）或 `cooldown_minutes >= 1`。同时给时 `cooldown_seconds` 优先。
+- 只支持 `action.*`；必须 `idempotent:false` + 冷却：`cooldown_seconds`（0 允许，表示每次边沿都生成下发）或 `cooldown_minutes >= 1`。同时给时 `cooldown_seconds` 优先；配秒时保留 `cooldown_minutes` 作回滚兜底。
 - 生成失败（无帧 / 模型错误 / 空结果）时不下发、不落冷却；同一 `(rule, did, iid)` 在途时后续触发跳过。
 - 同槽按顺序执行，生成会阻塞后面的动作——生成式动作单独放，或排在槽内最后。
 

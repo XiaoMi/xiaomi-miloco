@@ -260,7 +260,8 @@ class RuleAction(BaseModel):
         description=(
             "Cooldown for non-idempotent actions, in seconds. "
             "Takes precedence over cooldown_minutes. "
-            "0 explicitly disables the cooldown (scene actions require >= 1)."
+            "0 explicitly disables the cooldown (scene actions require >= 1). "
+            "When using this field, keep cooldown_minutes as a rollback fallback."
         ),
     )
     generate: GenerateSpec | None = Field(
