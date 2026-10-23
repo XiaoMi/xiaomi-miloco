@@ -107,7 +107,8 @@ def _truncate_for_tts(text: str, max_chars: int) -> str:
     句末标点早于 ``max(2, max_chars // 2)`` 的不采用——宁可硬切，也不为
     对齐一个很早的句号把文案砍得过短。一个句末标点都没有时退回软上限硬切。
 
-    返回值长度不超过 ``max_chars + TRUNCATION_MARGIN + SENTENCE_LOOKAHEAD``。
+    返回值长度不超过 ``max_chars + TRUNCATION_MARGIN + SENTENCE_LOOKAHEAD``，
+    另加句末标点后紧跟的收尾引号/括号。
     """
     soft = max_chars + TRUNCATION_MARGIN
     if len(text) <= soft:
@@ -120,9 +121,10 @@ def _truncate_for_tts(text: str, max_chars: int) -> str:
             continue
         end = i + 1
         # 句号后紧跟的右引号/右括号一起保留，避免 TTS 文本里落单。
-        while end < len(window) and window[end] in SENTENCE_CLOSERS:
+        # 收尾扫描以原文为界：标点恰在窗口末位时，收尾符会落在窗口外。
+        while end < len(text) and text[end] in SENTENCE_CLOSERS:
             end += 1
-        return window[:end].rstrip()
+        return text[:end].rstrip()
     return text[:soft].rstrip()
 
 
