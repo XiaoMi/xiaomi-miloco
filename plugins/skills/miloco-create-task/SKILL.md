@@ -55,7 +55,7 @@ user-facing text 仅在两个时机出现：
 2. 终态 §响应动作 同时含「触发后做什么」+「记录什么」：Y / N
 3. 每条装配提示「怎么改」字段给出用户可直接复述的短语：Y / N
 4. iot 规则的 iid 抄自本轮 `device spec` 输出，did / value 抄自本轮真实输出：Y / N / NA
-5. 带 generate 的动作：`action.*` + `idempotent:false` + 冷却（`cooldown_seconds` 与 `cooldown_minutes` 双写，或 `cooldown_minutes>=1`）+ `params` 含 `{{result}}`；达标槽、iot / record 规则、session 退出槽与 duration 规则显式配 `sources`：Y / N / NA
+5. 带 generate 的动作：`action.*` + `idempotent:false` + 冷却（`cooldown_seconds`（0 允许）/ `cooldown_minutes>=1` / 双写，配秒时推荐双写作回滚兜底）+ `params` 含 `{{result}}`；达标槽、iot / record 规则、session 退出槽与 duration 规则显式配 `sources`：Y / N / NA
 ```
 
 ## 装配提示元规则
