@@ -2710,7 +2710,10 @@ def test_rule_create_scene_action_requires_cooldown(runner):
     result = runner.invoke(cli, _rule_create_argv(action))
     assert result.exit_code != 0
     combined = result.output + (result.stderr or "")
-    assert "idempotent=false requires cooldown_minutes" in combined
+    assert (
+        "idempotent=false requires cooldown_seconds or cooldown_minutes"
+        in combined
+    )
 
 
 def test_rule_create_scene_action_valid(runner):
@@ -2736,7 +2739,57 @@ def test_rule_create_scene_action_rejects_zero_cooldown(runner):
     result = runner.invoke(cli, _rule_create_argv(action))
     assert result.exit_code != 0
     combined = result.output + (result.stderr or "")
-    assert "iid=scene requires cooldown_minutes >= 1" in combined
+    assert (
+        "iid=scene requires cooldown_seconds >= 1 or cooldown_minutes >= 1"
+        in combined
+    )
+
+
+def test_rule_create_scene_action_rejects_zero_seconds(runner):
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_seconds":0}'
+    result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    combined = result.output + (result.stderr or "")
+    assert "iid=scene requires cooldown_seconds >= 1" in combined
+
+
+@pytest.mark.parametrize(
+    ("cooldown", "message"),
+    [
+        ({"cooldown_minutes": 0.5}, "cooldown_minutes must be an integer"),
+        # 1.5 秒不触发 <1 的下限检查，但后端 int 字段照样拒。
+        ({"cooldown_seconds": 1.5}, "cooldown_seconds must be an integer"),
+        # 布尔不是整数；后端宽松模式会收成 1 秒，本地刻意拒。
+        ({"cooldown_seconds": True}, "cooldown_seconds must be an integer"),
+    ],
+)
+def test_rule_create_scene_action_rejects_non_integer_cooldown(
+    runner, cooldown, message
+):
+    """非整数冷却（小数、布尔）按字段级约束在本地拦下。"""
+    action = json.dumps(
+        {
+            "did": "1792764217947197440",
+            "iid": "scene",
+            "idempotent": False,
+            **cooldown,
+        }
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    assert message in (result.output + (result.stderr or ""))
+    mock.assert_not_called()
+
+
+def test_rule_create_scene_action_accepts_seconds(runner):
+    action = '{"did":"1792764217947197440","iid":"scene","idempotent":false,"cooldown_seconds":5}'
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {"code": 0, "data": {"rule_id": "r-scene-s"}}
+        result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code == 0
+    body = mock.call_args[0][1]
+    assert body["actions"][0]["cooldown_seconds"] == 5
 
 
 def test_rule_create_scene_action_string_cooldown_no_traceback(runner):
@@ -2844,9 +2897,8 @@ def test_rule_create_generate_action_prompt_at_max_length_passes(runner):
     assert result.exit_code == 0, result.output + (result.stderr or "")
 
 
-@pytest.mark.parametrize("cooldown", [1, True])
-def test_rule_create_generate_action_accepts_numeric_cooldown(runner, cooldown):
-    """bool 按数值语义走（True=1 放，False=0 拒），与后端 int 收敛一致。"""
+def test_rule_create_generate_action_accepts_integer_cooldown(runner):
+    """整数分钟按数值语义放行；bool 由非整数分支拒。"""
     action = json.dumps(
         {
             "did": "speaker-1",
@@ -2854,7 +2906,7 @@ def test_rule_create_generate_action_accepts_numeric_cooldown(runner, cooldown):
             "params": ["{{result}}"],
             "generate": {"prompt": "看"},
             "idempotent": False,
-            "cooldown_minutes": cooldown,
+            "cooldown_minutes": 1,
         },
         ensure_ascii=False,
     )
@@ -2864,7 +2916,7 @@ def test_rule_create_generate_action_accepts_numeric_cooldown(runner, cooldown):
 
     assert result.exit_code == 0, result.output + (result.stderr or "")
     body = mock.call_args[0][1]
-    assert body["actions"][0]["cooldown_minutes"] == cooldown
+    assert body["actions"][0]["cooldown_minutes"] == 1
 
 
 @pytest.mark.parametrize(
@@ -2921,15 +2973,17 @@ def test_rule_create_generate_action_rejects_bad_fields(runner, generate, expect
         ({"idempotent": True}, "generate requires idempotent=false"),
         (
             {"idempotent": False, "cooldown_minutes": None},
-            "generate requires cooldown_minutes >= 1",
+            "generate requires cooldown_seconds (0 allowed) "
+            "or cooldown_minutes >= 1",
         ),
         (
             {"idempotent": False, "cooldown_minutes": 0},
-            "generate requires cooldown_minutes >= 1",
+            "generate requires cooldown_seconds (0 allowed) "
+            "or cooldown_minutes >= 1",
         ),
         (
             {"idempotent": False, "cooldown_minutes": False},
-            "generate requires cooldown_minutes >= 1",
+            "cooldown_minutes must be an integer",
         ),
         (
             {"idempotent": False, "cooldown_minutes": 30, "params": ["没有占位符"]},
@@ -2966,6 +3020,130 @@ def test_rule_create_generate_action_rejects_bad_action(
     assert expected in combined
 
 
+@pytest.mark.parametrize("seconds", [0, 15])
+def test_rule_create_generate_action_accepts_seconds(runner, seconds):
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["{{result}}"],
+            "generate": {"prompt": "看"},
+            "idempotent": False,
+            "cooldown_seconds": seconds,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {"code": 0, "data": {"rule_id": "r-gen-s"}}
+        result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+    body = mock.call_args[0][1]
+    assert body["actions"][0]["cooldown_seconds"] == seconds
+
+
+@pytest.mark.parametrize(
+    ("cooldown", "message"),
+    [
+        ({"cooldown_minutes": 0.5}, "cooldown_minutes must be an integer"),
+        ({"cooldown_seconds": 0.5}, "cooldown_seconds must be an integer"),
+        ({"cooldown_minutes": True}, "cooldown_minutes must be an integer"),
+    ],
+)
+def test_rule_create_generate_action_rejects_non_integer_cooldown(
+    runner, cooldown, message
+):
+    """generate 与其它形态共用同一份数值检查，非整数冷却不下发。"""
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["{{result}}"],
+            "generate": {"prompt": "看"},
+            "idempotent": False,
+            **cooldown,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    assert message in (result.output + (result.stderr or ""))
+    mock.assert_not_called()
+
+
+def test_rule_create_generate_action_rejects_negative_seconds(runner):
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["{{result}}"],
+            "generate": {"prompt": "看"},
+            "idempotent": False,
+            "cooldown_seconds": -1,
+        },
+        ensure_ascii=False,
+    )
+    result = runner.invoke(cli, _rule_create_argv(action))
+    combined = result.output + (result.stderr or "")
+    assert result.exit_code != 0
+    assert "cooldown_seconds must be >= 0" in combined
+
+
+def test_rule_create_plain_tts_accepts_zero_seconds(runner):
+    """通用非幂等分支：seconds=0 是显式关闭，不需要再配 minutes。"""
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["你好"],
+            "idempotent": False,
+            "cooldown_seconds": 0,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        mock.return_value = {"code": 0, "data": {"rule_id": "r-tts-0"}}
+        result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code == 0, result.output + (result.stderr or "")
+
+
+@pytest.mark.parametrize(
+    ("cooldown", "message"),
+    [
+        ({"cooldown_seconds": -1}, "cooldown_seconds must be >= 0"),
+        ({"cooldown_seconds": 0.5}, "cooldown_seconds must be an integer"),
+        ({"cooldown_minutes": 0.5}, "cooldown_minutes must be an integer"),
+        # 布尔不是整数；true 在后端宽松模式下会变成 1，本地刻意拒。
+        ({"cooldown_seconds": True}, "cooldown_seconds must be an integer"),
+        ({"cooldown_minutes": False}, "cooldown_minutes must be an integer"),
+        # 秒字段合法不代表分钟字段合法：后端会解析每个字段。
+        (
+            {"cooldown_seconds": 15, "cooldown_minutes": 0.5},
+            "cooldown_minutes must be an integer",
+        ),
+    ],
+)
+def test_rule_create_plain_tts_rejects_bad_cooldown_numbers(
+    runner, cooldown, message
+):
+    """普通 TTS 与其它形态共用同一份数值检查，坏值不下发。"""
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["你好"],
+            "idempotent": False,
+            **cooldown,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_post") as mock:
+        result = runner.invoke(cli, _rule_create_argv(action))
+    assert result.exit_code != 0
+    assert message in (result.output + (result.stderr or ""))
+    mock.assert_not_called()
+
+
 def test_task_set_actions_passes_generate(runner):
     with patch("miloco_cli.client.api_patch") as mock:
         mock.return_value = {"code": 0, "data": {}}
@@ -2978,6 +3156,27 @@ def test_task_set_actions_passes_generate(runner):
     assert body["on_enter_actions"][0]["generate"]["prompt"] == (
         "夸夸画面里最显著的人"
     )
+
+
+def test_task_set_actions_passes_cooldown_seconds(runner):
+    action = json.dumps(
+        {
+            "did": "speaker-1",
+            "iid": "action.5.3",
+            "params": ["你好"],
+            "idempotent": False,
+            "cooldown_seconds": 15,
+        },
+        ensure_ascii=False,
+    )
+    with patch("miloco_cli.client.api_patch") as mock:
+        mock.return_value = {"code": 0, "data": {}}
+        result = runner.invoke(
+            cli, ["task", "set-actions", "t1", "--on-enter-action", action]
+        )
+    assert result.exit_code == 0
+    body = mock.call_args[0][1]
+    assert body["on_enter_actions"][0]["cooldown_seconds"] == 15
 
 
 def test_task_set_actions_rejects_bad_generate_locally(runner):

@@ -7,8 +7,9 @@ Rule data models (V3)
 V3 design source of truth: ~/work/newdoc/miloco-rule/v3-system-overview.md (§3.1 / §6.3).
 
 Key V3 changes vs V1:
-- RuleAction uses {did, iid, value/params, idempotent, cooldown_minutes} format,
-  with idempotent check and cooldown dedup dispatched by the runner (§6.3).
+- RuleAction uses {did, iid, value/params, idempotent, cooldown_minutes/
+  cooldown_seconds} format, with idempotent check and cooldown dedup dispatched
+  by the runner (§6.3).
 - Rule has new fields: task_id, mode, lifecycle, on_enter_actions, on_enter_desc,
   on_exit_actions, on_exit_desc, terminate_when, exit_debounce_seconds.
 - 每条 rule 在 fire 时按字段非空隐式选择执行路径——`actions` / `on_*_actions`
@@ -217,12 +218,18 @@ class RuleAction(BaseModel):
     ``params`` / neither), and by whether ``generate`` is present. There is no
     ``type`` field on RuleAction itself.
 
-    Validation note: ``idempotent=False`` requires ``cooldown_minutes``, and
-    ``iid=scene`` requires ``idempotent=False``. ``generate`` additionally
-    requires ``action.*``, ``idempotent=False``, ``cooldown_minutes >= 1`` and
-    a ``{{result}}`` placeholder in non-empty ``params``. Service / cli layers
-    enforce these; the schema keeps the fields optional so PATCH-style partial
-    updates are not blocked when only one is sent.
+    Cooldown can be expressed in minutes or seconds. ``cooldown_seconds`` takes
+    precedence when both are present; ``0`` explicitly disables the cooldown.
+    ``iid=scene`` still requires an effective cooldown of at least one second,
+    because a cooldown is its only dedup mechanism.
+
+    Validation note: ``idempotent=False`` requires ``cooldown_seconds`` or
+    ``cooldown_minutes``, and ``iid=scene`` requires ``idempotent=False``.
+    ``generate`` additionally requires ``action.*``, ``idempotent=False``, a
+    declared cooldown (``cooldown_seconds`` may be 0, ``cooldown_minutes`` must
+    be >= 1) and a ``{{result}}`` placeholder in non-empty ``params``. Service /
+    cli layers enforce these; the schema keeps the fields optional so PATCH-style
+    partial updates are not blocked when only one is sent.
     """
 
     did: str = Field(
@@ -241,16 +248,43 @@ class RuleAction(BaseModel):
     idempotent: bool = Field(
         True,
         description="True: query current state and skip if already at target. "
-        "False: use cooldown_minutes to deduplicate.",
+        "False: use cooldown_seconds or cooldown_minutes to deduplicate.",
     )
     cooldown_minutes: int | None = Field(
         None,
-        description="Cooldown for non-idempotent actions; required when idempotent=False.",
+        description=(
+            "Cooldown for non-idempotent actions, in minutes; required when "
+            "idempotent=False and cooldown_seconds is absent. Ignored when "
+            "cooldown_seconds is present (keep it as a rollback fallback)."
+        ),
+    )
+    cooldown_seconds: int | None = Field(
+        None,
+        ge=0,
+        description=(
+            "Cooldown for non-idempotent actions, in seconds. "
+            "Takes precedence over cooldown_minutes. "
+            "0 explicitly disables the cooldown (scene actions require >= 1). "
+            "When using this field, keep cooldown_minutes as a rollback fallback."
+        ),
     )
     generate: GenerateSpec | None = Field(
         None,
         description="生成式参数：执行前调一次 omni，把结果替换进 params 的 {{result}}",
     )
+
+    @property
+    def effective_cooldown_seconds(self) -> int | None:
+        """生效冷却秒数；None=未配置，0=显式关闭。
+
+        ``cooldown_seconds`` 优先；旧字段按分钟折算，负值按 0 处理（运行期
+        语义就是「不冷却」，不在属性里抛错）。
+        """
+        if self.cooldown_seconds is not None:
+            return self.cooldown_seconds
+        if self.cooldown_minutes is not None:
+            return max(0, self.cooldown_minutes) * 60
+        return None
 
 
 class RuleCondition(BaseModel):

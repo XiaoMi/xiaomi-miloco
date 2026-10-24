@@ -69,13 +69,15 @@ _TOOLS = [
                 "1. Device control (idempotent):\n"
                 "   {\"did\":\"<id>\",\"iid\":\"prop.<siid>.<piid>\","
                 "\"value\":<v>,\"idempotent\":true}\n"
-                "2. Notify / TTS (non-idempotent, MUST include "
-                "cooldown_minutes):\n"
+                "2. Notify / TTS (non-idempotent, MUST include a cooldown):\n"
                 "   {\"did\":\"<id>\",\"iid\":\"action.<siid>.<aiid>\","
                 "\"params\":[\"<text>\"],\"idempotent\":false,"
                 "\"cooldown_minutes\":10}\n"
+                "   cooldown_seconds may be used alongside cooldown_minutes "
+                "(wins over it; 0 disables it). Keep cooldown_minutes as the "
+                "rollback fallback.\n"
                 "CLI strictly rejects idempotent=false without "
-                "cooldown_minutes."
+                "cooldown_seconds or cooldown_minutes."
             ),
             "parameters": {
                 "type": "object",

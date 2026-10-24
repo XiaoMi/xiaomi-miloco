@@ -200,6 +200,23 @@ class TestRuleRepoRoundtrip:
         assert got.actions[0].idempotent is False
         assert got.actions[0].cooldown_minutes == 30
 
+    def test_action_cooldown_seconds_preserved(self, rule_repo):
+        """新旧冷却字段同时 round-trip，运行期按 seconds 优先。"""
+        action = RuleAction(
+            did="dev-y",
+            iid="action.5.7",
+            params=["hello"],
+            idempotent=False,
+            cooldown_minutes=1,
+            cooldown_seconds=15,
+        )
+        rule = _make_static_rule(name=_name("act-cd"), actions=[action])
+        rid = rule_repo.create(rule)
+        got = rule_repo.get_by_id(rid)
+        assert got.actions[0].cooldown_minutes == 1
+        assert got.actions[0].cooldown_seconds == 15
+        assert got.actions[0].effective_cooldown_seconds == 15
+
     def test_action_with_params_for_action_iid(self, rule_repo):
         """iid=action.* 时 params（list）round-trip。"""
         action = RuleAction(did="d1", iid="action.3.1", params=[1, "hello", True])
