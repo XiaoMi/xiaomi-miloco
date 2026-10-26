@@ -385,23 +385,17 @@ class TaskStateMachine:
             return self._done(TransitionOutcome.ALREADY_IN_STATE, signal)
 
         existing = self._pending_enters.get(signal.task_id, {}).get(signal.rule_id)
-        if (
-            topology.is_session_type
-            and existing is not None
-            and self._pending_enter_expired(existing)
-        ):
+        if existing is not None and self._pending_enter_expired(existing):
             self._mark_pending_enter_expired(signal.task_id, signal.rule_id, existing)
-            return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
+            if topology.is_session_type:
+                return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
+            self.clear_pending_enters(signal.task_id, signal.rule_id)
+            existing = None
 
         unmet = self._unmet_guards(topology)
         if unmet:
-            # 条件层锁存后不会再产生同一条 false→true 边沿，因此先保存信号，等前提
-            # 满足后由上游释放。保存原始信号也意味着 session 的起点按主条件首次成立
-            # 计，而不是按前提恢复时刻计。
+            # 会话型保存首次边沿以保留会话起点；事件型过期后可用新信号重新等待。
             pending = self._pending_enters.setdefault(signal.task_id, {})
-            if existing is not None and self._pending_enter_expired(existing):
-                pending.pop(signal.rule_id, None)
-                existing = None
             if existing is None:
                 logger.info(
                     "task %s 的进入被前提拦下 (rule=%s): %s",

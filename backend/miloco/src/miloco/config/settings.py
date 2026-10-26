@@ -311,6 +311,7 @@ class RuleSettings(BaseModel):
     guard_pending_timeout_seconds: float = Field(
         default=60.0,
         gt=0.0,
+        allow_inf_nan=False,
         description="guard 拦截的主规则进入信号最多保留多久（秒）",
     )
 

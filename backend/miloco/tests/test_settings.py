@@ -169,8 +169,8 @@ def test_guard_pending_timeout_env_override(monkeypatch) -> None:
     assert get_settings().rule.guard_pending_timeout_seconds == 90.0
 
 
-@pytest.mark.parametrize("value", [0, -1])
-def test_guard_pending_timeout_rejects_non_positive(monkeypatch, value) -> None:
+@pytest.mark.parametrize("value", [0, -1, "nan", "inf", "-inf", "1e309"])
+def test_guard_pending_timeout_rejects_invalid_values(monkeypatch, value) -> None:
     monkeypatch.setenv("MILOCO_RULE__GUARD_PENDING_TIMEOUT_SECONDS", str(value))
     reset_settings()
     with pytest.raises(ValidationError):
