@@ -5,11 +5,9 @@
   > ``$MILOCO_HOME/config.json`` > 默认值。
 - Token 由 miloco 后端 bootstrap 写入 ``server.token``，CLI 不应覆盖。
 
-schema 白名单与类型由常量 ``_SCHEMA_PATHS`` 维护。新增字段时按段同步：核心段
-（``debug`` / ``server`` / ``agent`` / ``model``）同步 ``settings.schema.json``；其余段
-（``perception`` / ``rule`` / ``camera`` …）schema.json 按设计不覆盖（见
-``knowledge/06-dev-guide/dev-guide.md``），以 ``settings.yaml`` + ``settings.py`` 的
-pydantic 模型为准。
+schema 白名单与类型由常量 ``_SCHEMA_PATHS`` 维护。新增字段时，先在此处声明 CLI
+可编辑范围；``settings.schema.json`` 覆盖核心段及按需纳入的非核心字段，但不是完整
+设置模型。完整字段定义以 ``settings.yaml`` + ``settings.py`` 的 pydantic 模型为准。
 
 默认值（元组第 2 项）一律对齐后端**实际生效**的默认值：``settings.yaml`` 里有该 key 就取
 yaml 的值，没有才取 ``settings.py`` 对应 pydantic 字段的默认值。对齐由
@@ -19,6 +17,7 @@ yaml 的值，没有才取 ``settings.py`` 对应 pydantic 字段的默认值。
 from __future__ import annotations
 
 import json
+import math
 import os
 import shlex
 import tempfile
@@ -269,6 +268,11 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "result.suggestions 保留完整，仅 agent 派发受限；重启生效"
         "（在 UI 拨这个滑条走 admin API，则热更、下个感知周期生效）",
     ),
+    "rule.guard_pending_timeout_seconds": (
+        float,
+        60.0,
+        "guard 拦截的主规则进入信号最多保留多久（秒），必须为有限正数，重启生效",
+    ),
     "miot.central_hub_enabled": (
         bool,
         True,
@@ -470,9 +474,14 @@ def _coerce(path: str, raw: str) -> Any:
             raise ValueError(f"{path} 需要整数，收到 {raw!r}") from exc
     if pytype is float:
         try:
-            return float(raw)
+            value = float(raw)
         except ValueError as exc:
             raise ValueError(f"{path} 需要浮点数，收到 {raw!r}") from exc
+        if path == "rule.guard_pending_timeout_seconds" and (
+            not math.isfinite(value) or value <= 0
+        ):
+            raise ValueError(f"{path} 需要有限正数，收到 {raw!r}")
+        return value
     if pytype is list:
         # CLI 只能递字符串，故约定逗号分隔；同时容忍 JSON 数组，方便脚本直接透传。
         # 留空 = 清空该项（回到"仅靠自动发现"语义），不是写入 [""]。

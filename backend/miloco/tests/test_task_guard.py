@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 
+import pytest
 from miloco.task.state_machine import (
     ActionSlot,
     RuleDirection,
@@ -24,7 +25,13 @@ from miloco.task.state_machine import (
 
 
 class Harness:
-    def __init__(self, satisfied: dict[str, bool | None] | None = None):
+    def __init__(
+        self,
+        satisfied: dict[str, bool | None] | None = None,
+        *,
+        pending_enter_timeout_seconds: float = 60.0,
+        clock=None,
+    ):
         self.satisfied = satisfied or {}
         self.dispatched: list[tuple[str, ActionSlot]] = []
         self.tracked: list[tuple[TransitionOutcome, TaskSignal]] = []
@@ -32,6 +39,8 @@ class Harness:
             is_condition_satisfied=lambda rid: self.satisfied.get(rid, False),
             dispatch_action=lambda t, s, _p=None: self.dispatched.append((t, s)),
             track=lambda o, s: self.tracked.append((o, s)),
+            pending_enter_timeout_seconds=pending_enter_timeout_seconds,
+            clock=clock,
         )
 
 
@@ -135,6 +144,174 @@ def test_blocked_event_can_be_released_after_guard_becomes_true():
     h.satisfied["g"] = True
     assert h.sm.release_pending_enters("t1") == [signal]
     assert h.sm.release_pending_enters("t1") == []
+
+
+@pytest.mark.parametrize("release_at", [220.0, 220.001])
+def test_expired_blocked_event_rebuilds_window_with_new_signal(caplog, release_at):
+    now = [100.0]
+    harness = Harness(
+        {"a": True, "g": False},
+        pending_enter_timeout_seconds=60.0,
+        clock=lambda: now[0],
+    )
+    harness.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    first = _entered("a", payload={"caption": "旧信号"})
+    second = _entered("a", payload={"caption": "新信号"})
+
+    assert harness.sm.handle(first) is TransitionOutcome.BLOCKED_BY_GUARD
+    now[0] = 160.001
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert harness.sm.handle(second) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "task t1 的进入因 guard pending 超时未触发 "
+        "(rule=a, waited=60.001s, timeout=60.000s)",
+        "task t1 的进入被前提拦下 (rule=a): g=不成立",
+    ]
+
+    now[0] = 190.0
+    assert harness.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+    now[0] = release_at
+    harness.satisfied["g"] = True
+    released = harness.sm.release_pending_enters("t1")
+    if release_at == 220.0:
+        assert len(released) == 1
+        assert released[0] is second
+    else:
+        assert released == []
+    assert harness.sm.release_pending_enters("t1") == []
+    assert harness.sm.runtime_state("t1") is TaskRuntimeState.OFF
+
+
+def test_expired_event_logs_before_firing_new_signal_with_guard_restored(caplog):
+    now = [100.0]
+    harness = Harness({"a": True, "g": False}, clock=lambda: now[0])
+    harness.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    assert harness.sm.handle(_entered("a")) is TransitionOutcome.BLOCKED_BY_GUARD
+    now[0] = 160.0
+    harness.satisfied["g"] = True
+    new_signal = _entered("a", payload=object())
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert harness.sm.handle(new_signal) is TransitionOutcome.EVENT_FIRED
+    assert [record.getMessage() for record in caplog.records] == [
+        "task t1 的进入因 guard pending 超时未触发 "
+        "(rule=a, waited=60.000s, timeout=60.000s)"
+    ]
+    assert harness.dispatched == [("t1", ActionSlot.ON_ENTER)]
+    assert harness.tracked[-1][1] is new_signal
+    assert harness.sm.release_pending_enters("t1") == []
+
+
+def test_blocked_event_logs_when_it_expires_before_guard_becomes_true(caplog):
+    now = [100.0]
+    h = Harness(
+        {"a": True, "g": False},
+        pending_enter_timeout_seconds=60.0,
+        clock=lambda: now[0],
+    )
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    now[0] = 160.001
+    h.satisfied["g"] = True
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert h.sm.release_pending_enters("t1") == []
+
+    timeout_logs = [
+        record for record in caplog.records if "guard pending 超时未触发" in record.message
+    ]
+    assert len(timeout_logs) == 1
+    assert "task t1" in timeout_logs[0].message
+    assert "rule=a" in timeout_logs[0].message
+
+
+def test_blocked_event_is_releasable_before_timeout():
+    now = [100.0]
+    h = Harness(
+        {"a": True, "g": False},
+        pending_enter_timeout_seconds=60.0,
+        clock=lambda: now[0],
+    )
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    now[0] = 159.999
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [signal]
+
+
+def test_blocked_event_expires_at_timeout_boundary():
+    now = [100.0]
+    h = Harness(
+        {"a": True, "g": False},
+        pending_enter_timeout_seconds=60.0,
+        clock=lambda: now[0],
+    )
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    now[0] = 160.0
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_repeated_main_rule_signal_does_not_extend_pending_timeout():
+    now = [100.0]
+    h = Harness(
+        {"a": True, "g": False},
+        pending_enter_timeout_seconds=60.0,
+        clock=lambda: now[0],
+    )
+    h.sm.register_task("t1", {"a": RuleDirection.ENTER, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+    now[0] = 130.0
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    now[0] = 160.001
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == []
+
+
+def test_expired_pending_enter_stays_blocked_until_cleared(caplog):
+    now = [100.0]
+    h = Harness(
+        {"a": True, "g": False},
+        pending_enter_timeout_seconds=60.0,
+        clock=lambda: now[0],
+    )
+    h.sm.register_task("t1", {"a": RuleDirection.SESSION, "g": RuleDirection.GUARD})
+    signal = _entered("a")
+
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    now[0] = 160.001
+    with caplog.at_level(logging.INFO, logger="miloco.task.state_machine"):
+        assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+        h.satisfied["g"] = True
+        assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+        assert h.sm.release_pending_enters("t1") == []
+
+    timeout_logs = [
+        record for record in caplog.records if "guard pending 超时未触发" in record.message
+    ]
+    assert len(timeout_logs) == 1
+
+    h.sm.clear_pending_enters("t1", "a")
+    h.satisfied["g"] = False
+    now[0] = 170.0
+    assert h.sm.handle(signal) is TransitionOutcome.BLOCKED_BY_GUARD
+
+    h.satisfied["g"] = True
+    assert h.sm.release_pending_enters("t1") == [signal]
 
 
 def test_blocked_event_releases_all_pending_enters_after_guard_becomes_true():

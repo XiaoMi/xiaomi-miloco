@@ -202,6 +202,27 @@ def test_config_list_paths(runner):
     assert "model.omni.api_key" in paths
 
 
+def test_config_guard_pending_timeout(runner, isolated_config):
+    path = "rule.guard_pending_timeout_seconds"
+    result = runner.invoke(cli, ["config", "set", path, "7.5", "--no-restart"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["value"] == 7.5
+    data = json.loads(isolated_config.read_text())
+    assert data["rule"]["guard_pending_timeout_seconds"] == 7.5
+
+    result = runner.invoke(cli, ["config", "get", path, "--value-only"])
+    assert result.exit_code == 0
+    assert result.output.strip() == "7.5"
+
+    result = runner.invoke(cli, ["config", "list-paths"])
+    assert result.exit_code == 0
+    description = next(
+        item["description"] for item in json.loads(result.output) if item["path"] == path
+    )
+    assert "正数" in description
+    assert "重启生效" in description
+
+
 def test_config_get_value_only_outputs_bare_value(runner, isolated_config):
     """``config get --value-only`` 输出裸值, 便于 shell 脚本免 JSON 解析。"""
     from miloco_cli.config import set_value
