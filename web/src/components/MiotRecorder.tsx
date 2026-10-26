@@ -24,6 +24,7 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { PerceptionCamera } from "@/lib/types";
 import { authHeaders } from "@/api/register";
+import { errorMessage } from "@/api/client";
 // 感知层用合成 did（多通道相机 cam:ch{n}）；后端 watch / record_clip 按**物理 did +
 // 通道号**走（SDK 会话按物理 did 建），故发请求前把合成 did 拆回。工具收在 @/lib/cameraChannel。
 import {
@@ -126,8 +127,7 @@ export function MiotRecorder({ cameras, onDone, onCancel }: Props) {
       if (!r.ok) {
         let detail = t("account.recordFailHttp", { status: r.status });
         try {
-          const j = await r.json();
-          detail = j.detail ?? j.message ?? detail;
+          detail = errorMessage(await r.json()) ?? detail;
         } catch {
           /* 非 JSON 响应,沿用默认文案 */
         }

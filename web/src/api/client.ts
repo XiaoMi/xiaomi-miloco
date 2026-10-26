@@ -28,6 +28,28 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * 从错误响应体里取住户可读的文案。
+ *
+ * FastAPI 的 HTTPException(detail=...) 在 detail 是字符串时原样返回；omni preflight
+ * 失败时 detail 是对象（{code,message,...}）。旧写法把整个 detail 塞进 Error，String()
+ * 后只剩 "[object Object]"，住户看不到失败原因。这里只取其中的 message 字符串。
+ *
+ * 导出给绕开 apiFetch 的 multipart 直连 fetch 复用，避免各处再手写一份。
+ */
+export function errorMessage(body: unknown): string | null {
+  if (typeof body === "string") return body || null;
+  if (!body || typeof body !== "object") return null;
+  const b = body as { message?: unknown; detail?: unknown };
+  if (typeof b.message === "string" && b.message) return b.message;
+  if (typeof b.detail === "string") return b.detail || null;
+  if (b.detail && typeof b.detail === "object") {
+    const m = (b.detail as { message?: unknown }).message;
+    if (typeof m === "string" && m) return m;
+  }
+  return null;
+}
+
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
@@ -43,8 +65,7 @@ export async function apiFetch<T>(
   if (!resp.ok) {
     let msg = `HTTP ${resp.status}`;
     try {
-      const body = await resp.json();
-      msg = body.message ?? body.detail ?? msg;
+      msg = errorMessage(await resp.json()) ?? msg;
     } catch {
       // ignore
     }
