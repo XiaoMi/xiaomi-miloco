@@ -26,7 +26,6 @@ import {
   FoldBadge,
   FoldChipPill,
   FoldMembers,
-  StrengthToggle,
   firstMemberIdOf,
   hostRegionOf,
   membersIdOf,
@@ -189,8 +188,10 @@ describe("FoldBadge — 一枚徽标一个热区,两档语义不同", () => {
   it("两档的读屏文本说的就是它实际会做的事", () => {
     const strong = badgeHtml({ strength: "strong", open: false });
     const weak = badgeHtml({ strength: "weak", open: false });
-    // 读屏文本说的是「定位过去」,与它实际的动作为一致
-    expect(byAttr(weak, "button", "data-jump", K)["aria-label"]).toContain("定位到该支");
+    // 跳转入口同时展开目标动作组，读屏提示与可见按钮说明一致。
+    expect(byAttr(weak, "button", "data-jump", K)["aria-label"]).toContain("跳到并展开动作组");
+    expect(weak).toContain("查看动作组 · 2 项");
+    expect(strong).toContain("展开动作 · 2 项");
     expect(byAttr(strong, "button", "data-jump", K)["aria-label"]).toContain("就地展开该支");
     expect(byAttr(badgeHtml({ strength: "strong", open: true }), "button", "data-jump", K)[
       "aria-label"
@@ -341,28 +342,6 @@ describe("FoldMembers — 降级徽标穿得过折叠", () => {
       renderToStaticMarkup(<FoldMembers branch={branch()} specs={new Map()} onToggle={noop} />),
     );
     expect(warningBadges(members)).toHaveLength(0);
-  });
-});
-
-describe("StrengthToggle — 两档、roving tabindex", () => {
-  it("单选组、两枚 radio,选中的那枚才在 Tab 序列里", () => {
-    const html = renderToStaticMarkup(<StrengthToggle strength="strong" onChange={noop} />);
-    expect(html).toContain('role="radiogroup"');
-    const radios = tagsIn(html, "button").filter((a) => a["role"] === "radio");
-    expect(radios).toHaveLength(2);
-    expect(radios.map((r) => r["tabindex"])).toEqual(["-1", "0"]);
-    expect(radios.map((r) => r["aria-checked"])).toEqual(["false", "true"]);
-    expectNoRawKeys(html);
-  });
-
-  it("两档的名字与说明都在(i18n key 取不到时这里会红)", () => {
-    const html = renderToStaticMarkup(<StrengthToggle strength="weak" onChange={noop} />);
-    const radios = tagsIn(html, "button").filter((a) => a["role"] === "radio");
-    expect(radios.map((r) => r["tabindex"])).toEqual(["0", "-1"]);
-    expect(radios[0]["title"]).toContain("各行其时");
-    expect(radios[1]["title"]).toContain("并入事件");
-    expect(html).toContain("弱");
-    expect(html).toContain("强");
   });
 });
 
