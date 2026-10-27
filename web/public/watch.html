@@ -116,6 +116,7 @@ const I18N = {
     mseLibMissing: "MSE 解码库未加载(/vendor/jmuxer.min.js 取不到)",
     wsQuiet: (s) => `WS ${s}s 无消息，重连…`,
     decodeStalled: "解码停滞 8s+，重连…",
+    retrying: (s, n) => `${s} 秒后重连（第 ${n} 次）…`,
     connectingTo: (cam) => "正在连接 " + cam + "…",
   },
   en: {
@@ -153,6 +154,7 @@ const I18N = {
     mseLibMissing: "MSE decode library not loaded (/vendor/jmuxer.min.js unreachable)",
     wsQuiet: (s) => `No WS messages for ${s}s, reconnecting…`,
     decodeStalled: "Decode stalled for 8s+, reconnecting…",
+    retrying: (s, n) => `Retrying in ${s}s (attempt ${n})…`,
     connectingTo: (cam) => "Connecting to " + cam + "…",
   },
 };
@@ -259,6 +261,9 @@ async function refreshCameraList() {
 }
 
 let ws, decoder, configured = false;
+let retryTimer = null;
+let retryAttempt = 0;
+let pageActive = true;
 // 每次 connect() 新建一个 AbortController,其 signal 传给该 socket 的所有 listener;
 // tearDown() abort 它 → 一次性解绑旧 socket 的全部 listener,避免频繁 reconnect 时
 // 已关闭 socket 的 handler(连同闭包持有的旧 socket)滞留拖慢 GC。
@@ -374,10 +379,14 @@ function setState(text, isErr=false) {
   }
 }
 function hideLoading() {
+  // A successful handshake is not recovery: reset only once video is displayed.
+  retryAttempt = 0;
   $("loading")?.classList.add("hidden");
 }
 
 function tearDown() {
+  clearTimeout(retryTimer);
+  retryTimer = null;
   configured = false;
   codecHint = null;
   serverWillClose = false;
@@ -432,6 +441,27 @@ function tearDown() {
 }
 
 function connect() {
+  // Explicit user/boot connection: cancel a queued retry and start fresh.
+  retryAttempt = 0;
+  startConnection();
+}
+
+function scheduleReconnect(reason) {
+  if (!pageActive || retryTimer !== null) return;
+  tearDown();
+  // Bound both the exponent and the delay. Jitter spreads reconnects from the
+  // camera iframes after a shared VPN outage; no tight polling while offline.
+  const base = Math.min(30000, 1000 * 2 ** Math.min(retryAttempt++, 5));
+  const delay = Math.min(30000, Math.round(base * (0.8 + Math.random() * 0.4)));
+  setState(`${reason} ${t("retrying", Math.ceil(delay / 1000), retryAttempt)}`, true);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    startConnection();
+  }, delay);
+}
+
+function startConnection() {
+  if (!pageActive) return;
   tearDown();
   const camId = $("cam").value;
   const channel = $("ch").value;
@@ -450,6 +480,8 @@ function connect() {
   setState(t("connecting"));
   ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
+  // Also time out a blackholed handshake or an OPEN socket with no first init.
+  stats.lastWsTs = Date.now();
   // 本次连接的 socket 引用 + 专属 AbortController。listener 都挂在 thisWs 上并带
   // signal,支持的浏览器上 tearDown abort 后一次性解绑。身份守卫 `thisWs !== ws` 不是
   // 可有可无的"冗余"——在不支持 {signal} 的老 webview 上它是唯一的正确性保证,在新
@@ -463,17 +495,24 @@ function connect() {
   // 看到"已连接"却永远没画面。真正的"已连接"语义留给收到 init 信令(见 onMessage)。
   thisWs.addEventListener("open", () => {
     if (thisWs !== ws) return;
+    stats.lastWsTs = Date.now();
     setState(t("connectingCam"));
   }, { signal: sig });
   thisWs.addEventListener("close", (ev) => {
     if (thisWs !== ws) return;  // 旧 socket 的迟到 close,忽略,别盖新连接状态
+    configured = false;
     // 后端 error 信令(camera_unreachable 等)已经设了更具体的文案 —— 不要用泛泛的
     // "已断开 (1011)" 覆盖它,否则住户看到的还是没头没尾的 code。
     if (!serverWillClose) {
-      setState(t("disconnected", ev.code, ev.reason),
-               ev.code !== 1000);
+      const reason = t("disconnected", ev.code, ev.reason);
+      // Retry transport loss / temporary server failures, not a clean stop,
+      // protocol/policy rejection, or the camera error signalled above.
+      if ([1001, 1005, 1006, 1011, 1012, 1013, 1014].includes(ev.code)) {
+        scheduleReconnect(reason);
+      } else {
+        setState(reason, ev.code !== 1000);
+      }
     }
-    configured = false;
   }, { signal: sig });
   thisWs.addEventListener("error", () => {
     if (thisWs !== ws) return;
@@ -811,22 +850,30 @@ $("refresh").addEventListener("click", refreshCameraList);
 $("cam").addEventListener("change", connect);
 $("ch").addEventListener("change", connect);
 
+window.addEventListener("pagehide", () => {
+  pageActive = false;
+  tearDown();
+});
+window.addEventListener("pageshow", (ev) => {
+  pageActive = true;
+  if (ev.persisted) connect();
+});
+
 // Stale-stream watchdog: WS quiet for 15 s OR decoded video stalled for 8 s
 // while WS still flowing → reconnect. Using `lastWsTs` (any inbound message)
 // instead of `lastFrameTs` keeps us patient through the camera's first-IDR
 // wait, which can be a few seconds on IPC streams with sparse keyframes.
 setInterval(() => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (!pageActive || serverWillClose || !ws) return;
+  if (ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING) return;
   const now = Date.now();
   const wsAge = stats.lastWsTs ? now - stats.lastWsTs : 0;
   if (wsAge > 15000) {
-    setState(t("wsQuiet", (wsAge/1000).toFixed(0)), true);
-    connect();
+    scheduleReconnect(t("wsQuiet", (wsAge/1000).toFixed(0)));
     return;
   }
   if (configured && stats.lastFrameLocalMs && now - stats.lastFrameLocalMs > 8000) {
-    setState(t("decodeStalled"), true);
-    connect();
+    scheduleReconnect(t("decodeStalled"));
   }
 }, 2000);
 
