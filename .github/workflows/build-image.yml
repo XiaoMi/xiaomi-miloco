@@ -1,5 +1,5 @@
 # 构建 PR Review 用镜像（gh + 审查 CLI）并推到 ghcr，供 pr-review workflow 当 container 用。
-# 手动触发（Actions 页 Run workflow），或改动 Dockerfile.pr-review 时自动重建。
+# 手动触发（Actions 页 Run workflow），或改动 Dockerfile.pr-review / pr-agent.sh 时自动重建。
 # 用 job 自带的 GITHUB_TOKEN 推送：org 包会自动 link 到本仓并授予本仓 Actions 拉取权限。
 name: Build Review Image
 
@@ -7,7 +7,10 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: [".ci/Dockerfile.pr-review"]
+    # .ci/pr-agent.sh 也要列上：它被 COPY 进镜像，改了不重建会静默不生效。
+    paths:
+      - ".ci/Dockerfile.pr-review"
+      - ".ci/pr-agent.sh"
 
 permissions:
   contents: read
@@ -23,9 +26,15 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: 算出镜像名
+        id: img
+        # ghcr 的仓库路径必须小写，而仓库名可能带大写（如 HCl8 / XiaoMi）。转成小写之后
+        # 镜像跟着所属仓库走：fork 推自己的命名空间，不再撞上游的包权限。
+        run: echo "name=$(printf 'ghcr.io/%s/pr-review' '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: .ci/Dockerfile.pr-review
           push: true
-          tags: ghcr.io/xiaomi/xiaomi-miloco/pr-review:trixie
+          tags: ${{ steps.img.outputs.name }}:trixie

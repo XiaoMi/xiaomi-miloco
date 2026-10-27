@@ -245,15 +245,32 @@ check_pr_review_gate() {
         | python3 -c "
 import sys, json
 comments = json.load(sys.stdin)
+# 每个标记只取**最新**那条（生产里每个模型维护自己的一条并原地更新），
+# 不取历史并集：旧结论会把已修的问题重新算进来，造成假红。
+latest = {}
 for c in comments:
     body = c.get('body', '')
-    if body.startswith('<!-- review-pr-ci -->'):
-        print(body)
-        break
+    if not body.startswith('<!-- review-pr-ci'):
+        continue
+    marker = body.split('-->')[0]
+    ts = c.get('updated_at', '')
+    if marker not in latest or ts > latest[marker][0]:
+        latest[marker] = (ts, body)
+# 迁移前的旧无 tag 评论是「该标记的最新一条」，会在新管线下永久假红。
+# 但无 tag 标记没有废弃——云端兜底（/review cloud）写的正是它，所以只在
+# 它比所有带 tag 的都旧时才丢。
+tagged = {m: v for m, v in latest.items() if m.strip() != '<!-- review-pr-ci'}
+if tagged:
+    newest_tagged = max(v[0] for v in tagged.values())
+    latest = {m: v for m, v in latest.items() if m in tagged or v[0] > newest_tagged}
+print('\n'.join(v[1] for _, v in sorted(latest.items())))
 " 2>/dev/null)
-    severity_count=$(echo "$comment" | grep -cE '^#{1,4} .*(🔴 严重|🟡 重要)' 2>/dev/null || echo 0)
+    severity_count=$(echo "$comment" | grep -cE '^#{1,4} .*(🔴 严重|🟡 重要)' 2>/dev/null || true)
     set -e
-    if [[ "$severity_count" -gt 0 ]]; then
+    if [[ -z "$comment" ]]; then
+        # 没找到评论时 severity_count 恒为 0，直接判通过就是假绿
+        _err "pr-review: 没找到审查评论（标记 review-pr-ci*），无法判断"
+    elif [[ "$severity_count" -gt 0 ]]; then
         echo "$comment" | grep -E '^#{1,4} .*(🔴 严重|🟡 重要)' || true
         _err "pr-review: $severity_count 项严重/重要问题"
     else
