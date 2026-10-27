@@ -1,6 +1,13 @@
-# 维护者手动触发的 PR 审查：在 PR 评论里发 "/review" 即对该 PR 跑一次 /review-pr。
+# 维护者手动触发的 PR 审查：在 PR 评论里发 "/review" 即对该 PR 跑一次审查。
 # 用途：维护者手动对任意 PR（含 fork）跑审查；在 base 仓上下文里通过 issue_comment 触发。
 # 安全边界 = 评论者须有 write+ 权限 + 钉死触发时刻的 head SHA。
+#
+# 用哪条 runner 由评论内容显式决定，不猜测：
+#   /review       → 自托管。它和 push 触发的自动审查共用 concurrency 组，
+#                   所以会替换掉正在跑的那条（新的一条同样会打 a/b 两条状态）。
+#   /review cloud → 公共 runner。用于池子被占满、或启动器不可用导致自托管一直排队时。
+# 不查"有没有活跃的自托管 run"：fork PR 的 workflow_runs.pull_requests 恒为空，
+# 那个判断对上游绝大多数 PR 都是失效的。
 name: PR Review (command)
 
 on:
@@ -13,16 +20,14 @@ permissions:
   statuses: write # 把门禁结论打到 head SHA 的 commit status
   packages: read # 拉 ghcr 上的审查镜像
 
-concurrency:
-  group: pr-review-cmd-${{ github.event.issue.number }}
-  cancel-in-progress: true
+# 这里刻意不设工作流级并发组：它会把整个 run 取消，于是「/review 还在跑 → 改发
+# /review cloud」会把自托管那条连同它要打的 a/b 状态一起掐掉。同类的互斥交给下面
+# 各 job 自己的组（自托管按 tag、云端单独一个），跨类本来就该并行。
 
 jobs:
-  # 轻量授权门：用评论自带的 author_association 判定（OWNER/MEMBER/COLLABORATOR=可信内部人），
-  # 挡住外部贡献者在自己 fork PR 下自助触发带 key 的流程。
-  # 用 author_association 而非 `gh api collaborators/<user>/permission`：后者权限要求在 org 仓不确定，
-  # token 不足时会对所有人 403→静默拒绝；author_association 是 webhook 自带字段，无 API、无 token 依赖。
-  # 注：MEMBER 含只读 org 成员（比"对本仓有 write"略宽），对"挡外部人"这个目标足够。
+  # 轻量授权门：按评论自带的 author_association 判定，挡外部贡献者在 fork PR 下自助
+  # 触发带 key 的流程。不用 `gh api collaborators/.../permission`：token 不足会对所有人
+  # 403 静默拒绝。注：MEMBER 含只读 org 成员，比「有 write」略宽，挡外部人够用。
   authorize:
     if: >-
       github.event.issue.pull_request != null
@@ -32,19 +37,38 @@ jobs:
     outputs:
       head_sha: ${{ steps.gate.outputs.head_sha }}
       matched: ${{ steps.check.outputs.matched }}
+      where: ${{ steps.route.outputs.where }}
+      draft: ${{ steps.gate.outputs.draft }}
+      force_cloud: ${{ steps.check.outputs.force_cloud }}
     steps:
       - name: 校验评论命令
         id: check
         env:
           COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
-          BODY="$(printf '%s' "$COMMENT_BODY" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+          # 先把换行/制表符折成空格：评论常写成 "/review" 换行再写理由，
+          # 按行匹配会把这种最自然的写法静默忽略掉。
+          BODY="$(printf '%s' "$COMMENT_BODY" | tr '\n\t' '  ' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]][[:space:]]*/ /g')"
           if [ "$BODY" = "/review" ] || printf '%s' "$BODY" | grep -q '^/review '; then
             echo "matched=true" >> "$GITHUB_OUTPUT"
+            # /review cloud = 强制走公共 runner：池子被占满或启动器挂了时的手动逃生门
+            ARGS="${BODY#/review}"
+            ARGS="${ARGS# }"
+            ARG="$(printf '%s' "${ARGS%% *}" | tr '[:upper:]' '[:lower:]')"
+            case "$ARG" in
+              cloud)
+                echo "force_cloud=true" >> "$GITHUB_OUTPUT"
+                echo "::notice::按评论要求强制走公共 runner" ;;
+              "")
+                echo "force_cloud=false" >> "$GITHUB_OUTPUT" ;;
+              *)
+                echo "force_cloud=false" >> "$GITHUB_OUTPUT"
+                echo "::notice::忽略未知参数：${ARGS}" ;;
+            esac
           else
             echo "matched=false" >> "$GITHUB_OUTPUT"
-            SAFE_BODY="$(printf '%s' "$BODY" | tr '\n' ' ')"
-            echo "::notice::跳过：评论内容不匹配 /review 命令（trim 后为: ${SAFE_BODY}）"
+            echo "::notice::跳过：评论内容不匹配 /review 命令（trim 后为: ${BODY}）"
           fi
 
       - name: 钉死 head SHA
@@ -55,9 +79,46 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.issue.number }}
         run: |
-          # 钉死触发此刻的 head SHA：维护者背书的是这个 commit，审查也必须审它（防触发后被换包）
-          HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.head.sha')
+          # 一次取两样：head SHA（钉死背书对象）与 draft（草稿不审）。
+          # 不能只给 draft 那行加 ||：命令替换失败不会让 step 变红，draft 会静默变空，
+          # 于是草稿 PR 被当成正常 PR 跑掉两个模型的额度。
+          if ! info=$(gh api "repos/$REPO/pulls/$PR" --jq '[.head.sha, .draft] | @tsv'); then
+            echo "::error::读不到 PR 元数据（head sha / draft），本次中止"
+            exit 1
+          fi
+          HEAD_SHA="${info%%$'\t'*}"
+          DRAFT="${info##*$'\t'}"
           echo "head_sha=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+          echo "draft=$DRAFT" >> "$GITHUB_OUTPUT"
+
+      # 草稿上发 /review 时给一句反馈：否则两个审查 job 静默跳过，维护者只能看到 👀
+      - name: 草稿不审，说明一下
+        if: steps.check.outputs.matched == 'true' && steps.gate.outputs.draft == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/issues/$PR/comments" \
+            -f body="这是草稿（draft），按设计不跑审查。标记为 ready for review 后再发 /review，或等自动审查。" >/dev/null || true
+
+      # 用哪条 runner 完全由评论决定：
+      #   /review       → 自托管（与自动审查共用 concurrency 组，会替换掉正在跑的那条）
+      #   /review cloud → 公共 runner
+      # 不去查"这个 PR 上有没有活跃的自托管 run"：fork PR 的 workflow_runs.pull_requests
+      # 恒为空，对上游绝大多数 PR 都判成"没有"；而且那要额外的 actions: read 权限，
+      # 等于给会读攻击者文本的容器多一把钥匙。
+      - name: 决定用哪条 runner
+        if: steps.check.outputs.matched == 'true'
+        id: route
+        env:
+          FORCE_CLOUD: ${{ steps.check.outputs.force_cloud }}
+        run: |
+          if [ "${FORCE_CLOUD:-false}" = "true" ]; then
+            echo "where=cloud" >> "$GITHUB_OUTPUT"
+          else
+            echo "where=self" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: 回应 👀 表示已收到
         if: success() && steps.check.outputs.matched == 'true'
@@ -67,21 +128,74 @@ jobs:
           gh api "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
             -f content=eyes >/dev/null 2>&1 || true
 
-  # needs: authorize —— authorize 被 if 跳过（非授权人）或评论不匹配时本 job 也随之跳过
-  review:
+  # 自托管：容器由启动器提供，模型地址与假钥匙也由它注入 —— 刻意不声明 ANTHROPIC_*，
+  # 声明空值会把注入值覆盖掉。
+  review_self:
     needs: authorize
-    if: needs.authorize.outputs.matched == 'true'
+    if: needs.authorize.outputs.matched == 'true' && needs.authorize.outputs.where == 'self' && needs.authorize.outputs.draft != 'true'
+    runs-on: [self-hosted, prr-test]
+    # 与 push 触发的自托管审查**共用同一个组**（同样带 tag）：路由判完之后又推了新 commit 时，
+    # 后来的那条会取消这条（反之亦然），不会出现两条同时写同一条评论和同一个 status。
+    concurrency:
+      group: pr-review-selfhosted-${{ github.event.issue.number }}-${{ matrix.tag }}
+      cancel-in-progress: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      # 只放标签：模型名在宿主机的网关配置里，容器只发 a / b
+      matrix:
+        include:
+          - tag: a
+          - tag: b
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PRR_REVIEW_TAG: ${{ matrix.tag }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # PR 那边的代码由门禁脚本自己 fetch，这里只取默认分支
+          fetch-depth: 0
+
+      - name: 审查并按严重度门禁
+        env:
+          PR: ${{ github.event.issue.number }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          git fetch --no-tags origin main 2>/dev/null || true
+          if ! src="$(git show origin/main:.ci/pr-review-run.sh 2>/dev/null)"; then
+            echo "::error::取不到审查脚本（origin/main:.ci/pr-review-run.sh）"
+            gh api "repos/$REPO/statuses/$HEAD_SHA" -f state=error \
+              -f context="pr-review-$PRR_REVIEW_TAG" -f description="取不到审查脚本，未审查" >/dev/null || true
+            exit 1
+          fi
+          printf '%s' "$src" | bash -s -- "$PR" "$HEAD_SHA" "$REPO" "$PRR_REVIEW_TAG"
+
+  # 公共 runner：审查环境来自 ghcr 上的镜像，模型凭据来自仓库 secrets。
+  review_cloud:
+    needs: authorize
+    if: needs.authorize.outputs.matched == 'true' && needs.authorize.outputs.where == 'cloud' && needs.authorize.outputs.draft != 'true'
     runs-on: ubuntu-latest
+    # 自托管那边按 tag 分成两个组，云端这条单独一组，互不取消：云端写的是
+    # <!-- review-pr-ci --> 评论和 pr-review 状态，与自托管的 a/b 两套不重叠。
+    concurrency:
+      group: pr-review-cloud-${{ github.event.issue.number }}
+      cancel-in-progress: true
     timeout-minutes: 60
     container:
-      image: ghcr.io/xiaomi/xiaomi-miloco/pr-review:trixie
+      # 镜像跟着所属仓库走（由 build-image.yml 推）。仓库名可能带大写，而 ghcr 路径必须
+      # 小写，表达式没法转换，所以用仓库变量覆盖；没设时落到上游那份（公开可拉）。
+      image: ${{ vars.PR_REVIEW_IMAGE || 'ghcr.io/xiaomi/xiaomi-miloco/pr-review:trixie' }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     env:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+      # 云端是兜底路径，只跑一个模型；模型名走 vars（云端没有宿主网关做别名替换）。
       PR_AGENT_MODEL: ${{ vars.PR_AGENT_MODEL }}
+      # 单条结论打单条 context（pr-review），描述里标明是兜底，不冒充 a / b
+      PRR_REVIEW_FALLBACK: "1"
       ANTHROPIC_FALLBACK_API_KEY: ${{ secrets.ANTHROPIC_FALLBACK_API_KEY }}
       ANTHROPIC_FALLBACK_BASE_URL: ${{ secrets.ANTHROPIC_FALLBACK_BASE_URL }}
       PR_AGENT_FALLBACK_MODEL: ${{ vars.PR_AGENT_FALLBACK_MODEL }}
@@ -89,42 +203,20 @@ jobs:
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          # 钉死 head SHA：refs/pull/<n>/head 在 base 仓里对 fork PR 也可拉；fetch-depth 0 供命令内 merge-base 比对
-          ref: refs/pull/${{ github.event.issue.number }}/head
+          # PR 那边的代码由门禁脚本自己 fetch，这里只取默认分支
           fetch-depth: 0
 
-      - name: 校验 head 未被偷换
+      - name: 审查并按严重度门禁
+        env:
+          PR: ${{ github.event.issue.number }}
+          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+          REPO: ${{ github.repository }}
         run: |
-          GOT=$(git rev-parse HEAD)
-          if [ "$GOT" != "${{ needs.authorize.outputs.head_sha }}" ]; then
-            echo "::error::PR head 从授权时的 ${{ needs.authorize.outputs.head_sha }} 变为 $GOT，疑似触发后改包，已中止"
+          git fetch --no-tags origin main 2>/dev/null || true
+          if ! src="$(git show origin/main:.ci/pr-review-run.sh 2>/dev/null)"; then
+            echo "::error::取不到审查脚本（origin/main:.ci/pr-review-run.sh）"
+            gh api "repos/$REPO/statuses/$HEAD_SHA" -f state=error \
+              -f context="pr-review" -f description="取不到审查脚本，未审查" >/dev/null || true
             exit 1
           fi
-
-      - name: 允许 git 访问工作区
-        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      - name: AI 审查并按严重度门禁
-        env:
-          PR_NUMBER: ${{ github.event.issue.number }}
-          HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
-        run: |
-          git fetch origin main
-
-          # 跑 base 分支上的共用审查+门禁脚本（与 pr-review.yml 同一份，单一来源）。
-          # 用 git show 取 base 版本而非当前 checkout——fork PR 改不动这段逻辑；
-          # 脚本内部会清掉 fork PR 树里的不可信配置并从 base 取回可信命令文件（见脚本头部安全模型）。
-          if git show origin/main:.ci/pr-review-gate.sh | bash -s -- "$PR_NUMBER" "${{ github.repository }}"; then
-            STATE=success
-            DESC="未发现严重/重要问题"
-          else
-            STATE=failure
-            DESC="发现严重/重要问题"
-          fi
-
-          # issue_comment 触发的 run 不会自动成为 PR 的 check；把结论打到 head SHA 的 commit status，
-          # 让结果显示在 PR 上，也可在分支保护里设为 required check 来真正阻断 merge
-          gh api "repos/${{ github.repository }}/statuses/$HEAD_SHA" \
-            -f state="$STATE" -f context="pr-review" -f description="$DESC" >/dev/null
-
-          [ "$STATE" = success ]
+          printf '%s' "$src" | bash -s -- "$PR" "$HEAD_SHA" "$REPO"
