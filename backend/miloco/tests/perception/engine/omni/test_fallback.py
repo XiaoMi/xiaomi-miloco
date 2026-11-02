@@ -1,0 +1,360 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import httpx
+import pytest
+from miloco.perception.engine.config import OmniConfig
+from miloco.perception.engine.identity.dispatcher import IdentityQueryItem
+from miloco.perception.engine.omni import omni as orchestrator
+from miloco.perception.engine.omni import omni_client
+from miloco.perception.engine.omni.circuit_breaker import CircuitOpenError
+from miloco.perception.engine.omni.omni_client import (
+    MalformedBodyError,
+    OmniError,
+    _is_fallback_eligible,
+    resolve_fallback_omni_configs,
+)
+from miloco.perception.engine.types import OmniContext
+
+
+def _http_error(status: int) -> OmniError:
+    req = httpx.Request("POST", "https://provider.example/v1/chat/completions")
+    resp = httpx.Response(status, request=req)
+    return OmniError(
+        "failed", original=httpx.HTTPStatusError("failed", request=req, response=resp)
+    )
+
+
+def test_fallback_eligible_only_for_recoverable_failures():
+    assert _is_fallback_eligible(OmniError("timeout", original=httpx.ReadTimeout("x")))
+    assert _is_fallback_eligible(
+        OmniError(
+            "server disconnected",
+            original=httpx.RemoteProtocolError("Server disconnected without response"),
+        )
+    )
+    assert _is_fallback_eligible(_http_error(429))
+    assert _is_fallback_eligible(_http_error(503))
+    malformed = OmniError("bad", original=MalformedBodyError("list"))
+    assert _is_fallback_eligible(malformed)
+    assert malformed.code == "bad_response"
+    assert _is_fallback_eligible(
+        OmniError(
+            "open",
+            original=CircuitOpenError("skipped:cooling:rate_limited", "limited"),
+        )
+    )
+
+    assert not _is_fallback_eligible(_http_error(400))
+    assert not _is_fallback_eligible(_http_error(401))
+    assert not _is_fallback_eligible(_http_error(404))
+    assert not _is_fallback_eligible(_http_error(422), is_primary=False)
+    assert _is_fallback_eligible(_http_error(401), is_primary=False)
+    assert _is_fallback_eligible(_http_error(403), is_primary=False)
+    assert _is_fallback_eligible(_http_error(404), is_primary=False)
+    assert not _is_fallback_eligible(
+        OmniError(
+            "open",
+            original=CircuitOpenError("skipped:cooling:bad_key", "bad key"),
+        )
+    )
+    assert not _is_fallback_eligible(OmniError("unknown"))
+
+
+def test_resolve_fallback_configs_preserves_order_and_skips_invalid(monkeypatch):
+    profiles = [
+        SimpleNamespace(
+            label="same", model="primary", base_url="https://p/v1", api_key="p"
+        ),
+        SimpleNamespace(
+            label="backup-b", model="b", base_url="https://b/v1/", api_key="kb"
+        ),
+        SimpleNamespace(
+            label="backup-a", model="a", base_url="https://a/v1", api_key="ka"
+        ),
+        SimpleNamespace(
+            label="empty-key", model="x", base_url="https://x/v1", api_key=""
+        ),
+    ]
+    settings = SimpleNamespace(
+        model=SimpleNamespace(
+            omni_profiles=profiles,
+            omni_fallbacks=[
+                "missing",
+                "backup-b",
+                "backup-b",
+                "same",
+                "empty-key",
+                "backup-a",
+            ],
+        )
+    )
+    monkeypatch.setattr("miloco.config.get_settings", lambda: settings)
+    base = OmniConfig(
+        model="primary",
+        base_url="https://p/v1",
+        api_key="p",
+        max_completion_tokens=321,
+        timeout=12,
+    )
+
+    out = resolve_fallback_omni_configs(base)
+
+    assert [(x.model, x.base_url, x.api_key) for x in out] == [
+        ("b", "https://b/v1", "kb"),
+        ("a", "https://a/v1", "ka"),
+    ]
+    assert all(x.max_completion_tokens == 321 for x in out)
+    assert all(x.timeout == 12 for x in out)
+
+
+@pytest.mark.asyncio
+async def test_call_omni_uses_ordered_fallback_without_primary_breaker(monkeypatch):
+    primary = OmniConfig(model="primary", base_url="https://p/v1", api_key="p")
+    backup = OmniConfig(model="backup", base_url="https://b/v1", api_key="b")
+    calls: list[tuple[str, bool]] = []
+
+    monkeypatch.setattr(
+        omni_client, "resolve_fallback_omni_configs", lambda config: [backup]
+    )
+
+    async def fake_call(payload, config, type="realtime", *, use_circuit_breaker=True):
+        calls.append((config.model, use_circuit_breaker))
+        if config.model == "primary":
+            raise _http_error(429)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(omni_client, "_call_omni_once", fake_call)
+
+    result = await omni_client.call_omni({"messages": []}, primary)
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert calls == [("primary", True), ("backup", False)]
+
+
+@pytest.mark.asyncio
+async def test_call_omni_skips_bad_credentials_in_middle_of_chain(monkeypatch):
+    primary = OmniConfig(model="primary", base_url="https://p/v1", api_key="p")
+    broken = OmniConfig(model="broken", base_url="https://a/v1", api_key="a")
+    healthy = OmniConfig(model="healthy", base_url="https://b/v1", api_key="b")
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        omni_client,
+        "resolve_fallback_omni_configs",
+        lambda config: [broken, healthy],
+    )
+
+    async def fake_call(payload, config, type="realtime", *, use_circuit_breaker=True):
+        calls.append(config.model)
+        if config.model == "primary":
+            raise _http_error(429)
+        if config.model == "broken":
+            raise _http_error(401)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(omni_client, "_call_omni_once", fake_call)
+
+    result = await omni_client.call_omni({"messages": []}, primary)
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert calls == ["primary", "broken", "healthy"]
+
+
+@pytest.mark.asyncio
+async def test_call_omni_falls_back_for_malformed_body(monkeypatch):
+    primary = OmniConfig(model="primary", base_url="https://p/v1", api_key="p")
+    backup = OmniConfig(model="backup", base_url="https://b/v1", api_key="b")
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        omni_client, "resolve_fallback_omni_configs", lambda config: [backup]
+    )
+
+    async def fake_call(payload, config, type="realtime", *, use_circuit_breaker=True):
+        calls.append(config.model)
+        if config.model == "primary":
+            malformed = MalformedBodyError("list")
+            raise OmniError(str(malformed), original=malformed)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    monkeypatch.setattr(omni_client, "_call_omni_once", fake_call)
+
+    result = await omni_client.call_omni({"messages": []}, primary)
+
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert calls == ["primary", "backup"]
+
+
+@pytest.mark.asyncio
+async def test_call_omni_does_not_fallback_for_bad_request(monkeypatch):
+    primary = OmniConfig(model="primary", base_url="https://p/v1", api_key="p")
+    backup = OmniConfig(model="backup", base_url="https://b/v1", api_key="b")
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        omni_client, "resolve_fallback_omni_configs", lambda config: [backup]
+    )
+
+    async def fake_call(payload, config, type="realtime", *, use_circuit_breaker=True):
+        calls.append(config.model)
+        raise _http_error(400)
+
+    monkeypatch.setattr(omni_client, "_call_omni_once", fake_call)
+
+    with pytest.raises(OmniError):
+        await omni_client.call_omni({"messages": []}, primary)
+
+    assert calls == ["primary"]
+
+
+@pytest.mark.asyncio
+async def test_stream_fallback_only_before_first_delta(monkeypatch):
+    primary = OmniConfig(model="primary", base_url="https://p/v1", api_key="p")
+    backup = OmniConfig(model="backup", base_url="https://b/v1", api_key="b")
+    calls: list[tuple[str, bool]] = []
+
+    monkeypatch.setattr(
+        omni_client, "resolve_fallback_omni_configs", lambda config: [backup]
+    )
+
+    async def fake_stream(
+        payload,
+        config,
+        usage_out=None,
+        type="realtime",
+        *,
+        use_circuit_breaker=True,
+    ):
+        calls.append((config.model, use_circuit_breaker))
+        if config.model == "primary":
+            raise _http_error(503)
+        yield "backup"
+
+    monkeypatch.setattr(omni_client, "_call_omni_stream_once", fake_stream)
+
+    chunks = [
+        chunk async for chunk in omni_client.call_omni_stream({"messages": []}, primary)
+    ]
+
+    assert chunks == ["backup"]
+    assert calls == [("primary", True), ("backup", False)]
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_fallback_after_partial_output(monkeypatch):
+    primary = OmniConfig(model="primary", base_url="https://p/v1", api_key="p")
+    backup = OmniConfig(model="backup", base_url="https://b/v1", api_key="b")
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        omni_client, "resolve_fallback_omni_configs", lambda config: [backup]
+    )
+
+    async def fake_stream(
+        payload,
+        config,
+        usage_out=None,
+        type="realtime",
+        *,
+        use_circuit_breaker=True,
+    ):
+        calls.append(config.model)
+        yield "partial"
+        raise _http_error(503)
+
+    monkeypatch.setattr(omni_client, "_call_omni_stream_once", fake_stream)
+
+    with pytest.raises(OmniError):
+        async for _ in omni_client.call_omni_stream({"messages": []}, primary):
+            pass
+
+    assert calls == ["primary"]
+
+
+def _fused_engine():
+    candidates = [IdentityQueryItem(track_id=7, bbox_xyxy_norm=(100, 100, 400, 900))]
+    library = Mock()
+    library.list_persons.return_value = []
+    return SimpleNamespace(
+        library=library,
+        take_fused_pending=Mock(
+            return_value=SimpleNamespace(candidates=candidates, gallery_snapshot={})
+        ),
+        config=SimpleNamespace(
+            stranger=SimpleNamespace(distinguish=True), confidence_cutoff=0.5
+        ),
+        deliver_fused_response=AsyncMock(),
+        deliver_fused_failure=AsyncMock(),
+    )
+
+
+def _patch_fused_payload(monkeypatch, fallbacks):
+    built_for: list[str] = []
+
+    def fake_build(**kwargs):
+        built_for.append(type(kwargs["adapter"]).__name__)
+        return {"messages": [{"role": "user", "content": "window"}]}
+
+    monkeypatch.setattr(orchestrator, "build_fused_payload", fake_build)
+    monkeypatch.setattr(
+        orchestrator, "resolve_fallback_omni_configs", lambda config: fallbacks
+    )
+    monkeypatch.setattr(
+        orchestrator, "parse_identity_assignments", lambda raw, **kwargs: []
+    )
+    return built_for
+
+
+@pytest.mark.asyncio
+async def test_fused_falls_back_past_bad_backup_credentials(monkeypatch):
+    primary = OmniConfig(model="primary", base_url="https://p/v1", api_key="p")
+    broken = OmniConfig(model="broken", base_url="https://a/v1", api_key="a")
+    healthy = OmniConfig(model="healthy", base_url="https://b/v1", api_key="b")
+    built_for = _patch_fused_payload(monkeypatch, [broken, healthy])
+    calls: list[tuple[str, bool]] = []
+
+    async def fake_messages(
+        messages, config, *, adapter=None, use_circuit_breaker=True
+    ):
+        calls.append((config.model, use_circuit_breaker))
+        if config.model == "primary":
+            raise _http_error(429)
+        if config.model == "broken":
+            raise _http_error(401)
+        return {"choices": [{"message": {"content": '{"caption": "fallback ok"}'}}]}
+
+    monkeypatch.setattr(orchestrator, "_call_omni_messages", fake_messages)
+    engine = _fused_engine()
+
+    output = await orchestrator.run_omni_fused([], OmniContext(), primary, engine)
+
+    assert output.caption[0].description == "fallback ok"
+    assert calls == [("primary", True), ("broken", False), ("healthy", False)]
+    assert len(built_for) == 3
+    engine.deliver_fused_response.assert_awaited_once_with([])
+    engine.deliver_fused_failure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fused_reports_failure_once_when_all_providers_fail(monkeypatch):
+    primary = OmniConfig(model="primary", base_url="https://p/v1", api_key="p")
+    backup = OmniConfig(model="backup", base_url="https://b/v1", api_key="b")
+    _patch_fused_payload(monkeypatch, [backup])
+    calls: list[str] = []
+
+    async def fake_messages(
+        messages, config, *, adapter=None, use_circuit_breaker=True
+    ):
+        calls.append(config.model)
+        raise _http_error(429 if config.model == "primary" else 503)
+
+    monkeypatch.setattr(orchestrator, "_call_omni_messages", fake_messages)
+    engine = _fused_engine()
+
+    with pytest.raises(OmniError):
+        await orchestrator.run_omni_fused([], OmniContext(), primary, engine)
+
+    assert calls == ["primary", "backup"]
+    engine.deliver_fused_response.assert_not_awaited()
+    engine.deliver_fused_failure.assert_awaited_once()
