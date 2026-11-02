@@ -7,6 +7,7 @@ from miloco.perception.engine.omni.provider import (
     GeminiAdapter,
     LocalMediaInfo,
     MiMoAdapter,
+    MiniMaxAdapter,
     OpenAICompatAdapter,
     QwenOmniAdapter,
     build_request_headers,
@@ -81,16 +82,27 @@ class TestGetAdapter:
     def test_gemini_case_insensitive(self):
         assert isinstance(get_adapter("Gemini-3-Pro"), GeminiAdapter)
 
+    def test_minimax_m3(self):
+        assert isinstance(get_adapter("MiniMax-M3"), MiniMaxAdapter)
+
+    def test_minimax_m3_flash(self):
+        assert isinstance(get_adapter("MiniMax-M3.1-Flash"), MiniMaxAdapter)
+
+    def test_minimax_case_insensitive(self):
+        assert isinstance(get_adapter("minimax-m3.1-flash"), MiniMaxAdapter)
+
     def test_openai_compat_family(self):
-        # MiMo / Qwen 都归 OpenAI 兼容族；Gemini 不是。
+        # MiMo / Qwen / MiniMax 都归 OpenAI 兼容族；Gemini 不是。
         assert isinstance(get_adapter("mimo-v2.6-flash"), OpenAICompatAdapter)
         assert isinstance(get_adapter("qwen3.5-omni-flash"), OpenAICompatAdapter)
+        assert isinstance(get_adapter("MiniMax-M3.1-Flash"), OpenAICompatAdapter)
         assert not isinstance(get_adapter("gemini-3-flash-preview"), OpenAICompatAdapter)
 
     def test_singleton(self):
         assert get_adapter("mimo-v2.6-flash") is get_adapter("mimo-v2.6-flash")
         assert get_adapter("qwen3.5-omni-flash") is get_adapter("qwen3.5-omni-plus")
         assert get_adapter("gemini-3-flash") is get_adapter("gemini-3-pro")
+        assert get_adapter("MiniMax-M3") is get_adapter("MiniMax-M3.1-Flash")
 
 
 class TestMiMoAdapter:
@@ -136,6 +148,64 @@ class TestMiMoAdapter:
         assert body["stream"] is True
         assert body["stream_options"] == {"include_usage": True}
         assert body["thinking"] == {"type": "disabled"}
+
+
+class TestMiniMaxAdapter:
+    adapter = MiniMaxAdapter()
+
+    def test_request_body_has_no_thinking(self):
+        """根因回归守护:M3 要求 adaptive thinking,显式 thinking.disabled 会被上游拒(400/2013)。"""
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
+        )
+        assert "thinking" not in body
+
+    def test_request_body_stream_has_no_thinking(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=True,
+        )
+        assert "thinking" not in body
+        assert body["stream"] is True
+        assert body["stream_options"] == {"include_usage": True}
+
+    def test_request_body_otherwise_same_as_mimo(self):
+        """除 thinking 外与 MiMoAdapter 逐字段一致。"""
+        minimax = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
+        )
+        mimo = MiMoAdapter().build_request_body(
+            _MESSAGES, model="mimo-v2.6-flash",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
+        )
+        assert set(minimax) == set(mimo) - {"thinking"}
+        assert minimax["max_tokens"] == mimo["max_tokens"]
+        assert minimax["temperature"] == mimo["temperature"]
+        assert minimax["top_p"] == mimo["top_p"]
+        assert minimax["stream"] == mimo["stream"]
+
+    def test_video_block_same_as_mimo(self):
+        block = self.adapter.build_video_block("AAAA", _VIDEO_MEDIA)
+        assert block["type"] == "video_url"
+        assert block["fps"] == 1
+        assert block["media_resolution"] == "max"
+        assert block["video_url"]["url"].startswith("data:video/mp4;base64,")
+
+    def test_audio_block_same_as_mimo(self):
+        block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA)
+        assert block["type"] == "input_audio"
+        assert block["input_audio"]["format"] == "m4a"
+        assert block["input_audio"]["data"].startswith("data:audio/m4a;base64,")
+
+    def test_image_block_default_jpeg_data_uri(self):
+        block = self.adapter.build_image_block(b"\xff\xd8rawjpeg")
+        assert block["type"] == "image_url"
+        prefix = "data:image/jpeg;base64,"
+        url = block["image_url"]["url"]
+        assert url.startswith(prefix)
+        assert base64.b64decode(url[len(prefix):]) == b"\xff\xd8rawjpeg"
 
 
 class TestQwenOmniAdapter:

@@ -14,8 +14,8 @@ adapter 职责：
   - parse_response / parse_stream_chunk —— 把 provider 响应反解析回 OpenAI 形态
     ``{choices:[{message:{content}}], usage:{...}}``。
 
-OpenAI 兼容族（MiMo / Qwen）继承 ``OpenAICompatAdapter``，协议方法走默认实现，只覆写各自
-的 block / body 差异。Gemini 走原生 ``generateContent`` 协议（OpenAI 兼容端点不支持视频输入）。
+OpenAI 兼容族（MiMo / Qwen / MiniMax）继承 ``OpenAICompatAdapter``，协议方法走默认实现，
+只覆写各自的 block / body 差异。Gemini 走原生 ``generateContent`` 协议（OpenAI 兼容端点不支持视频输入）。
 """
 
 from __future__ import annotations
@@ -225,6 +225,69 @@ class MiMoAdapter(OpenAICompatAdapter):
             "top_p": top_p,
             "stream": stream,
             "thinking": {"type": "disabled"},
+        }
+        if stream:
+            body["stream_options"] = {"include_usage": True}
+        return body
+
+
+class MiniMaxAdapter(OpenAICompatAdapter):
+    """MiniMax M3 系列 API adapter（MiniMax-M3 / MiniMax-M3.1-Flash）。
+
+    与 MiMoAdapter 的唯一差别：**不发 ``thinking`` 字段**。
+
+    M3 系列要求 adaptive thinking（由上游自行决定是否思考），显式关思考会被拒：
+    ``invalid params, model "MiniMax-M3.1-Flash" requires adaptive thinking;
+    thinking.type="disabled" (including reasoning.effort=none) is not allowed (2013)``（HTTP 400）。
+    而 get_adapter 对未识别的模型名一律落到 MiMoAdapter，其 build_request_body 强加
+    ``thinking: {"type": "disabled"}`` —— 于是 MiniMax 配置在 /api/admin/omni-config/test 上
+    表现为 rejected_authed(400)，被误报成「模型名或 API Key 可能有误」，实际两者都正确。
+
+    不发 thinking ≠ 关思考：M3 会自行开启 adaptive thinking，推理内容走响应里的
+    ``reasoning_content`` 字段（部分场景内联 ``<think>`` 标签，response_parser 侧已剥离）。
+
+    - video block: ``video_url`` + ``fps`` + ``media_resolution: "max"``（同 MiMo；
+      MiniMax 要求 data URI 带真实 media type，``data:;base64,`` 会被拒）
+    - audio block: ``input_audio`` + ``format``（同 MiMo）
+    - request body: 不含 ``thinking``
+    """
+
+    def build_video_block(self, video_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        return {
+            "type": "video_url",
+            "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
+            "fps": media.fps,
+            "media_resolution": "max",
+        }
+
+    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
+        # 形态同 MiMoAdapter：OpenAI 规范 input_audio 的 data+format 均必填，m4a(AAC) 容器。
+        return {
+            "type": "input_audio",
+            "input_audio": {
+                "data": f"data:audio/m4a;base64,{audio_base64}",
+                "format": "m4a",
+            },
+        }
+
+    def build_request_body(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        # 与 MiMoAdapter 逐字段相同，唯一差别是这里**不写** thinking —— M3 不接受显式关闭。
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "stream": stream,
         }
         if stream:
             body["stream_options"] = {"include_usage": True}
@@ -534,6 +597,7 @@ def adjust_fps_for_omni(fps: int, omni_fps: int) -> int:
 _DEFAULT_ADAPTER = MiMoAdapter()
 _QWEN_ADAPTER = QwenOmniAdapter()
 _GEMINI_ADAPTER = GeminiAdapter()
+_MINIMAX_ADAPTER = MiniMaxAdapter()
 
 
 def get_adapter(model: str) -> OmniProviderAdapter:
@@ -542,9 +606,14 @@ def get_adapter(model: str) -> OmniProviderAdapter:
     Qwen 侧仅支持 Qwen3.5-Omni 系列（qwen3.5-omni-plus / qwen3.5-omni-flash），
     旧版 qwen3-omni-flash 不支持多模态组合输入，无法满足 fused 模式需求。
 
+    MiniMax 侧支持 M3 系列（MiniMax-M3 / MiniMax-M3.1-Flash）：协议仍是 OpenAI 兼容，
+    与 MiMo 的唯一差别是不发 thinking 字段（M3 要求 adaptive thinking，显式关闭会被拒）。
+
     Gemini 走原生 generateContent 协议（OpenAI 兼容端点不支持视频输入）。
     """
     name = model.lower()
+    if "minimax" in name:
+        return _MINIMAX_ADAPTER
     if "qwen" in name:
         return _QWEN_ADAPTER
     if "gemini" in name:
