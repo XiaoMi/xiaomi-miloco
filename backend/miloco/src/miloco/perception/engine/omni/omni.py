@@ -416,7 +416,9 @@ async def _call_omni_messages(
             inference_params={
                 "temperature": config.temperature,
                 "top_p": config.top_p,
-                "max_tokens": config.max_completion_tokens,
+                # 以 adapter 改写后的 body 为准：MiniMax 会把 max_tokens 抬到 4096 下限，
+                # 记录配置值会让 trace 与实际请求不一致，失去「可直接铺回请求体复现」的语义。
+                "max_tokens": body.get("max_tokens", config.max_completion_tokens),
             },
         )
 

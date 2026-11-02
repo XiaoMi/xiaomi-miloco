@@ -169,6 +169,8 @@ class TestMiniMaxAdapter:
         assert "thinking" not in body
         assert body["stream"] is True
         assert body["stream_options"] == {"include_usage": True}
+        # 流式路径同样受 max_tokens 下限约束(生产 stream=True 走的就是这条)。
+        assert body["max_tokens"] == 4096
 
     def test_request_body_otherwise_same_as_mimo(self):
         """除 thinking / max_tokens 下限外与 MiMoAdapter 逐字段一致。"""
@@ -198,12 +200,16 @@ class TestMiniMaxAdapter:
         assert body["max_tokens"] == 4096
 
     def test_max_tokens_larger_config_untouched(self):
-        """配置比下限大时按配置走,不压回去。"""
+        """配置比下限大时按配置走,不压回去。
+
+        用例必须传一个明显大于下限的值:传恰好等于下限(4096)的话,实现写成
+        「永远返回 4096」照样通过,「保留用户配置」这条分支实际没被覆盖。
+        """
         body = self.adapter.build_request_body(
             _MESSAGES, model="MiniMax-M3.1-Flash",
-            max_tokens=4096, temperature=0.1, top_p=0.95, stream=False,
+            max_tokens=8192, temperature=0.1, top_p=0.95, stream=False,
         )
-        assert body["max_tokens"] == 4096
+        assert body["max_tokens"] == 8192
 
     def test_inherits_mimo_block_shapes(self):
         """块形态靠继承保证一致,而不是复制粘贴后靠人同步。"""

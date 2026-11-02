@@ -3,6 +3,12 @@
 统一被 web preflight (admin/router.py) 与运行时 circuit_breaker HALF_OPEN 复用。
 两阶段探测：GET /models 验鉴权+可达；再 max_tokens=1 chat 真校验模型。
 
+注意 max_tokens=1 是「探针哨兵」语义：探测只判 HTTP 200 + 响应是 dict，从不读 content，
+故预算给多少都无所谓。MiniMax 侧例外——M3 强制 adaptive thinking 且思考 token 计入
+max_tokens 预算，adapter 会把 1 抬到 4096 下限（见 provider.py 的
+_MINIMAX_MIN_MAX_TOKENS）。抬高的是上限不是实耗：实测 ping 的思考量仅 20-40 token、
+延迟 0.9-4.6s，仍在 _TIMEOUT 的 15s 读超时内。
+
 返回统一形状 {ok, code, status?, latency_ms?, message}。探测类 code 与 spec §2 的集合一致;
 ``fetch_models`` 另有一个 ``list_unsupported``,不参与熔断、不属于该集合(见 error_classifier
 的 docstring),别因为在那边找不到就补进去。
@@ -314,6 +320,9 @@ async def _probe_stream_chat(
 
 async def probe_chat(model: str, base_url: str, api_key: str) -> dict[str, Any]:
     """极简 chat 探测(max_tokens=1)真校验模型是否可用。
+
+    max_tokens=1 是哨兵值：只判 HTTP 200,不需要可见输出预算。MiniMax 的 adapter 会把它
+    抬到 4096(见 provider.py),实际消耗仍然极小。
 
     走 provider adapter 生成 body,兼容不同 provider 的强制要求(Qwen 强制
     stream=True + modalities=["text"])。之前硬编码非流式 body 打 Qwen 会被

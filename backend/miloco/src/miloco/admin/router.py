@@ -1276,7 +1276,7 @@ class OmniTestBody(BaseModel):
 
 @router.post(
     "/omni-config/test",
-    summary="测试 omni 配置连通性（OpenAI 兼容族（MiMo/Qwen/MiniMax）两阶段预检+真校验 / 原生协议单阶段 chat 探测，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
+    summary="测试 omni 配置连通性（OpenAI 兼容族（MiMo/Qwen/MiniMax）两阶段预检+真校验 / 原生协议单阶段 chat 探测，max_tokens=1 极少量 token；MiniMax 因强制自适应思考实际下限 4096，不写库、不计入 miloco 用量统计）",
     response_model=NormalResponse,
 )
 async def test_omni_config(
@@ -1287,6 +1287,9 @@ async def test_omni_config(
     OpenAI 兼容族（MiMo/Qwen/MiniMax）两阶段：先 GET /models 验鉴权/可达，再发一次 max_tokens=1 的
     极简 chat 真正验证该模型可用；非 OpenAI 兼容族（Gemini 等原生协议）没有等价 GET /models
     预检语义，直接走 adapter 化的 chat 探测。消耗极少量 token，不计入 miloco 用量统计。
+    MiniMax 例外：M3 强制 adaptive thinking 且思考 token 计入 max_tokens 预算，adapter 会把
+    探测用的 max_tokens=1 抬到 4096 下限（实测 ping 的思考量仅 20-40 token，抬高的是上限而非
+    实耗，延迟实测 0.9-4.6s 仍在探测 15s 超时内）。
     返回 {ok, code, status, latency_ms, message}。"""
     omni = get_settings().model.omni
     model = (body.model or omni.model).strip()

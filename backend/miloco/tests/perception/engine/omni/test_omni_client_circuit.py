@@ -15,6 +15,7 @@ from miloco.perception.engine.omni.error_classifier import (
     ErrorCategory,
 )
 from miloco.perception.engine.omni.provider import build_request_headers, get_adapter
+from miloco.perception.snapshot_context import OmniEventArtifacts, event_artifacts_scope
 
 
 class _FakeResp:
@@ -97,6 +98,103 @@ def _cfg(base_url: str = "https://x/v1") -> OmniConfig:
 
 def _payload() -> dict:
     return {"system_prompt": "sys", "user_content": "u"}
+
+
+# ─── trace 留痕:max_tokens 以 adapter 实际产出的 body 为准 ──────────────────
+
+
+async def test_trace_max_tokens_matches_sent_body_for_minimax(monkeypatch):
+    """MiniMax 的 trace 留痕必须记 adapter 抬高后的 max_tokens,不是配置原值。
+
+    留痕契约是「键名与 wire payload 对齐,供复现时可直接铺进请求体还原完整 API call」
+    (见 snapshot_context.push_omni_trace)。MiniMax adapter 会把 max_tokens 抬到 4096 下限,
+    若留痕仍记配置值(默认 512),按 trace 复现就会复现出本 PR 要消灭的空 content。
+    """
+    captured: list[dict] = []
+
+    def _capture(*a, **k):
+        captured.append(k.get("json") or {})
+        return _FakeResp(200, {"choices": [], "usage": {}})
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            return _capture(*a, **k)
+
+    monkeypatch.setattr(omni_client.httpx, "AsyncClient", _C)
+
+    artifacts = OmniEventArtifacts()
+    cfg = OmniConfig(
+        model="MiniMax-M3.1-Flash",
+        base_url="https://x/v1",
+        api_key="sk-1",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=512,
+        timeout=1.0,
+        stream=False,
+    )
+    with event_artifacts_scope(artifacts):
+        await omni_client.call_omni(_payload(), cfg)
+
+    assert captured, "请求没发出去,断言无效"
+    sent_max_tokens = captured[0]["max_tokens"]
+    assert sent_max_tokens == 4096, "adapter 没把 max_tokens 抬到下限"
+
+    calls = (artifacts.trace or {}).get("calls") or []
+    assert calls, "trace 没记到调用"
+    recorded = calls[-1]["inference_params"]["max_tokens"]
+    assert recorded == sent_max_tokens, (
+        f"trace 记的 max_tokens={recorded} 与实际发出的 {sent_max_tokens} 不一致"
+    )
+
+
+async def test_trace_max_tokens_unchanged_for_mimo(monkeypatch):
+    """非 MiniMax provider 的留痕行为不变(MiMo 没有下限,记的就是配置值)。"""
+    captured: list[dict] = []
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            captured.append(k.get("json") or {})
+            return _FakeResp(200, {"choices": [], "usage": {}})
+
+    monkeypatch.setattr(omni_client.httpx, "AsyncClient", _C)
+
+    artifacts = OmniEventArtifacts()
+    cfg = OmniConfig(
+        model="mimo-v2.6-flash",
+        base_url="https://x/v1",
+        api_key="sk-1",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=512,
+        timeout=1.0,
+        stream=False,
+    )
+    with event_artifacts_scope(artifacts):
+        await omni_client.call_omni(_payload(), cfg)
+
+    calls = (artifacts.trace or {}).get("calls") or []
+    assert calls
+    recorded = calls[-1]["inference_params"]["max_tokens"]
+    assert recorded == captured[0]["max_tokens"] == 512
 
 
 # ─── call_omni × 熔断 ───────────────────────────────────────────────────────
