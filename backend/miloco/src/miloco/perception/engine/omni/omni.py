@@ -31,6 +31,7 @@ from miloco.perception.engine.omni.error_classifier import (
 from miloco.perception.engine.omni.omni_client import (
     OmniError,
     _collect_stream_response,
+    _trace_inference_params,
     call_omni,
     call_omni_stream,
     extract_usage,
@@ -413,13 +414,7 @@ async def _call_omni_messages(
             latency_ms=latency_ms,
             error=error,
             model=config.model,
-            inference_params={
-                "temperature": config.temperature,
-                "top_p": config.top_p,
-                # 以 adapter 改写后的 body 为准：MiniMax 会把 max_tokens 抬到 4096 下限，
-                # 记录配置值会让 trace 与实际请求不一致，失去「可直接铺回请求体复现」的语义。
-                "max_tokens": body.get("max_tokens", config.max_completion_tokens),
-            },
+            inference_params=_trace_inference_params(body, config),
         )
 
 

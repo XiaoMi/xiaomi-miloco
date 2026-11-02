@@ -32,6 +32,25 @@ from miloco.perception.engine.omni.provider import (
 )
 from miloco.perception.snapshot_context import push_omni_trace
 
+
+def _trace_inference_params(
+    body: dict[str, Any], config: OmniConfig
+) -> dict[str, Any]:
+    """trace 留痕的推理参数——以 adapter 改写后的 body 为准。
+
+    留痕契约是「键名与 wire payload 对齐，供复现时可直接铺进请求体还原完整 API call」
+    (见 snapshot_context.push_omni_trace)。MiniMax 的 adapter 会把 max_tokens 抬到 4096
+    下限，记录配置值(默认 512)会让 trace 与实际请求不一致。Gemini 的 body 无
+    max_tokens 键(走 generationConfig.maxOutputTokens)，默认值保证它照旧记配置值。
+
+    三个 omni 出口(非流式 / 流式 / fused)共用这一份，避免各留一份副本后改一处漏两处。
+    """
+    return {
+        "temperature": config.temperature,
+        "top_p": config.top_p,
+        "max_tokens": body.get("max_tokens", config.max_completion_tokens),
+    }
+
 logger = logging.getLogger(__name__)
 
 _ENV_KEY = "MILOCO_MODEL__OMNI__API_KEY"
@@ -329,13 +348,7 @@ async def call_omni(
             latency_ms=latency_ms,
             error=error,
             model=config.model,
-            inference_params={
-                "temperature": config.temperature,
-                "top_p": config.top_p,
-                # 以 adapter 改写后的 body 为准：MiniMax 会把 max_tokens 抬到 4096 下限，
-                # 记录配置值会让 trace 与实际请求不一致，失去「可直接铺回请求体复现」的语义。
-                "max_tokens": body.get("max_tokens", config.max_completion_tokens),
-            },
+            inference_params=_trace_inference_params(body, config),
         )
 
 
@@ -563,11 +576,5 @@ async def call_omni_stream(
             latency_ms=latency_ms,
             error=error,
             model=config.model,
-            inference_params={
-                "temperature": config.temperature,
-                "top_p": config.top_p,
-                # 以 adapter 改写后的 body 为准：MiniMax 会把 max_tokens 抬到 4096 下限，
-                # 记录配置值会让 trace 与实际请求不一致，失去「可直接铺回请求体复现」的语义。
-                "max_tokens": body.get("max_tokens", config.max_completion_tokens),
-            },
+            inference_params=_trace_inference_params(body, config),
         )

@@ -618,6 +618,11 @@ def get_adapter(model: str) -> OmniProviderAdapter:
     Gemini 走原生 generateContent 协议（OpenAI 兼容端点不支持视频输入）。
     """
     name = model.lower()
+    # 按厂商名整体接管 MiniMax：目前只实测过 M3 系列（MiniMax-M3 / MiniMax-M3.1-Flash），
+    # 但分流条件是「模型名含 minimax」，故其他 MiniMax 模型名（如 MiniMax-Text-01 一类）
+    # 也会拿到「不发 thinking + max_tokens 4096 下限」——与改动前落到 MiMoAdapter 的行为
+    # 不同（此前带 thinking.disabled 且用配置原值 max_tokens）。接入非 M3 的 MiniMax 模型前
+    # 需实测确认该模型接受不发 thinking、且 4096 预算合适；收窄到 "m3" 可避免这一变更。
     if "minimax" in name:
         return _MINIMAX_ADAPTER
     if "qwen" in name:
