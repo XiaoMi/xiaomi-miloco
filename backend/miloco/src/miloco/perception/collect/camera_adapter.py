@@ -578,7 +578,39 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             tracks = state.sync_buffer.peek_latest(duration_ms=collect_ms)
             if tracks is None or not any(tracks.values()):
                 return None
-            return self._build_device_data(state, tracks)
+            # peek 没有 drain 窗口可借边界,必须自己补:缺省的 0/0 会让 DeviceData 的
+            # 起止时刻相等(unix 换算后同为 epoch_delta),下游 snapshot 时长为 0,
+            # get_frames_at_fps 随之不做抽帧、整段原始帧原样放行,而视频编码仍按配置帧率
+            # 标注 → 容器时长 = 帧数 / 配置 fps,与实际采样跨度脱钩。
+            window_start_ms, window_end_ms = self._peek_window_bounds(tracks, collect_ms)
+            return self._build_device_data(
+                state,
+                tracks,
+                window_start_ms=window_start_ms,
+                window_end_ms=window_end_ms,
+            )
+
+    @staticmethod
+    def _peek_window_bounds(
+        tracks: dict[str, list[StreamFragment]], duration_ms: int
+    ) -> tuple[int, int]:
+        """Monotonic ``(start, end)`` ms for a non-consuming peek of ``duration_ms``.
+
+        ``end`` is the newest fragment's ``wall_ms`` over all tracks. ``start`` is
+        ``end - duration_ms`` (the span ``peek_latest`` slices, matching the window
+        length the realtime path stamps on a drained window), but never earlier than
+        the oldest fragment actually returned: right after connect, or after a burst,
+        the buffer may hold far less than ``duration_ms``, and a nominal full-length
+        window would make resampling repeat frames and the encoded clip claim
+        seconds of content that were never captured. Every downstream consumer
+        (resampling to the pipeline fps, the encoded clip's frame-rate label) sizes
+        itself from this span.
+        """
+        walls = [f.wall_ms for frags in tracks.values() for f in frags]
+        if not walls:
+            return 0, 0
+        newest = max(walls)
+        return max(newest - duration_ms, min(walls)), newest
 
     def peek_latest_frame(self, did: str, *, window_ms: int = 2000) -> "NDArray[np.uint8] | None":
         """非破坏性取该相机最近一帧解码图(numpy BGR);无缓存返 None。
