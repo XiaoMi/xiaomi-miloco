@@ -558,8 +558,23 @@ class MiotService:
             if realign:
                 manager.start_state_alignment()
 
+    def _reset_cloud_backoff(self) -> None:
+        """用户主动刷新时打破网络层退避（绑定 / 切家庭 / refresh 接口专用）。
+
+        ``getattr`` 是给测试里的替身 proxy 留的余地：退避是可选能力，缺了它
+        不该让整条刷新路径失败。
+        """
+        reset = getattr(self._miot_proxy, "reset_cloud_backoff", None)
+        if callable(reset):
+            reset()
+
     async def _refresh_all_caches(self) -> None:
-        """把设备 / 相机 / 场景缓存换成新作用域的。单个失败不拖垮另外两个。"""
+        """把设备 / 相机 / 场景缓存换成新作用域的。单个失败不拖垮另外两个。
+
+        调用方是绑定 / 换号 / 切家庭这类用户动作，允许打破退避——否则刚被限流
+        过一次，住户切家庭后看到的会是一份空缓存。
+        """
+        self._reset_cloud_backoff()
         results = await asyncio.gather(
             self._miot_proxy.refresh_devices(),
             self._miot_proxy.refresh_cameras(),
@@ -872,6 +887,7 @@ class MiotService:
         Returns:
             dict: Dictionary containing result of each refresh operation
         """
+        self._reset_cloud_backoff()
         try:
             return await self._miot_proxy.refresh_miot_info()
         except Exception as e:
@@ -886,6 +902,8 @@ class MiotService:
         见 client.refresh_camera_online_status——专给前端「列相机」前调,解决相机重新
         上线后 is_online 不自愈,而又不像 refresh_miot_cameras 那样会瞬时卡流。
         """
+        # 不打破退避：这个接口由前端「打开相机列表」自动调用（force 标志只在前端
+        # 用于绕 8s 节流，传不到这里），自动路径不能清窗口。
         result = await self._miot_proxy.refresh_camera_online_status()
         return result is not None
 
@@ -893,6 +911,7 @@ class MiotService:
         """
         Refresh MiOT camera information
         """
+        self._reset_cloud_backoff()
         try:
             result = await self._miot_proxy.refresh_cameras()
             if not result:
@@ -908,6 +927,7 @@ class MiotService:
         """
         Refresh MiOT scene information
         """
+        self._reset_cloud_backoff()
         try:
             result = await self._miot_proxy.refresh_scenes()
             # None means call failed; an empty dict just means no scenes available and should not be treated as an error
@@ -924,6 +944,7 @@ class MiotService:
         """
         Refresh MiOT user information
         """
+        self._reset_cloud_backoff()
         try:
             result = await self._miot_proxy.refresh_user_info()
             if not result:
@@ -939,6 +960,7 @@ class MiotService:
         """
         Refresh MiOT device information
         """
+        self._reset_cloud_backoff()
         try:
             result = await self._miot_proxy.refresh_devices()
             if not result:
@@ -1323,6 +1345,9 @@ class MiotService:
         """Get home info。refresh=True 时先刷新云端数据。"""
         try:
             if refresh:
+                # refresh=True 只来自用户主动操作（CLI `device refresh` / 面板刷新），
+                # 允许它打破退避；自动轮询走不到这里。
+                self._reset_cloud_backoff()
                 await asyncio.gather(
                     self._miot_proxy.refresh_devices(),
                     self._miot_proxy.refresh_scenes(),

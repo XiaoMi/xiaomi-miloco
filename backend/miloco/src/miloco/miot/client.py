@@ -85,6 +85,15 @@ STATE_REFRESH_SOURCE = "iot_refresh"
 # 与它限制的是同一件事,调值时两处一起改。
 _RECONCILE_CONCURRENCY = 16
 
+# 「加载成功但账号下确实没有相机」时的重查间隔，与网络层退避的上限一致（5 分钟）。
+# 感知同步循环在没有活跃设备时是 1 秒一轮、每轮调 get_cameras 两次；不设这个间隔，
+# 零相机账号会退化成每秒两次云端拉取（每次 = gethome + 若干 device_list_page），
+# 而且永不停止。用户主动刷新（CLI / 接口）会把它清零，见 reset_cloud_backoff。
+_CAMERA_EMPTY_RECHECK_SEC = 300.0
+# 拉取失败后的重试间隔。网络层还有一层按接口的指数退避；这里只保证「失败」不会
+# 被 1 秒循环放大成每轮重试。
+_CAMERA_FAILURE_RETRY_SEC = 10.0
+
 
 def is_subscribable_did(did: str) -> bool:
     """did 能否用于拼 MQTT topic:带 '/' 会打断 topic 路径与解码正则。
@@ -569,6 +578,17 @@ class MiotProxy:
     #: 有意的：绕过 ``__init__`` 造实例的路径（测试）同样取得到它。
     _verify_token_on_start: bool = False
 
+    #: 相机缓存下次允许重取的时刻（monotonic）。类级默认值同理：绕过 ``__init__``
+    #: 造实例的路径也要能取到，否则 get_cameras 会 AttributeError。
+    _camera_retry_at: float = 0.0
+
+    #: 相机缓存被成功发布的次数。refresh_cameras 发布之后若在副作用里抛错会返回
+    #: None，用代次判断"这次到底发布成功没有"，比看返回值可靠。
+    _camera_load_gen: int = 0
+
+    #: get_cameras 的单飞锁。类级默认 None，首次用到时创建（测试替身同样适用）。
+    _camera_get_lock: asyncio.Lock | None = None
+
     def _refuse_if_not_operational(self, what: str) -> str | None:
         """授权已被云端永久拒绝时，给出拒绝理由；仍可用则返回 ``None``。
 
@@ -831,6 +851,8 @@ class MiotProxy:
         self._user_info = None
         self._reset_subscription_mirrors()
         self._cameras_loaded = False
+        self._camera_retry_at = 0.0
+        self._camera_load_gen = 0
         # Welcome service survives deinit (rebuilt only in __init__), but its
         # dedup window state must reset alongside the other in-memory caches —
         # otherwise a re-bind of the same did within WELCOME_DEDUP_SEC after an
@@ -878,6 +900,8 @@ class MiotProxy:
         self._camera_info_dict: dict[str, MIoTCameraInfo] = {}
         self._device_info_dict: dict[str, MIoTDeviceInfo] = {}
         self._scene_info_dict: dict[str, MIoTManualSceneInfo] = {}
+        self._camera_retry_at: float = 0.0
+        self._camera_load_gen = 0
 
         user_info_str = self._kv_repo.get(DeviceInfoKeys.USER_INFO_KEY)
         if user_info_str:
@@ -1107,13 +1131,54 @@ class MiotProxy:
             logger.error("Failed to get camera instance: %s", e)
             return None
 
+    def reset_cloud_backoff(self) -> None:
+        """用户主动刷新（CLI ``device refresh``、面板刷新按钮）专用：打破退避。
+
+        只给「人明确要求刷新」的入口用。自动路径（感知循环、事件回调、定时任务）
+        不允许调它，否则就等于把保护关掉了。相机空缓存节流一并清零。
+        """
+        self._camera_retry_at = 0.0
+        try:
+            cleared = self._miot_client.clear_backoff()
+        except Exception as e:  # noqa: BLE001 - 退避是尽力而为，不能挡住刷新
+            logger.warning("清云端退避失败: %s", e)
+            return
+        if cleared:
+            logger.info("用户主动刷新:清掉 %d 个接口的退避窗口", cleared)
+        else:
+            logger.info("用户主动刷新:退避窗口未清(强刷额度已用尽或无需清理)")
+
     async def get_cameras(self) -> dict[str, MIoTCameraInfo]:
         # 降级 / 未绑定时不去打这一趟自刷新（同 cached_scenes 的注释），只回手上
         # 已有的一份。显式刷新仍走 refresh_cameras，它不受这道闸门约束——恢复
         # 路径正要靠它把授权修回来。
-        if not self._camera_info_dict and self.is_operational:
-            logger.warning("No camera info dict found, refreshing cameras")
-            await self.refresh_cameras()
+        # 「空」有两种：从没加载过（立刻拉）和加载成功但账号下确实没有相机
+        # （只在低频重查）。不区分的话，感知同步循环每轮两次调用会把它放大成
+        # 每秒两次云端拉取，且永不停止。
+        if (
+            not self._camera_info_dict
+            and self.is_operational
+            and time.monotonic() >= self._camera_retry_at
+        ):
+            # 单飞：判空和刷新之间隔着 await，并发调用会各自再拉一次。
+            lock = self._camera_get_lock
+            if lock is None:
+                lock = self._camera_get_lock = asyncio.Lock()
+            async with lock:
+                if (
+                    not self._camera_info_dict
+                    and time.monotonic() >= self._camera_retry_at
+                ):
+                    logger.warning("No camera info dict found, refreshing cameras")
+                    gen = self._camera_load_gen
+                    await self.refresh_cameras()
+                    # 以「缓存有没有被发布过」判成功，而不是看返回值：
+                    # refresh_cameras 在发布之后的副作用里抛错会返回 None。
+                    self._camera_retry_at = time.monotonic() + (
+                        _CAMERA_EMPTY_RECHECK_SEC
+                        if self._camera_load_gen != gen
+                        else _CAMERA_FAILURE_RETRY_SEC
+                    )
         return self._camera_info_dict
 
     def get_cached_camera(self, did: str) -> MIoTCameraInfo | None:
@@ -1249,6 +1314,7 @@ class MiotProxy:
                 cameras = copy.deepcopy(cameras)
                 # Publish before registering so callbacks resolve against the new dict.
                 self._camera_info_dict = cameras
+                self._camera_load_gen += 1
                 # 相机列表已成功加载(放字典发布处,而非整段副作用全绿之后)
                 self._cameras_loaded = True
                 # 启动/新设备补读 awake：对当前家庭、awake 缓存里还没有的相机读一次并回填。
@@ -1416,6 +1482,7 @@ class MiotProxy:
             try:
                 cameras = await self._miot_client.get_cameras_async()
                 self._camera_info_dict = copy.deepcopy(cameras)
+                self._camera_load_gen += 1
                 self._cameras_loaded = True
             except Exception as e:
                 logger.error("Failed to refresh camera online status: %s", e)
