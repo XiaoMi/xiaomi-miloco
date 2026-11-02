@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 from miloco.perception.engine.config import OmniConfig
-from miloco.perception.engine.omni import omni_client
+from miloco.perception.engine.omni import omni, omni_client
 from miloco.perception.engine.omni.circuit_breaker import (
     get_omni_circuit_breaker,
     reset_omni_circuit_breaker_for_tests,
@@ -195,6 +195,131 @@ async def test_trace_max_tokens_unchanged_for_mimo(monkeypatch):
     assert calls
     recorded = calls[-1]["inference_params"]["max_tokens"]
     assert recorded == captured[0]["max_tokens"] == 512
+
+
+async def test_trace_max_tokens_matches_sent_body_for_minimax_stream(monkeypatch):
+    """流式路径（call_omni_stream）的 trace 留痕同样记 4096,不是配置原值。
+
+    留痕修复落在 3 个 push_omni_trace 站点（非流式 / 流式 / fused）,每个站点都要有
+    回归守护——任一处被改回 config.max_completion_tokens,CI 都应报警。
+    """
+    captured: list[dict] = []
+
+    class _FakeStreamResp:
+        status_code = 200
+        text = ""
+        headers: dict = {}
+
+        def json(self):
+            return {}
+
+        def raise_for_status(self):
+            pass
+
+        async def aread(self):
+            pass
+
+        async def aiter_lines(self):
+            for line in [
+                'data: {"choices": [{"delta": {"content": "{}"}}]}',
+                "data: [DONE]",
+            ]:
+                yield line
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, **k):
+            captured.append(k.get("json") or {})
+            return _FakeStreamResp()
+
+    monkeypatch.setattr(omni_client.httpx, "AsyncClient", _C)
+
+    artifacts = OmniEventArtifacts()
+    cfg = OmniConfig(
+        model="MiniMax-M3.1-Flash",
+        base_url="https://x/v1",
+        api_key="sk-1",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=512,
+        timeout=1.0,
+        stream=True,
+    )
+    with event_artifacts_scope(artifacts):
+        async for _ in omni_client.call_omni_stream(_payload(), cfg):
+            pass
+
+    assert captured, "流式请求没发出去,断言无效"
+    assert captured[0]["max_tokens"] == 4096, "adapter 没把 max_tokens 抬到下限"
+
+    calls = (artifacts.trace or {}).get("calls") or []
+    assert calls, "trace 没记到调用"
+    recorded = calls[-1]["inference_params"]["max_tokens"]
+    assert recorded == captured[0]["max_tokens"], (
+        f"流式 trace 记的 max_tokens={recorded} 与实际发出的不一致"
+    )
+
+
+async def test_trace_max_tokens_matches_sent_body_for_minimax_fused(monkeypatch):
+    """fused 路径（_call_omni_messages）的 trace 留痕同样记 4096,不是配置原值。"""
+    captured: list[dict] = []
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **k):
+            captured.append(k.get("json") or {})
+            return _FakeResp(200, {"choices": [], "usage": {}})
+
+    monkeypatch.setattr(omni.httpx, "AsyncClient", _C)
+    monkeypatch.setattr(omni, "_get_fused_http_client", lambda timeout: _C())
+
+    artifacts = OmniEventArtifacts()
+    cfg = OmniConfig(
+        model="MiniMax-M3.1-Flash",
+        base_url="https://x/v1",
+        api_key="sk-1",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=512,
+        timeout=1.0,
+        stream=False,
+    )
+    with event_artifacts_scope(artifacts):
+        await omni._call_omni_messages(
+            [{"role": "user", "content": "ping"}], cfg, type="realtime"
+        )
+
+    assert captured, "fused 请求没发出去,断言无效"
+    assert captured[0]["max_tokens"] == 4096, "adapter 没把 max_tokens 抬到下限"
+
+    calls = (artifacts.trace or {}).get("calls") or []
+    assert calls, "trace 没记到调用"
+    recorded = calls[-1]["inference_params"]["max_tokens"]
+    assert recorded == captured[0]["max_tokens"], (
+        f"fused trace 记的 max_tokens={recorded} 与实际发出的不一致"
+    )
 
 
 # ─── call_omni × 熔断 ───────────────────────────────────────────────────────
