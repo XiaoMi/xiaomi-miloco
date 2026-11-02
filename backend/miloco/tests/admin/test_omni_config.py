@@ -1101,3 +1101,182 @@ def test_test_connection_failure_does_not_touch_breaker(client, monkeypatch, rea
 
     # 熔断仍是 error
     assert get_omni_circuit_breaker().snapshot().state == "error"
+
+
+# ─── /omni-config/test-image(可选的图片输入能力探测) ───────────────────────
+
+
+_SAVED = {"label": "甲", "model": "m1", "base_url": "https://x/v1", "api_key": "sk-k123456789"}
+
+
+def _save_profile(client):
+    client.put("/api/admin/omni-config", json=_SAVED)
+
+
+def _capture_image_probe(monkeypatch) -> list[tuple]:
+    calls: list[tuple] = []
+
+    async def _fake_image_probe(model, base_url, api_key, **_):
+        calls.append((model, base_url, api_key))
+        return {"status": "supported", "reason": "answer_correct", "latency_ms": 7}
+
+    monkeypatch.setattr(
+        "miloco.admin.router._probe_image.probe_image_input", _fake_image_probe
+    )
+    return calls
+
+
+def test_test_image_endpoint_uses_saved_profile_and_not_connectivity_probe(
+    client, monkeypatch
+):
+    calls = _capture_image_probe(monkeypatch)
+
+    async def _boom(*a, **k):
+        raise AssertionError("connectivity probe must not run for test-image")
+
+    _save_profile(client)  # 保存本身会跑连通性探测;此后才禁止
+    monkeypatch.setattr("miloco.admin.router._probe.probe_omni", _boom)
+    data = client.post(
+        "/api/admin/omni-config/test-image", json={"label": "甲"}
+    ).json()["data"]
+    assert data == {"status": "supported", "reason": "answer_correct", "latency_ms": 7}
+    assert calls == [("m1", "https://x/v1", "sk-k123456789")]
+
+
+def test_test_image_endpoint_empty_label_uses_active_config(client, monkeypatch):
+    calls = _capture_image_probe(monkeypatch)
+    _save_profile(client)  # PUT 同时令其生效
+    client.post("/api/admin/omni-config/test-image", json={})
+    assert calls == [("m1", "https://x/v1", "sk-k123456789")]
+
+
+def test_test_image_endpoint_ignores_target_fields_in_body(client, monkeypatch):
+    """请求体不能把探测请求指向任意地址 / 模型 / key:一律取自已保存配置。"""
+    calls = _capture_image_probe(monkeypatch)
+    _save_profile(client)
+    client.post(
+        "/api/admin/omni-config/test-image",
+        json={
+            "label": "甲",
+            "model": "other-model",
+            "base_url": "http://169.254.169.254/latest",
+            "api_key": "sk-attacker",
+        },
+    )
+    assert calls == [("m1", "https://x/v1", "sk-k123456789")]
+
+
+def test_test_image_endpoint_unknown_label_is_not_saved(client, monkeypatch):
+    calls = _capture_image_probe(monkeypatch)
+    data = client.post(
+        "/api/admin/omni-config/test-image", json={"label": "未保存的配置"}
+    ).json()["data"]
+    assert data == {"status": "failed", "reason": "not_saved", "challenges": 0}
+    assert calls == []
+
+
+def test_test_image_endpoint_no_key(client, monkeypatch):
+    calls = _capture_image_probe(monkeypatch)
+    data = client.post("/api/admin/omni-config/test-image", json={}).json()["data"]
+    assert data == {"status": "failed", "reason": "no_key", "challenges": 0}
+    assert calls == []
+
+
+def test_test_image_endpoint_profile_without_key_does_not_borrow_other_key(
+    client, monkeypatch
+):
+    """无 key 的档案不会借用当前生效配置(或其他档案)的 key:key 只随其所属 URL 使用。"""
+    calls = _capture_image_probe(monkeypatch)
+    _save_profile(client)  # 甲:有 key,且为当前生效
+    from miloco.config.settings import get_settings
+
+    s = get_settings()
+    s.model.omni_profiles.append(
+        s.model.omni_profiles[0].model_copy(
+            update={"label": "乙", "base_url": "https://other.example/v1", "api_key": ""}
+        )
+    )
+    data = client.post(
+        "/api/admin/omni-config/test-image", json={"label": "乙"}
+    ).json()["data"]
+    assert data == {"status": "failed", "reason": "no_key", "challenges": 0}
+    assert calls == []
+
+
+def test_test_image_endpoint_allows_lan_model_address(client, monkeypatch):
+    """自建 / 局域网模型(Ollama、vLLM 等)地址照常可测,不做私网拦截。"""
+    calls = _capture_image_probe(monkeypatch)
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "本地",
+            "model": "qwen2.5-vl",
+            "base_url": "http://10.0.0.5:11434/v1",
+            "api_key": "placeholder",
+        },
+    )
+    client.post("/api/admin/omni-config/test-image", json={"label": "本地"})
+    assert calls == [("qwen2.5-vl", "http://10.0.0.5:11434/v1", "placeholder")]
+
+
+def test_test_image_endpoint_never_logs_api_key(client, monkeypatch, caplog):
+    """走真实 probe_image + GeminiAdapter(非 flash 模型会打一条带 model 的 warning):
+    日志里可以有模型名,但绝不能出现 api_key。"""
+    import logging
+
+    import httpx
+    from miloco.perception.engine.omni import probe_image
+
+    secret = "sk-never-log-this-123456"
+    client.put(
+        "/api/admin/omni-config",
+        json={
+            "label": "g",
+            "model": "gemini-2.5-pro",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta",
+            "api_key": secret,
+        },
+    )
+    real_client = httpx.AsyncClient
+
+    def _handler(request):
+        return httpx.Response(
+            200, json={"candidates": [{"content": {"parts": [{"text": "red"}]}}]}
+        )
+
+    monkeypatch.setattr(
+        probe_image.httpx,
+        "AsyncClient",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(_handler)}),
+    )
+    caplog.set_level(logging.DEBUG)
+    caplog.clear()
+    data = client.post(
+        "/api/admin/omni-config/test-image", json={"label": "g"}
+    ).json()["data"]
+    assert data["status"] in {"supported", "inconclusive"}
+    assert "gemini-2.5-pro" in caplog.text  # 确实触发了带 model 的日志
+    assert secret not in caplog.text
+    assert secret not in str(data)
+
+
+def test_test_image_endpoint_unsupported_end_to_end(client, monkeypatch):
+    """真走 probe_image + 底层 httpx(MockTransport 注入点之外用 monkeypatch 替换 AsyncClient 工厂)。"""
+    import httpx
+    from miloco.perception.engine.omni import probe_image
+
+    real_client = httpx.AsyncClient
+
+    def _handler(request):
+        return httpx.Response(400, json={"error": {"message": "image_url not supported"}})
+
+    monkeypatch.setattr(
+        probe_image.httpx,
+        "AsyncClient",
+        lambda **kw: real_client(**{**kw, "transport": httpx.MockTransport(_handler)}),
+    )
+    _save_profile(client)
+    data = client.post(
+        "/api/admin/omni-config/test-image", json={"label": "甲"}
+    ).json()["data"]
+    assert data["status"] == "unsupported" and data["reason"] == "image_rejected"

@@ -30,6 +30,7 @@ from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
 from miloco.perception.engine.omni import probe as _probe
+from miloco.perception.engine.omni import probe_image as _probe_image
 from miloco.rule.schema import RuleDirection
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
@@ -1326,6 +1327,66 @@ async def test_omni_config(
             cb = get_omni_circuit_breaker()
             if cb.snapshot().state != "ok":
                 await cb.reset_on_config_change()
+    return NormalResponse(code=0, message="ok", data=result)
+
+
+class OmniImageTestBody(BaseModel):
+    # 只按 label 选已保存的配置;省略 = 当前生效配置。model / base_url / key 一律取自
+    # 已存配置,不接受请求体传入(避免向未保存的任意地址发送图片请求)。
+    label: str | None = None
+
+
+def _saved_omni_target(label: str) -> tuple[str, str, str] | None:
+    """label → 已保存配置的 (label, model, base_url);空 label = 当前生效配置。
+
+    刻意不返回 api_key:key 由调用方经 ``_key_by_label(..., base_url=...)`` 单独取,
+    沿用其「key 只能配合当初保存它的 URL 使用」的校验,也不让 key 与 model / base_url
+    混在同一个值里流向请求构造与日志。
+    """
+    m = get_settings().model
+    active_label = _active_display_label()
+    if not label or label in (m.omni.label, active_label):
+        return active_label, m.omni.model, m.omni.base_url
+    for p in m.omni_profiles:
+        if p.label == label:
+            return p.label, p.model, p.base_url
+    return None
+
+
+@router.post(
+    "/omni-config/test-image",
+    summary="测试已保存的 omni 配置是否真的接受图片输入（可选；用最多两张内置合成纯色小图各问一次，最多 2 次模型请求、消耗极少量 token，仅用户显式触发，不写库、不影响熔断状态）",
+    response_model=NormalResponse,
+)
+async def test_omni_image_input(
+    body: OmniImageTestBody, current_user: str = Depends(verify_token)
+):
+    """图片输入能力探测:与 ``/omni-config/test`` 的连通性探测互补,不替代它。
+
+    只针对**已保存**的配置(按 label 选取,省略为当前生效配置):model / base_url / key
+    均取自配置,请求体不能指定地址。最多两次独立挑战:两张不同颜色的内置纯色 JPEG
+    (经 provider adapter 构造,各 provider 格式正确)各问一次颜色并核对回答;第一张未识别
+    成功即停止,两张都答对才算支持。返回 {status, reason, challenges, http_status?,
+    latency_ms?},status ∈ supported / unsupported / failed / inconclusive,不含 provider
+    原始响应文本。只读探测:不清熔断、不写档案。"""
+    target = _saved_omni_target((body.label or "").strip())
+    if target is None:
+        return NormalResponse(
+            code=0,
+            message="ok",
+            data={"status": "failed", "reason": "not_saved", "challenges": 0},
+        )
+    saved_label, model, base_url = target
+    model = model.strip()
+    base_url = base_url.strip()
+    api_key = _key_by_label(saved_label, None, base_url=base_url)
+    if not api_key:
+        return NormalResponse(
+            code=0,
+            message="ok",
+            data={"status": "failed", "reason": "no_key", "challenges": 0},
+        )
+    result = await _probe_image.probe_image_input(model, base_url, api_key)
     return NormalResponse(code=0, message="ok", data=result)
 
 

@@ -41,6 +41,7 @@ import type {
   OmniConfigUpdate,
   OmniHealth,
   OmniProfileRef,
+  OmniImageProbeResult,
   OmniTestResult,
   OmniModelsResult,
   UpgradeCheck,
@@ -2208,6 +2209,18 @@ export async function realTestOmniConfig(
   const r = await apiFetch<Normal<OmniTestResult>>(
     "/api/admin/omni-config/test",
     { method: "POST", body: JSON.stringify(body) },
+  );
+  return r.data;
+}
+
+// 可选的图片输入能力探测:后端对已保存的配置发一张内置合成纯色小图并问主色(会消耗极少量
+// token),仅由用户点「测试图片输入」触发,绝不自动调用。只传 label,目标地址取自已保存配置。
+export async function realTestOmniImageInput(input: {
+  label: string;
+}): Promise<OmniImageProbeResult> {
+  const r = await apiFetch<Normal<OmniImageProbeResult>>(
+    "/api/admin/omni-config/test-image",
+    { method: "POST", body: JSON.stringify({ label: input.label }) },
   );
   return r.data;
 }
