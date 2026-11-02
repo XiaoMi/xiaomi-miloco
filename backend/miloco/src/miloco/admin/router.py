@@ -1276,7 +1276,7 @@ class OmniTestBody(BaseModel):
 
 @router.post(
     "/omni-config/test",
-    summary="测试 omni 配置连通性（OpenAI 兼容族两阶段预检+真校验 / 原生协议单阶段 chat 探测，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
+    summary="测试 omni 配置连通性（OpenAI 兼容族（MiMo/Qwen/MiniMax）两阶段预检+真校验 / 原生协议单阶段 chat 探测，max_tokens=1 极少量 token，不写库、不计入 miloco 用量统计）",
     response_model=NormalResponse,
 )
 async def test_omni_config(
@@ -1284,7 +1284,7 @@ async def test_omni_config(
 ):
     """用表单值（缺省回退当前已保存配置）探测配置可用性。
 
-    OpenAI 兼容族（MiMo/Qwen）两阶段：先 GET /models 验鉴权/可达，再发一次 max_tokens=1 的
+    OpenAI 兼容族（MiMo/Qwen/MiniMax）两阶段：先 GET /models 验鉴权/可达，再发一次 max_tokens=1 的
     极简 chat 真正验证该模型可用；非 OpenAI 兼容族（Gemini 等原生协议）没有等价 GET /models
     预检语义，直接走 adapter 化的 chat 探测。消耗极少量 token，不计入 miloco 用量统计。
     返回 {ok, code, status, latency_ms, message}。"""

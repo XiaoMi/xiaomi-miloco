@@ -231,44 +231,50 @@ class MiMoAdapter(OpenAICompatAdapter):
         return body
 
 
-class MiniMaxAdapter(OpenAICompatAdapter):
+# MiniMax M3 强制 adaptive thinking，且思考 token 计入 max_tokens（实测 reasoning_tokens
+# 会把预算吃满、content 直接为空）。默认 OmniConfig.max_completion_tokens=512 不够用，
+# 故为可见输出预留下限。实测（2026-11，MiniMax-M3.1-Flash，identity 路径采样）reasoning
+# 中位数约 743、单次峰值 1927（total 1993），512 下 json 解析全失败、768 起才通过。
+# 取下限 4096 ≈ 峰值的 2 倍，覆盖场景复杂度与随机抖动。max_tokens 只是上限、按实际
+# 用量计费，抬高它不增加成本；用户配得更大时按配置走，不压回去。
+_MINIMAX_MIN_MAX_TOKENS = 4096
+
+
+def _minimax_effective_max_tokens(max_tokens: int) -> int:
+    """把 MiniMax 的 max_tokens 抬到能容纳 adaptive thinking 的预算下限。
+
+    失败形态是静默的：思考吃满预算 → ``content`` 为空 → ``extract_json`` 失败 → 感知窗口
+    按 skipped 直接跳过，用户侧与「这轮没看到事件」不可区分。故在 adapter 层兜底，
+    而不是指望每个部署都把 ``max_completion_tokens`` 调高。
+    """
+    return max(max_tokens, _MINIMAX_MIN_MAX_TOKENS)
+
+
+class MiniMaxAdapter(MiMoAdapter):
     """MiniMax M3 系列 API adapter（MiniMax-M3 / MiniMax-M3.1-Flash）。
 
-    与 MiMoAdapter 的唯一差别：**不发 ``thinking`` 字段**。
+    继承 MiMoAdapter 而非复制：video / audio / image 块形态与 MiMo 逐字节相同，继承把
+    「同 MiMo」从口头约定变成结构保证——MiMo 侧改块形态时这里自动跟随，不会静默漂移。
 
-    M3 系列要求 adaptive thinking（由上游自行决定是否思考），显式关思考会被拒：
-    ``invalid params, model "MiniMax-M3.1-Flash" requires adaptive thinking;
-    thinking.type="disabled" (including reasoning.effort=none) is not allowed (2013)``（HTTP 400）。
-    而 get_adapter 对未识别的模型名一律落到 MiMoAdapter，其 build_request_body 强加
-    ``thinking: {"type": "disabled"}`` —— 于是 MiniMax 配置在 /api/admin/omni-config/test 上
-    表现为 rejected_authed(400)，被误报成「模型名或 API Key 可能有误」，实际两者都正确。
+    与 MiMoAdapter 的差别只有两处：
 
-    不发 thinking ≠ 关思考：M3 会自行开启 adaptive thinking，推理内容走响应里的
-    ``reasoning_content`` 字段（部分场景内联 ``<think>`` 标签，response_parser 侧已剥离）。
+    1. **不发 ``thinking`` 字段**。M3 系列要求 adaptive thinking（由上游自行决定是否思考），
+       显式关思考会被拒：
+       ``invalid params, model "MiniMax-M3.1-Flash" requires adaptive thinking;
+       thinking.type="disabled" (including reasoning.effort=none) is not allowed (2013)``（HTTP 400）。
+       而 get_adapter 对未识别的模型名一律落到 MiMoAdapter，其 build_request_body 强加
+       ``thinking: {"type": "disabled"}`` —— 于是 MiniMax 配置在 /api/admin/omni-config/test 上
+       表现为 rejected_authed(400)，被误报成「模型名或 API Key 可能有误」，实际两者都正确。
 
-    - video block: ``video_url`` + ``fps`` + ``media_resolution: "max"``（同 MiMo；
-      MiniMax 要求 data URI 带真实 media type，``data:;base64,`` 会被拒）
-    - audio block: ``input_audio`` + ``format``（同 MiMo）
-    - request body: 不含 ``thinking``
+    2. **max_tokens 下限 4096**（见 ``_MINIMAX_MIN_MAX_TOKENS``）。不发 thinking ≠ 关思考：
+       M3 会自行开启 adaptive thinking，且思考 token **计入 max_tokens 预算**——这是与 MiMo /
+       Gemini 等可关思考 provider 的关键差异（它们关思考正是为了让 512 预算全给可见输出）。
+       推理内容走响应的 ``reasoning_content`` 字段（部分场景内联 ``<think>`` 标签，
+       response_parser 侧已剥离）。
+
+    注意：adaptive thinking 会拉高延迟。实测 identity 路径 2.5s–13.6s（默认 timeout 30s），
+    复杂场景比 MiMo 慢数倍，属预期行为而非故障。
     """
-
-    def build_video_block(self, video_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
-        return {
-            "type": "video_url",
-            "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
-            "fps": media.fps,
-            "media_resolution": "max",
-        }
-
-    def build_audio_block(self, audio_base64: str, media: LocalMediaInfo) -> dict[str, Any]:
-        # 形态同 MiMoAdapter：OpenAI 规范 input_audio 的 data+format 均必填，m4a(AAC) 容器。
-        return {
-            "type": "input_audio",
-            "input_audio": {
-                "data": f"data:audio/m4a;base64,{audio_base64}",
-                "format": "m4a",
-            },
-        }
 
     def build_request_body(
         self,
@@ -280,17 +286,16 @@ class MiniMaxAdapter(OpenAICompatAdapter):
         top_p: float,
         stream: bool = False,
     ) -> dict[str, Any]:
-        # 与 MiMoAdapter 逐字段相同，唯一差别是这里**不写** thinking —— M3 不接受显式关闭。
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_p": top_p,
-            "stream": stream,
-        }
-        if stream:
-            body["stream_options"] = {"include_usage": True}
+        body = super().build_request_body(
+            messages,
+            model=model,
+            max_tokens=_minimax_effective_max_tokens(max_tokens),
+            temperature=temperature,
+            top_p=top_p,
+            stream=stream,
+        )
+        # 唯一的协议差异：M3 不接受显式关思考，必须让上游自行 adaptive thinking。
+        body.pop("thinking", None)
         return body
 
 
@@ -607,7 +612,8 @@ def get_adapter(model: str) -> OmniProviderAdapter:
     旧版 qwen3-omni-flash 不支持多模态组合输入，无法满足 fused 模式需求。
 
     MiniMax 侧支持 M3 系列（MiniMax-M3 / MiniMax-M3.1-Flash）：协议仍是 OpenAI 兼容，
-    与 MiMo 的唯一差别是不发 thinking 字段（M3 要求 adaptive thinking，显式关闭会被拒）。
+    与 MiMo 的差别是不发 thinking 字段（M3 要求 adaptive thinking，显式关闭会被拒），
+    且 max_tokens 有 4096 下限（思考 token 计入该预算，详见 MiniMaxAdapter）。
 
     Gemini 走原生 generateContent 协议（OpenAI 兼容端点不支持视频输入）。
     """

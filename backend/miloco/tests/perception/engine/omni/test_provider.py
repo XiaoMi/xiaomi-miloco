@@ -171,14 +171,14 @@ class TestMiniMaxAdapter:
         assert body["stream_options"] == {"include_usage": True}
 
     def test_request_body_otherwise_same_as_mimo(self):
-        """除 thinking 外与 MiMoAdapter 逐字段一致。"""
+        """除 thinking / max_tokens 下限外与 MiMoAdapter 逐字段一致。"""
         minimax = self.adapter.build_request_body(
             _MESSAGES, model="MiniMax-M3.1-Flash",
-            max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
+            max_tokens=4096, temperature=0.1, top_p=0.95, stream=False,
         )
         mimo = MiMoAdapter().build_request_body(
             _MESSAGES, model="mimo-v2.6-flash",
-            max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
+            max_tokens=4096, temperature=0.1, top_p=0.95, stream=False,
         )
         assert set(minimax) == set(mimo) - {"thinking"}
         assert minimax["max_tokens"] == mimo["max_tokens"]
@@ -186,18 +186,43 @@ class TestMiniMaxAdapter:
         assert minimax["top_p"] == mimo["top_p"]
         assert minimax["stream"] == mimo["stream"]
 
-    def test_video_block_same_as_mimo(self):
-        block = self.adapter.build_video_block("AAAA", _VIDEO_MEDIA)
-        assert block["type"] == "video_url"
-        assert block["fps"] == 1
-        assert block["media_resolution"] == "max"
-        assert block["video_url"]["url"].startswith("data:video/mp4;base64,")
+    def test_max_tokens_raised_to_floor(self):
+        """守护:adaptive thinking 计入 max_tokens,默认 512 会让 content 恒为空。
 
-    def test_audio_block_same_as_mimo(self):
-        block = self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA)
-        assert block["type"] == "input_audio"
-        assert block["input_audio"]["format"] == "m4a"
-        assert block["input_audio"]["data"].startswith("data:audio/m4a;base64,")
+        实测 identity 路径 reasoning 中位数约 743 / 单次峰值 1927,512 下 JSON 解析全失败。
+        """
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
+        )
+        assert body["max_tokens"] == 4096
+
+    def test_max_tokens_larger_config_untouched(self):
+        """配置比下限大时按配置走,不压回去。"""
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=4096, temperature=0.1, top_p=0.95, stream=False,
+        )
+        assert body["max_tokens"] == 4096
+
+    def test_inherits_mimo_block_shapes(self):
+        """块形态靠继承保证一致,而不是复制粘贴后靠人同步。"""
+        assert isinstance(self.adapter, MiMoAdapter)
+
+    def test_video_block_equals_mimo(self):
+        assert self.adapter.build_video_block("AAAA", _VIDEO_MEDIA) == (
+            MiMoAdapter().build_video_block("AAAA", _VIDEO_MEDIA)
+        )
+
+    def test_audio_block_equals_mimo(self):
+        assert self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA) == (
+            MiMoAdapter().build_audio_block("BBBB", _AUDIO_MEDIA)
+        )
+
+    def test_image_block_equals_mimo(self):
+        assert self.adapter.build_image_block(b"\xff\xd8rawjpeg") == (
+            MiMoAdapter().build_image_block(b"\xff\xd8rawjpeg")
+        )
 
     def test_image_block_default_jpeg_data_uri(self):
         block = self.adapter.build_image_block(b"\xff\xd8rawjpeg")
