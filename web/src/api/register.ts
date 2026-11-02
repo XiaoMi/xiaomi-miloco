@@ -8,7 +8,7 @@
  * 前端直接走主 backend。
  */
 
-import { resolveToken } from "./client";
+import { errorMessage, resolveToken } from "./client";
 import i18n from "@/i18n";
 
 // 生产 / dev 都通过主 backend 转发,token 经 vite proxy::attachAuth(dev)或前端
@@ -57,7 +57,7 @@ export async function extractCandidates(
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
     throw new Error(
-      err.detail ?? err.message ?? i18n.t("api.extractFail", { status: r.status }),
+      errorMessage(err) ?? i18n.t("api.extractFail", { status: r.status }),
     );
   }
   const body = (await r.json()) as Normal<ExtractResult>;
@@ -120,7 +120,7 @@ export async function saveSamplesBatch(
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));
     throw new Error(
-      err.detail ?? err.message ?? i18n.t("api.saveFail", { status: r.status }),
+      errorMessage(err) ?? i18n.t("api.saveFail", { status: r.status }),
     );
   }
   const body = (await r.json()) as { data: SaveBatchResult };
