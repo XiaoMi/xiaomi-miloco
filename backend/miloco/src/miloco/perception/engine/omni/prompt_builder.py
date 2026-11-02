@@ -19,6 +19,7 @@ from __future__ import annotations
 import base64
 import logging
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import TYPE_CHECKING, Literal
 
 import av
@@ -1893,6 +1894,7 @@ def _encode_video(
         identity_packet.sample_rate,
         fps=identity_packet.frame_info.fps,
         short_edge=short_edge,
+        duration_s=_window_duration_s(identity_packet.frame_info),
     )
 
 
@@ -2002,11 +2004,13 @@ def _encode_video_mp4(
     sample_rate: int,
     fps: int,
     short_edge: int = _VIDEO_SHORT_EDGE,
+    duration_s: float = 0.0,
 ) -> tuple[str | None, LocalMediaInfo | None]:
     prepared = _prepare_omni_visual_frames(
         frames,
         fps=fps,
         short_edge=short_edge,
+        duration_s=duration_s,
     )
     if prepared is None:
         return None, None
@@ -2037,6 +2041,13 @@ def _encode_prepared_video_mp4(
 
     frames = prepared.frames
     fps = prepared.fps
+    # When the capture-window duration is known, use the real sampling rate
+    # (frame_count / duration_s) instead of the config-derived fps, so the
+    # container duration matches the actual capture span. See #560.
+    if prepared.duration_s > 0:
+        eff_rate = Fraction(len(frames), 1) / Fraction(prepared.duration_s).limit_denominator(10000)
+    else:
+        eff_rate = Fraction(int(fps), 1)
     target_w = prepared.width
     target_h = prepared.height
 
@@ -2046,7 +2057,7 @@ def _encode_prepared_video_mp4(
     try:
         container = av.open(tmp_path, "w")
 
-        v_stream = container.add_stream("h264", rate=fps)
+        v_stream = container.add_stream("h264", rate=eff_rate)
         v_stream.width = target_w
         v_stream.height = target_h
         v_stream.pix_fmt = "yuv420p"
@@ -2059,8 +2070,11 @@ def _encode_prepared_video_mp4(
         _AAC_FRAME_SIZE = 1024
         has_audio = audio_clip is not None and audio_clip.size >= _AAC_FRAME_SIZE
         if has_audio:
-            # Pad audio with silence to match video duration to avoid corrupt mp4
-            video_duration_samples = int(len(frames) / fps * sample_rate)
+            # Pad audio with silence to match video duration to avoid corrupt
+            # mp4. 与视频流同由 eff_rate 推导, 两轨时长恒等(duration 已知时
+            # len(frames)/eff_rate == duration_s; fallback 时退化为原
+            # len(frames)/fps 公式, 行为不变)。
+            video_duration_samples = int(round(len(frames) / float(eff_rate) * sample_rate))
             if audio_clip.size < video_duration_samples:
                 audio_clip = np.pad(audio_clip, (0, video_duration_samples - audio_clip.size))
             a_stream = container.add_stream("aac", rate=sample_rate)
@@ -2097,7 +2111,10 @@ def _encode_prepared_video_mp4(
         media_info = LocalMediaInfo(
             video_width=target_w,
             video_height=target_h,
-            fps=fps,
+            # 实际编码帧率(容器 rate 同源), 不是配置帧率——MiMo/Gemini 会把
+            # 这个值当"模型按多少 fps 解读时间轴"的声明, 写配置值会让容器
+            # 节奏与声明劈叉, #560 的时间错位经元数据通道复现。
+            fps=float(eff_rate),
             frame_count=len(frames),
             has_audio=has_audio,
             audio_sample_rate=sample_rate if has_audio else 0,
@@ -2592,9 +2609,11 @@ def _maybe_encode_adaptive(
             if _packet_audio_included(ep)
             else np.empty(0, dtype=np.int16)
         )
-        # fps 沿用 frame_info.fps(下采样后真实帧间隔),与全景视频一致——crop 逐帧不抽帧,
-        # 用独立帧率会让视频时长/音画错位(全景用的正是这个 fps)。先准备 canonical
-        # 帧，再按最终表达方式编码，确保 image/video 两路看到的画面完全一致。
+        # fps 沿用 frame_info.fps, 仅在窗口时长缺失时作 fallback rate(并流入
+        # LocalMediaInfo); 时长已知时容器编码率由 _encode_prepared_video_mp4
+        # 统一按 帧数/窗口时长 计算——crop 逐帧不抽帧, 与全景共用同一口径,
+        # 不会视频时长/音画错位。先准备 canonical 帧，再按最终表达方式编码，
+        # 确保 image/video 两路看到的画面完全一致。
         prepared = _prepare_omni_visual_frames(
             cropped,
             fps=ep.frame_info.fps,

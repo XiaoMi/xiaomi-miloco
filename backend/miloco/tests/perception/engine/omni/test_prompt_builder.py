@@ -3788,3 +3788,119 @@ class TestPersonCropInject:
         )
         assert imgs[-1] == guide + 1, _dbg     # 引导语紧跟的那张，仍是 video 前最后一张
         assert self._note_idx(content) < guide, _dbg  # 人像注入整段在引导语之前
+
+
+def test_video_mp4_container_duration_uses_window_not_config_fps():
+    """Regression for #560 (video path).
+
+    The mp4 container duration must follow the real capture window
+    (sampling_fps = frame_count / duration_s), not frame_count / config_fps.
+    8 frames delivered over a 4-second window with config fps=1 must yield a
+    ~4-second container, not 8 seconds.
+    """
+    import base64 as b64mod
+    import io
+    from types import SimpleNamespace
+
+    import av
+    import numpy as np
+    from miloco.perception.engine.omni.prompt_builder import _encode_video
+
+    n_frames = 8
+    window_s = 4.0
+    config_fps = 1  # misleading config-derived fps
+
+    frames = [np.zeros((64, 64, 3), np.uint8) for _ in range(n_frames)]
+    audio = np.zeros(16000 * int(window_s), np.int16)
+
+    frame_info = SimpleNamespace(
+        fps=config_fps,
+        start_timestamp=0.0,
+        end_timestamp=window_s * 1000.0,  # ms
+    )
+    packet = SimpleNamespace(
+        all_frames=frames,
+        audio_clip=audio,
+        sample_rate=16000,
+        frame_info=frame_info,
+        trigger=None,
+    )
+
+    b64, info = _encode_video(packet)
+    assert b64 is not None
+    assert info is not None
+
+    # Decode the mp4 and check its container duration.
+    mp4_bytes = b64mod.b64decode(b64)
+    with av.open(io.BytesIO(mp4_bytes)) as container:
+        duration = float(container.duration / av.time_base)
+
+    # Should be ~4s (the real capture window), not ~8s (frame_count / config_fps).
+    assert abs(duration - window_s) < 0.5, (
+        f"mp4 container duration {duration:.2f}s != expected {window_s:.2f}s "
+        f"(would be {n_frames / config_fps:.2f}s if config fps were used)"
+    )
+
+    # The reported media info must declare the actual encoding rate (2 fps =
+    # 8 frames / 4s), not the config fps — providers interpret this field as
+    # "at what rate to read the video timeline".
+    assert abs(info.fps - n_frames / window_s) < 1e-6, (
+        f"media_info.fps {info.fps} != actual encoding rate {n_frames / window_s}"
+    )
+
+
+def test_video_mp4_audio_padded_to_window():
+    """Audio shorter than the capture window is padded with silence up to the
+    window, so the audio track matches the video track instead of the
+    config-fps-derived length. Regression for #560 (video path).
+    """
+    import base64 as b64mod
+    import io
+    from types import SimpleNamespace
+
+    import av
+    import numpy as np
+    from miloco.perception.engine.omni.prompt_builder import _encode_video
+
+    n_frames = 8
+    window_s = 4.0
+    config_fps = 1
+    sample_rate = 16000
+
+    frames = [np.zeros((64, 64, 3), np.uint8) for _ in range(n_frames)]
+    # Audio deliberately shorter than the window (2s < 4s) to exercise the
+    # silence-padding branch.
+    audio = np.zeros(sample_rate * 2, np.int16)
+
+    frame_info = SimpleNamespace(
+        fps=config_fps,
+        start_timestamp=0.0,
+        end_timestamp=window_s * 1000.0,  # ms
+    )
+    packet = SimpleNamespace(
+        all_frames=frames,
+        audio_clip=audio,
+        sample_rate=sample_rate,
+        frame_info=frame_info,
+        trigger=None,
+    )
+
+    b64, info = _encode_video(packet)
+    assert b64 is not None
+
+    mp4_bytes = b64mod.b64decode(b64)
+    with av.open(io.BytesIO(mp4_bytes)) as container:
+        duration = float(container.duration / av.time_base)
+        # Count decoded audio samples: must be padded to the 4s window
+        # (~64000 samples), not left at 2s nor padded to the config-fps
+        # derived 8s (128000 samples).
+        decoded_samples = sum(frame.samples for frame in container.decode(audio=0))
+
+    assert abs(duration - window_s) < 0.5, (
+        f"mp4 container duration {duration:.2f}s != expected {window_s:.2f}s"
+    )
+    expected_samples = sample_rate * window_s
+    assert abs(decoded_samples - expected_samples) < 1024 * 3, (
+        f"decoded audio {decoded_samples} samples != ~{expected_samples} "
+        f"(window length); padding used the wrong target"
+    )
