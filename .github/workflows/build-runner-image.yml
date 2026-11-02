@@ -1,0 +1,61 @@
+name: Build Runner Image
+
+# 构建一次性审查容器的镜像（runner 底座 + 审查环境），多架构，推 ghcr。
+# 构建放 CI 而非运行机：运行机到上游安装源的 TLS 链在容器里验不过，取不到审查 CLI；
+# 放 CI 还可复现、可审计，运行机只剩取镜像一件事。
+#
+# 分发只有 ghcr 一条路：一条 `container image pull` 即可，可按 digest 钉住，也不受
+# artifact 保留期限制。前提是包可读 —— 把包设成 public，运行机就零凭据（镜像不含秘密）。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".ci/Dockerfile.pr-runner"
+      - ".ci/pr-agent.sh"
+      - ".ci/runner-entrypoint.sh"
+      - ".github/workflows/build-runner-image.yml"
+
+permissions:
+  contents: read
+  packages: write     # 推 ghcr
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      # ghcr 的镜像名必须全小写，而 GitHub 用户名可能有大写
+      - name: 算镜像名
+        id: img
+        run: |
+          owner="$(printf '%s' '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "name=ghcr.io/${owner}/prr-review" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: .ci/Dockerfile.pr-runner
+          # 同时留 amd64 与 arm64：换架构时不用改构建
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.img.outputs.name }}:latest
+            ${{ steps.img.outputs.name }}:${{ github.sha }}
+          # 镜像自带「我是哪个 commit 构建的」：用 :latest 时从名字看不出换了镜像，
+          # digest 也要翻 registry 才能对回 commit。
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=prr-review
+          cache-to: type=gha,mode=max,scope=prr-review

@@ -1,0 +1,73 @@
+# 一次性审查容器的镜像：审查环境 + GitHub 官方 runner 程序。容器本身就是那台 runner，
+# 起来后注册、领一个任务、跑完退出并销毁。分两阶段：底座只放让 runner 活起来的东西，
+# 审查工具单独一层，改工具不用重建底座。
+#
+# 镜像由 .github/workflows/build-runner-image.yml 在 CI 上多架构构建并推 ghcr。不在运行机上
+# 本地构建：运行机到上游源的 TLS 链在容器里验不过，取不到审查 CLI；运行机只负责取镜像。
+
+ARG BASE_IMAGE=debian:trixie
+
+# ---------------------------------------------------------------- 阶段一：runner 底座
+FROM ${BASE_IMAGE} AS runner-base
+
+ARG RUNNER_VERSION=2.338.0
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl bash git gh jq tar gzip tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# 官方 runner 程序：按版本下载并按官方 release 的 SHA256 校验。
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      arm64) asset="actions-runner-linux-arm64-${RUNNER_VERSION}.tar.gz"; \
+             sha="628b4a7258487b80c1d3c221095a7ded349f5ae0175fd3dfab708d07428f041b" ;; \
+      amd64) asset="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"; \
+             sha="af4b794c1bc41d73d40535e3fe092a39f9679cd8d965954c2aca25a05ca41d32" ;; \
+      *) echo "不支持的架构: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/runner; \
+    cd /opt/runner; \
+    curl -fsSL -o runner.tar.gz \
+      "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${asset}"; \
+    echo "${sha}  runner.tar.gz" | sha256sum -c -; \
+    tar xzf runner.tar.gz; \
+    rm -f runner.tar.gz
+
+# runner 的 .NET 运行时依赖，官方脚本按发行版装齐
+RUN cd /opt/runner && ./bin/installdependencies.sh
+
+# UID 对齐 GitHub 托管 runner（1001）且必须非 root，否则 Actions 创建 /__w 与
+# runner_file_commands 时会 EACCES。
+RUN useradd -m -s /bin/bash -u 1001 agent \
+    && chown -R agent:agent /opt/runner
+
+# 入口包装：等启动器把登记凭据拷成文件，再以 --jitconfig 交给 runner；
+# 凭据不走命令行参数或环境变量，容器侧读完立刻删。
+COPY .ci/runner-entrypoint.sh /opt/runner/entrypoint.sh
+RUN chmod 0755 /opt/runner/entrypoint.sh
+
+# ---------------------------------------------------------------- 阶段二：审查环境
+FROM runner-base
+
+USER root
+
+# 单一来源：两个 Dockerfile 共用同一个包装脚本，避免各存一份漂移
+COPY .ci/pr-agent.sh /usr/local/bin/pr-agent
+RUN chmod 0755 /usr/local/bin/pr-agent
+
+USER agent
+
+# 必须在切到 agent 之后设，否则写的是 /root/.gitconfig，等于没设。
+# 作用是关掉 dubious ownership 检查，不然 gh pr diff / git diff / git log 会全部报错。
+RUN git config --global --add safe.directory '*'
+
+# 审查 CLI 装到 agent 用户下。刻意不 pin 版本：镜像按周期重建以跟进上游。
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+ENV PATH="/home/agent/.local/bin:${PATH}"
+
+WORKDIR /opt/runner
+ENTRYPOINT ["/usr/bin/tini", "--", "/opt/runner/entrypoint.sh"]

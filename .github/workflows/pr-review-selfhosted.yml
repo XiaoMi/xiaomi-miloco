@@ -1,0 +1,74 @@
+name: PR Review (self-hosted)
+
+# 自托管审查路径：门禁脚本与 /review 那条共用（.ci/pr-review-gate.sh），runs-on 指向自托管 runner，
+# 不声明 container:（容器由启动器起）。
+#
+# 用 pull_request_target，而不是 pull_request：
+#   · 外部贡献的 fork PR 也要自动审，而 pull_request 下 fork 拿到的 token 是只读的，
+#     打不了 status、发不了评论；
+#   · 换过来之后工作流定义取自默认分支，外部人改不动 job；
+#   · PR 的代码由门禁脚本自己 fetch，只当**数据**读，不构建、不执行。
+#
+# 一次推送跑两个模型：matrix 展开成两个 job，各自落在一个待命容器里（一个 job 一个容器），
+# 所以两个审查进程天然隔离，不共享工作树。各自维护一条带自己 tag 的评论、各打一条 status。
+#
+# ⚠️ 模型清单出现在两处，改的时候一起改：本文件、pr-review-command.yml 的 review_self。
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write # 发 / 改自己那条 review-pr-ci-<tag> 评论
+  statuses: write       # 把结论打成 pr-review-<tag> commit status
+
+jobs:
+  review:
+    # 认专属标签，避免被 GitHub 托管的机器接走
+    runs-on: [self-hosted, prr-test]
+    timeout-minutes: 60
+    # 草稿不审，靠 ready_for_review 补审
+    if: github.event.pull_request.draft == false
+    strategy:
+      # 一个模型挂了不能顺带取消另一个 —— 两份结论要各自独立成立
+      fail-fast: false
+      # 只放标签，不放模型名：模型名会出现在 job 名称和日志里，而这里是公开仓库。
+      # 真名在宿主机的网关配置（model_aliases）里，容器只发 a / b。
+      matrix:
+        include:
+          - tag: a
+          - tag: b
+    # 同一 PR + 同一个模型只留最新。组名带上 tag，两个模型互不取消；
+    # 与线上那份（pr-review-<号>）也必须不同名，那条保持停用。
+    concurrency:
+      group: pr-review-selfhosted-${{ github.event.pull_request.number }}-${{ matrix.tag }}
+      cancel-in-progress: true
+    env:
+      # 只传标签：门禁据此选模型别名、决定评论标记和 status context
+      PRR_REVIEW_TAG: ${{ matrix.tag }}
+    steps:
+      # 只取默认分支：PR 那一侧的代码由门禁脚本自己 fetch 合并结果再切过去。
+      # 不用 ref: refs/pull/<n>/head —— 特权上下文里 checkout 不可信 ref 是 pwn-request 的
+      # 标准形态（CodeQL 会直接报 Critical），而且这一步本来就不需要。
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+
+      - name: AI 审查并按严重度门禁
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+          # 启动器注入的 ANTHROPIC_BASE_URL / 假钥匙照旧生效；只有模型名被上面的 env 覆盖。
+        run: |
+          git fetch --no-tags origin main 2>/dev/null || true
+          # 取不到脚本也要打 status：裸失败会让 required check 停在 Expected
+          if ! src="$(git show origin/main:.ci/pr-review-run.sh 2>/dev/null)"; then
+            echo "::error::取不到审查脚本（origin/main:.ci/pr-review-run.sh）"
+            gh api "repos/$REPO/statuses/$HEAD_SHA" -f state=error \
+              -f context="pr-review-$PRR_REVIEW_TAG" -f description="取不到审查脚本，未审查" >/dev/null || true
+            exit 1
+          fi
+          # 校验 head 未被换、跑 base 分支上的门禁、把结论打到 head —— 都在这个共用脚本里
+          printf '%s' "$src" | bash -s -- "$PR" "$HEAD_SHA" "$REPO" "$PRR_REVIEW_TAG"

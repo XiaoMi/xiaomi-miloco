@@ -11,6 +11,9 @@ on:
       - "plugins/openclaw/**"
       - "web/**"
       - ".github/workflows/**"
+      # 与 codeql-critical-quality.yml 保持同样的覆盖：只改 .ci/ 的 PR 也要跑，
+      # 否则它产出的 configuration 在 PR 上缺失，汇总检查会报 configurations not found。
+      - ".ci/**"
   push:
     branches: [main]
     paths:
@@ -19,6 +22,7 @@ on:
       - "plugins/openclaw/**"
       - "web/**"
       - ".github/workflows/**"
+      - ".ci/**"
   schedule:
     - cron: "0 6 * * *"
 

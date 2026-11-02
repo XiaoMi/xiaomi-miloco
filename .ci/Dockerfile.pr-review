@@ -2,7 +2,7 @@ FROM debian:trixie
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# gh：GitHub 侧的 review-pr 命令用它发/改 PR 评论。debian main 里的版本够用（gh api / gh pr）。
+# gh：review-pr 用 gh api / gh pr 发/改 PR 评论。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -14,70 +14,34 @@ RUN apt-get update \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
-# pr-agent: self-contained streaming wrapper for non-interactive CI usage.
-# - 映射 PR_AGENT_MODEL 到底层 CLI 的多个模型 env 变量
-# - 用 dontAsk 模式（仅执行 allow 列表的命令）+ --tools 白名单，纵深防御
-# - 跑底层 CLI 的 stream-json 输出，再用 jq 转成可读行
-# Usage: pr-agent "<prompt>"
-RUN cat > /usr/local/bin/pr-agent <<'EOF' && chmod +x /usr/local/bin/pr-agent
-#!/usr/bin/env bash
-set -eo pipefail
-export PATH="/home/agent/.local/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
-if [ -n "${PR_AGENT_MODEL:-}" ]; then
-    export ANTHROPIC_MODEL="${ANTHROPIC_MODEL:-$PR_AGENT_MODEL}"
-    export ANTHROPIC_SMALL_FAST_MODEL="${ANTHROPIC_SMALL_FAST_MODEL:-$PR_AGENT_MODEL}"
-    export ANTHROPIC_DEFAULT_OPUS_MODEL="${ANTHROPIC_DEFAULT_OPUS_MODEL:-$PR_AGENT_MODEL}"
-    export ANTHROPIC_DEFAULT_SONNET_MODEL="${ANTHROPIC_DEFAULT_SONNET_MODEL:-$PR_AGENT_MODEL}"
-    export ANTHROPIC_DEFAULT_HAIKU_MODEL="${ANTHROPIC_DEFAULT_HAIKU_MODEL:-$PR_AGENT_MODEL}"
-fi
-stdbuf -oL claude \
-  --permission-mode dontAsk \
-  --tools "Bash,Read,Glob,Grep" \
-  ${PR_AGENT_FALLBACK_USED:+--append-system-prompt "审查报告末尾 <sub> 行里的版本号后追加 (降级模式)"} \
-  --verbose --output-format stream-json -p "$@" \
-  | jq --unbuffered -rc '
-      def T: if length>300 then .[:300]+"…" else . end;
-      if .type=="assistant" then .message.content[]?
-        | if .type=="text" then "[assistant] "+.text
-          elif .type=="tool_use" then "[tool_use] "+.name+": "+(.input|tostring|T)
-          else empty end
-      elif .type=="user" then .message.content[]?
-        | if .type=="tool_result" then "[tool_result] "+((.content|if type=="string" then . else tostring end)|T)
-          else empty end
-      elif .type=="result" then "[DONE] cost=$"+((.total_cost_usd//0)|tostring)+", turns="+((.num_turns//0)|tostring)
-      else empty end'
-EOF
+# pr-agent 的单一来源是 .ci/pr-agent.sh，本文件与 Dockerfile.pr-runner 共用，避免各存一份漂移。
+COPY .ci/pr-agent.sh /usr/local/bin/pr-agent
+RUN chmod +x /usr/local/bin/pr-agent
 
-# UID 必须是 1001：GitHub-hosted runner 以 runner 用户(UID 1001)创建 /__w 及 _temp 下的
-# runner_file_commands 文件，容器用户 UID 不一致时 actions/checkout 写 save_state 会 EACCES。
-# 同时必须保持非 root——dontAsk 模式同样拒绝以 root 运行。
+# UID 必须是 1001 且非 root：GitHub-hosted runner 以 runner 用户(1001)创建 /__w 与
+# runner_file_commands，UID 不一致会让 actions/checkout 写 save_state 时 EACCES；
+# dontAsk 模式也拒绝以 root 运行。
 RUN useradd -m -s /bin/bash -u 1001 agent
 USER agent
 WORKDIR /home/agent
 
-# NOTE(intentional): 刻意不 pin 审查 CLI 版本——镜像按周期手工 rebuild & push，
-# 借此跟进上游新版本；每次 push 前会本地验证通过。所以 `curl | bash` 的不确定性在本仓
-# 的工作流中是特性而非 bug，后续 review 请勿再次标记此处。
+# 刻意不 pin 审查 CLI 版本：镜像按周期重建以跟进上游。
 RUN curl -fsSL https://claude.ai/install.sh | bash
 
 ENV PATH="/home/agent/.local/bin:${PATH}"
 
-# GitHub Actions 以 root 克隆仓库到容器工作目录，而容器以 agent (UID 1001) 运行；
-# 禁用 git 的 dubious ownership 检查，避免 gh pr diff / git diff / git log 全部报错
+# GitHub Actions 以 root 克隆仓库、容器以 agent(1001) 运行，需禁用 dubious ownership 检查，
+# 否则 gh pr diff / git diff / git log 全部报错。
 RUN git config --global --add safe.directory '*'
 
-# 本镜像供 GitHub Actions 的 pr-review workflow 使用，手动构建并推送到 ghcr：
-#   echo "$CR_PAT" | docker login ghcr.io -u <github-user> --password-stdin
+# 手动构建并推送到 ghcr：
 #   docker build -t ghcr.io/xiaomi/xiaomi-miloco/pr-review:trixie -f .ci/Dockerfile.pr-review .
 #   docker push ghcr.io/xiaomi/xiaomi-miloco/pr-review:trixie
 #
-# 运行时通过 GitHub Actions secrets / env 按需注入：
-#   ANTHROPIC_API_KEY   —— 必填
-#   ANTHROPIC_BASE_URL  —— 可选；**不在此 ENV 声明空值**，否则空字符串会被 SDK 当成有效 base URL 解析失败，而不是回退到默认端点
-#   PR_AGENT_MODEL             —— 可选，由 pr-agent 映射到 ANTHROPIC_MODEL / ANTHROPIC_SMALL_FAST_MODEL
-#   ANTHROPIC_FALLBACK_API_KEY —— 可选；降级链路用，主 key/endpoint 不可用时切到备用（见 pr-review-gate.sh）
-#   ANTHROPIC_FALLBACK_BASE_URL—— 可选；降级链路用的备用 endpoint，不配则降级时沿用默认端点
-#   PR_AGENT_FALLBACK_MODEL    —— 可选；降级链路用的备用模型；须与 ANTHROPIC_FALLBACK_API_KEY 同时配齐才触发降级
-#   GH_TOKEN                   —— gh 用来读 / 发 PR 评论（workflow 注入 github.token）
+# 运行时注入：ANTHROPIC_API_KEY 必填；ANTHROPIC_BASE_URL 可选，但不能声明为空
+# （空串会被 SDK 当无效 URL）；PR_AGENT_MODEL / GH_TOKEN 可选；
+# ANTHROPIC_FALLBACK_API_KEY 与 PR_AGENT_FALLBACK_MODEL 同时配齐才触发降级，
+# ANTHROPIC_FALLBACK_BASE_URL 不配则沿用主 endpoint（同一网关换 key/模型）；
+#   要指向另一个服务商时必须显式配置，否则降级请求仍会发往主网关。
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/bin/bash"]

@@ -10,6 +10,10 @@ on:
       - "cli/**"
       - "plugins/openclaw/**"
       - "web/**"
+      # 只改 CI 的 PR 也要跑：这个 workflow 在 main 上产生了两个 configuration，
+      # PR 上缺了它们，CodeQL 的汇总检查会报 "configurations not found" 而失败。
+      - ".ci/**"
+      - ".github/workflows/**"
   schedule:
     - cron: "30 6 * * *"
 
