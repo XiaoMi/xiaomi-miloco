@@ -111,25 +111,13 @@ async def test_trace_max_tokens_matches_sent_body_for_minimax(monkeypatch):
     若留痕仍记配置值(默认 512),按 trace 复现就会复现出本 PR 要消灭的空 content。
     """
     captured: list[dict] = []
-
-    def _capture(*a, **k):
-        captured.append(k.get("json") or {})
-        return _FakeResp(200, {"choices": [], "usage": {}})
-
-    class _C:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def post(self, *a, **k):
-            return _capture(*a, **k)
-
-    monkeypatch.setattr(omni_client.httpx, "AsyncClient", _C)
+    monkeypatch.setattr(
+        omni_client.httpx,
+        "AsyncClient",
+        _fake_async_client(
+            _FakeResp(200, {"choices": [], "usage": {}}), sent=captured
+        ),
+    )
 
     artifacts = OmniEventArtifacts()
     cfg = OmniConfig(
@@ -146,7 +134,7 @@ async def test_trace_max_tokens_matches_sent_body_for_minimax(monkeypatch):
         await omni_client.call_omni(_payload(), cfg)
 
     assert captured, "请求没发出去,断言无效"
-    sent_max_tokens = captured[0]["max_tokens"]
+    sent_max_tokens = captured[0]["json"]["max_tokens"]
     assert sent_max_tokens == 4096, "adapter 没把 max_tokens 抬到下限"
 
     calls = (artifacts.trace or {}).get("calls") or []
@@ -160,22 +148,13 @@ async def test_trace_max_tokens_matches_sent_body_for_minimax(monkeypatch):
 async def test_trace_max_tokens_unchanged_for_mimo(monkeypatch):
     """非 MiniMax provider 的留痕行为不变(MiMo 没有下限,记的就是配置值)。"""
     captured: list[dict] = []
-
-    class _C:
-        def __init__(self, *a, **k):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def post(self, *a, **k):
-            captured.append(k.get("json") or {})
-            return _FakeResp(200, {"choices": [], "usage": {}})
-
-    monkeypatch.setattr(omni_client.httpx, "AsyncClient", _C)
+    monkeypatch.setattr(
+        omni_client.httpx,
+        "AsyncClient",
+        _fake_async_client(
+            _FakeResp(200, {"choices": [], "usage": {}}), sent=captured
+        ),
+    )
 
     artifacts = OmniEventArtifacts()
     cfg = OmniConfig(
@@ -194,7 +173,7 @@ async def test_trace_max_tokens_unchanged_for_mimo(monkeypatch):
     calls = (artifacts.trace or {}).get("calls") or []
     assert calls
     recorded = calls[-1]["inference_params"]["max_tokens"]
-    assert recorded == captured[0]["max_tokens"] == 512
+    assert recorded == captured[0]["json"]["max_tokens"] == 512
 
 
 async def test_trace_max_tokens_matches_sent_body_for_minimax_stream(monkeypatch):
