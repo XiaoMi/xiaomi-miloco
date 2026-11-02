@@ -104,7 +104,7 @@ def _fake_stream_client(sent: list[dict]):
     """流式路径的 AsyncClient stub:把 ``stream()`` 收到的请求体追加进 ``sent``。
 
     ``_fake_async_client`` 只覆盖 ``post()``，流式出口走的是 ``client.stream()``，
-    所以单独一个 helper；三条 trace 守护用例共用它，避免各写一份。
+    所以单独一个 helper；供流式 trace 守护用例使用。
     """
 
     class _FakeStreamResp:
