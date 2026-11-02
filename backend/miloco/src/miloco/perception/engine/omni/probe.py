@@ -7,7 +7,7 @@
 故预算给多少都无所谓。MiniMax 侧例外——M3 强制 adaptive thinking 且思考 token 计入
 max_tokens 预算，adapter 会把 1 抬到 4096 下限（见 provider.py 的
 _MINIMAX_MIN_MAX_TOKENS）。抬高的是上限不是实耗：实测 ping 的思考量仅 20-40 token、
-延迟 0.9-4.6s，仍在 _TIMEOUT 的 15s 读超时内。
+延迟 0.9-5.1s，仍在 _TIMEOUT 的 15s 读超时内。
 
 返回统一形状 {ok, code, status?, latency_ms?, message}。探测类 code 与 spec §2 的集合一致;
 ``fetch_models`` 另有一个 ``list_unsupported``,不参与熔断、不属于该集合(见 error_classifier

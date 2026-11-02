@@ -270,7 +270,9 @@ async def test_trace_max_tokens_matches_sent_body_for_minimax_fused(monkeypatch)
         _FakeResp(200, {"choices": [], "usage": {}}), sent=captured
     )
     monkeypatch.setattr(omni.httpx, "AsyncClient", _fake)
-    monkeypatch.setattr(omni, "_get_fused_http_client", lambda timeout: _fake)
+    # 传实例而非类：_get_fused_http_client 的返回值会被当作 client 直接 await .post(...)，
+    # 给类的话 url 会落进未绑定函数的 self 形参，captured 里的 url 恒为 None。
+    monkeypatch.setattr(omni, "_get_fused_http_client", lambda timeout: _fake())
 
     artifacts = OmniEventArtifacts()
     cfg = OmniConfig(

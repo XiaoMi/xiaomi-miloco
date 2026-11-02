@@ -1289,7 +1289,7 @@ async def test_omni_config(
     预检语义，直接走 adapter 化的 chat 探测。消耗极少量 token，不计入 miloco 用量统计。
     MiniMax 例外：M3 强制 adaptive thinking 且思考 token 计入 max_tokens 预算，adapter 会把
     探测用的 max_tokens=1 抬到 4096 下限（实测 ping 的思考量仅 20-40 token，抬高的是上限而非
-    实耗，延迟实测 0.9-4.6s 仍在探测 15s 超时内）。
+    实耗，延迟实测 0.9-5.1s 仍在探测 15s 超时内）。
     返回 {ok, code, status, latency_ms, message}。"""
     omni = get_settings().model.omni
     model = (body.model or omni.model).strip()
