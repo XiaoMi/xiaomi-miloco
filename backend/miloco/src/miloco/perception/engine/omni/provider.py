@@ -272,7 +272,7 @@ class MiniMaxAdapter(MiMoAdapter):
        推理内容走响应的 ``reasoning_content`` 字段（部分场景内联 ``<think>`` 标签，
        response_parser 侧已剥离）。
 
-    注意：adaptive thinking 会拉高延迟。实测 identity 路径 2.5s–13.6s（默认 timeout 30s），
+    注意：adaptive thinking 会拉高延迟。实测 identity 路径 2.5s–11.3s（默认 timeout 30s），
     复杂场景比 MiMo 慢数倍，属预期行为而非故障。
     """
 
