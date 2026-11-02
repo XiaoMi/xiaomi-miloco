@@ -524,19 +524,16 @@ if [ -f "$MILOCO_HOME/config.json" ]; then
     fi
 
     if [ -n "$FOUND_PY" ]; then
-      info "auto-fix: config.json::server.python_bin = $FOUND_PY"
-      "$PYTHON" - "$MILOCO_HOME" "$FOUND_PY" <<'PY'
-import json, sys
-from pathlib import Path
-home, py_bin = sys.argv[1], sys.argv[2]
-p = Path(home) / "config.json"
-try:
-    cfg = json.loads(p.read_text(encoding="utf-8"))
-except Exception:
-    cfg = {}
-cfg.setdefault("server", {})["python_bin"] = py_bin
-p.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
-PY
+      # fail-closed：config.json 读不懂时拒绝写盘（脚本 exit 1 → shell 走 warn 分支），
+      # 绝不用空基底整体覆盖——server.token / model.omni.api_key 一个字节都不能丢，
+      # 且本修复跑在 step 5 备份之前，损坏字节被盖掉后连人工恢复的现场都没有。
+      # 合并 + 原子写在 scripts/fix_python_bin.py（与 read_python_bin.py 配对，有单测）。
+      if "$PYTHON" "$HERE/scripts/fix_python_bin.py" "$MILOCO_HOME" "$FOUND_PY"; then
+        info "auto-fix: config.json::server.python_bin = $FOUND_PY"
+      else
+        warn "python_bin auto-fix 已跳过：config.json 读不懂，拒绝写盘以免清空其他配置"
+        warn "请恢复备份（config.json.bak-*）后重新运行 install-hermes.sh"
+      fi
     else
       warn "config.json::server.python_bin auto-fix 失败：找不到能 import miloco 的 python"
       warn "手动修：${MILOCO_HOME}/config.json::server.python_bin = <装 miloco 包的 python 路径>"

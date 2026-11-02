@@ -387,3 +387,87 @@ describe("getNotifyDedupWindowMs", () => {
     expect(getNotifyDedupWindowMs()).toBe(30_000);
   });
 });
+
+describe("config.json 读不懂时拒绝覆盖写盘（issue #569）", () => {
+  let origHome: string | undefined;
+  let tmpHome: string;
+  let configPath: string;
+
+  beforeEach(() => {
+    origHome = process.env.MILOCO_HOME;
+    tmpHome = mkdtempSync(path.join(tmpdir(), "miloco-home-"));
+    configPath = path.join(tmpHome, "config.json");
+    process.env.MILOCO_HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    if (origHome === undefined) delete process.env.MILOCO_HOME;
+    else process.env.MILOCO_HOME = origHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it("loadSharedConfig 遇损坏 config.json 不落盘，用户字节原样保留", async () => {
+    // 旧实现把读失败当空基底，再合入 agent.* 落盘，产物正是
+    // 「只剩 agent 段的 135 字节 config.json」（server.token 被清 → 503）。
+    const original = '{ "server": { "token": "tok-half-written"';
+    writeFileSync(configPath, original);
+
+    const { loadSharedConfig } = await import("../src/miloco/config.js");
+    const api = await makeApi();
+    const cfg = loadSharedConfig(api);
+
+    expect(readFileSync(configPath, "utf-8")).toBe(original);
+    // 内存里仍给一份可用配置，网关能先起来（agent 兜底字段照常补）
+    expect(cfg.agent.webhook_url).toContain("/miloco/webhook");
+  });
+
+  it("loadSharedConfig 遇顶层非对象 config.json 不落盘", async () => {
+    const original = "[1, 2, 3]";
+    writeFileSync(configPath, original);
+
+    const { loadSharedConfig } = await import("../src/miloco/config.js");
+    const api = await makeApi();
+    loadSharedConfig(api);
+
+    expect(readFileSync(configPath, "utf-8")).toBe(original);
+  });
+
+  it("updateSharedConfig 遇损坏 config.json 抛错拒绝写盘", async () => {
+    const original = "NOT JSON {{{{";
+    writeFileSync(configPath, original);
+
+    const { updateSharedConfig } = await import("../src/miloco/config.js");
+    expect(() => updateSharedConfig({ scheduler: { enabled: false } })).toThrow(
+      /拒绝写入/,
+    );
+    expect(readFileSync(configPath, "utf-8")).toBe(original);
+  });
+
+  it("updateSharedConfig 正常合并保留其它段落", async () => {
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        server: { token: "tok-keep" },
+        model: { omni: { api_key: "sk-keep" } },
+      }),
+    );
+
+    const { updateSharedConfig } = await import("../src/miloco/config.js");
+    updateSharedConfig({ scheduler: { enabled: false } });
+
+    const onDisk = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(onDisk.server.token).toBe("tok-keep");
+    expect(onDisk.model.omni.api_key).toBe("sk-keep");
+    expect(onDisk.scheduler.enabled).toBe(false);
+  });
+
+  it("空文件按首启初始化（无可保留内容）", async () => {
+    writeFileSync(configPath, "");
+
+    const { updateSharedConfig } = await import("../src/miloco/config.js");
+    updateSharedConfig({ scheduler: { enabled: true } });
+
+    const onDisk = JSON.parse(readFileSync(configPath, "utf-8"));
+    expect(onDisk.scheduler.enabled).toBe(true);
+  });
+});

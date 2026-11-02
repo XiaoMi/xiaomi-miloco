@@ -1,11 +1,14 @@
 import { randomBytes } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
-  writeFileSync,
+  writeSync,
 } from "node:fs";
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -60,11 +63,19 @@ export function readTextFileSync(path: string): string {
 }
 
 export function writeTextFileSync(path: string, text: string): void {
-  // Atomic write: 先写到同目录临时文件，再 rename 覆盖目标路径；
+  // Atomic write: 先写到同目录临时文件并 fsync 落盘，再 rename 覆盖目标路径。
+  // fsync 数据页后再 rename，掉电不会留下「改了名却没落盘」的空文件——
+  // 空文件会被读取器按首启初始化静默重建，是 #569 那类数据丢失的损坏源。
   mkdirSync(dirname(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
   try {
-    writeFileSync(tmp, text, "utf8");
+    const fd = openSync(tmp, "w");
+    try {
+      writeSync(fd, text, undefined, "utf8");
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmp, path);
   } catch (err) {
     try {

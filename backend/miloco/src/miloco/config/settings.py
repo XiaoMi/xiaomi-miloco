@@ -567,7 +567,14 @@ def _load_json_dict(path: Path) -> dict[str, Any]:
         logger.warning("config.json 解析失败 (%s)，将视为空配置：%s", path, exc)
         return {}
     if not isinstance(data, dict):
-        raise ValueError(f"{path} must deserialize to a mapping, got {type(data)!r}")
+        # 与上面的 JSONDecodeError 分支对齐：读路径宽容，warn + 视为空配置。
+        # 写路径的拒绝在 agent_config._read_config_dict（读不懂拒绝写盘），
+        # 这里容忍是为了让 ensure_backend_token 的启动降级分支对两种损坏
+        # 形态都成立——否则 [1,2,3] 会让 bootstrap 在此处裸崩 ValueError。
+        logger.warning(
+            "config.json 顶层不是对象 (%s)，将视为空配置: %r", path, type(data)
+        )
+        return {}
     return data
 
 
