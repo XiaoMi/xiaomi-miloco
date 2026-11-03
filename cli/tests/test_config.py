@@ -156,12 +156,37 @@ def test_get_value_missing_path_raises():
         get_value("server.does_not_exist")
 
 
+def test_guard_pending_timeout_round_trips_as_positive_float(isolated_config):
+    assert get_value("rule.guard_pending_timeout_seconds") == 60.0
+    assert set_value("rule.guard_pending_timeout_seconds", "90.5") == 90.5
+    assert get_value("rule.guard_pending_timeout_seconds") == 90.5
+
+    data = json.loads(isolated_config.read_text())
+    assert data["rule"]["guard_pending_timeout_seconds"] == 90.5
+    assert isinstance(data["rule"]["guard_pending_timeout_seconds"], float)
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "-0.1", "nan", "inf", "-inf", "1e309"])
+def test_guard_pending_timeout_rejects_invalid_values_atomically(raw, isolated_config):
+    set_value("server.url", "http://original:1810")
+    original = isolated_config.read_bytes()
+    with pytest.raises(ValueError, match="需要有限正数"):
+        set_values(
+            [
+                ("server.url", "http://changed:1810"),
+                ("rule.guard_pending_timeout_seconds", raw),
+            ]
+        )
+    assert isolated_config.read_bytes() == original
+
+
 def test_known_paths_includes_all_scopes():
     paths = known_paths()
     assert "debug" in paths
     assert "server.url" in paths
     assert "server.python_bin" in paths
     assert "model.omni.api_key" in paths
+    assert "rule.guard_pending_timeout_seconds" in paths
 
 
 def test_set_value_does_not_bake_env_var(isolated_config, monkeypatch):

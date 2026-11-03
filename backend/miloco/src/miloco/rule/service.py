@@ -483,7 +483,9 @@ async def init_rule_service(
 
     rule_repo = RuleRepo()
     rule_log_repo = RuleLogRepo()
-    sample_interval = get_settings().perception.collect.window_size
+    settings = get_settings()
+    sample_interval = settings.perception.collect.window_size
+    guard_pending_timeout = settings.rule.guard_pending_timeout_seconds
     task_record_service = TaskRecordService()
     rule_runner = RuleRunner(
         rules=rule_repo.get_all(enabled_only=False),
@@ -491,6 +493,7 @@ async def init_rule_service(
         rule_log_repo=rule_log_repo,
         sample_interval_seconds=sample_interval,
         task_record_service=task_record_service,
+        guard_pending_timeout_seconds=guard_pending_timeout,
     )
     attach_task_state_machine(rule_runner, rule_repo)
     if state_store is not None:
@@ -617,6 +620,7 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
             signal.task_id, signal.rule_id, outcome.value, now_ms()
         ),
         on_forget=tracker.forget,
+        pending_enter_timeout_seconds=rule_runner.guard_pending_timeout_seconds,
     )
     rule_runner.attach_state_machine(state_machine)
     rule_runner.attach_tracker(tracker)

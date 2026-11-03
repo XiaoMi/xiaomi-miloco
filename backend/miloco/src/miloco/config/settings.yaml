@@ -75,6 +75,7 @@ camera:
 rule:
   log_ttl: 30                  # 天
   default_duration_ratio: 0.6  # duration_seconds 窗口 True 比例默认阈值，未显式 --duration-ratio 时生效
+  guard_pending_timeout_seconds: 60  # guard 拦截的主规则进入信号最多保留多久（秒）
 
 # 感知管线配置
 perception:
