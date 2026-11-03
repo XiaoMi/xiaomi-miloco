@@ -389,6 +389,17 @@ class MIoTClient:
         """HTTP client."""
         return self._http_client
 
+    def clear_backoff(self, key: str | None = None) -> int:
+        """用户主动刷新时清掉云端接口的失败退避，返回被清掉的数量。
+
+        转发到 ``http_client``：调用方（miloco 的 MiotProxy）持有的是
+        ``MIoTClient``，不该为了清退避再穿两层去拿 HTTP 客户端。
+        """
+        client = self._http_client
+        if client is None:
+            return 0
+        return client.clear_backoff(key)
+
     @property
     def central_hub(self) -> Optional[CentralHubManager]:
         """Central hub gateway coordinator (None outside cn / before login)."""
