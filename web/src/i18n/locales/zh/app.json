@@ -34,6 +34,11 @@
     "miotBound": "米家已绑定",
     "miotBoundScopeKept": "米家已重新绑定，原有家庭与摄像头设置已保留",
     "homeStatusUnavailable": "暂时连不上后端，正在自动重试…",
-    "loadOnDemandLogsFail": "加载主动查询日志失败"
+    "loadOnDemandLogsFail": "加载主动查询日志失败",
+    "refresh": "刷新",
+    "refreshing": "刷新中…",
+    "refreshDone": "已刷新",
+    "refreshFail": "刷新失败：{{msg}}",
+    "refreshHint": "从米家重新拉取设备、相机和场景"
   }
 }

@@ -1341,6 +1341,16 @@ export async function realRefreshCameraOnline(force = false): Promise<void> {
   await apiFetch<Normal<unknown>>("/api/miot/refresh_camera_online");
 }
 
+/**
+ * 用户主动刷新：让后端重新拉取设备 / 相机 / 场景 / 账号信息。
+ *
+ * 后端已经不再为「缓存为空」「列表为空」这类常驻状态周期性回源，新数据靠推送
+ * 与这条手动通道补——所以它也是住户发现「家里刚加了设备但没显示」时的唯一入口。
+ */
+export async function realRefreshAll(): Promise<void> {
+  await apiFetch<Normal<unknown>>("/api/miot/refresh_miot_all_info");
+}
+
 export async function realToggleScopeCamera(
   dids: string[],
   inUse: boolean,
