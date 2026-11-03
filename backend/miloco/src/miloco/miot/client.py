@@ -85,13 +85,10 @@ STATE_REFRESH_SOURCE = "iot_refresh"
 # 与它限制的是同一件事,调值时两处一起改。
 _RECONCILE_CONCURRENCY = 16
 
-# 「加载成功但账号下确实没有相机」时的重查间隔，与网络层退避的上限一致（5 分钟）。
-# 感知同步循环在没有活跃设备时是 1 秒一轮、每轮调 get_cameras 两次；不设这个间隔，
-# 零相机账号会退化成每秒两次云端拉取（每次 = gethome + 若干 device_list_page），
-# 而且永不停止。用户主动刷新（CLI / 接口）会把它清零，见 reset_cloud_backoff。
-_CAMERA_EMPTY_RECHECK_SEC = 300.0
-# 拉取失败后的重试间隔。网络层还有一层按接口的指数退避；这里只保证「失败」不会
-# 被 1 秒循环放大成每轮重试。
+# 首次加载失败后的重试间隔。网络层还有一层按接口的指数退避；这里只保证「失败」
+# 不会被感知的 1 秒循环放大成每轮重试。
+# **加载成功之后不再有周期性重拉**：账号下确实没有相机时，新相机靠设备绑定 /
+# 元信息推送、MQTT 重连或用户主动刷新发现，不靠轮询。
 _CAMERA_FAILURE_RETRY_SEC = 10.0
 
 
@@ -582,6 +579,14 @@ class MiotProxy:
     #: 造实例的路径也要能取到，否则 get_cameras 会 AttributeError。
     _camera_retry_at: float = 0.0
 
+    #: 「成功加载过」的标记。与「缓存是否为空」分开表达：账号下确实没有该类数据时
+    #: 缓存恒空，只用空判据会让每次读取都重拉一次云端。只有从未加载成功（或加载
+    #: 失败）时才允许读取路径自刷新；之后靠事件推送与用户主动刷新。
+    _cameras_loaded: bool = False
+    _devices_loaded: bool = False
+    _scenes_loaded: bool = False
+    _user_loaded: bool = False
+
     #: 相机缓存被成功发布的次数。refresh_cameras 发布之后若在副作用里抛错会返回
     #: None，用代次判断"这次到底发布成功没有"，比看返回值可靠。
     _camera_load_gen: int = 0
@@ -853,6 +858,9 @@ class MiotProxy:
         self._cameras_loaded = False
         self._camera_retry_at = 0.0
         self._camera_load_gen = 0
+        self._devices_loaded = False
+        self._scenes_loaded = False
+        self._user_loaded = False
         # Welcome service survives deinit (rebuilt only in __init__), but its
         # dedup window state must reset alongside the other in-memory caches —
         # otherwise a re-bind of the same did within WELCOME_DEDUP_SEC after an
@@ -902,12 +910,17 @@ class MiotProxy:
         self._scene_info_dict: dict[str, MIoTManualSceneInfo] = {}
         self._camera_retry_at: float = 0.0
         self._camera_load_gen = 0
+        self._devices_loaded = False
+        self._scenes_loaded = False
+        self._user_loaded = False
 
         user_info_str = self._kv_repo.get(DeviceInfoKeys.USER_INFO_KEY)
         if user_info_str:
             self._user_info: MIoTUserInfo | None = MIoTUserInfo.model_validate_json(
                 user_info_str
             )
+            # 落库的那份就是"加载过"的凭据：读取路径不必再为它去云端。
+            self._user_loaded = True
         else:
             self._user_info = None
 
@@ -1152,11 +1165,13 @@ class MiotProxy:
         # 降级 / 未绑定时不去打这一趟自刷新（同 cached_scenes 的注释），只回手上
         # 已有的一份。显式刷新仍走 refresh_cameras，它不受这道闸门约束——恢复
         # 路径正要靠它把授权修回来。
-        # 「空」有两种：从没加载过（立刻拉）和加载成功但账号下确实没有相机
-        # （只在低频重查）。不区分的话，感知同步循环每轮两次调用会把它放大成
-        # 每秒两次云端拉取，且永不停止。
+        # 只在「从未成功加载过」（或加载失败待重试）时才自刷新。加载成功之后即使
+        # 账号下一台相机都没有，也不再周期性重拉：新相机靠设备绑定 / 元信息推送、
+        # MQTT 重连刷新和用户主动刷新发现。不这样分的话，感知同步循环每轮两次调用
+        # 会把它放大成每秒两次云端拉取，且永不停止。
         if (
             not self._camera_info_dict
+            and not self._cameras_loaded
             and self.is_operational
             and time.monotonic() >= self._camera_retry_at
         ):
@@ -1167,18 +1182,19 @@ class MiotProxy:
             async with lock:
                 if (
                     not self._camera_info_dict
+                    and not self._cameras_loaded
                     and time.monotonic() >= self._camera_retry_at
                 ):
                     logger.warning("No camera info dict found, refreshing cameras")
                     gen = self._camera_load_gen
                     await self.refresh_cameras()
-                    # 以「缓存有没有被发布过」判成功，而不是看返回值：
+                    # 失败才排下一次重试；成功（含空）后 _cameras_loaded 为真，
+                    # 这里不再安排任何周期动作。以代次判成功而不是看返回值：
                     # refresh_cameras 在发布之后的副作用里抛错会返回 None。
-                    self._camera_retry_at = time.monotonic() + (
-                        _CAMERA_EMPTY_RECHECK_SEC
-                        if self._camera_load_gen != gen
-                        else _CAMERA_FAILURE_RETRY_SEC
-                    )
+                    if self._camera_load_gen == gen:
+                        self._camera_retry_at = (
+                            time.monotonic() + _CAMERA_FAILURE_RETRY_SEC
+                        )
         return self._camera_info_dict
 
     def get_cached_camera(self, did: str) -> MIoTCameraInfo | None:
@@ -1206,7 +1222,11 @@ class MiotProxy:
         # 降级 / 未绑定时不去打这一趟自刷新（同 cached_scenes 的注释），只回手上
         # 已有的一份（空则 {}）——返回值与刷新失败时相同，不新增第三种状态。
         # 显式刷新仍走 refresh_devices，它不在闸门之内。
-        if not self._device_info_dict and self.is_operational:
+        if (
+            not self._device_info_dict
+            and not self._devices_loaded
+            and self.is_operational
+        ):
             await self.refresh_devices()
         return self._device_info_dict
 
@@ -1583,6 +1603,7 @@ class MiotProxy:
                 # 故意不 deepcopy:返回的就是 SDK buffer 本体。refresh_cameras 尾部的
                 # 对账靠这个别名看到刚重拉的设备清单,改成拷贝会把新绑设备当"该退订"。
                 self._device_info_dict = devices
+                self._devices_loaded = True
                 # 与 refresh_cameras / refresh_camera_online_status 同口径:对账派后台任务。
                 # 目标集合在进锁后才求值(见 _reconcile_subscriptions),晚几秒不影响正确性;
                 # 本方法挂在 /miot/home_info?refresh=true 与 /miot/refresh_miot_devices
@@ -1836,8 +1857,13 @@ class MiotProxy:
         self._mips_connect_listeners.append(callback)
 
     async def _on_mips_connected(self) -> None:
-        """SDK 单槽回调的唯一占用方: 先刷设备表, 再通知各个 listener。"""
+        """SDK 单槽回调的唯一占用方: 先刷设备与相机表, 再通知各个 listener。
+
+        相机列表必须一起刷：断线期间新绑的相机不会再有推送，而读取路径已经不再
+        周期性重拉，这是它唯一的补救点。
+        """
         await self.refresh_devices()
+        await self.refresh_cameras()
         for callback in self._mips_connect_listeners:
             try:
                 callback()
@@ -2094,6 +2120,7 @@ class MiotProxy:
         try:
             scenes = await self._miot_client.get_manual_scenes_async()
             self._scene_info_dict = scenes
+            self._scenes_loaded = True
             return scenes
         except Exception as e:
             logger.error("Failed to get all scenes: %s", e)
@@ -2129,7 +2156,7 @@ class MiotProxy:
         # 同 get_devices：降级 / 未绑定时只回手上已有的一份（空则 {}），不为
         # 填缓存去打这一趟云端。返回类型保持缓存本体，别改返 None——那会把
         # 「空列表」变成调用侧的报错，是叠在闸门上的第二处变更。
-        if not self._scene_info_dict and self.is_operational:
+        if not self._scene_info_dict and not self._scenes_loaded and self.is_operational:
             await self.refresh_scenes()
         return self._scene_info_dict
 
@@ -2218,6 +2245,7 @@ class MiotProxy:
         try:
             user_info = await self._miot_client.get_user_info_async()
             self._user_info = user_info
+            self._user_loaded = True
             self._kv_repo.set(
                 DeviceInfoKeys.USER_INFO_KEY, json.dumps(to_jsonable_python(user_info))
             )
@@ -2236,7 +2264,7 @@ class MiotProxy:
         # 与刷新失败走的是同一条路，不新增第三种状态。
         # 恢复路径不走这里：refresh_miot_info 直接调 refresh_user_info，不受这道
         # 前置约束。
-        if not self._user_info and self.is_operational:
+        if not self._user_info and not self._user_loaded and self.is_operational:
             await self.refresh_user_info()
         return self._user_info
 

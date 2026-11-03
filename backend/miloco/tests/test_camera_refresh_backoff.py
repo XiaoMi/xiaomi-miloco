@@ -17,14 +17,15 @@ from miloco.miot import client as client_mod
 from miloco.miot.client import MiotProxy
 
 
-def _proxy(cameras=None, refresh_result=None, publishes=True):
-    """``publishes`` 模拟 refresh_cameras 是否真的发布了缓存（代次 +1）。"""
+def _proxy(cameras=None, refresh_result=None, publishes=True, loaded=False):
+    """``publishes`` 模拟 refresh_cameras 是否真的发布了缓存（代次 +1 且标记已加载）。"""
     calls = []
 
     async def refresh_cameras():
         calls.append(time.monotonic())
         if publishes:
             proxy._camera_load_gen += 1
+            proxy._cameras_loaded = True
         return refresh_result
 
     proxy = types.SimpleNamespace(
@@ -32,6 +33,7 @@ def _proxy(cameras=None, refresh_result=None, publishes=True):
         _camera_retry_at=0.0,
         _camera_load_gen=0,
         _camera_get_lock=None,
+        _cameras_loaded=loaded,
         is_operational=True,
         refresh_cameras=refresh_cameras,
     )
@@ -51,17 +53,18 @@ class TestGetCamerasThrottle:
         asyncio.run(_get(proxy))
 
         assert len(calls) == 1
-        assert proxy._camera_retry_at > time.monotonic() + 50
+        assert proxy._cameras_loaded is True
 
-    def test_empty_result_refetches_after_window(self):
+    def test_loaded_but_empty_never_refetches(self):
+        # 加载成功但账号下确实没有相机：不再有任何周期重拉，靠事件/手动刷新发现
         proxy, calls = _proxy(cameras={}, refresh_result={})
         asyncio.run(_get(proxy))
         assert len(calls) == 1
 
-        # 把窗口拨到过期，模拟 60s 之后
-        proxy._camera_retry_at = time.monotonic()
+        proxy._camera_retry_at = 0.0  # 就算窗口早已过期也不该再拉
         asyncio.run(_get(proxy))
-        assert len(calls) == 2
+        asyncio.run(_get(proxy))
+        assert len(calls) == 1
 
     def test_failure_uses_short_retry_window(self):
         proxy, calls = _proxy(cameras={}, refresh_result=None, publishes=False)
@@ -82,12 +85,13 @@ class TestGetCamerasThrottle:
         asyncio.run(_get(proxy))
         assert calls == []
 
-    def test_published_empty_but_returned_none_still_uses_long_window(self):
-        # refresh_cameras 发布缓存后若在副作用里抛错会返回 None；以代次判成功。
+    def test_published_empty_but_returned_none_still_marks_loaded(self):
+        # refresh_cameras 发布缓存后若在副作用里抛错会返回 None；以代次判成功，
+        # 不能当成失败去每 10s 重试。
         proxy, calls = _proxy(cameras={}, refresh_result=None, publishes=True)
         asyncio.run(_get(proxy))
+        asyncio.run(_get(proxy))
         assert len(calls) == 1
-        assert proxy._camera_retry_at > time.monotonic() + 200
 
     def test_not_operational_never_refreshes(self):
         proxy, calls = _proxy(cameras={}, refresh_result={})

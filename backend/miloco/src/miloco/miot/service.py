@@ -1394,24 +1394,17 @@ class MiotService:
             if not allow:
                 data["home_name"] = None
             else:
-                # 优先 cache,cache 空 *或* cache 跟 allow 无交集时 fallback list_homes
-                # (家里所有摄像头都离线导致 device cache 不含启用集 hid 的 case)。
+                # 只从缓存里反查家庭名。此前这里在缓存缺失时会 fallback 调
+                # list_homes（一次 gethome），而 /api/miot/home 是前端 30s 轮询的
+                # ——「选中的家庭里没有设备/相机」这种常驻状态下就变成每 30s 一次
+                # 云端请求。家庭名缺失由前端切家列表（/api/miot/homes）或用户主动
+                # 刷新补齐，不再在轮询路径上回源。
                 home_name: str | None = None
                 if home_id_to_name:
                     sorted_hids = sorted(home_id_to_name.keys())
                     pick_hids = [h for h in sorted_hids if h in allow]
                     if pick_hids:
                         home_name = home_id_to_name[pick_hids[0]]
-                if home_name is None:
-                    try:
-                        homes = await self.list_homes()
-                    except Exception as e:
-                        logger.warning("list_homes failed in get_home_info: %s", e)
-                        homes = []
-                    sorted_homes = sorted(homes, key=lambda h: h["home_id"])
-                    pick = [h for h in sorted_homes if h["home_id"] in allow]
-                    if pick:
-                        home_name = pick[0].get("home_name")
                 data["home_name"] = home_name
             # home_id_to_name 是 backend 内部用的中转，前端不需要。
             # client.py::get_home_info_data 每次 build 新 dict（dict literal 现构造），
