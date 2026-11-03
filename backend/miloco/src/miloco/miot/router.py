@@ -889,9 +889,15 @@ async def video_stream_websocket(
     websocket: WebSocket,
     camera_id: str,
     channel: int,
+    fps: int | None = None,
     current_user: str = Depends(verify_websocket_token),
 ):
-    """Video stream WebSocket."""
+    """Video stream WebSocket.
+
+    ``fps`` (optional) is the live frame rate the viewer asks for; the server
+    clamps it to ``camera.live_max_fps`` and may lower it automatically when
+    the host cannot keep up.
+    """
     logger.info(
         "WebSocket connection request, %s, %s",
         safe_log(current_user),
@@ -909,6 +915,7 @@ async def video_stream_websocket(
             token_hash=token_hash,
             camera_id=camera_id,
             channel=channel,
+            fps=fps,
         )
         # 注册成功(reg_id≥0)只代表 SDK 收下了订阅,不代表摄像头真能出帧。跨局域网
         # 且 PPCS 中继没建起来时,reg_id≥0 但永远没帧,前端会死等。起首帧看门狗,

@@ -15,6 +15,7 @@ import { cameraAvailable } from "@/lib/types";
 import { PersonChip } from "./PersonChip";
 import { PetAvatar } from "@/components/PetAvatar";
 import { LivePlayerPlaceholder } from "./LivePlayerPlaceholder";
+import { LIVE_FPS_OPTIONS, normalizeLiveFps, readLiveFps, saveLiveFps } from "../lib/liveFps";
 import { getUsageStats } from "@/api";
 import { useAsync } from "@/hooks/useAsync";
 import { humanTokens } from "@/lib/formatTokens";
@@ -304,6 +305,8 @@ function CameraSection({
   // bulkBusy 锁防"全开/全关"连点;singleBusyDids 跟踪单卡 in-flight,让住户切单卡 A
   // 时只 disable A 卡,B/C/D 仍可点。bulk 操作进行时仍 disable 所有(防交叠)。
   const [bulkBusy, setBulkBusy] = useState(false);
+  // 实时画面帧率（本地保存）；改动会让各卡 iframe 以新 fps 重连。
+  const [liveFps, setLiveFps] = useState<number>(readLiveFps);
   const [singleBusyDids, setSingleBusyDids] = useState<Set<string>>(new Set());
   // 拾音开关独立 in-flight 集：拾音 PUT 走独立端点,与投喂 PUT 互不阻塞,分开跟踪。
   const [voiceBusyDids, setVoiceBusyDids] = useState<Set<string>>(new Set());
@@ -400,8 +403,33 @@ function CameraSection({
   return (
     <>
       <div className="flex items-baseline justify-between flex-wrap gap-2 mb-2">
-        <div className="flex items-baseline gap-2">
+        <div className="flex items-baseline gap-2 flex-wrap">
           <SectionLabel>{t("hero.liveLabel")}</SectionLabel>
+          {streamingCams.length > 0 && (
+            <label
+              className="inline-flex items-center gap-1.5 text-caption text-text-tertiary"
+              title={t("hero.liveFpsHint")}
+            >
+              <span>{t("hero.liveFps")}</span>
+              <select
+                value={liveFps}
+                onChange={(e) => {
+                  const next = normalizeLiveFps(e.target.value);
+                  setLiveFps(next);
+                  saveLiveFps(next);
+                }}
+                aria-label={t("hero.liveFps")}
+                className="bg-bg-primary border border-border rounded-md px-1.5 py-0.5 text-caption text-text-primary hover:border-border-strong focus:outline-none focus:border-brand-primary cursor-pointer"
+              >
+                {LIVE_FPS_OPTIONS.map((n) => (
+                  <option key={n} value={n}>
+                    {t("hero.liveFpsOption", { n })}
+                  </option>
+                ))}
+              </select>
+              <span className="hidden sm:inline">{t("hero.liveFpsHint")}</span>
+            </label>
+          )}
         </div>
         {total > 0 && (
           <div className="text-caption flex items-center gap-2 text-text-tertiary">
@@ -458,7 +486,8 @@ function CameraSection({
               一个小窗),整台一套开关。卡 key=物理 did,稳定排序,toggle 某台时其余卡
               key+位置不变，React 复用其 iframe，不会连带把其它台的流断开重连。 */}
           {streamingCams.length > 0 ? (
-            <div className="flex gap-3 overflow-x-auto snap-x snap-mandatory pb-2 -mx-1 px-1">
+            // 网格：窄屏（竖屏 / 手机）2×2，宽屏一行 4 路；卡片宽度随列宽自适应，不再横向滚动。
+            <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 pb-2">
               {streamingCams.map((c) => {
                 const feedDid = feedDidOf(c);
                 return (
@@ -478,6 +507,7 @@ function CameraSection({
                       singleBusyDids.has(feedDid)
                     }
                     onToggleVoice={(v) => requestVoiceToggle(c.did, c.name, v)}
+                    liveFps={liveFps}
                     hasPrompt={!!c.perceptionPrompt}
                     onEditPrompt={() =>
                       openPromptEditor(feedDid, channelLabelOf(c) ? `${c.name} · ${channelLabelOf(c)}` : c.name, c.perceptionPrompt)
@@ -918,6 +948,8 @@ interface CamCardProps {
   onToggleVoice: (next: boolean) => void;
   hasPrompt: boolean;
   onEditPrompt: () => void;
+  /** live view requested fps */
+  liveFps: number;
 }
 
 // 上区卡只渲染「正在投喂 miloco（connected）」的相机——必然是活流，无需蒙层。
@@ -933,16 +965,18 @@ function CamCardWithToggle({
   onToggleVoice,
   hasPrompt,
   onEditPrompt,
+  liveFps,
 }: CamCardProps) {
   const { t } = useTranslation();
   return (
-    <div className="snap-start shrink-0 w-[min(280px,85vw)]">
+    <div className="min-w-0">
       <div className="relative">
         <LivePlayerPlaceholder
           cameraName={cam.name}
           roomName={cam.roomName}
           cameraDid={cam.did}
           channel={cam.channel}
+          liveFps={liveFps}
         />
         {/* 画面左上角标相机名(单/多摄一致都显示);多摄再后缀镜头标签(移动/固定画面)区分同台两路。 */}
         <span className="absolute top-2 left-2 max-w-[calc(100%-1rem)] truncate px-1.5 py-0.5 rounded-md bg-black/50 text-white text-caption pointer-events-none z-10">

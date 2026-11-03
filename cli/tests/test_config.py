@@ -164,6 +164,18 @@ def test_known_paths_includes_all_scopes():
     assert "model.omni.api_key" in paths
 
 
+def test_camera_decoded_frame_interval_can_be_set(isolated_config):
+    assert set_value("camera.decoded_frame_interval", "1000") == 1000
+    data = json.loads(isolated_config.read_text())
+    assert data["camera"]["decoded_frame_interval"] == 1000
+
+
+def test_perception_stagger_devices_can_be_set(isolated_config):
+    assert set_value("perception.collect.stagger_devices", "true") is True
+    data = json.loads(isolated_config.read_text())
+    assert data["perception"]["collect"]["stagger_devices"] is True
+
+
 def test_set_value_does_not_bake_env_var(isolated_config, monkeypatch):
     """set_value 只写入本次显式设置的 path，不把环境变量固化进文件。"""
     monkeypatch.setenv("MILOCO_SERVER__URL", "http://env-url:9000")

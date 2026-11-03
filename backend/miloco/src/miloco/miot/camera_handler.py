@@ -234,11 +234,28 @@ class CameraVisionHandler:
         self._audio_codec[channel] = None
 
     async def register_decode_video_frame_stream(
-        self, callback: Callable[[str, VideoFrame, int, int, int, int], Coroutine], channel: int
+        self,
+        callback: Callable[[str, VideoFrame, int, int, int, int], Coroutine],
+        channel: int,
+        *,
+        full_rate: bool = False,
+        frame_interval_ms: int | None = None,
     ) -> int:
         """Register decoded VideoFrame callback (multi_reg, coexists with internal decode_jpg)."""
         return await self.miot_camera_instance.register_decode_video_frame_async(
-            callback, channel, multi_reg=True
+            callback,
+            channel,
+            multi_reg=True,
+            full_rate=full_rate,
+            frame_interval_ms=frame_interval_ms,
+        )
+
+    async def set_decode_video_frame_interval(
+        self, channel: int, reg_id: int, frame_interval_ms: int
+    ) -> bool:
+        """Change the interval of a live decoded-frame registration."""
+        return await self.miot_camera_instance.set_live_frame_interval_async(
+            channel, reg_id, frame_interval_ms
         )
 
     async def unregister_decode_video_frame_stream(self, channel: int, reg_id: int):
