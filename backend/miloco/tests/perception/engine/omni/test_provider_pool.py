@@ -1,0 +1,911 @@
+"""ProviderPool 故障转移 + 恢复探测 单元测试。"""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from miloco.config.settings import OmniModelSettings
+from miloco.perception.engine.omni.circuit_breaker import (
+    get_omni_circuit_breaker,
+    reset_omni_circuit_breaker_for_tests,
+)
+from miloco.perception.engine.omni.provider_pool import (
+    OmniProviderPool,
+    _provider_key,
+    get_pool,
+    init_pool,
+    reset_pool_for_tests,
+)
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _omni(
+    *,
+    label: str = "default",
+    model: str = "test-model",
+    base_url: str = "https://test.local/v1",
+    api_key: str = "sk-test",
+) -> OmniModelSettings:
+    return OmniModelSettings(label=label, model=model, base_url=base_url, api_key=api_key)
+
+
+def _mock_settings(primary: OmniModelSettings, fallback_labels: list[str], profiles: list[OmniModelSettings], monkeypatch):
+    """注入 mock get_settings，返回指定的 primary + fallback labels + profiles。"""
+
+    class _M:
+        omni = primary
+        omni_fallbacks = fallback_labels
+        omni_profiles = profiles
+
+    class _S:
+        model = _M()
+
+    # patch 到 miloco.config（provider_pool 内部延迟 import 从此路径获取）
+    monkeypatch.setattr(
+        "miloco.config.get_settings",
+        lambda: _S(),
+        raising=True,
+    )
+
+
+def _build_pool(loop: asyncio.AbstractEventLoop) -> OmniProviderPool:
+    """创建一个测试用 Pool，时间常量设为 0 以便同步验证。"""
+    return OmniProviderPool(
+        loop,
+        min_switch_interval_sec=0.0,
+        recovery_probe_interval_sec=0.0,
+    )
+
+
+# ── fixtures ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _reset():
+    """每个测试前后重置 CB 与 Pool 单例。"""
+    reset_omni_circuit_breaker_for_tests()
+    reset_pool_for_tests()
+    yield
+    reset_omni_circuit_breaker_for_tests()
+    reset_pool_for_tests()
+
+
+@pytest.fixture
+def loop():
+    lp = asyncio.new_event_loop()
+    yield lp
+    lp.close()
+
+
+# ── test: provider key 指纹 ───────────────────────────────────────────────
+
+
+def test_provider_key_distinguishes_same_gateway_different_keys():
+    """同 model + 同 base_url 但不同 key 的档案应生成不同的 provider key。
+
+    同一网关下的多把配额 key 是两个独立 provider，不带指纹会被折叠成一个，
+    导致 failover 直接判耗尽。
+    """
+    a = _omni(label="a", model="m1", base_url="https://x/v1", api_key="sk-aaa")
+    b = _omni(label="b", model="m1", base_url="https://x/v1", api_key="sk-bbb")
+    assert _provider_key(a) != _provider_key(b)
+    # 同一档案（同 key）稳定
+    a2 = _omni(label="a", model="m1", base_url="https://x/v1", api_key="sk-aaa")
+    assert _provider_key(a) == _provider_key(a2)
+    # 不泄漏明文 key
+    assert "sk-aaa" not in _provider_key(a)
+
+
+# ── test: 空 fallback 始终返回 primary ───────────────────────────────────────
+
+
+def test_no_fallback_stays_on_primary(loop, monkeypatch):
+    """omni_fallbacks 为空时，get_active() 始终返回 primary。"""
+    primary = _omni(label="p", model="primary-model")
+    _mock_settings(primary, [], [], monkeypatch)
+
+    pool = _build_pool(loop)
+    active = pool.get_active()
+    assert active.model == "primary-model"
+    assert active.label == "p"
+
+
+# ── test: failover 到第一个健康备选 ───────────────────────────────────────────
+
+
+async def test_failover_to_first_healthy(loop, monkeypatch):
+    """主 failed 后，_try_failover 切到第一个有 key 且未 failed 的备选。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    fb_b = _omni(label="b", model="fb-b-model")
+    _mock_settings(primary, ["a", "b"], [fb_a, fb_b], monkeypatch)
+
+    pool = _build_pool(loop)
+
+    # 先让 CB 进入 error 状态，模拟主 provider 熔断
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("bad_key", "m", ErrorCategory.CONFIG)
+        )
+    assert cb.snapshot().state == "error"
+
+    # 触发 failover
+    ok = await pool._try_failover()
+    assert ok
+    active = pool.get_active()
+    assert active.model == "fb-a-model"
+    assert active.label == "a"
+
+
+# ── test: 跳过已 failed 和无 key 的备选 ──────────────────────────────────────
+
+
+async def test_failover_skips_failed_and_keyless(loop, monkeypatch):
+    """跳过已 failed 的备选和 api_key 为空的备选。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")  # 有 key
+    fb_b = _omni(label="b", model="fb-b-model", api_key="")  # 无 key
+    fb_c = _omni(label="c", model="fb-c-model")  # 有 key
+    _mock_settings(primary, ["a", "b", "c"], [fb_a, fb_b, fb_c], monkeypatch)
+
+    pool = _build_pool(loop)
+
+    # 手动标记 fb_a 为 failed（模拟它已被用过且 failed）
+    pool._failed_keys.add(_provider_key(fb_a))
+
+    # 让 CB 进入 error 状态
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("bad_key", "m", ErrorCategory.CONFIG)
+        )
+
+    ok = await pool._try_failover()
+    assert ok
+    active = pool.get_active()
+    # 应跳过 a（已 failed）和 b（无 key），选中 c
+    assert active.model == "fb-c-model"
+    assert active.label == "c"
+
+
+# ── test: 池耗尽维持暂停 ──────────────────────────────────────────────────
+
+
+async def test_pool_exhausted_stays_paused(loop, monkeypatch):
+    """所有备选都 failed → _try_failover 返回 False。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    fb_b = _omni(label="b", model="fb-b-model")
+    _mock_settings(primary, ["a", "b"], [fb_a, fb_b], monkeypatch)
+
+    pool = _build_pool(loop)
+
+    # 所有备选都已 failed
+    pool._failed_keys.add(_provider_key(fb_a))
+    pool._failed_keys.add(_provider_key(fb_b))
+
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("bad_key", "m", ErrorCategory.CONFIG)
+        )
+
+    ok = await pool._try_failover()
+    assert not ok
+    # active 应停留在 primary（_get_active_unlocked 在主 _active_label is None 时返回 primary）
+    active = pool.get_active()
+    assert active.model == "primary-model"
+
+
+async def test_pool_exhausted_from_fallback_keeps_active_label(loop, monkeypatch):
+    """从备选耗尽时，_active_label 保持指向备选而非清空回主。
+
+    若清空成 None，get_active() 翻回 primary，omni_client 的配置变更钩子
+    （三元组变化即清熔断）会误判成用户改配置而清掉熔断器，感知没暂停反而
+    继续对着已知挂掉的主 provider 发 payload。改用 _exhausted 显式标记。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    async def _trip_cb():
+        for _ in range(3):
+            await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+
+    # 第一步：primary 熔断 → 切到 A
+    await _trip_cb()
+    assert await pool._try_failover()
+    assert pool._active_label == "a"
+    assert pool._exhausted is False
+
+    # 第二步：A 也熔断 → 池耗尽（唯一备选 A 已 failed）
+    await _trip_cb()
+    assert not await pool._try_failover()
+
+    # 关键断言：_active_label 保持 "a"（不清空回主），_exhausted 置 True
+    assert pool._active_label == "a"
+    assert pool._exhausted is True
+    assert pool.get_active().label == "a"
+
+
+async def test_no_fallback_does_not_mark_primary_failed(loop, monkeypatch):
+    """没配置任何备选时，池不介入自愈，primary 不进 failed 集。
+
+    若 primary 进了 failed 集，_probe_failed_providers 会起一条绕开熔断器
+    指数退避的 30s 固定探测通道，破坏「零配置兼容」承诺。
+    """
+    primary = _omni(label="p", model="primary-model")
+    _mock_settings(primary, [], [], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    assert cb.snapshot().state == "error"
+
+    # 零 fallback：_try_failover 直接返回 False，且不标记 primary failed
+    assert not await pool._try_failover()
+    assert _provider_key(primary) not in pool._failed_keys
+    assert pool._exhausted is False
+    assert pool.get_active().model == "primary-model"
+
+
+# ── test: 去抖跳过快速连续切换 ───────────────────────────────────────────────
+
+
+async def test_debounce_skips_rapid_switch(loop, monkeypatch):
+    """距上次切换不足 min_switch_interval 时跳过 failover；超过间隔后允许再次切换。
+
+    关键点：必须配置 >=2 个健康备选。若只有单个备选，第二次 failover 会因池耗尽
+    返回 False，与去抖返回的 False 无法区分——原测试是假阳性。本测试用 a/b 两个
+    备选，分别验证「立即调用被去抖拦截」与「模拟间隔足够后再调用成功切到 b」。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    fb_b = _omni(label="b", model="fb-b-model")
+    _mock_settings(primary, ["a", "b"], [fb_a, fb_b], monkeypatch)
+
+    pool = OmniProviderPool(loop, min_switch_interval_sec=30.0, recovery_probe_interval_sec=0.0)
+
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    async def _trip_cb():
+        for _ in range(3):
+            await cb.record_failure(
+                ClassifiedError("bad_key", "m", ErrorCategory.CONFIG)
+            )
+
+    # 第一次切换：primary failed → 切到 a，CB 被 reset 回 ok
+    await _trip_cb()
+    assert await pool._try_failover()
+    assert pool.get_active().label == "a"
+    assert cb.snapshot().state == "ok"
+
+    # 重新让 CB 进入 error（模拟 a 也挂了）
+    await _trip_cb()
+    assert cb.snapshot().state == "error"
+
+    # 立即再触发：应被去抖拦截（CB 非 ok + 距上次不足 30s），停留在 a
+    assert not await pool._try_failover()
+    assert pool.get_active().label == "a"  # 没有被切走
+    assert cb.snapshot().state == "error"  # 确认不是 CB-ok 分支
+
+    # 模拟「30s 已过去」：重置 last_switch 时间戳，去抖不应再拦截
+    pool._last_switch_monotonic = 0.0
+    await _trip_cb()  # 维持 CB 非 ok
+    assert await pool._try_failover()
+    assert pool.get_active().label == "b"  # 成功切到下一个健康备选
+
+
+# ── test: primary 恢复自动切回 ────────────────────────────────────────────────
+
+
+async def test_probe_recovers_primary_switches_back(loop, monkeypatch):
+    """探测 primary 恢复通过 → _switch_back_to_primary 将 _active_label 置为 None。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+
+    # 手动设置：当前在备选 fb_a
+    pool._active_label = "a"
+    pool._failed_keys.add(_provider_key(primary))
+    assert pool._active_label == "a"
+
+    # 模拟 primary 恢复：手动调用 _switch_back_to_primary
+    await pool._switch_back_to_primary()
+
+    assert pool._active_label is None
+    active = pool.get_active()
+    assert active.model == "primary-model"
+
+
+# ── test: fallbacks 被删除后 get_active 回退 primary ──────────────────────────
+
+
+async def test_active_label_removed_from_fallbacks_falls_back(loop, monkeypatch):
+    """当前 active label 已不在 fallback 列表中 → get_active 回退 primary。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    fb_b = _omni(label="b", model="fb-b-model")
+    _mock_settings(primary, ["a", "b"], [fb_a, fb_b], monkeypatch)
+
+    pool = _build_pool(loop)
+    pool._active_label = "a"
+
+    assert pool.get_active().model == "fb-a-model"
+
+    # 模拟管理员删除 fb_a：omni_fallbacks 变为 ["b"]
+    _mock_settings(primary, ["b"], [fb_b], monkeypatch)
+
+    # get_active 发现 label "a" 不存在 → 回退 primary
+    active = pool.get_active()
+    assert active.model == "primary-model"
+    assert pool._active_label is None  # 已自动纠正
+
+
+# ── test: 运行时拖拽重排不导致静默跳 provider ─────────────────────────────────
+
+
+async def test_reorder_keeps_same_active_by_label(loop, monkeypatch):
+    """管理员拖拽重排 fallback 顺序后，label-based 追踪保持指向同一 provider。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    fb_b = _omni(label="b", model="fb-b-model")
+    _mock_settings(primary, ["a", "b"], [fb_a, fb_b], monkeypatch)
+
+    pool = _build_pool(loop)
+    pool._active_label = "a"
+    assert pool.get_active().model == "fb-a-model"
+
+    # 管理员把 B 拖到 A 前面
+    _mock_settings(primary, ["b", "a"], [fb_b, fb_a], monkeypatch)
+
+    # label-based 追踪：仍然指向 A，不会静默跳到 B
+    active = pool.get_active()
+    assert active.model == "fb-a-model"
+    assert active.label == "a"
+
+
+# ── test: snapshot 正确反映运行时状态 ─────────────────────────────────────────
+
+
+def test_snapshot_reflects_runtime_state(loop, monkeypatch):
+    """snapshot() 返回完整运行时状态（所有 PoolSnapshot 字段）。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    fb_b = _omni(label="b", model="fb-b-model")
+    _mock_settings(primary, ["a", "b"], [fb_a, fb_b], monkeypatch)
+
+    pool = _build_pool(loop)
+
+    # 初始状态：在 primary
+    snap1 = pool.snapshot()
+    assert snap1.active_is_primary
+    assert snap1.active_index == 0
+    assert snap1.active_model == "primary-model"
+    assert snap1.active_label == "p"
+    assert snap1.fallback_count == 2
+    assert snap1.failed_keys == []
+    assert snap1.last_switch_at_ms is None
+    assert not snap1.recovery_loop_running
+
+    # Failover 到 a 之后，并标记 primary failed
+    pool._active_label = "a"
+    pool._failed_keys.add(_provider_key(primary))
+    pool._last_switch_monotonic = 1234.567
+    pool._last_switch_wall_ms = 1  # 任意非 None epoch ms，仅用于验证 snapshot 透传
+    snap2 = pool.snapshot()
+    assert not snap2.active_is_primary
+    assert snap2.active_index == 1
+    assert snap2.active_model == "fb-a-model"
+    assert snap2.failed_keys == [_provider_key(primary)]
+    assert snap2.last_switch_at_ms == 1
+    assert snap2.fallback_count == 2
+
+
+# ── test: _resolve_providers 跳过不存在的 label ───────────────────────────────
+
+
+def test_resolve_skips_missing_label(loop, monkeypatch):
+    """omni_fallbacks 中的 label 不在 profiles 中时自动跳过。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a", "missing-label"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    _, fallbacks = pool._resolve_providers_unlocked()
+    assert len(fallbacks) == 1
+    assert fallbacks[0].label == "a"
+
+
+# ── test: start/stop 生命周期 ──────────────────────────────────────────────────
+
+
+async def test_start_idempotent(monkeypatch):
+    """重复调用 start() 不创建多余后台 task。"""
+    primary = _omni(label="p", model="primary-model")
+    _mock_settings(primary, [], [], monkeypatch)
+
+    pool = _build_pool(asyncio.get_running_loop())
+    await pool.start()
+    assert pool._recovery_task is not None
+    task1 = pool._recovery_task
+
+    # 重复调用：应 no-op，task 不变
+    await pool.start()
+    assert pool._recovery_task is task1
+
+    await pool.stop()
+
+
+async def test_stop_idempotent_and_cleans_up(monkeypatch):
+    """stop() 幂等：已停止时 no-op；正常停止后 _recovery_task 置 None。"""
+    primary = _omni(label="p", model="primary-model")
+    _mock_settings(primary, [], [], monkeypatch)
+
+    pool = _build_pool(asyncio.get_running_loop())
+    await pool.start()
+    await pool.stop()
+    assert pool._recovery_task is None
+
+    # 重复 stop 不应抛异常
+    await pool.stop()
+
+
+# ── test: _probe_failed_providers 完整流程 ────────────────────────────────────
+
+
+async def test_probe_failed_providers_recovery_flow(loop, monkeypatch):
+    """完整探测流程：primary 恢复 → 从 failed 移除 + 自动切回。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    # 设置状态：primary failed，当前在备选 fb_a
+    pool._active_label = "a"
+    pool._failed_keys.add(_provider_key(primary))
+    pool._failed_keys.add(_provider_key(fb_a))
+
+    # Mock probe_omni：primary 恢复，fb_a 仍为失败
+    async def _mock_probe(model, base_url, api_key):
+        return {"ok": model == "primary-model"}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _mock_probe,
+    )
+
+    await pool._probe_failed_providers()
+
+    # primary 从 failed 移除 + 自动切回
+    assert _provider_key(primary) not in pool._failed_keys
+    # fb_a 探测失败，仍在 failed 中
+    assert _provider_key(fb_a) in pool._failed_keys
+    assert pool._active_label is None
+    assert pool.get_active().model == "primary-model"
+
+
+async def test_probe_skips_keyless_provider(loop, monkeypatch):
+    """无 api_key 的 provider 不探测，直接跳过。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model", api_key="")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    pool._failed_keys.add(_provider_key(fb_a))
+
+    probe_calls = []
+
+    async def _track_probe(model, base_url, api_key):
+        probe_calls.append((model, base_url, api_key))
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _track_probe,
+    )
+
+    await pool._probe_failed_providers()
+    # 无 key 的 provider 不会被探测
+    assert len(probe_calls) == 0
+
+
+# ── test: CB-ok 短路 / switch_back 幂等 / init_pool 幂等 ───────────────────────
+
+
+async def test_try_failover_skips_when_cb_ok(loop, monkeypatch):
+    """CB 状态为 ok 时 _try_failover 不执行 failover。"""
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+
+    # CB 默认状态为 ok
+    assert get_omni_circuit_breaker().snapshot().state == "ok"
+
+    result = await pool._try_failover()
+    assert not result
+    # active 保持不变
+    active = pool.get_active()
+    assert active.model == "primary-model"
+
+
+async def test_failover_skips_when_tick_probe_in_flight(loop, monkeypatch):
+    """tick 探测在飞行中（且非 OPEN_CONFIG）→ _try_failover 本轮不切。
+
+    切换尾部的 reset_on_config_change 不清 _probe_in_flight，旧 provider 的
+    探测结论落回来会把刚复位成 CLOSED 的熔断器重新推开，新 provider 被无辜短路
+    （配置类错误还会把 tick 通道钉死）。与 _probe_failed_providers 同口径：
+    OPEN_CONFIG（state == "error"）下 tick 不 arm 新探测，不让权，仍由池收尾。
+    """
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    primary = _omni(label="primary", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model", api_key="sk-a")
+    _mock_settings(primary, ["a"], [primary, fb_a], monkeypatch)
+    pool = _build_pool(loop)
+
+    cb = get_omni_circuit_breaker()
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("rate_limited", "m", ErrorCategory.RECOVERABLE)
+        )
+    assert cb.snapshot().state == "warn"
+
+    # tick 通道已 arm 自己的探测 → 池本轮整体让权。
+    # 直写私有位仅为构造「arm 后未落账」的残留态（跑 try_arm_probe 要先把 probe_due
+    # 推到未来，反而要再写一个私有时钟）；置位后立刻用公共读口复核，实现若改成派生
+    # 字段这里会先炸，不会静默失真。
+    cb._probe_in_flight = True
+    assert cb.probe_in_flight() is True
+    assert await pool._try_failover() is False
+    assert pool._active_label is None  # 没切走
+    assert pool._failed_keys == set()  # 也没提前把主标成 failed
+
+    # 探测落账（record_probe_result 的路径之一）→ 下一轮照常切
+    cb.clear_probe_in_flight()
+    assert await pool._try_failover() is True
+    assert pool._active_label == "a"
+
+
+async def test_failover_not_yield_when_open_config(loop, monkeypatch):
+    """OPEN_CONFIG（state == "error"）且 tick 探测在飞行中 → 池不让权，照常收尾。
+
+    与 _probe_failed_providers 同口径：配置类错误下 tick 不 arm 新探测，
+    _probe_in_flight 残留不应阻塞池的 failover 决策。
+    """
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    primary = _omni(label="primary", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model", api_key="sk-a")
+    _mock_settings(primary, ["a"], [primary, fb_a], monkeypatch)
+    pool = _build_pool(loop)
+
+    cb = get_omni_circuit_breaker()
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("invalid_api_key", "m", ErrorCategory.CONFIG)
+        )
+    assert cb.snapshot().state == "error"
+
+    cb._probe_in_flight = True
+    assert cb.probe_in_flight() is True
+    assert await pool._try_failover() is True  # 不让权，仍切换
+    assert pool._active_label == "a"
+    # 切换尾部只复位状态机、不清 in-flight 位：残留位正是让权守卫要防的那一个，
+    # 这里显式钉住「OPEN_CONFIG 下不会因此把新 provider 短路」。
+    assert cb.snapshot().state == "ok"
+    assert cb.probe_in_flight() is True
+
+
+async def test_switch_back_to_primary_when_already_primary(loop, monkeypatch):
+    """已在 primary 时调用 _switch_back_to_primary 为 no-op。"""
+    primary = _omni(label="p", model="primary-model")
+    _mock_settings(primary, [], [], monkeypatch)
+
+    pool = _build_pool(loop)
+    assert pool._active_label is None
+
+    # 不应抛异常，直接返回
+    await pool._switch_back_to_primary()
+    assert pool._active_label is None
+    assert pool.get_active().model == "primary-model"
+
+
+async def test_switch_back_on_pool_exhausted_primary_recovery(loop, monkeypatch):
+    """池耗尽后 primary 恢复：_switch_back_to_primary 必须 reset CB。
+
+    P+A 全 CONFIG 熔断 → 池耗尽（_active_label=None, CB OPEN_CONFIG）。
+    P 恢复后 _probe_failed_providers 调 _switch_back_to_primary，CB 必须
+    被 reset 回 CLOSED，否则感知永久暂停。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 构造池耗尽态：_active_label=None, CB OPEN_CONFIG, primary 在 failed_keys
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("bad_key", "m", ErrorCategory.CONFIG)
+        )
+    assert cb.snapshot().state == "error"
+    pool._active_label = None
+    pool._failed_keys.add(_provider_key(primary))
+
+    # mock probe：primary 恢复
+    async def _mock_probe(model, base_url, api_key):
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _mock_probe,
+    )
+
+    await pool._probe_failed_providers()
+
+    # primary 从 failed 移除，CB 被 reset 回 ok
+    assert _provider_key(primary) not in pool._failed_keys
+    assert cb.snapshot().state == "ok"
+    assert pool.get_active().model == "primary-model"
+
+
+async def test_pool_exhausted_current_fallback_self_recovery(loop, monkeypatch):
+    """耗尽态下当前备选自己探通 → 就地解除耗尽态并 reset 熔断器。
+
+    单备选部署（主 + A）：主 401 熔断切到 A，A 被几帧坏数据打进 OPEN_CONFIG，
+    池耗尽后（_active_label="a"、_exhausted=True）。下一轮 _probe_failed_providers
+    探通 A（主仍 401）→ primary_recovered=False，必须走 resume_in_place 出口，
+    否则 OPEN_CONFIG 下 tick 通道 try_arm_probe() 恒 False，没人 reset → 永久停摆。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 构造耗尽态：_active_label="a"、_exhausted=True、failed_keys 含主和 A
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("bad_key", "m", ErrorCategory.CONFIG)
+        )
+    assert cb.snapshot().state == "error"
+    pool._active_label = "a"
+    pool._exhausted = True
+    pool._failed_keys.add(_provider_key(primary))
+    pool._failed_keys.add(_provider_key(fb_a))
+
+    # mock probe：主仍失败，A 探通
+    async def _mock_probe(model, base_url, api_key):
+        return {"ok": model == "fb-a-model"}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _mock_probe,
+    )
+
+    await pool._probe_failed_providers()
+
+    # A 自愈：耗尽态解除，熔断器回 ok
+    assert pool._exhausted is False
+    assert cb.snapshot().state == "ok"
+    # A 从 failed 移除，主仍在 failed
+    assert _provider_key(fb_a) not in pool._failed_keys
+    assert _provider_key(primary) in pool._failed_keys
+    # active 仍是 A
+    assert pool.get_active().label == "a"
+
+
+async def test_probe_skips_reset_when_tick_armed_during_probe(loop, monkeypatch):
+    """探测期间 tick 通道 arm 了自己的探测 → 池不抢收尾权。
+
+    OPEN_RECOVERABLE 耗尽态下，池在函数开头读到 probe_in_flight()==False 放行，
+    网络探测期间 tick 才 arm 探测。探测返回 ok 后，tick_owns_reset 守卫应让池
+    跳过 resume_in_place：不清耗尽态、不 reset 熔断器、不清 in-flight 位。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 构造 OPEN_RECOVERABLE（RECOVERABLE 类错误，state == "warn"）
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("rate_limited", "m", ErrorCategory.RECOVERABLE)
+        )
+    assert cb.snapshot().state == "warn"
+
+    # 构造耗尽态：_active_label="a"、_exhausted=True、failed_keys 含主和 A
+    pool._active_label = "a"
+    pool._exhausted = True
+    pool._failed_keys.add(_provider_key(primary))
+    pool._failed_keys.add(_provider_key(fb_a))
+
+    # mock probe：主仍失败，只有 A 探通；探测过程中模拟 tick 通道 arm 自己的探测
+    async def _mock_probe(model, base_url, api_key):
+        cb._probe_in_flight = True
+        return {"ok": model == "fb-a-model"}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _mock_probe,
+    )
+
+    await pool._probe_failed_providers()
+
+    # 守卫生效：耗尽态未清、熔断器未 reset、in-flight 位未清
+    assert pool._exhausted is True
+    assert cb.snapshot().state == "warn"
+    assert cb.probe_in_flight() is True
+
+
+async def test_probe_skips_checkpoint_when_tick_armed_primary_recovered(loop, monkeypatch):
+    """主档案恢复 + tick 探测在飞行中 → 整轮探测结论不落账。
+
+    tick 的探测目标在 arm 那一刻解析定，池探测期间 tick arm 了探测。落账前
+    检测到 probe_in_flight 且非 OPEN_CONFIG → 整轮不摘 failed 集、不切回主，
+    避免「池已切回主但熔断器仍 OPEN」的半提交中间态。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")
+    _mock_settings(primary, ["a"], [fb_a], monkeypatch)
+
+    pool = _build_pool(loop)
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 构造 OPEN_RECOVERABLE（state == "warn"）
+    for _ in range(3):
+        await cb.record_failure(
+            ClassifiedError("rate_limited", "m", ErrorCategory.RECOVERABLE)
+        )
+    assert cb.snapshot().state == "warn"
+
+    # active 在备选 A，主在 failed 集（主已熔断切到 A）
+    pool._active_label = "a"
+    pool._failed_keys.add(_provider_key(primary))
+
+    # mock probe：主探通；探测过程中 tick 通道 arm 了自己的探测
+    async def _mock_probe(model, base_url, api_key):
+        cb._probe_in_flight = True
+        return {"ok": True}
+
+    monkeypatch.setattr(
+        "miloco.perception.engine.omni.probe.probe_omni",
+        _mock_probe,
+    )
+
+    await pool._probe_failed_providers()
+
+    # 整轮不落账：主仍在 failed 集、active 仍是 A、熔断器未清零
+    assert _provider_key(primary) in pool._failed_keys
+    assert pool.get_active().label == "a"
+    assert cb.snapshot().state == "warn"
+    assert cb.probe_in_flight() is True
+
+
+# ── test: 恢复循环超时分支推进 failover（OPEN_CONFIG 钉死修复） ──────────────
+
+
+async def test_recovery_loop_failover_on_timeout(monkeypatch):
+    """恢复循环超时分支也能推进 failover，不依赖事件重发。
+
+    OPEN_CONFIG 下 failover 事件不再重发，去抖窗口内被跳过的 failover
+    会在下一超时被重试，确保健康备选最终被尝试（而非「钉死」在坏 provider 上）。
+    """
+    primary = _omni(label="p", model="primary-model")
+    fb_a = _omni(label="a", model="fb-a-model")  # 模拟 key 配错，会触发 CONFIG
+    fb_b = _omni(label="b", model="fb-b-model")  # 健康的备选
+    _mock_settings(primary, ["a", "b"], [fb_a, fb_b], monkeypatch)
+
+    pool = OmniProviderPool(asyncio.get_running_loop(), min_switch_interval_sec=0.0, recovery_probe_interval_sec=0.0)
+
+    cb = get_omni_circuit_breaker()
+    from miloco.perception.engine.omni.error_classifier import (
+        ClassifiedError,
+        ErrorCategory,
+    )
+
+    # 第一步：primary 熔断 → failover 切到 A
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    assert await pool._try_failover()
+    assert pool.get_active().label == "a"
+    assert cb.snapshot().state == "ok"
+
+    # 第二步：A 的 key 配错 → CB 进 OPEN_CONFIG，_on_cb_change 设了 event
+    for _ in range(3):
+        await cb.record_failure(ClassifiedError("bad_key", "m", ErrorCategory.CONFIG))
+    assert cb.snapshot().state == "error"
+
+    # 清除事件，模拟「事件已被消费但 failover 未成功」的场景 → 走超时分支
+    pool._failover_event.clear()
+
+    # 启动恢复循环（recovery_probe_interval_sec=0 → wait_for 立即超时）
+    await pool.start()
+    await asyncio.sleep(0.05)  # 给循环时间跑完至少一轮
+    await pool.stop()
+
+    # 超时分支应已调 _try_failover，切到健康备选 B
+    assert pool.get_active().label == "b"
+    assert _provider_key(fb_a) in pool._failed_keys
+
+
+def test_init_pool_creates_and_is_idempotent(loop, monkeypatch):
+    """init_pool 创建实例；重复调用返回同一实例。"""
+    primary = _omni(label="p", model="primary-model")
+    _mock_settings(primary, [], [], monkeypatch)
+
+    pool1 = init_pool(
+        loop, min_switch_interval_sec=0.0, recovery_probe_interval_sec=0.0
+    )
+    pool2 = init_pool(loop)
+
+    assert pool1 is pool2  # 幂等：返回同一实例
+
+
+def test_get_pool_returns_none_when_not_initialized():
+    """未初始化时 get_pool 返回 None。"""
+    reset_pool_for_tests()
+    assert get_pool() is None
