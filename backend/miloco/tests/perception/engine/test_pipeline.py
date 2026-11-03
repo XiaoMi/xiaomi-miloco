@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 import pytest
+from miloco.observability.perception_flow import GraphStatus
 from miloco.perception.engine.api import PerceptionEngine
 from miloco.perception.engine.config import PerceptionConfig
 from miloco.perception.engine.gate.visual_gate import _preprocess
@@ -524,6 +525,56 @@ async def test_batch_omni_error_all_fail_room_skipped():
 
     assert result.rooms["study-room"].skipped is True
     assert result.rooms["study-room"].omni_outputs == {}
+
+
+def test_batch_capability_error_is_expected_skip(caplog):
+    """Provider capability rejection skips locally without inflating Omni errors."""
+    import asyncio
+    import logging
+
+    from miloco.perception.engine.omni.provider import OmniCapabilityError
+
+    gray = _solid(100, 100, 100)
+    white = _solid(255, 255, 255)
+    frames = [gray, gray, white, white, white, white]
+    snap = _make_snapshot(
+        "study-room", "cam-1", frames, np.zeros(16000, dtype=np.int16)
+    )
+    batch = BatchedSnapshot(snapshots=[snap])
+
+    config = PerceptionConfig()
+    config.omni.api_key = "test-key"
+    contexts = {"cam-1": OmniContext()}
+    tracking = MockTrackingService(create_default_mock_response())
+
+    async def unsupported(*args, **kwargs):
+        raise OmniCapabilityError("Kimi does not support audio input")
+
+    caplog.set_level(logging.WARNING, logger="miloco.perception.engine.pipeline")
+    with patch(
+        "miloco.perception.engine.pipeline.run_omni_batch", side_effect=unsupported
+    ):
+        result = asyncio.run(
+            run_batch_pipeline(
+                batch,
+                contexts,
+                config,
+                get_tracking_service=lambda did, room_name: tracking,
+                collect_flow_diagnostics=True,
+            )
+        )
+
+    room = result.rooms["study-room"]
+    assert room.device_results["cam-1"].skipped is True
+    diagnostics = result.flow_diagnostics.devices["cam-1"]
+    assert diagnostics.status is GraphStatus.WARNING
+    assert diagnostics.omni_status is GraphStatus.SKIPPED
+    assert diagnostics.omni_request_status is GraphStatus.SKIPPED
+    assert "_omni_error_cam-1" not in room.timing
+    capability_logs = [r for r in caplog.records if "能力边界" in r.message]
+    assert len(capability_logs) == 1
+    assert capability_logs[0].levelno == logging.WARNING
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 @pytest.mark.asyncio

@@ -224,6 +224,22 @@ def _maybe_reset_breaker_on_config_change(resolved: OmniConfig) -> None:
     _maybe_reset_breaker_on_config_change._last_fingerprint = fingerprint  # type: ignore[attr-defined]
 
 
+def _trace_inference_params(body: dict[str, Any], config: OmniConfig) -> dict[str, Any]:
+    """取实际发出的采样参数用于 trace 上报（三条 omni 调用路径共用）。
+
+    adapter 可能改写或省略采样参数。显式出现在 body 中时 trace 记录
+    wire 值；provider 管理默认值或采用嵌套协议时，缺键回退 config 值。
+
+    三条路径（``call_omni`` / ``call_omni_stream`` / ``_call_omni_messages``）同构
+    重复这份 dict，抽成本函数消除「加字段要改三处、漏一处即静默不一致」的隐患。
+    """
+    return {
+        "temperature": body.get("temperature", config.temperature),
+        "top_p": body.get("top_p", config.top_p),
+        "max_tokens": config.max_completion_tokens,
+    }
+
+
 async def call_omni(
     payload: dict, config: OmniConfig, type: str = "realtime"
 ) -> dict[str, Any]:
@@ -329,11 +345,7 @@ async def call_omni(
             latency_ms=latency_ms,
             error=error,
             model=config.model,
-            inference_params={
-                "temperature": config.temperature,
-                "top_p": config.top_p,
-                "max_tokens": config.max_completion_tokens,
-            },
+            inference_params=_trace_inference_params(body, config),
         )
 
 
@@ -561,9 +573,5 @@ async def call_omni_stream(
             latency_ms=latency_ms,
             error=error,
             model=config.model,
-            inference_params={
-                "temperature": config.temperature,
-                "top_p": config.top_p,
-                "max_tokens": config.max_completion_tokens,
-            },
+            inference_params=_trace_inference_params(body, config),
         )

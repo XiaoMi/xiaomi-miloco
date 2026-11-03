@@ -110,6 +110,21 @@ class TestParseOmniResponse:
         result = parse_omni_response({"choices": []})
         assert "解析失败" in result.caption[0].description
 
+    def test_length_finish_with_empty_content_is_skipped(self):
+        """Kimi may spend its output budget on reasoning and return no answer body."""
+        result = parse_omni_response(
+            {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"content": ""},
+                    }
+                ]
+            }
+        )
+        assert result.skipped is True
+        assert "解析失败" in result.caption[0].description
+
     def test_needs_response_flag(self):
         data = {
             "caption": [],
