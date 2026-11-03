@@ -180,6 +180,7 @@ class _SetupFakeMips:
         self._fail_meta_dids = set(fail_meta_dids)
         self._fail_state_dids: set[str] = set()
         self._fail_props_dids: set[str] = set()
+        self._fail_event_dids: set[str] = set()
         self.init_async = AsyncMock()
         self.sub_user_bind_async = AsyncMock()
         self.sub_user_unbind_async = AsyncMock()
@@ -187,6 +188,7 @@ class _SetupFakeMips:
         self.sub_home_scene_changed_async = AsyncMock()
         self.sub_device_state_async = AsyncMock(side_effect=self._state)
         self.sub_device_props_async = AsyncMock(side_effect=self._props)
+        self.sub_device_events_async = AsyncMock(side_effect=self._events)
 
     async def _meta(self, did: str, handler) -> None:
         if did in self._fail_meta_dids:
@@ -200,13 +202,24 @@ class _SetupFakeMips:
         if did in self._fail_props_dids:
             raise RuntimeError(f"SUBACK rejected for {did}")
 
+    async def _events(self, did: str, handler) -> None:
+        if did in self._fail_event_dids:
+            raise RuntimeError(f"SUBACK rejected for {did}")
+
     def register_subscribe_error_handler(self, cb) -> None: ...
     def register_subscribe_success_handler(self, cb) -> None: ...
     def register_mips_state_handler(self, cb) -> None: ...
 
 
 def _setup_client(
-    monkeypatch, fake, *, meta_dids, scene_home_ids, state_dids=(), props_dids=()
+    monkeypatch,
+    fake,
+    *,
+    meta_dids,
+    scene_home_ids,
+    state_dids=(),
+    props_dids=(),
+    event_dids=(),
 ) -> MIoTClient:
     monkeypatch.setattr(client_mod, "MIoTMipsCloud", lambda **kw: fake)
     client = MIoTClient.__new__(MIoTClient)
@@ -224,10 +237,12 @@ def _setup_client(
     client._props_sub_dids = set(props_dids)
     client._props_sub_sources = {d: SOURCE_CLOUD for d in props_dids}
     client._props_source_lock = asyncio.Lock()
+    client._event_sub_dids = set(event_dids)
     client._callback_device_meta_changed = None
     client._callback_scene_changed = None
     client._callback_device_state_changed = None
     client._callback_device_props_changed = None
+    client._callback_device_event = None
     client._callback_subscription_reset = None
     client._callback_mips_connect = None
     return client
@@ -446,9 +461,14 @@ async def test_setup_mips_fires_subscription_reset_with_post_replay_sets(monkeyp
     copy (replay-failed entities dropped, departed re-subscribed ones kept)."""
     fake = _SetupFakeMips()
     client = _setup_client(
-        monkeypatch, fake, meta_dids={"dev-a", "dev-bad"}, scene_home_ids=set()
+        monkeypatch,
+        fake,
+        meta_dids={"dev-a", "dev-bad"},
+        scene_home_ids=set(),
+        event_dids={"dev-e", "dev-ebad"},
     )
     fake._fail_meta_dids = frozenset({"dev-bad"})
+    fake._fail_event_dids = frozenset({"dev-ebad"})
     received: list = []
 
     async def _reset(*args) -> None:
@@ -460,12 +480,15 @@ async def test_setup_mips_fires_subscription_reset_with_post_replay_sets(monkeyp
 
     # Callback fired exactly once, after replay, with the post-replay sets:
     # dev-bad's replay failed → dropped from the meta set; dev-a succeeded.
+    # 事件那条车道单独传一份,并且给一个与其它车道不同的值 —— 全是空集的话,
+    # 「事件集没接上」和「本来就没有事件订阅」分不开。
     assert len(received) == 1
-    meta_dids, state_dids, scene_home_ids, props_dids = received[0]
+    meta_dids, state_dids, scene_home_ids, props_dids, event_dids = received[0]
     assert meta_dids == {"dev-a"}
     assert state_dids == set()
     assert scene_home_ids == set()
     assert props_dids == set()
+    assert event_dids == {"dev-e"}
 
 
 @pytest.mark.asyncio
@@ -481,6 +504,8 @@ async def test_setup_mips_connect_failure_clears_tracked_and_fires_reset(monkeyp
         meta_dids={"dev-a"},
         scene_home_ids=set(),
         state_dids={"dev-b"},
+        props_dids={"dev-c"},
+        event_dids={"dev-d"},
     )
     fake.init_async = AsyncMock(side_effect=MipsConnectionError("connect refused"))
     received: list = []
@@ -495,8 +520,10 @@ async def test_setup_mips_connect_failure_clears_tracked_and_fires_reset(monkeyp
     assert client._meta_sub_dids == set()
     assert client._state_sub_dids == set()
     assert client._scene_sub_home_ids == set()
+    assert client._props_sub_dids == set()
+    assert client._event_sub_dids == set()
     assert len(received) == 1
-    assert received[0] == (set(), set(), set(), set())
+    assert received[0] == (set(), set(), set(), set(), set())
 
 
 # ------------------------------------ mips_user_sub_error scoping (reconnect)

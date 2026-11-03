@@ -86,25 +86,29 @@ def dnf_structure_error(dnf: RuleConditionDNF | None) -> str | None:
 
 
 def render_iot_condition(
-    device_name: str, prop_entry: dict[str, Any], op: str, value: Any
+    device_name: str, entry: dict[str, Any], op: str, value: Any
 ) -> str:
     """一条 iot 条件项渲染成住户看得懂的一句话，例如 ``玄关门锁 门 门状态 = 开``。
 
     落库的就是这句（``create_rule`` 在写库之前覆盖 ``condition.query``），展示层不
     现算 —— 现算就是第二份。代价是设备改名后这句仍是旧名，直到这条 rule 下次被改。
+
+    ``entry`` 是属性条目还是事件参数条目都行：这句读的只有 ``description`` 与
+    ``value_list``，两边的条目都带。**别往这里加只有属性才有的键**（``access`` 之类），
+    那会让事件条件渲染成半句话。
     """
-    label = str(prop_entry.get("description") or "")
+    label = str(entry.get("description") or "")
     parts = [device_name.strip(), label.strip(), _OP_LABEL.get(op, op)]
-    return " ".join(p for p in parts if p) + f" {_value_label(prop_entry, value)}"
+    return " ".join(p for p in parts if p) + f" {_value_label(entry, value)}"
 
 
-def _value_label(prop_entry: dict[str, Any], value: Any) -> str:
+def _value_label(entry: dict[str, Any], value: Any) -> str:
     """枚举值换成它的名字，别的原样。``制冷`` 比 ``1`` 有意义得多。
 
     优先取 ``description``（多语言转换后的文本），退回 ``name``（spec 的英文名）——
     这句是给住户看的。标准库没收录那条枚举时两者都是英文，那是上游数据的事。
     """
-    for choice in prop_entry.get("value_list") or []:
+    for choice in entry.get("value_list") or []:
         if not isinstance(choice, dict) or choice.get("value") != value:
             continue
         for key in ("description", "name"):

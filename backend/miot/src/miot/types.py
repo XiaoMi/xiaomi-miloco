@@ -463,6 +463,45 @@ class MIoTDevicePropsEvent(BaseModel):
     )
 
 
+class MIoTEventArg(BaseModel):
+    """One argument entry inside an `event_occured` push.
+
+    ``piid`` is numeric and the wire carries no argument name, so resolving
+    piid → spec name needs the device spec and happens above the transport
+    layer (the miloco proxy's event spec accessor). Mirrors ``MIoTPropChange``.
+    """
+
+    piid: int = Field(description="Argument instance id")
+    value: Any = Field(default=None, description="Argument value (scalar)")
+
+
+class MIoTDeviceEvent(BaseModel):
+    """Decoded `device/{did}/up/event_occured/{siid}/{eiid}` payload.
+
+    `did` comes from the topic; the payload repeats did/siid/eiid, which the
+    decoder uses as a free cross-check. Unlike the props lane this message is
+    one event, not a list — the MIoT spec keys an event by the pair
+    (siid, eiid), so a frame carries exactly one. `params` is undocumented, so
+    the argument list is normalised to a list either way.
+
+    ``args`` may legitimately be empty: the spec allows an event with no
+    arguments, and dropping such a frame here would make its arrival invisible.
+    The broker publishes no timestamp — `timestamp_ms` is when we received it.
+    """
+
+    did: str = Field(description="Device id")
+    siid: int = Field(description="Service instance id")
+    eiid: int = Field(description="Event instance id")
+    args: List[MIoTEventArg] = Field(
+        default_factory=list, description="Event arguments (may be empty)"
+    )
+    timestamp_ms: int = Field(description="Local receive time (ms)")
+    raw: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Raw decoded payload (broker schema is undocumented)",
+    )
+
+
 class MipsConnectionError(Exception):
     """MIPS cloud client failed to connect."""
 

@@ -60,6 +60,7 @@ from miloco.miot.filter import (
     physical_camera_did,
     select_active_camera_dids,
 )
+from miloco.miot.iid import event_iid
 from miloco.miot.mips_listeners import (
     BindEventListener,
     CameraStateEventListener,
@@ -69,6 +70,7 @@ from miloco.miot.mips_listeners import (
 from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.state_push import write_online
 from miloco.miot.welcome_service import DeviceWelcomeService
+from miloco.state.path import validate_segment
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +221,65 @@ def _resolve_camera_switch_iids(spec: dict) -> list[tuple[int, int]]:
     return iids
 
 
+def _event_arg_description(service, event, arg) -> str:
+    """事件参数条目的描述：服务名 + 「最近一次」开锁这类事件名 + 参数名，相邻重复省一个。
+
+    拼接口径同属性车道（``parse_lite_async`` 里那句「服务名打头、与前者不同才追加」）。
+    事件这边有两处必须：
+
+    * **带上事件名。** 事件的参数是按 piid 引用服务属性的（spec 里 ``prop.iid == piid``
+      才算命中），同一设备的多个事件共用同一参数时拿到的 ``description_trans`` 就是同一份
+      —— 只取参数名的话，「单击」与「长按」两条规则会渲染成逐字相同的住户文案，谁也分不出
+      盯的是哪个事件。
+    * **事件名前面加「最近一次」。** 事件叶里只有最后落下的那个值，条件判的不是「此刻如
+      何」而是「最近一次发生时如何」，这句落库后是住户和 agent 唯一能看到的说明。
+      「重启后事件叶为空即按未就绪拦截」是运维口径，写在 ``state_push.write_event`` 的
+      docstring 与验收清单里，不进住户句。
+    """
+    parts: list[str] = []
+    last: str | None = None
+    for obj, is_event in ((service, False), (event, True), (arg, False)):
+        text = str(
+            getattr(obj, "description_trans", None)
+            or getattr(obj, "description", None)
+            or ""
+        ).strip()
+        if not text:
+            continue
+        # 事件那段不参与去重：它与服务同名时留着「最近一次」这个标记，比省掉一次重复
+        # 更要紧 —— 标记没了，这句话读起来就是一个属性条件
+        if is_event:
+            parts.append(f"最近一次{text}")
+        elif text != last:
+            parts.append(text)
+        last = text
+    return " ".join(parts)
+
+
+def _event_arg_lands(siid: int, eiid: int, argname: Any) -> bool:
+    """这个事件参数落不落得了叶 —— 写入侧那两道判据的前置。
+
+    写入侧先按名取表（``state_push._event_arg_names`` 收表时判空），再按
+    ``{siid}.{eiid}.{参数名}`` 拼出容器叶的末段交给 `validate_segment`。两条都过，
+    这一笔才进得了树；这里是同一个串、同一条规则的前置校验。
+
+    **入表的条目必须真能落成叶。** 落不了的条目一旦进表，规则创建时那道
+    ``spec.get(iid)`` 校验会放行，运行期却永远 ``path_missing`` —— 正是
+    ``_validate_iot_item`` 说要在创建时拦掉的那类「建得成功、永不触发、用户和 agent
+    都拿不到反馈」的配置错误。
+
+    名字为空要单独判，**不能指望 `validate_segment` 兜住**：空名拼出来的段是
+    ``2.1020.`` 这种尾巴上多一个点、非空也不含非法字符的形态，段校验反而放行。
+    """
+    if not argname:
+        return False
+    try:
+        validate_segment(f"{siid}.{eiid}.{argname}")
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def build_sub_device_names(device: MIoTDeviceInfo) -> dict[str, str]:
     """Convert MIoTDeviceInfo.sub_devices to {siid: user_alias}.
 
@@ -297,7 +358,7 @@ class MiotProxy:
         # 在锁内递增;对账提交不递增、只校验代次,防止把飞行期间的改写覆盖掉
         # (见 _reconcile_subscriptions)。
         self._sub_intent_generation = 0
-        # 四类对账共用一个并发闸:同时刻对同一条 broker 连接的在飞 SUBSCRIBE
+        # 各条对账车道共用一个并发闸:同时刻对同一条 broker 连接的在飞 SUBSCRIBE
         # 总数不超过 _RECONCILE_CONCURRENCY(每类自建会把上限按类数翻倍)
         self._sub_semaphore = asyncio.Semaphore(_RECONCILE_CONCURRENCY)
         # 相机清单是否至少成功拉取过一次（区分"真没相机"与"还没加载"）
@@ -335,6 +396,11 @@ class MiotProxy:
         # immutable per model — once fetched they never change. Typical home has
         # < 100 device models so memory footprint is negligible.
         self._spec_cache: dict[str, dict] = {}
+
+        # URN → 事件参数表。与 _spec_cache 同一条理由（spec 按型号不变、可无限
+        # 缓存），但要分开存：lite 视图里根本没有事件，这份得走完整解析器，键面
+        # 与条目形状也不同（见 _fetch_device_events）。
+        self._event_spec_cache: dict[str, dict] = {}
 
         # did → {channel: 「镜头开关」态} 缓存（camera-control:on 最近一次云读结果，per-lens）。
         # 每路 True=镜头开启 / False=镜头关闭(隐私·物理遮挡) / None=未知(读失败)；channel 缺失
@@ -396,11 +462,17 @@ class MiotProxy:
         # ACCOUNT-WIDE —— 家庭过滤放在写容器那一侧(见 state_push)。
         self._subscribed_props_dids: set[str] = set()
 
-        # 上下线 / 属性推送的本层消费方。SDK 那两个回调是单槽、已被本类占着，
+        # Dids whose device/{did}/up/event_occured/# topic this proxy intends to
+        # subscribe. Mirrors _subscribed_props_dids —— 同样 ACCOUNT-WIDE，家庭
+        # 过滤在写容器那一侧。
+        self._subscribed_event_dids: set[str] = set()
+
+        # 上下线 / 属性 / 事件推送的本层消费方。SDK 那几个回调是单槽、已被本类占着，
         # 别的消费方（状态容器、属性历史）挂在这里。存在 proxy 上而不是 client 上，
         # re-OAuth 重建 client 后不用重新注册
         self._state_listeners: list[Callable[[Any], Awaitable[None]]] = []
         self._props_listeners: list[Callable[[Any], Awaitable[None]]] = []
+        self._events_listeners: list[Callable[[Any], Awaitable[None]]] = []
         # MQTT 重连的多消费方。SDK 那一层是单槽 (register_mips_connect_callback),
         # 已经被本类的 refresh_devices 占着 —— 别的消费方直接注册会把设备刷新覆盖掉。
         # 形状照 add_device_state_listener。
@@ -626,7 +698,7 @@ class MiotProxy:
         return instance
 
     def _reset_subscription_mirrors(self) -> None:
-        """清空四个订阅意图镜像。
+        """清空五个订阅意图镜像。
 
         必须原地清空(见 _reconcile_subscriptions 的"原地改写"要求)。
         不持锁——init/deinit 是生命周期边界,SDK 侧集合一并重置;此刻若有残留
@@ -638,6 +710,7 @@ class MiotProxy:
             self._subscribed_device_state_dids,
             self._subscribed_scene_home_ids,
             self._subscribed_props_dids,
+            self._subscribed_event_dids,
         ):
             mirror.clear()
 
@@ -666,7 +739,7 @@ class MiotProxy:
 
     async def _subscription_sync_loop(self) -> None:
         """对账循环:串行跑轮次,期间有新触发或代次被改写则补一轮再停。"""
-        labels = ("meta", "device-state", "scene", "device-props")
+        labels = ("meta", "device-state", "scene", "device-props", "device-events")
         try:
             while True:
                 self._sub_sync_rerun_requested = False
@@ -676,6 +749,7 @@ class MiotProxy:
                     self._sync_device_state_subscriptions(),
                     self._sync_scene_subscriptions(),
                     self._sync_props_subscriptions(),
+                    self._sync_event_subscriptions(),
                     return_exceptions=True,
                 )
                 for label, r in zip(labels, results):
@@ -734,6 +808,9 @@ class MiotProxy:
         self._miot_client.register_device_props_changed_callback(
             self._on_device_props_changed_event
         )
+        # Device event push (event_occured): fan out to this layer's consumers
+        # (state container today; rule conditions read the leaves it writes).
+        self._miot_client.register_device_event_callback(self._on_device_event)
         # Home scene change (rename/delete/edit): refresh the scene list.
         self._miot_client.register_scene_changed_callback(self._on_scene_changed_event)
         # mips 实例重建后重建订阅意图镜像——见 _on_subscription_reset
@@ -1761,6 +1838,12 @@ class MiotProxy:
         """加一个属性推送的消费方。多次调用按注册顺序全部收到。"""
         self._props_listeners.append(callback)
 
+    def add_device_events_listener(
+        self, callback: Callable[[Any], Awaitable[None]]
+    ) -> None:
+        """加一个事件推送的消费方。多次调用按注册顺序全部收到。"""
+        self._events_listeners.append(callback)
+
     def add_mips_connect_listener(self, callback: Callable[[], None]) -> None:
         """加一个 MQTT 重连的消费方。回调是同步的, 自己排后台任务。
 
@@ -1915,9 +1998,38 @@ class MiotProxy:
             label="device-props",
         )
 
+    async def _sync_event_subscriptions(self) -> None:
+        """Reconcile per-device event push subs to the device list.
+
+        形制与口径同 _sync_props_subscriptions(ACCOUNT-WIDE、不设对齐门、
+        跳过含 '/' 的 did):订阅是账号级的,家庭过滤是容器一家的需求,在写容器
+        那一侧判。
+        """
+        skipped = [
+            did for did in self._device_info_dict if not is_subscribable_did(did)
+        ]
+        if skipped:
+            logger.debug(
+                "device-events: skipping %d did(s) with '/': %s", len(skipped), skipped
+            )
+        await _reconcile_subscriptions(
+            lambda: {did for did in self._device_info_dict if is_subscribable_did(did)},
+            self._subscribed_event_dids,
+            self._miot_client.sub_device_events_async,
+            self._miot_client.unsub_device_events_async,
+            lock=self._sub_intent_lock,
+            semaphore=self._sub_semaphore,
+            generation=lambda: self._sub_intent_generation,
+            label="device-events",
+        )
+
     async def _on_device_props_changed_event(self, msg: Any) -> None:
         """把属性推送交给本层的消费方。本类自己不缓存属性值,这里只做扇出。"""
         await self._fan_out(self._props_listeners, msg, "device-props")
+
+    async def _on_device_event(self, msg: Any) -> None:
+        """把事件推送交给本层的消费方。同上,这里只做扇出。"""
+        await self._fan_out(self._events_listeners, msg, "device-events")
 
     async def _on_scene_changed_event(self, msg: MIoTSceneChangedEvent) -> None:
         """Forward home scene-change push events to the dedicated listener.
@@ -1934,16 +2046,21 @@ class MiotProxy:
         state_dids: set,
         scene_home_ids: set,
         props_dids: set,
+        event_dids: set,
     ) -> None:
         """mips 实例重建后,把本层意图镜像重建为 SDK 重放后的集合(原地改写,见
         _reconcile_subscriptions 的原地要求)。代次递增使飞行中对账的提交自失效,
-        由重建后必然触发的下一轮对账重订。由 SDK 在三个重放块之后调用。"""
+        由重建后必然触发的下一轮对账重订。由 SDK 在全部重放块之后调用。
+
+        形参个数与 SDK 的 _fire_subscription_reset 实参一一对应 —— 少一个的话那侧
+        的 except Exception 会把 TypeError 吞掉,表现是镜像静默不再重建。"""
         async with self._sub_intent_lock:
             for mirror, truth in (
                 (self._subscribed_meta_dids, meta_dids),
                 (self._subscribed_device_state_dids, state_dids),
                 (self._subscribed_scene_home_ids, scene_home_ids),
                 (self._subscribed_props_dids, props_dids),
+                (self._subscribed_event_dids, event_dids),
             ):
                 mirror.clear()
                 mirror.update(truth)
@@ -2894,6 +3011,75 @@ class MiotProxy:
         except Exception as e:
             logger.warning("Failed to fetch spec for urn %s: %s", urn, e)
             return {}
+
+    async def _fetch_device_events(self, urn: str) -> dict:
+        """取一台设备 spec 里的事件参数，键形如 `event.{siid}.{eiid}.{argname}`。
+
+        **必须单独解析一遍**：lite 视图（`parse_lite_async`）只遍历
+        properties/actions，事件一条都不在里面，`_fetch_device_spec` 的缓存里
+        没有可借用的东西。
+
+        条目在 lite 形制（description/format/value_list/value_range）之外多带
+        `siid`/`eiid`/`piid`：推送帧里只有数字 piid，而落叶子要的是参数名，写入
+        侧靠这三个字段把 (siid, eiid, piid) 反查回名字。名字一律用 spec 原名、
+        不做缩写 —— 规则 iid、容器路径、渲染文案三处认的是同一个串。
+
+        按 URN 缓存，与 `_spec_cache` 同一条理由（spec 按型号不变）。**失败不入
+        缓存**：一次云端抖动不该让这台设备在整个进程生命周期里都解不出参数名。
+        """
+        cache_key = urn
+        if cache_key in self._event_spec_cache:
+            return {k: dict(v) for k, v in self._event_spec_cache[cache_key].items()}
+        try:
+            spec = await self.miot_client.spec_parser.parse_async(urn=urn)
+        except RuntimeError:
+            # miot_client not initialized (no OAuth yet)
+            return {}
+        except Exception as e:
+            logger.warning("Failed to fetch event spec for urn %s: %s", urn, e)
+            return {}
+        if spec is None:
+            return {}
+        events: dict = {}
+        for service in spec.services or []:
+            for event in service.events or []:
+                for arg in event.arguments or []:
+                    # 落不了叶的参数不进表：这类条目入了表只会放行一条「建得成功、永不
+                    # 触发」的规则 —— 判据见 _event_arg_lands
+                    if not _event_arg_lands(service.iid, event.iid, arg.name):
+                        continue
+                    entry: dict = {
+                        "name": arg.name,
+                        "description": _event_arg_description(service, event, arg),
+                        "format": arg.format,
+                        "siid": service.iid,
+                        "eiid": event.iid,
+                        "piid": arg.iid,
+                    }
+                    if arg.unit:
+                        entry["unit"] = arg.unit
+                    if arg.value_range:
+                        entry["value_range"] = [
+                            arg.value_range.min_,
+                            arg.value_range.max_,
+                            arg.value_range.step,
+                        ]
+                    if arg.value_list:
+                        entry["value_list"] = [
+                            {
+                                "name": v.name,
+                                "value": v.value,
+                                "description": v.description,
+                            }
+                            for v in arg.value_list
+                        ]
+                    # 键由 iid 那边拼：这张表的键、规则条件项的 iid、容器叶的末段必须
+                    # 是同一个串，各写一份 f-string 就会在改动时漂移
+                    events[event_iid(service.iid, event.iid, arg.name)] = entry
+        # 存副本、返原件：命中那条路已经在拷了，这里不拷的话**首次取表**的调用方拿到的
+        # 就是缓存本体 —— 它改一个字段，同型号的下一台设备跟着变
+        self._event_spec_cache[cache_key] = {k: dict(v) for k, v in events.items()}
+        return events
 
     async def _check_and_refresh_token(self):
         """检查令牌是否临近过期，需要则刷新。

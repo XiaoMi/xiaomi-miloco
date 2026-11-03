@@ -285,15 +285,18 @@ temporary 且到期时刻确定（信号 2 时间窗 / 信号 4 绝对一次性�
 
 先看 system context `## 设备目录` 段，按 access 含 `n` 筛候选设备与属性名。目录缺失或未覆盖 → `miloco-cli device list`（**不带 `--room`**：房间名只能来自用户原话，本步推出来的房间名不算，也不许带到 §Rule.感知设备）。
 
-**选定设备之后必须跑 `miloco-cli device spec <did>`**：`--iot-iid` 的值只能从 `device spec` 输出的行首列 `prop.<siid>.<piid>` 抄，去掉 `prop.` 前缀。设备目录只用来筛候选，不作为 iid 的来源。
+**选定设备之后必须跑 `miloco-cli device spec <did>`**：`--iot-iid` 的值只能从 `device spec` 输出的行首列抄，两种形态 —— 属性是 `prop.<siid>.<piid>`（去掉 `prop.` 前缀），事件参数是 `event.<siid>.<eiid>.<argname>`（整串照抄，`event.` 是它的一部分）。设备目录只用来筛候选，不作为 iid 的来源。
 
 access 列：`w` 可写 / `r` 可读 / `n` 设备主动推送。**只有 `r` 没有 `n` 的属性不能当触发源**，用它建规则会被拒。
+
+**事件参数那一节要加 `--events` 才输出**（默认那次不解析事件表）。命题问的是「设备只在事件里报的那件事」时走这里 —— 参数名是 spec 原名、拼不出来，只能从这一节抄，且末段必须逐字相同。事件叶里存的是**最近一次**收到的值：条件判的是「最近一次发生时如何」，同一参数值连着上报不会重复叫醒规则；进程重启后事件叶为空，要等下一次上报，这期间引用它的条件按未就绪处理。**建规则、改条件、重新启用任务时会先拿这个旧值判一次** —— 最近一次发生若与条件相符，规则落地那一刻就会触发一次动作，而不是等下一次上报；「从现在起有人开锁就…」这类命题要给用户交代这一下，别把它当成刚发生的事。
 
 **第 2 步 · 判定**。判「答不答得了」只看命题里的**瞬时观测**：持续时长、累计次数都不参与，它们由 `duration_seconds` 或 record 表达，不在条件里（source=iot 时只能用 record，装法见 §Rule.duration_seconds）。「空调开着超过两小时」的瞬时观测是「空调开着」。
 
 | 情况 | source |
 |---|---|
 | 找到含 `n` 的属性，且它答的就是本命题 | `iot` + 触发装配提示（告知装到了哪台设备的哪条属性）|
+| 属性答不了本命题（设备只在事件里报这件事），而 `device spec --events` 里有参数答得了 | `iot` + 触发装配提示 |
 | 找到属性但它答的不是本命题（命题问人或行为，属性答设备自身状态）| `omni` |
 | 没找到 | `omni` |
 
@@ -306,7 +309,7 @@ source=iot 时填，与 `--condition` 互斥（同时给会被拒）。四个 fl
 | flag | 取值 |
 |---|---|
 | `--iot-did` | 设备 did |
-| `--iot-iid` | **裸 `<siid>.<piid>`**。`device spec` 输出的键是 `prop.<siid>.<piid>`，去掉 `prop.` 前缀 |
+| `--iot-iid` | 属性：**裸 `<siid>.<piid>`**（`device spec` 输出的 `prop.<siid>.<piid>` 去掉 `prop.` 前缀）。事件参数：`event.<siid>.<eiid>.<argname>` **整串照抄**（`device spec --events` 那一节的行首列），`event.` 不能省，末段参数名不能自己拼 |
 | `--iot-op` | `eq` / `ne` / `gt` / `gte` / `lt` / `lte` |
 | `--iot-value` | 按该属性的 format：枚举填 spec 里的**数字**、不是名字；bool 只收 `true` / `false`；整数族填整数；float 填小数 |
 
@@ -721,7 +724,7 @@ session + duration record 三 desc 分工：
 | `direction=session` | `--direction session` |
 | `direction=guard` | `--direction guard`（不传任何动作 flag、不传 `--duration-seconds`）|
 | `source=omni` + `condition.query` | `--condition "<query>"` |
-| `source=iot` | `--iot-did <did> --iot-iid <siid.piid> --iot-op <op> --iot-value <v>`（四个同时给，与 `--condition` 互斥）|
+| `source=iot` | `--iot-did <did> --iot-iid <iid> --iot-op <op> --iot-value <v>`（四个同时给，与 `--condition` 互斥；`<iid>` 的两种形态见 §Rule.condition.iot）|
 | enter / exit + action JSON | `--action '<JSON>'`（落哪个槽由 direction 定，不用 `--on-exit-*`）|
 | enter / exit + desc | `--action-desc "<desc>"` |
 | 动作装在 task 上 / 出方向不做事 | 不传动作 flag |

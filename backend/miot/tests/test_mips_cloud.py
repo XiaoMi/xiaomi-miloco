@@ -1117,6 +1117,68 @@ async def test_props_unsubscribes_the_same_wildcard_it_subscribed():
 
 
 @pytest.mark.asyncio
+async def test_an_event_push_reaches_the_handler_through_the_wildcard():
+    """事件那条子树与属性一样要通配，且拼写是 `event_occured`（云端的原文如此）。
+
+    解码那批用例各自把 topic 当参数传进去，所以订阅端把这段拼错时它们全绿 ——
+    只有这条能从订阅走到回调。
+    """
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+    received: list = []
+    try:
+        await asyncio.gather(
+            mips.sub_device_events_async("dev-9", handler=received.append),
+            _ack_subscribes(fake, 1),
+        )
+        assert [topic for topic, _qos, _mid in fake.subscribed] == [
+            "device/dev-9/up/event_occured/#"
+        ]
+        fake.fire_message(
+            "device/dev-9/up/event_occured/2/1020",
+            b'{"method":"event_occured","params":{"siid":2,"eiid":1020,'
+            b'"arguments":[{"piid":1,"value":2}]}}',
+        )
+        await asyncio.sleep(0.01)
+
+        assert (received[0].siid, received[0].eiid) == (2, 1020)
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_events_unsubscribe_the_same_wildcard_they_subscribed():
+    mips, _ = _make_mips()
+    holder: dict[str, _FakeMqttClient] = {}
+
+    def factory(client_id: str) -> _FakeMqttClient:
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]  # type: ignore[return-value]
+
+    mips._client_factory = factory  # type: ignore[assignment]
+    fake = await _connect(mips, holder)
+    try:
+        await asyncio.gather(
+            mips.sub_device_events_async("dev-9", handler=lambda _msg: None),
+            _ack_subscribes(fake, 1),
+        )
+        await mips.unsub_device_events_async("dev-9")
+
+        assert set(fake.unsubscribed) == {
+            topic for topic, _qos, _mid in fake.subscribed
+        }
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
 async def test_a_second_handler_on_the_same_topic_is_reported(caplog):
     """一个 topic 只挂一个 handler：第二个注册会静默替换掉第一个，
     两个消费方各订一份时先注册的那个从此收不到推送。"""
@@ -1177,3 +1239,253 @@ def test_an_explicit_null_value_is_kept():
     )
 
     assert [(c.siid, c.piid, c.value) for c in event.changes] == [(2, 1, None)]
+
+
+# ── 事件推送 ──────────────────────────────────────────────────────────
+
+
+def _event_decoder():
+    return MIoTMipsCloud._make_device_event_decoder()
+
+
+def test_an_event_occurred_push_decodes_into_one_event():
+    """参数带的是数字 piid，不是 spec 里的参数名 —— 名字由上层查 spec 补。"""
+    event = _event_decoder()(
+        "device/d1/up/event_occured/2/1020",
+        b'{"method":"event_occured","params":{"did":"d1","siid":2,"eiid":1020,'
+        b'"arguments":[{"piid":1,"value":2}]}}',
+    )
+
+    assert event is not None
+    assert (event.did, event.siid, event.eiid) == ("d1", 2, 1020)
+    assert [(a.piid, a.value) for a in event.args] == [(1, 2)]
+    assert event.timestamp_ms > 0
+
+
+def test_an_event_without_arguments_decodes_with_no_args():
+    """spec 允许无参事件。**在这里丢掉的话它的到达就完全不可观测了** —— 帧是真的，
+    只是没有可落的参数，交给上层计数。"""
+    event = _event_decoder()(
+        "device/d1/up/event_occured/2/1020",
+        b'{"method":"event_occured","params":{"siid":2,"eiid":1020}}',
+    )
+
+    assert event is not None
+    assert event.args == []
+
+
+def test_an_argument_without_a_piid_is_skipped_but_the_event_survives(caplog):
+    """缺 piid 的参数去不了任何地方 —— 叶子的键要按 piid 反查参数名。
+
+    丢掉是对的（猜一个 piid 就是把值挂到别的参数上），但**不能静默丢**：没了告警，
+    上位只看得见「参数少了一个」，而「设备没上报这个参数」与「上报了但认不出」在
+    计数上长得一样。同一条 arguments 里缺失 value 的那条已经会告警，这里同口径。
+    """
+    with caplog.at_level(logging.WARNING, logger="miot.mips_cloud"):
+        event = _event_decoder()(
+            "device/d1/up/event_occured/2/1020",
+            b'{"method":"event_occured","params":{"siid":2,"eiid":1020,'
+            b'"arguments":[{"value":9},{"piid":2,"value":3}]}}',
+        )
+
+    assert event is not None
+    assert [(a.piid, a.value) for a in event.args] == [(2, 3)]
+    assert "carries no usable piid" in caplog.text
+    assert "did=d1" in caplog.text and "iid=event.2.1020" in caplog.text
+
+
+def test_a_non_object_argument_is_skipped_with_the_same_warning(caplog):
+    """参数列表里混进非对象（null、字符串、数组）时也走同一条告警。
+
+    这种形态本来就在同一条循环里被默默吃掉，下场与「缺 piid」逐字相同：值真丢了，而上位
+    只看得见一个「无参事件」。*不加* type 闸才接得住 —— 加一道 `isinstance` 就等于把它从
+    这条告警里漏出去。type= 用来把这种形态与「是个对象但 piid 不可用」分开。
+    """
+    with caplog.at_level(logging.WARNING, logger="miot.mips_cloud"):
+        event = _event_decoder()(
+            "device/d1/up/event_occured/2/1020",
+            b'{"method":"event_occured","params":{"siid":2,"eiid":1020,'
+            b'"arguments":[null,"x",{"piid":2,"value":3}]}}',
+        )
+
+    assert event is not None
+    assert [(a.piid, a.value) for a in event.args] == [(2, 3)]
+    assert caplog.text.count("carries no usable piid") == 2
+    assert "type=NoneType" in caplog.text and "type=str" in caplog.text
+
+
+def test_an_arguments_object_instead_of_a_list_is_not_silently_empty(caplog):
+    """整个 arguments 给成对象时逐项取到的是键（字符串）—— 以前全被默默过滤成空。
+
+    后果最坏的一种：帧照常返回、args 为空，看起来就是一个无参事件。这条与「列表里
+    混进非对象」是两种形态，文案也分开：那一条说的是某个参数认不出，这一条说的是
+    装参数的容器本身不对。
+    """
+    with caplog.at_level(logging.WARNING, logger="miot.mips_cloud"):
+        event = _event_decoder()(
+            "device/d1/up/event_occured/2/1020",
+            b'{"method":"event_occured","params":{"siid":2,"eiid":1020,'
+            b'"arguments":{"5":{"value":9}}}}',
+        )
+
+    assert event is not None
+    assert event.args == []
+    assert "arguments is not a list" in caplog.text
+    assert "did=d1" in caplog.text and "iid=event.2.1020" in caplog.text
+    assert "type=dict" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("raw", "type_name"),
+    [(b"5", "int"), (b"true", "bool"), (b"0", "int"), (b'""', "str")],
+    ids=["number", "bool", "zero", "empty-string"],
+)
+def test_arguments_that_is_not_a_list_never_escapes_the_decoder_warning(
+    caplog, raw, type_name
+):
+    """arguments 的容器形态不对时，在这里说清楚，不留给上层那句通用失败。
+
+    实际后果比「丢参数」更重：不可迭代的值在循环头抛 TypeError，异常越过本函数，被
+    `_on_message` 的通用解码失败兜住，整帧被丢掉，日志里只剩 topic 和一句 TypeError
+    —— 没有 did、没有 iid，也没说是参数容器的问题。0 与空串这两种假值单列，是因为
+    判据写成 `or []` 时它们会静默变成「无参事件」，而那正是本段要拦的形态。
+    """
+    with caplog.at_level(logging.WARNING, logger="miot.mips_cloud"):
+        event = _event_decoder()(
+            "device/d1/up/event_occured/2/1020",
+            b'{"method":"event_occured","params":{"siid":2,"eiid":1020,'
+            b'"arguments":' + raw + b"}}",
+        )
+
+    assert event is not None, raw
+    assert event.args == []
+    assert "arguments is not a list" in caplog.text
+    assert "did=d1" in caplog.text and "iid=event.2.1020" in caplog.text
+    assert f"type={type_name}" in caplog.text
+
+
+def test_absent_or_null_arguments_is_still_a_quiet_no_arg_event():
+    """容器闸只认「不是 None 又不是列表」：字段缺失与显式 null 都是合法的无参事件。
+
+    这道闸一旦写成「必须得有列表」，无参事件就会开始刷告警 —— spec 允许它，真机上
+    这类事件不少。
+    """
+    for raw in (b"null", None):
+        payload = (
+            b'{"method":"event_occured","params":{"siid":2,"eiid":1020}}'
+            if raw is None
+            else b'{"method":"event_occured","params":{"siid":2,"eiid":1020,'
+            b'"arguments":null}}'
+        )
+        event = _event_decoder()("device/d1/up/event_occured/2/1020", payload)
+        assert event is not None
+        assert event.args == []
+
+
+def test_an_argument_without_a_value_is_skipped_but_the_event_survives():
+    """与属性侧同口径：缺 value 是残缺的推送，不是「值为 None」。"""
+    event = _event_decoder()(
+        "device/d1/up/event_occured/2/1020",
+        b'{"method":"event_occured","params":{"siid":2,"eiid":1020,'
+        b'"arguments":[{"piid":1},{"piid":2,"value":3}]}}',
+    )
+
+    assert [(a.piid, a.value) for a in event.args] == [(2, 3)]
+
+
+def test_a_topic_outside_the_event_occurred_subtree_is_dropped():
+    """订的是通配，别的 leaf 也会落进来 —— 这道闸是白名单，不是防御性冗余。"""
+    assert (
+        _event_decoder()(
+            "device/d1/up/properties_changed/2/1020",
+            b'{"method":"event_occured","params":{"siid":2,"eiid":1020}}',
+        )
+        is None
+    )
+
+
+def test_an_event_topic_carrying_a_properties_changed_payload_is_dropped():
+    assert (
+        _event_decoder()(
+            "device/d1/up/event_occured/2/1020",
+            b'{"method":"properties_changed","params":{"siid":2,"eiid":1020}}',
+        )
+        is None
+    )
+
+
+def test_a_params_list_with_one_entry_decodes():
+    """broker 没文档化 params 形态：实测是裸 dict，HA 的惯例是 list，两种都收。"""
+    event = _event_decoder()(
+        "device/d1/up/event_occured/2/1020",
+        b'{"method":"event_occured","params":[{"siid":2,"eiid":1020,'
+        b'"arguments":[{"piid":1,"value":2}]}]}',
+    )
+
+    assert [(a.piid, a.value) for a in event.args] == [(1, 2)]
+
+
+def test_a_params_list_with_several_entries_is_dropped():
+    """与属性侧的形制差异：一次事件只承载一个 (siid, eiid) —— 那是 spec 里事件的键。
+
+    多条时无从对应 topic 那一对，猜一条写下去会把一个事件的值挂到另一个事件的叶子上。
+    """
+    assert (
+        _event_decoder()(
+            "device/d1/up/event_occured/2/1020",
+            b'{"method":"event_occured","params":['
+            b'{"siid":2,"eiid":1020},{"siid":3,"eiid":1}]}',
+        )
+        is None
+    )
+
+
+def test_an_event_payload_did_that_contradicts_the_topic_is_dropped():
+    """不一致会把一台设备的事件写到另一台的路径上。"""
+    assert (
+        _event_decoder()(
+            "device/d1/up/event_occured/2/1020",
+            b'{"method":"event_occured","params":{"did":"d2","siid":2,"eiid":1020}}',
+        )
+        is None
+    )
+
+
+def test_a_payload_iid_that_contradicts_the_topic_is_dropped():
+    """事件帧的 topic 那一对永远对得上（一次只有一个事件），对不上就是真矛盾。
+
+    属性侧只在单条时才敢比 —— 那条限制不适用于这里。
+    """
+    assert (
+        _event_decoder()(
+            "device/d1/up/event_occured/2/1020",
+            b'{"method":"event_occured","params":{"siid":9,"eiid":9}}',
+        )
+        is None
+    )
+
+
+def test_an_event_topic_without_the_iid_suffix_decodes():
+    """订阅通配是 `event_occured/#`，对齐不上时 topic 可能只到方法名那一段。"""
+    event = _event_decoder()(
+        "device/d1/up/event_occured",
+        b'{"method":"event_occured","params":{"siid":2,"eiid":1020}}',
+    )
+
+    assert event is not None
+    assert (event.siid, event.eiid) == (2, 1020)
+
+
+def test_a_bridged_child_did_decodes():
+    """网关子设备的 did 形如 `blt.x` / `proxy.x` —— topic 里的 did 段不能按数字收。"""
+    event = _event_decoder()(
+        "device/blt.4.1/up/event_occured/2/1020",
+        b'{"method":"event_occured","params":{"siid":2,"eiid":1020}}',
+    )
+
+    assert event is not None
+    assert event.did == "blt.4.1"
+
+
+def test_a_non_json_event_payload_is_dropped():
+    assert _event_decoder()("device/d1/up/event_occured/2/1020", b"not json") is None

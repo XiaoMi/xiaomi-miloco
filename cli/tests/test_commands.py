@@ -711,7 +711,9 @@ def test_device_spec_default_table(runner, fake_home_info):
     assert "room=客厅" in text
     assert "[service 2]" in text  # 按 service 分组的标题行
     assert "prop.2.1" in text
-    mock.assert_called_once_with("/api/miot/devices/lamp_001/spec")
+    # 事件表要显式问才取：不加这个参数时请求里不该出现它
+    mock.assert_called_once_with("/api/miot/devices/lamp_001/spec", params=None)
+    assert "事件参数" not in text
 
 
 def test_device_spec_multiple_dids(runner, fake_home_info):
@@ -732,11 +734,15 @@ def test_device_spec_multiple_dids(runner, fake_home_info):
 
 
 def test_device_spec_multiple_partial_failure(runner, fake_home_info):
-    """多 did 中某台 spec 为空 → 该 did 报错到 stderr，其余正常输出，exit 0。"""
+    """多 did 中某台不在响应里 → 该 did 报错到 stderr，其余正常输出，exit 0。
+
+    报错条件只认这一条：属性表空是另一回事（那次响应里设备是有的），由渲染那层
+    降级成一行提示 —— 见 test_device_spec_events_survive_an_empty_property_table。
+    """
     def fake_get(path, *args, **kwargs):
         did = path.split("/")[-2]
         if did == "bad":
-            return {"code": 0, "data": {}}  # 空 spec
+            return {"code": 0, "data": {}}  # 响应里没有这台设备
         return {"code": 0, "data": {
             "did": did, "online": True, "category": "light",
             "spec": {"prop.2.1": {"type": "bool"}},
@@ -746,6 +752,8 @@ def test_device_spec_multiple_partial_failure(runner, fake_home_info):
         result = runner.invoke(cli, ["device", "spec", "good", "bad"])
     assert result.exit_code == 0
     assert "did=good" in result.output
+    assert "did 'bad' not found" in result.stderr
+    assert "did=bad" not in result.output
 
 
 def test_device_spec_groups_by_service_with_description(runner, fake_home_info):
@@ -791,6 +799,97 @@ def test_device_spec_groups_by_service_with_description(runner, fake_home_info):
     # 无 properties:/actions: 小节标题，行不缩进（iid 顶格）
     assert "properties:" not in text and "actions:" not in text
     assert "\nprop.2.1  " in text and "\naction.2.1  " in text
+
+
+def test_device_spec_events_are_opt_in(runner, fake_home_info):
+    """--events 才追加事件参数小节，并顺带把 include_events 带给服务端。
+
+    事件的参数名是 spec 原名、拼不出来，只能从这里抄 —— 而事件表要走另一个解析器，
+    所以默认那次请求里不该出现这个参数（后端那边也没解析）。
+    """
+    payload = {
+        "code": 0,
+        "data": {
+            "did": "lock_001", "name": "玄关门锁", "online": True, "category": "lock",
+            "spec": {"prop.2.1": {"type_name": "on", "format": "bool"}},
+            "event_spec": {
+                "event.2.1020.unlock-operation-position": {
+                    "name": "unlock-operation-position",
+                    "description": "门锁 最近一次开锁操作",
+                    "format": "uint8",
+                    "siid": 2, "eiid": 1020, "piid": 1,
+                    "value_list": [{"name": "Inside", "value": 2, "description": "室内开锁"}],
+                },
+            },
+        },
+    }
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = payload
+        result = runner.invoke(cli, ["device", "spec", "lock_001", "--events"])
+    assert result.exit_code == 0
+    assert mock.call_args[1]["params"] == {"include_events": "true"}
+    text = result.output
+    # 第一列就是能直接抄给 --iot-iid 的那个串，顶格、不被 @ 后缀改写
+    assert "\nevent.2.1020.unlock-operation-position  " in text
+    # iid 一行里只出现一次：渲染器的输出也以 key 打头，不切掉前缀就是同一串两遍，
+    # 表头那列说明（第一段是空的，别名在行首列里）也对不上
+    assert text.count("event.2.1020.unlock-operation-position") == 1
+    # 描述落在行尾注释里；access 列没有可写的位（事件只推不读也不写）
+    assert "|-|uint8|Inside=2  # 门锁 最近一次开锁操作" in text
+    # 事件小节在属性小节之后
+    assert text.index("prop.2.1") < text.index("event.2.1020")
+
+
+def test_device_spec_events_says_so_when_the_device_has_none(runner, fake_home_info):
+    """--events 遇到没有事件参数的设备要明说。
+
+    整个小节一片空白的话，看的人分不清是「这台设备没有事件」还是「取事件表这一步
+    挂了」—— 后者会让人以为 iid 没处可查，跑去别处找。
+    """
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {
+            "code": 0,
+            "data": {
+                "did": "lamp_001", "name": "台灯", "online": True, "category": "light",
+                "spec": {"prop.2.1": {"type_name": "on", "format": "bool"}},
+            },
+        }
+        result = runner.invoke(cli, ["device", "spec", "lamp_001", "--events"])
+    assert result.exit_code == 0
+    assert "# 本设备 spec 里没有事件参数" in result.output
+
+
+def test_device_spec_events_survive_an_empty_property_table(runner, fake_home_info):
+    """属性表空不能把事件小节一起吞掉，也不能报成「设备不存在」。
+
+    两张表在服务端是两次独立解析，各自会单独失败 —— 「属性表空 + 事件表有值」是真
+    会出现的组合。而事件参数名是 spec 原名、别处抄不到，这一节是唯一的发现路径：
+    吞掉它，agent 就只能猜参数名或者放弃建规则，且报错还指向「设备不存在」。
+    """
+    with patch("miloco_cli.client.api_get") as mock:
+        mock.return_value = {
+            "code": 0,
+            "data": {
+                "did": "lock_001", "name": "玄关门锁", "online": True, "category": "lock",
+                "spec": {},
+                "event_spec": {
+                    "event.2.1020.unlock-operation-position": {
+                        "name": "unlock-operation-position",
+                        "description": "门锁 最近一次开锁操作",
+                        "format": "uint8",
+                        "siid": 2, "eiid": 1020, "piid": 1,
+                        "value_list": [{"name": "Inside", "value": 2, "description": "室内开锁"}],
+                    },
+                },
+            },
+        }
+        result = runner.invoke(cli, ["device", "spec", "lock_001", "--events"])
+    assert result.exit_code == 0
+    text = result.output
+    assert "\nevent.2.1020.unlock-operation-position  " in text
+    # 属性那一节退化成一行提示，事件那一节照出
+    assert "spec 为空" in text
+    assert "not found" not in text and "not found" not in result.stderr
 
 
 def test_device_props_annotates_spec_name(runner, fake_home_info):

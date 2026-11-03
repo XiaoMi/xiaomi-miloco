@@ -88,6 +88,25 @@ _SPEC = {
     "prop.7.1": _PRESET,
 }
 
+# 事件参数。**没有 `notify` / `readable` / `writeable`**：事件只推不读也不写，
+# 那三个键是属性才有的。事件也没法在外面读一次，所以条件项只能等下一次事件。
+_EVENT_IID = "event.2.1020.unlock-operation-position"
+_UNLOCK_OPERATION = {
+    "name": "unlock-operation-position",
+    # description 由 miloco/miot/client.py 的 `_event_arg_description` 拼：服务名 +
+    # 「最近一次」+ 事件名 + 参数名。这里照抄一份是为了跟真机 spec 同形。
+    "description": "门锁 最近一次开锁操作",
+    "format": "uint8",
+    "siid": 2,
+    "eiid": 1020,
+    "piid": 1,
+    "value_list": [
+        {"name": "Inside", "value": 2, "description": "室内开锁"},
+        {"name": "Outside", "value": 3, "description": "室外开锁"},
+    ],
+}
+_EVENT_SPEC = {_EVENT_IID: _UNLOCK_OPERATION}
+
 
 @pytest.fixture
 def service(monkeypatch):
@@ -126,6 +145,9 @@ def service(monkeypatch):
     manager = MagicMock()
     manager.miot_service.get_device_spec = AsyncMock(
         return_value={"did": DID, "name": "玄关门锁", "spec": dict(_SPEC)}
+    )
+    manager.miot_service.get_device_event_spec = AsyncMock(
+        return_value={"did": DID, "name": "玄关门锁", "spec": dict(_EVENT_SPEC)}
     )
     manager.miot_proxy.devices_in_current_home = AsyncMock(return_value={DID: object()})
     monkeypatch.setattr("miloco.manager.get_manager", lambda: manager)
@@ -296,6 +318,97 @@ async def test_bool_value_on_a_numeric_property_is_rejected(service):
     """bool 是 int 的子类，不单独分族的话「开关配了数值阈值」会被静默当成合法。"""
     with pytest.raises(ValidationException, match="类型不兼容"):
         await service.create_rule(_iot_rule(dnf=_iot_dnf(iid="3.1", value=True)))
+
+
+# ── 事件参数：第二条命名空间 ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_an_event_arg_renders_the_query_from_the_predicate(service):
+    """事件条件项要渲染得跟属性那条一样自然 —— 住户看到的是同一句话的形制。
+
+    句子里必须留着「最近一次」：它判的不是「此刻如何」而是「最近一次发生时如何」，
+    而这句落库后（``condition.query``）是住户与 agent 唯一看得到的说明。
+    """
+    await service.create_rule(
+        _iot_rule(dnf=_iot_dnf(iid=_EVENT_IID, value=2), query="")
+    )
+
+    stored = service._repo.create.call_args[0][0]
+    assert stored.condition.query == "玄关门锁 门锁 最近一次开锁操作 = 室内开锁"
+
+
+@pytest.mark.asyncio
+async def test_an_event_arg_is_not_looked_up_in_the_prop_spec(service):
+    """命名空间由 iid 的前缀定，不由「哪张表里有这个键」定。
+
+    走错表时错的那个键恰好存在（这里两边都有），所以断的是「取的是哪张表」而不是
+    报错文案 —— 只断文案的话，两张表取反也能绿。
+    """
+    await service.create_rule(_iot_rule(dnf=_iot_dnf(iid=_EVENT_IID, value=2)))
+
+    service._manager.miot_service.get_device_event_spec.assert_awaited()
+    service._manager.miot_service.get_device_spec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_event_arg_does_not_need_notify(service):
+    """属性那道 notify 闸对事件没有对应物：事件参数只推不读也不写。
+
+    与 `test_property_without_notify_is_rejected` 是同一条判据的两面 —— 只留一面的话
+    把闸套到事件上也能绿。
+    """
+    entry = dict(_UNLOCK_OPERATION, notify=False)
+    service._manager.miot_service.get_device_event_spec = AsyncMock(
+        return_value={"did": DID, "name": "玄关门锁", "spec": {_EVENT_IID: entry}}
+    )
+
+    await service.create_rule(_iot_rule(dnf=_iot_dnf(iid=_EVENT_IID, value=2)))
+
+    assert service._repo.create.called
+
+
+@pytest.mark.asyncio
+async def test_an_event_iid_missing_from_the_event_spec_is_rejected(service):
+    """报错要指向事件表。说成「没有属性 prop.event.…」会把人指去改一个抄对了的 iid。"""
+    with pytest.raises(ValidationException, match="事件参数 .* 不在设备"):
+        await service.create_rule(_iot_rule(dnf=_iot_dnf(iid="event.9.9.nope", value=1)))
+
+
+@pytest.mark.asyncio
+async def test_an_empty_event_spec_reports_the_event_spec(service):
+    """与 `test_empty_spec_reports_the_spec_not_the_iid` 同形：报的是拿不到 spec。"""
+    service._manager.miot_service.get_device_event_spec = AsyncMock(
+        return_value={"did": DID, "name": "玄关门锁", "spec": {}}
+    )
+
+    with pytest.raises(ValidationException, match="拿不到设备 .* 的事件 spec"):
+        await service.create_rule(_iot_rule(dnf=_iot_dnf(iid=_EVENT_IID, value=2)))
+
+
+@pytest.mark.asyncio
+async def test_an_event_value_outside_the_enum_is_rejected(service):
+    """枚举校验对事件同样成立，而且报错里要写「事件参数」不是「属性 prop.」。"""
+    with pytest.raises(ValidationException, match=r"事件参数 event\.2\.1020"):
+        await service.create_rule(_iot_rule(dnf=_iot_dnf(iid=_EVENT_IID, value=9)))
+
+
+@pytest.mark.asyncio
+async def test_an_event_arg_with_a_non_scalar_format_is_rejected(service):
+    entry = dict(_UNLOCK_OPERATION, format="iids")
+    service._manager.miot_service.get_device_event_spec = AsyncMock(
+        return_value={"did": DID, "name": "玄关门锁", "spec": {_EVENT_IID: entry}}
+    )
+
+    with pytest.raises(ValidationException, match="不是标量"):
+        await service.create_rule(_iot_rule(dnf=_iot_dnf(iid=_EVENT_IID, value=2)))
+
+
+@pytest.mark.asyncio
+async def test_the_value_error_text_names_the_namespace(service):
+    """同一个值校验函数服务两个命名空间，报错里的自称不能混 —— 属性那条沿用历史形态。"""
+    with pytest.raises(ValidationException, match=r"属性 prop\.5\.1"):
+        await service.create_rule(_iot_rule(dnf=_iot_dnf(iid="5.1", value=9)))
 
 
 # ── value_range 的步长 ────────────────────────────────────────────────

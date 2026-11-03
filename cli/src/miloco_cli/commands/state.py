@@ -18,6 +18,8 @@ def state_group():
     """状态容器：计数 / 转储。"""
 
 
+# 「成因」那一列跟着写入侧的判据走，判据已经前移过一次：`event_rejected` 里的「参数名
+# 当不了路径段」在入表校验前移后不可达了，该支成因并进了 `event_arg_unknown`。改判据时同步这里。
 @state_group.command("stats")
 @click.option("--pretty", is_flag=True)
 def state_stats(pretty):
@@ -30,6 +32,21 @@ def state_stats(pretty):
     - prop_written == 0 而 prop_not_aligned / prop_out_of_home / prop_rejected 有数
                                             推送到了，被闸挡掉
     - 全部为 0，而订阅对账报 failed=0       SUBACK 成功但 broker 没投递
+
+    判「事件推送通没通」（另一条独立通道，订阅与闸门都是分开的两套）：
+
+    \b
+    - push.event_written > 0                事件到达、参数名从 spec 翻出来了、真进了树
+    - event_arg_unknown 有数                帧到了，但 (siid, eiid, piid) 在事件 spec 里
+                                            翻不出参数名 —— 事件 spec 没取到，这台设备的
+                                            spec 里这个事件没有这个参数，或参数名非法
+                                            （空 / 含 '/' 或 '*' / 与 siid、eiid 拼成的段
+                                            超 128）在建表时已被滤掉
+    - event_no_args 有数                    无参事件（spec 允许），或整帧参数都残缺
+    - event_rejected 有数                   参数名翻出来了，值却没落进树：值是对象
+                                            （事件参数只承载标量），或设备号当不了路径段
+    - event_not_aligned / event_out_of_home 两道闸各自拦下的
+    - 全部为 0 且事件确实发生过             订阅那条通道没通（事件没有回拉，叶只能是空的）
     """
     from miloco_cli.client import api_get
 
@@ -41,7 +58,7 @@ def state_stats(pretty):
     "--pattern",
     default="**",
     show_default=True,
-    help="路径 pattern，例如 iot/device/*/prop/*",
+    help="路径 pattern，例如 iot/device/*/prop/* 或 iot/device/*/event/*",
 )
 @click.option("--limit", type=int, default=500, show_default=True, help="最多返回几行")
 @click.option("--pretty", is_flag=True)

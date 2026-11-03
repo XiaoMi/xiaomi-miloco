@@ -347,10 +347,14 @@ async def get_home_info(
     summary="Get single device spec",
     response_model=NormalResponse,
 )
-async def get_device_spec(did: str, current_user: str = Depends(verify_token)):
+async def get_device_spec(
+    did: str,
+    current_user: str = Depends(verify_token),
+    include_events: bool = Query(False, description="true = 额外返回 event_spec"),
+):
     """Get spec for a single device (轻量，不拉全量 home_info)。"""
     logger.info("Get device spec API called, user=%s, did=%s", safe_log(current_user), safe_log(did))
-    data = await manager.miot_service.get_device_spec(did)
+    data = await manager.miot_service.get_device_spec(did, include_events=include_events)
     return NormalResponse(code=0, message="ok", data=data)
 
 
@@ -403,7 +407,9 @@ async def get_state_stats(current_user: str = Depends(verify_token)):
     response_model=NormalResponse,
 )
 async def get_state_dump(
-    pattern: str = Query("**", description="路径 pattern，例如 iot/device/*/prop/*"),
+    pattern: str = Query(
+        "**", description="路径 pattern，例如 iot/device/*/prop/* 或 iot/device/*/event/*"
+    ),
     limit: int = Query(500, ge=1, le=5000),
     current_user: str = Depends(verify_token),
 ):

@@ -80,8 +80,9 @@
   排一个定时器，到点重新读账、够了就喂真。"今天通知过没有"由条件本身的值承载 ——
   已经是真就产不出新边沿，跨日归零把它翻假，第二天达标才是新的假→真。
 
-另一条入口：设备属性变化（iot 源）。状态容器里 iot/device/*/prop/* 或 status/online
-一变，IotSource（rule/iot_source.py）按 (did, iid) 索引出引用了这条属性的规则，只把那
+另一条入口：设备属性或事件参数变化（iot 源）。状态容器里 iot/device/*/prop/*、
+iot/device/*/event/* 或 status/online 一变，IotSource（rule/iot_source.py）按 (did, iid)
+索引出引用了这一项的规则，只把那
 几条放进待算集合重新求值 —— 不走感知那条帧级链路，但汇入上面同一个 ①②③④。
 ```
 
