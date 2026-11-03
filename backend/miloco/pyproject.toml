@@ -13,7 +13,20 @@ dependencies = [
   "httpx>=0.28.1",
   "numpy>=2.2.0",
   "opencv-python-headless>=4.13.0.92",
-  "onnxruntime>=1.27.0",
+  # onnxruntime-openvino 是 self-contained wheel(自带 ORT + OpenVINO EP),不依赖外部
+  # onnxruntime;两者同时安装会冲突(都提供 onnxruntime 命名空间),故按平台互斥安装。
+  #
+  # 该 wheel 在 PyPI 上只发 manylinux_2_28_x86_64 / win_amd64 + cp311/312/313 —— 没有任何
+  # macOS 发行版、没有 cp314、也没有 sdist。必须同时按 sys_platform / platform_machine /
+  # python_version 三维收窄,否则 Intel Mac / Python 3.14 上依赖直接无解。
+  # PyPI 上 onnxruntime-openvino 最新只到 1.24.1(对应 OpenVINO 2025.4.1),1.27.0 未发布。
+  #
+  # 非 x86-Linux 侧保持 1.27.0 下限不动:该下限是 355ef91f 为根治 KleidiAI 卷积 workspace
+  # 内存泄漏专门抬上来的(1.27.0 含上游 #28363 / #26834 修复,删去卷积缓存 key 里的输入
+  # 数据 hash),不能因为 openvino 包版本低就跟着回退——x86 不跑 KleidiAI(ARM-only 微
+  # 内核),不受此泄漏影响,两侧下限本就该各写各的、互不牵连。
+  "onnxruntime>=1.27.0; sys_platform != 'linux' or platform_machine != 'x86_64' or python_version >= '3.14'",
+  "onnxruntime-openvino>=1.24.1; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'",
   # HEIC/HEIF 解码（iPhone 相机默认格式）。选 pi-heif 而非 pillow-heif：两者同作者、同样封装
   # libheif，但 pi-heif 只带解码器（libde265），不捆绑 x265 编码器，PyPI 分类器因此是 LGPLv3
   # 而非 GPLv2；我们只需要解码。ffmpeg 走不通——它把 HEIC 的 tile grid 当成几十条独立
