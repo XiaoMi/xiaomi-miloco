@@ -30,6 +30,7 @@ import {
 import type { PerfBucket, PerfRtfPoint } from "@/lib/types";
 import { useMeasuredWidth } from "@/hooks/useMeasuredWidth";
 import { ChartGapOverlay } from "./ChartGapOverlay";
+import { formatRelativeDuration } from "./PerfKpiCards";
 
 interface Props {
   state: AsyncState<PerfRtfPoint[]>;
@@ -429,7 +430,7 @@ function Chart({ data, bucket, spanMs, hoverIdx, setHoverIdx, t }: ChartProps) {
                 />
                 <span className="text-text-secondary">{t(l.labelKey)}</span>
                 <span className="num text-text-primary ml-auto">
-                  {v == null ? "—" : v.toFixed(2)}
+                  {v == null ? "—" : formatRelativeDuration(v)}
                 </span>
               </div>
             );
