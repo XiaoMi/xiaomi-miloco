@@ -351,6 +351,12 @@ class Manager:
                 self._miot_proxy, self._kv_repo
             )
 
+        # 生成式动作要一次画面观测；rule 服务先于感知模块初始化，构造时拿不到
+        # 生成器，只能在这里接线。attach 之前触发的生成动作会明确失败，不会崩。
+        self._rule_service.attach_text_generator(
+            self._perception_service.generate_text
+        )
+
         self._task_service = TaskService(rule_service=self._rule_service)
 
         self._initialized = True

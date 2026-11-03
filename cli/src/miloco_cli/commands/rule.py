@@ -9,9 +9,11 @@ from miloco_cli.output import print_result
 
 API_PREFIX = "/api/rules"
 
-# 与 backend rule/schema.py 的 SCENE_IID 对齐。CLI 是独立包不依赖 miloco，
-# 故复刻字面量；改动时两处同步。
+# 与 backend rule/schema.py 的 SCENE_IID / {{result}} 契约对齐。CLI 是独立包
+# 不依赖 miloco，故复刻字面量；改动时两处同步。
 SCENE_IID = "scene"
+RESULT_PLACEHOLDER = "{{result}}"
+_GENERATE_KEYS = frozenset({"prompt", "sources", "max_chars"})
 
 
 def _rule_cursor_file():
@@ -305,6 +307,13 @@ def rule_iot_diagnostics(pretty):
         "通知/播报（必带冷却）："
         "{\"did\":\"<id>\",\"iid\":\"action.<siid>.<aiid>\",\"params\":[\"<text>\"],"
         "\"idempotent\":false,\"cooldown_minutes\":10}\n"
+        "按画面生成播报（仅 action.*，params 用 {{result}} 占位；"
+        "sources 省略时回退到触发相机）："
+        "{\"did\":\"<id>\",\"iid\":\"action.<siid>.<aiid>\","
+        "\"params\":[\"{{result}}\"],"
+        "\"generate\":{\"prompt\":\"<生成要求>\",\"sources\":[\"<camera_did>\"],"
+        "\"max_chars\":30},"
+        "\"idempotent\":false,\"cooldown_minutes\":30}\n"
         "触发米家场景（did 放 scene_id，必带冷却）："
         "{\"did\":\"<scene_id>\",\"iid\":\"scene\","
         "\"idempotent\":false,\"cooldown_minutes\":5}"
@@ -589,7 +598,10 @@ def rule_create(
     "--action",
     "actions_raw",
     multiple=True,
-    help="替换 enter / exit 方向的设备直控 actions（可重复，全量替换；RuleAction JSON）",
+    help=(
+        "替换 enter / exit 方向的设备直控 actions（可重复，全量替换；"
+        "RuleAction JSON，格式含 generate，同 rule create --action）"
+    ),
 )
 @click.option(
     "--action-desc",
@@ -1026,20 +1038,30 @@ def _parse_actions(raw_actions: tuple[str, ...], flag_name: str = "--action") ->
     return parsed
 
 
+def _is_action_iid(iid: object) -> bool:
+    """``action.<siid>.<aiid>``，两段都是整数。"""
+    if not isinstance(iid, str) or not iid.startswith("action."):
+        return False
+    parts = iid.split(".")
+    return len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit()
+
+
+def _has_result_placeholder(params: object) -> bool:
+    return isinstance(params, list) and any(
+        isinstance(item, str) and RESULT_PLACEHOLDER in item for item in params
+    )
+
+
 def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
     for i, a in enumerate(actions):
-        if a.get("iid") == SCENE_IID and a.get("idempotent") is not False:
-            _exit_error(
-                f"{flag_name}[{i}]: iid={SCENE_IID} requires idempotent=false"
-            )
-        if a.get("idempotent") is False and a.get("cooldown_minutes") is None:
-            _exit_error(
-                f"{flag_name}[{i}]: idempotent=false requires cooldown_minutes"
-            )
         # 冷却是场景唯一的去重手段，填 0 等于每次 fire 都真触发一次。
         # 只对数值比较：agent 可能把数字写成 "5"，直接比会 TypeError traceback，
         # 破坏 _exit_error 的干净报错；字符串形态交给后端 pydantic 收敛或 400。
         cooldown = a.get("cooldown_minutes")
+        if a.get("iid") == SCENE_IID and a.get("idempotent") is not False:
+            _exit_error(
+                f"{flag_name}[{i}]: iid={SCENE_IID} requires idempotent=false"
+            )
         if (
             a.get("iid") == SCENE_IID
             and isinstance(cooldown, (int, float))
@@ -1047,6 +1069,90 @@ def _validate_actions(actions: list[dict], flag_name: str = "--action") -> None:
         ):
             _exit_error(
                 f"{flag_name}[{i}]: iid={SCENE_IID} requires cooldown_minutes >= 1"
+            )
+
+        generate = a.get("generate")
+        if generate is None:
+            # 拼错 generate 会被后端 pydantic 当未知字段丢掉，音箱会把字面量
+            # {{result}} 念出来；这条是那种拼写错误唯一能拦住的地方。
+            if _has_result_placeholder(a.get("params")):
+                _exit_error(
+                    f"{flag_name}[{i}]: params contains {RESULT_PLACEHOLDER} "
+                    f"but generate is missing"
+                )
+        else:
+            if not isinstance(generate, dict):
+                _exit_error(f"{flag_name}[{i}]: generate must be a JSON object")
+            if not _is_action_iid(a.get("iid")):
+                _exit_error(
+                    f"{flag_name}[{i}]: generate requires "
+                    f"iid=action.<siid>.<aiid>"
+                )
+            if a.get("idempotent") is not False:
+                _exit_error(
+                    f"{flag_name}[{i}]: generate requires idempotent=false"
+                )
+            # 与 scene 分支同一口径：只对数值比较。字符串形态（"30"）交给后端
+            # pydantic 收敛；bool 走数值语义（False=0 拒、True=1 放）。多排除
+            # bool 会让 JSON false 在本地漏过，反而不一致。
+            if cooldown is None or (
+                isinstance(cooldown, (int, float)) and cooldown < 1
+            ):
+                _exit_error(
+                    f"{flag_name}[{i}]: generate requires cooldown_minutes >= 1"
+                )
+            params = a.get("params")
+            if params is not None and (
+                not isinstance(params, list)
+                or (params and not _has_result_placeholder(params))
+            ):
+                _exit_error(
+                    f"{flag_name}[{i}]: generate requires params to contain "
+                    f"{RESULT_PLACEHOLDER}"
+                )
+            prompt = generate.get("prompt")
+            if (
+                not isinstance(prompt, str)
+                or not prompt.strip()
+                or len(prompt) > 1000
+            ):
+                _exit_error(
+                    f"{flag_name}[{i}]: generate.prompt must be a non-empty "
+                    f"string of at most 1000 chars"
+                )
+            sources = generate.get("sources")
+            if sources is not None:
+                if not isinstance(sources, list) or not (1 <= len(sources) <= 3):
+                    _exit_error(
+                        f"{flag_name}[{i}]: generate.sources must contain 1-3 dids"
+                    )
+                if any(
+                    not isinstance(s, str) or not s.strip() for s in sources
+                ):
+                    _exit_error(
+                        f"{flag_name}[{i}]: generate.sources must contain "
+                        f"non-empty strings"
+                    )
+            max_chars = generate.get("max_chars", 30)
+            if (
+                not isinstance(max_chars, int)
+                or isinstance(max_chars, bool)
+                or not (1 <= max_chars <= 200)
+            ):
+                _exit_error(
+                    f"{flag_name}[{i}]: generate.max_chars must be an integer "
+                    f"in 1..200"
+                )
+            unknown = set(generate) - _GENERATE_KEYS
+            if unknown:
+                _exit_error(
+                    f"{flag_name}[{i}]: unknown generate keys: "
+                    f"{', '.join(sorted(unknown))}"
+                )
+
+        if a.get("idempotent") is False and cooldown is None:
+            _exit_error(
+                f"{flag_name}[{i}]: idempotent=false requires cooldown_minutes"
             )
 
 

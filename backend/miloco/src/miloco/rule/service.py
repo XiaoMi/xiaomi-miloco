@@ -34,6 +34,10 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot.client import MiotProxy, is_subscribable_did
 from miloco.miot.filter import allowed_home_ids, filter_by_home
+from miloco.rule.action_validation import (
+    generate_sources_required_error,
+    validate_action,
+)
 from miloco.rule.condition import (
     condition_to_dnf,
     dnf_structure_error,
@@ -73,7 +77,6 @@ from miloco.rule.schema import (
     RuleMode,
     RuleUpdate,
     TriggerOutcome,
-    parse_device_iid,
     task_rule_set_error,
 )
 
@@ -433,43 +436,49 @@ def _validate_rule_consistency(rule: Rule) -> None:
     # ---- 3. lifecycle ----
     _validate_lifecycle(rule)
 
-    # ---- 4. action idempotent / cooldown 配对 ----
-    # idempotent=False 的 action 不会做"读现值后判跳过"，必须靠 cooldown_minutes
-    # 限频；否则 runner._execute_action 的冷却分支会被 None 短路掉，每次 ENTERED
-    # 都重发 → TTS / 通知风暴。
+    # ---- 4. action 形态 / idempotent / cooldown / generate 配对 ----
+    # 判据与 task 写入、CLI 共用一份（rule.action_validation）：task 边界动作
+    # 是运行期唯一来源，却不经过这里，两条路径各写一套迟早漂移。
     for slot_name, slot_actions in (
         ("actions", rule.actions),
         ("on_enter_actions", rule.on_enter_actions),
         ("on_exit_actions", rule.on_exit_actions),
     ):
         for i, a in enumerate(slot_actions):
-            # 与 runner._execute_action 同口径:三种形态之外一律拒。少了这道,
-            # `scene.1.2` / `prop.2` 这类写法能建成功,运行期每次 fire 只在
-            # rule_log 里留一条 invalid_iid,规则永远是哑的。
-            if a.iid != SCENE_IID and parse_device_iid(a.iid) is None:
-                raise ValidationException(
-                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): iid must be "
-                    f"'{SCENE_IID}', 'prop.<siid>.<piid>' or "
-                    f"'action.<siid>.<aiid>'"
+            where = f"{slot_name}[{i}]"
+            validate_action(a, where)
+            # 只有「这次 fire 不带 trigger_dids 且规则相机也为空」才必然
+            # no_source：
+            # - 非 omni（iot / record）：喂数据的路径不带 trigger_dids，相机
+            #   条件也被 _validate_condition_against_dnf 强制留空；
+            # - duration 规则：ENTERED 只从 _evaluate_duration 出，那条链不带
+            #   trigger_dids（guard 延迟释放复用的也是这份 payload）。而且窗口
+            #   填满的那一轮可以是 False 周期，当前周期也没有触发相机可借；
+            # - omni 的 session 退出槽：EXITED 的 trigger_dids 恒为空（见
+            #   RuleRunner.update_state 的说明），只剩规则相机可回退。
+            # omni 的瞬时进入 / 事件槽不能拒：空 perceive_device_ids 是「广播
+            # 到全部相机」的合法写法，命中那一刻 trigger_dids 就是命中的那台。
+            # guard 规则到不了这里（_validate_guard 拒绝所有动作字段）。
+            fires_without_trigger_dids = (
+                rule.resolved_source_type != OMNI_SOURCE_TYPE
+                or rule.duration_seconds
+                or (
+                    slot_name == "on_exit_actions"
+                    and rule.resolved_direction is RuleDirection.SESSION
                 )
-            # 幂等分支会跳过判定直接下发,等于没有去重(原因见 SCENE_IID)。
-            if a.iid == SCENE_IID and a.idempotent:
-                raise ValidationException(
-                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
-                    f"iid={SCENE_IID} requires idempotent=false"
+            )
+            if (
+                fires_without_trigger_dids
+                and not rule.condition.perceive_device_ids
+            ):
+                error = generate_sources_required_error(
+                    a,
+                    where,
+                    "this fire carries no trigger camera and the rule has no "
+                    "camera condition item",
                 )
-            # 冷却是场景唯一的去重手段,而 runner 把 0 当「无冷却」——填 0 会让
-            # 每次 fire 都真触发一次场景,正是执行侧闸门要防的那种。
-            if a.iid == SCENE_IID and (a.cooldown_minutes or 0) < 1:
-                raise ValidationException(
-                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
-                    f"iid={SCENE_IID} requires cooldown_minutes >= 1"
-                )
-            if not a.idempotent and a.cooldown_minutes is None:
-                raise ValidationException(
-                    f"{slot_name}[{i}] (did={a.did}, iid={a.iid}): "
-                    f"idempotent=false requires cooldown_minutes"
-                )
+                if error:
+                    raise ValidationException(error)
 
 
 # ---- Service factory -------------------------------------------------------
@@ -698,6 +707,15 @@ class RuleService:
 
             task_record_service = TaskRecordService()
         self._task_record_service = task_record_service
+
+    def attach_text_generator(self, generator: Any) -> None:
+        """接上感知侧的文本生成器（keyword-only: prompt/sources/max_chars）。
+
+        rule 服务先于感知模块初始化，构造时注入拿不到；由 manager 在感知就绪后
+        接线。生成动作在没接上时明确失败（规则日志 ``generate_failed:
+        unavailable``），不会崩，也不会退回固定文案。
+        """
+        self._runner.attach_text_generator(generator)
 
     def _target_record_task_id(self, rule: Rule) -> str | None:
         """这条 rule 的达标看哪个 task 的 record —— 看不出达标就返 None。
@@ -1125,6 +1143,26 @@ class RuleService:
                 f"available: {', '.join(sorted(scenes)) or '(none)'}"
             )
 
+    async def _validate_generate_sources(self, rule: Rule) -> None:
+        """``generate.sources`` 的 did 必须是真实存在的感知设备。
+
+        抄错的话规则能建成功、运行期每次 fire 都是 ``generate_failed: no_frame``,
+        用户和 agent 都拿不到反馈——与 ``_validate_scene_ids`` 挡 scene did 同一
+        理由。sources 恒为相机(感知设备), 与规则自身的 source_type 无关: iot /
+        record 规则配 generate 时 sources 反而必填, 故不套
+        ``_validate_perceive_devices_of`` 的 omni 豁免。
+        """
+        wanted = {
+            did
+            for slot in (rule.actions, rule.on_enter_actions, rule.on_exit_actions)
+            for a in slot
+            if a.generate is not None and a.generate.sources
+            for did in a.generate.sources
+        }
+        if not wanted:
+            return
+        await self._validate_perceive_device_ids(sorted(wanted))
+
     def _fill_default_duration_ratio(self, rule: Rule) -> None:
         """未显式指定时回填 settings.rule.default_duration_ratio。
 
@@ -1160,6 +1198,7 @@ class RuleService:
         self._validate_task_rule_set(rule)
         self._validate_action_reachable(rule)
         await self._validate_scene_ids(rule)
+        await self._validate_generate_sources(rule)
 
         rule_id = self._repo.create(rule)
         if not rule_id:
@@ -1247,6 +1286,7 @@ class RuleService:
         self._validate_task_rule_set(rule, previous)
         self._validate_action_reachable(rule)
         await self._validate_scene_ids(rule)
+        await self._validate_generate_sources(rule)
 
         success = self._repo.update(rule)
         if success:
@@ -1437,6 +1477,7 @@ class RuleService:
             self._validate_action_reachable(existing)
         if {"actions", "on_enter_actions", "on_exit_actions"} & fields:
             await self._validate_scene_ids(existing)
+            await self._validate_generate_sources(existing)
 
         success = self._repo.update(existing)
         if success:

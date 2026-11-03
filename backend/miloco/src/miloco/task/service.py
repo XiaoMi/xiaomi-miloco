@@ -19,6 +19,10 @@ from miloco.middleware.exceptions import (
     BusinessException,
     ValidationException,
 )
+from miloco.rule.action_validation import (
+    generate_sources_required_error,
+    validate_action_dict,
+)
 from miloco.rule.schema import SCENE_IID, RuleDirection
 from miloco.task.schema import (
     BackendSyncResult,
@@ -167,6 +171,27 @@ class TaskService:
                 slots[desc_key] = None
             elif desc_key in slots and actions_key not in slots:
                 slots[actions_key] = None
+        # task 边界动作是运行期唯一来源，而本服务不经过 rule 的写入校验；
+        # 不在这里逐条查，坏 generate 配置会一路存进库、到 fire 时才静默失败。
+        for slot_name, raw_actions in slots.items():
+            if not slot_name.endswith("_actions") or not raw_actions:
+                continue
+            if not isinstance(raw_actions, list):
+                raise ValidationException(f"{slot_name} 必须是动作列表")
+            for i, raw in enumerate(raw_actions):
+                where = f"{slot_name}[{i}]"
+                action = validate_action_dict(raw, where)
+                # 达标 fire 来自服务端代建的 milestone 规则：条件里没有相机，也
+                # 不带 trigger_dids，_resolve_generate_sources 三条回退全空。写入
+                # 时不拒，每次达标就只是 generate_failed: no_source。
+                if slot_name == "on_target_actions":
+                    error = generate_sources_required_error(
+                        action,
+                        where,
+                        "the target slot has no trigger cameras or rule cameras",
+                    )
+                    if error:
+                        raise ValidationException(error)
         if slots.get("on_target_actions") or slots.get("on_target_desc"):
             if self._rule_service is None:
                 raise BusinessException("rule service 未就绪，无法校验达标配置")
