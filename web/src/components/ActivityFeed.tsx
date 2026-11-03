@@ -57,8 +57,9 @@ import {
   FoldBadge,
   FoldChipPill,
   FoldMembers,
-  FoldToggle,
-  StrengthToggle,
+  DisplayModeSelect,
+  actionDisplayState,
+  type ActivityDisplayMode,
   firstMemberIdOf,
   hostRegionOf,
 } from "./FeedFold";
@@ -658,6 +659,9 @@ export function ActivityFeed({
   const counts = useMemo(() => foldCounts(rows), [rows]);
   const shownEvents = counts.events;
   const shownActions = counts.actions;
+  const displayMode: ActivityDisplayMode = !folded ? "individual" : strength === "weak" ? "grouped" : "inline";
+  const hasActionGroups = rows.some((r) => r.kind === "branch" || (r.kind === "event" && r.branches.length > 0));
+  const displayState = actionDisplayState(displayMode, showActions, shownActions, hasActionGroups);
 
   // 动作为什么可能不全,有两个互相独立的原因,提示语不能混为一谈:
   //  - clippedByHorizon:已取回但被事件地平线压在下面,翻页就能显出来。
@@ -728,18 +732,18 @@ export function ActivityFeed({
     [openKeys, openBranch, closeBranch],
   );
 
-  /** 跳到某一行并闪一下。弱档的徽标、以及"已展开但滚出视口"的徽标都走这里。 */
+  /** 跳到某一行并闪一下。已展开但滚出视口的徽标，以及回返角标都走这里。 */
   const locate = useCallback((scrollId: string, flashId: string = scrollId) => {
     setPending({ scroll: scrollId, flash: flashId, block: "center" });
   }, []);
 
   /** 事件行上那枚徽标被激活。同一个控件在两种情形下是两件事,判据只能是"看得见吗":
-   *  弱档恒为定位;强档未展开则就地展开,已展开且展开面还在视口里则收起,已展开但滚走了
-   *  则把它滚回来 —— 那时点一下是收起一个自己看不见的东西,画面毫无变化。 */
+   *  动作分组(弱档)跳到支行并展开，焦点落到第一条动作；并入事件(强档)未展开则就地展开，
+   *  已展开且展开面还在视口里则收起，已展开但滚走了则把它滚回来，避免收起看不见的内容。 */
   const activateBadge = useCallback(
     (branch: FoldBranch, hostKey: string) => {
       if (strength !== "strong") {
-        locate(branch.key);
+        openBranch(branch.key, branch.key, branch.key);
         return;
       }
       if (!openKeys.has(branch.key)) {
@@ -854,15 +858,16 @@ export function ActivityFeed({
             />
             {t("actions.filterActions")}
           </label>
-          {/* 折叠开关 + 强度。与上面两个 checkbox 不是一回事:那两个决定"有哪些流",
-              这两枚决定"动作怎么画"——勾着事件、勾着动作,动作可以各自一行(关掉折叠),
-              也可以折进事件(开着折叠,再分两档)。三种画法都保留全部数据,所以它们放在
-              筛选旁边而不是筛选里面。
-              关掉折叠时强度控件**整个不渲染**:未折叠态没有"折叠强度"这回事,留着一个
-              不生效的控件就是在问一个当前不成立的问题(它的 aria-controls 也随之不写,
-              见 FeedFold 的 STRENGTH_CTL_ID)。 */}
-          <FoldToggle folded={folded} onChange={setFolded} />
-          {folded && <StrengthToggle strength={strength} onChange={setStrength} />}
+          {/* 筛选决定有哪些记录；显示方式只排列动作，不合并事件本身。
+              没有可见动作时禁用，但保留偏好，动作出现后恢复可用。 */}
+          <DisplayModeSelect
+            mode={displayMode}
+            disabled={displayState.disabled}
+            onChange={(mode) => {
+              if (mode !== "individual") setStrength(mode === "grouped" ? "weak" : "strong");
+              setFolded(mode !== "individual");
+            }}
+          />
           <TimeRangeFilter
             since={since}
             before={before}
@@ -877,6 +882,12 @@ export function ActivityFeed({
           />
         </div>
       </div>
+
+      {activeTab === "events" && (
+        <p id="activity-display-hint" role="status" aria-live="polite" className="px-5 pb-3 text-caption text-text-tertiary">
+          {t(displayState.hint)}
+        </p>
+      )}
 
       {/* Sub-tabs */}
       <div className="flex gap-0 px-5 border-b border-border" role="tablist" aria-label={t("activity.title")}>
