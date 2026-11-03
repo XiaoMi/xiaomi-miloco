@@ -189,8 +189,7 @@ run_tests() {
     # backend 全量测试（与 CI 完全一致：uv run pytest）
     _info "backend 全量测试…"
     cd "$REPO_ROOT/backend"
-    export MILOCO_CONFIG_SEARCH_PATH=/tmp/miloco-nonexistent-ci
-    export MILOCO_SERVER__TOKEN=''
+    # 测试收集期的环境/config.json/.env 隔离由 miloco/tests/conftest.py 负责。
     local out rc
     set +e
     out=$(uv run pytest miloco/tests/ -q --tb=line --color=no 2>&1)
@@ -207,7 +206,6 @@ run_tests() {
             _err "backend 测试 ($failed 失败)"
         fi
     fi
-    unset MILOCO_CONFIG_SEARCH_PATH MILOCO_SERVER__TOKEN
     cd "$REPO_ROOT"
 
     # hermes 全量测试

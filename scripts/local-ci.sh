@@ -53,9 +53,7 @@ check_tools() {
 run_backend_tests() {
     info "backend 全量测试 (对齐 ci.yml backend-test)…"
     cd "$REPO_ROOT/backend"
-    # 关键: 隔离本地 config.json（含 token），与 CI 干净环境对齐
-    export MILOCO_CONFIG_SEARCH_PATH=/tmp/miloco-nonexistent-ci
-    export MILOCO_SERVER__TOKEN=''
+    # 测试收集期的环境/config.json/.env 隔离由 miloco/tests/conftest.py 负责。
     # 跳过需要额外运行环境的大集成测试
     local ignore_dirs=(
         miloco/tests/e2e
@@ -82,7 +80,6 @@ run_backend_tests() {
             fail "backend 测试 ($failed 失败)"
         fi
     fi
-    unset MILOCO_CONFIG_SEARCH_PATH MILOCO_SERVER__TOKEN
     cd "$REPO_ROOT"
 }
 
@@ -90,8 +87,7 @@ run_backend_tests() {
 run_backend_quick() {
     info "backend 快速测试 (改动相关模块)…"
     cd "$REPO_ROOT/backend"
-    export MILOCO_CONFIG_SEARCH_PATH=/tmp/miloco-nonexistent-ci
-    export MILOCO_SERVER__TOKEN=''
+    # 测试收集期的环境/config.json/.env 隔离由 miloco/tests/conftest.py 负责。
     if uv run pytest -q --tb=short \
         miloco/tests/utils/ \
         miloco/tests/agent_platform/ \
@@ -103,7 +99,6 @@ run_backend_quick() {
     else
         fail "backend 快速测试"
     fi
-    unset MILOCO_CONFIG_SEARCH_PATH MILOCO_SERVER__TOKEN
     cd "$REPO_ROOT"
 }
 
