@@ -59,10 +59,15 @@ def _format_leaf(path: str, entry: Any, now: int, width: int) -> str:
     if not isinstance(entry, Entry):
         raise TypeError(f"{path} 没有元数据；dump 的快照要用 with_meta=True 取")
     # 值打 repr：容器按精确类型判等，看不出类型就查不了「同一个数写成两种类型」
+    expiration = ""
+    if entry.expires_at is not None:
+        expiration = f" expires_at={entry.expires_at}"
+        if entry.expired:
+            expiration += " EXPIRED"
     return (
         f"{path:<{width}} = {entry.value!r}  src={entry.source} "
         f"changed={_format_age(now - entry.last_changed)} "
-        f"reported={_format_age(now - entry.last_reported)}"
+        f"reported={_format_age(now - entry.last_reported)}{expiration}"
     )
 
 
