@@ -91,6 +91,48 @@ class TestGetAdapter:
     def test_minimax_case_insensitive(self):
         assert isinstance(get_adapter("minimax-m3.1-flash"), MiniMaxAdapter)
 
+    def test_minimax_drops_thinking_and_caps_reasoning(self):
+        adapter = MiniMaxAdapter()
+        body = adapter.build_request_body(
+            [{"role": "user", "content": "ping"}],
+            model="MiniMax-M3.1-Flash",
+            max_tokens=512,
+            temperature=0.0,
+            top_p=0.95,
+            stream=False,
+        )
+        # M3 rejects an explicit thinking switch with HTTP 400.
+        assert "thinking" not in body
+        # Reasoning tokens count against max_tokens, so the budget floor applies.
+        assert body["max_tokens"] >= 4096
+        # Unbounded adaptive thinking spends the whole budget on chain-of-thought
+        # and returns empty content; the adapter pins the cheap tier.
+        assert body["reasoning_effort"] == "low"
+
+    def test_minimax_keeps_caller_larger_budget(self):
+        adapter = MiniMaxAdapter()
+        body = adapter.build_request_body(
+            [{"role": "user", "content": "ping"}],
+            model="MiniMax-M3",
+            max_tokens=8192,
+            temperature=0.0,
+            top_p=0.95,
+            stream=False,
+        )
+        assert body["max_tokens"] == 8192
+
+    def test_mimo_keeps_thinking_disabled(self):
+        body = MiMoAdapter().build_request_body(
+            [{"role": "user", "content": "ping"}],
+            model="mimo-v2.6-flash",
+            max_tokens=512,
+            temperature=0.0,
+            top_p=0.95,
+            stream=False,
+        )
+        assert body["thinking"] == {"type": "disabled"}
+        assert "reasoning_effort" not in body
+
     def test_openai_compat_family(self):
         # MiMo / Qwen / MiniMax 都归 OpenAI 兼容族；Gemini 不是。
         assert isinstance(get_adapter("mimo-v2.6-flash"), OpenAICompatAdapter)
@@ -173,7 +215,7 @@ class TestMiniMaxAdapter:
         assert body["max_tokens"] == 4096
 
     def test_request_body_otherwise_same_as_mimo(self):
-        """除 thinking / max_tokens 下限外与 MiMoAdapter 逐字段一致。"""
+        """除 thinking / max_tokens 下限 / reasoning_effort 外与 MiMoAdapter 逐字段一致。"""
         minimax = self.adapter.build_request_body(
             _MESSAGES, model="MiniMax-M3.1-Flash",
             max_tokens=4096, temperature=0.1, top_p=0.95, stream=False,
@@ -182,7 +224,9 @@ class TestMiniMaxAdapter:
             _MESSAGES, model="mimo-v2.6-flash",
             max_tokens=4096, temperature=0.1, top_p=0.95, stream=False,
         )
-        assert set(minimax) == set(mimo) - {"thinking"}
+        assert set(minimax) == (set(mimo) - {"thinking"}) | {"reasoning_effort"}
+        # M3 的 adaptive thinking 默认档位会吃满预算，adapter 固定到低档。
+        assert minimax["reasoning_effort"] == "low"
         assert minimax["max_tokens"] == mimo["max_tokens"]
         assert minimax["temperature"] == mimo["temperature"]
         assert minimax["top_p"] == mimo["top_p"]

@@ -272,8 +272,13 @@ class MiniMaxAdapter(MiMoAdapter):
        推理内容走响应的 ``reasoning_content`` 字段（部分场景内联 ``<think>`` 标签，
        response_parser 侧已剥离）。
 
-    注意：adaptive thinking 会拉高延迟。实测 identity 路径 2.5s–11.3s（默认 timeout 30s），
-    复杂场景比 MiMo 慢数倍，属预期行为而非故障。
+    3. **``reasoning_effort: "low"``**。M3 的 adaptive thinking 默认档位对逐帧感知过重：
+       同一帧客厅画面，不给 effort 时 reasoning 写 9375 字符、单帧 24s；给 low 后约 880
+       字符、8s 内完成，可见输出项数不减反增。感知任务要的是"看清"不是"想透"，
+       长推理会把确定的结论改写成犹豫的猜测。
+
+    注意：即使压到 low，M3 仍比 MiMo 慢（实测 identity 路径 2.5s–11.3s，默认 timeout
+    30s），属 adaptive thinking 的固有成本，不是故障。
     """
 
     def build_request_body(
@@ -294,8 +299,16 @@ class MiniMaxAdapter(MiMoAdapter):
             top_p=top_p,
             stream=stream,
         )
-        # 唯一的协议差异：M3 不接受显式关思考，必须让上游自行 adaptive thinking。
+        # M3 不接受显式关思考，必须让上游自行 adaptive thinking。
         body.pop("thinking", None)
+        # 但 adaptive thinking 的默认档位对逐帧感知过重：实测同一帧 1280x720 客厅
+        # 画面，不给 effort 时 reasoning 写到 9375 字符（逐像素扫 x/y 坐标、反复
+        # "perhaps / maybe"），单帧 24s 且 4096 预算只剩 22 token 给可见输出；
+        # 给 low 后 reasoning 降到约 880 字符、单帧 8s 内、可见输出反而不减。
+        # 预算够不等于判得准：长推理在这类"列出画面里有什么"的任务上收益为负，
+        # 越扫越犹豫，最终把"餐桌"答成"玻璃茶几"、"沙发"答成"扶手椅"。
+        # low 是 M3 公开的档位之一（与 minimal/medium 并列），不改变协议。
+        body["reasoning_effort"] = "low"
         return body
 
 
