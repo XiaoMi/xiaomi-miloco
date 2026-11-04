@@ -14,8 +14,8 @@ adapter 职责：
   - parse_response / parse_stream_chunk —— 把 provider 响应反解析回 OpenAI 形态
     ``{choices:[{message:{content}}], usage:{...}}``。
 
-OpenAI 兼容族（MiMo / Qwen）继承 ``OpenAICompatAdapter``，协议方法走默认实现，只覆写各自
-的 block / body 差异。Gemini 走原生 ``generateContent`` 协议（OpenAI 兼容端点不支持视频输入）。
+OpenAI 兼容族（MiMo / Qwen / MiniMax）继承 ``OpenAICompatAdapter``，协议方法走默认实现，
+只覆写各自的 block / body 差异。Gemini 走原生 ``generateContent`` 协议（OpenAI 兼容端点不支持视频输入）。
 """
 
 from __future__ import annotations
@@ -228,6 +228,87 @@ class MiMoAdapter(OpenAICompatAdapter):
         }
         if stream:
             body["stream_options"] = {"include_usage": True}
+        return body
+
+
+# MiniMax M3 强制 adaptive thinking，且思考 token 计入 max_tokens（实测 reasoning_tokens
+# 会把预算吃满、content 直接为空）。默认 OmniConfig.max_completion_tokens=512 不够用，
+# 故为可见输出预留下限。实测（2026-11，MiniMax-M3.1-Flash，identity 路径采样）reasoning
+# 中位数约 743、单次峰值 1927（total 1993），512 下 json 解析全失败、768 起才通过。
+# 取下限 4096 ≈ 峰值的 2 倍，覆盖场景复杂度与随机抖动。max_tokens 只是上限、按实际
+# 用量计费，抬高它不增加成本；用户配得更大时按配置走，不压回去。
+_MINIMAX_MIN_MAX_TOKENS = 4096
+
+
+def _minimax_effective_max_tokens(max_tokens: int) -> int:
+    """把 MiniMax 的 max_tokens 抬到能容纳 adaptive thinking 的预算下限。
+
+    失败形态是静默的：思考吃满预算 → ``content`` 为空 → ``extract_json`` 失败 → 感知窗口
+    按 skipped 直接跳过，用户侧与「这轮没看到事件」不可区分。故在 adapter 层兜底，
+    而不是指望每个部署都把 ``max_completion_tokens`` 调高。
+    """
+    return max(max_tokens, _MINIMAX_MIN_MAX_TOKENS)
+
+
+class MiniMaxAdapter(MiMoAdapter):
+    """MiniMax M3 系列 API adapter（MiniMax-M3 / MiniMax-M3.1-Flash）。
+
+    继承 MiMoAdapter 而非复制：video / audio / image 块形态与 MiMo 逐字节相同，继承把
+    「同 MiMo」从口头约定变成结构保证——MiMo 侧改块形态时这里自动跟随，不会静默漂移。
+
+    与 MiMoAdapter 的差别只有两处：
+
+    1. **不发 ``thinking`` 字段**。M3 系列要求 adaptive thinking（由上游自行决定是否思考），
+       显式关思考会被拒：
+       ``invalid params, model "MiniMax-M3.1-Flash" requires adaptive thinking;
+       thinking.type="disabled" (including reasoning.effort=none) is not allowed (2013)``（HTTP 400）。
+       而 get_adapter 对未识别的模型名一律落到 MiMoAdapter，其 build_request_body 强加
+       ``thinking: {"type": "disabled"}`` —— 于是 MiniMax 配置在 /api/admin/omni-config/test 上
+       表现为 rejected_authed(400)，被误报成「模型名或 API Key 可能有误」，实际两者都正确。
+
+    2. **max_tokens 下限 4096**（见 ``_MINIMAX_MIN_MAX_TOKENS``）。不发 thinking ≠ 关思考：
+       M3 会自行开启 adaptive thinking，且思考 token **计入 max_tokens 预算**——这是与 MiMo /
+       Gemini 等可关思考 provider 的关键差异（它们关思考正是为了让 512 预算全给可见输出）。
+       推理内容走响应的 ``reasoning_content`` 字段（部分场景内联 ``<think>`` 标签，
+       response_parser 侧已剥离）。
+
+    3. **``reasoning_effort: "low"``**。M3 的 adaptive thinking 默认档位对逐帧感知过重：
+       同一帧客厅画面，不给 effort 时 reasoning 写 9375 字符、单帧 24s；给 low 后约 880
+       字符、8s 内完成，可见输出项数不减反增。感知任务要的是"看清"不是"想透"，
+       长推理会把确定的结论改写成犹豫的猜测。
+
+    注意：即使压到 low，M3 仍比 MiMo 慢（实测 identity 路径 2.5s–11.3s，默认 timeout
+    30s），属 adaptive thinking 的固有成本，不是故障。
+    """
+
+    def build_request_body(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        top_p: float,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        body = super().build_request_body(
+            messages,
+            model=model,
+            max_tokens=_minimax_effective_max_tokens(max_tokens),
+            temperature=temperature,
+            top_p=top_p,
+            stream=stream,
+        )
+        # M3 不接受显式关思考，必须让上游自行 adaptive thinking。
+        body.pop("thinking", None)
+        # 但 adaptive thinking 的默认档位对逐帧感知过重：实测同一帧 1280x720 客厅
+        # 画面，不给 effort 时 reasoning 写到 9375 字符（逐像素扫 x/y 坐标、反复
+        # "perhaps / maybe"），单帧 24s 且 4096 预算只剩 22 token 给可见输出；
+        # 给 low 后 reasoning 降到约 880 字符、单帧 8s 内、可见输出反而不减。
+        # 预算够不等于判得准：长推理在这类"列出画面里有什么"的任务上收益为负，
+        # 越扫越犹豫，最终把"餐桌"答成"玻璃茶几"、"沙发"答成"扶手椅"。
+        # low 是 M3 公开的档位之一（与 minimal/medium 并列），不改变协议。
+        body["reasoning_effort"] = "low"
         return body
 
 
@@ -534,6 +615,7 @@ def adjust_fps_for_omni(fps: int, omni_fps: int) -> int:
 _DEFAULT_ADAPTER = MiMoAdapter()
 _QWEN_ADAPTER = QwenOmniAdapter()
 _GEMINI_ADAPTER = GeminiAdapter()
+_MINIMAX_ADAPTER = MiniMaxAdapter()
 
 
 def get_adapter(model: str) -> OmniProviderAdapter:
@@ -542,9 +624,20 @@ def get_adapter(model: str) -> OmniProviderAdapter:
     Qwen 侧仅支持 Qwen3.5-Omni 系列（qwen3.5-omni-plus / qwen3.5-omni-flash），
     旧版 qwen3-omni-flash 不支持多模态组合输入，无法满足 fused 模式需求。
 
+    MiniMax 侧支持 M3 系列（MiniMax-M3 / MiniMax-M3.1-Flash）：协议仍是 OpenAI 兼容，
+    与 MiMo 的差别是不发 thinking 字段（M3 要求 adaptive thinking，显式关闭会被拒），
+    且 max_tokens 有 4096 下限（思考 token 计入该预算，详见 MiniMaxAdapter）。
+
     Gemini 走原生 generateContent 协议（OpenAI 兼容端点不支持视频输入）。
     """
     name = model.lower()
+    # 按厂商名整体接管 MiniMax：目前只实测过 M3 系列（MiniMax-M3 / MiniMax-M3.1-Flash），
+    # 但分流条件是「模型名含 minimax」，故其他 MiniMax 模型名（如 MiniMax-Text-01 一类）
+    # 也会拿到「不发 thinking + max_tokens 4096 下限」——与改动前落到 MiMoAdapter 的行为
+    # 不同（此前带 thinking.disabled 且用配置原值 max_tokens）。接入非 M3 的 MiniMax 模型前
+    # 需实测确认该模型接受不发 thinking、且 4096 预算合适；收窄到 "m3" 可避免这一变更。
+    if "minimax" in name:
+        return _MINIMAX_ADAPTER
     if "qwen" in name:
         return _QWEN_ADAPTER
     if "gemini" in name:
