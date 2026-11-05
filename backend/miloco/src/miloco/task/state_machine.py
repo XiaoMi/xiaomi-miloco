@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -79,6 +80,8 @@ class TransitionOutcome(str, Enum):
     NOT_IN_SESSION = "not_in_session"
     SIGNAL_DROPPED = "signal_dropped"
     UNKNOWN_RULE = "unknown_rule"
+    # 被前提拦下的进入等过了有效期, 这次进入作废。它是「没触发」, 不是异常。
+    EXPIRED_BLOCKED_ENTER = "expired_blocked_enter"
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,20 @@ class TaskSignal:
     # 派发时原样交回动作层的上下文。状态机不解释它。
     # compare=False: payload 常是 dict / 模型对象, 带进 __hash__ 会炸。
     payload: object | None = field(default=None, compare=False)
+
+
+@dataclass
+class PendingEnter:
+    """一个被前提拦下、等待放行的进入。
+
+    ``signal`` 保留首次观测到的信号 —— session 的起点按主条件首次成立计, 而不是按
+    前提恢复时刻计。``deadline_at`` 在每次重问时续期: ``None`` 表示不设上限
+    (timeout < 0); ``no_defer`` 表示 timeout == 0, 只留一条日志去重标记, 永不释放。
+    """
+
+    signal: TaskSignal
+    deadline_at: float | None
+    no_defer: bool = False
 
 
 @dataclass
@@ -198,6 +215,8 @@ class TaskStateMachine:
       ``payload`` 是 submit 时带的上下文, 状态机原样转交。
     - ``track(outcome, signal)``: 跟踪一次结论, 必须是同步内存操作 (§18.3)。
     - ``on_forget(task_id)``: task 撤销登记时清跟踪数据。
+    - ``defer_blocked_enter_timeout_sec``: 被前提拦下的进入最多挂起多久 (秒), 见
+      ``PendingEnter``。``clock`` 只为测试注入, 生产用单调时钟。
     """
 
     def __init__(
@@ -207,17 +226,21 @@ class TaskStateMachine:
         dispatch_action: Callable[[str, ActionSlot, object | None], None],
         track: Callable[[TransitionOutcome, TaskSignal], None] | None = None,
         on_forget: Callable[[str], None] | None = None,
+        defer_blocked_enter_timeout_sec: float = 60.0,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._is_condition_satisfied = is_condition_satisfied
         self._dispatch_action = dispatch_action
         self._track = track or (lambda outcome, signal: None)
         self._on_forget = on_forget or (lambda task_id: None)
+        self._defer_blocked_enter_timeout_sec = defer_blocked_enter_timeout_sec
+        self._clock = clock
 
         # handle(dispatch=False) 期间关掉派发 —— 见 handle 的 docstring
         self._dispatching = True
         self._topologies: dict[str, TaskTopology] = {}
         self._states: dict[str, TaskRuntimeState] = {}
-        self._pending_enters: dict[str, dict[str, TaskSignal]] = {}
+        self._pending_enters: dict[str, dict[str, PendingEnter]] = {}
         self._queues: dict[str, deque[TaskSignal]] = {}
         self._wakeups: dict[str, asyncio.Event] = {}
         self._consumers: dict[str, asyncio.Task] = {}
@@ -377,14 +400,20 @@ class TaskStateMachine:
             # 条件层锁存后不会再产生同一条 false→true 边沿，因此先保存信号，等前提
             # 满足后由上游释放。保存原始信号也意味着 session 的起点按主条件首次成立
             # 计，而不是按前提恢复时刻计。
+            #
+            # 每次重问都是一次新的观测: 只续期 deadline, 不替换原信号。duration 型
+            # rule 在窗口达标后每个采样轮都会回到这里, 只要还在被观测, 超时就不会
+            # 生效; 观测断了才在下一次释放检查时兜底作废。
             pending = self._pending_enters.setdefault(signal.task_id, {})
-            if signal.rule_id not in pending:
+            entry = pending.get(signal.rule_id)
+            if entry is None:
                 logger.info(
                     "task %s 的进入被前提拦下 (rule=%s): %s",
                     signal.task_id,
                     signal.rule_id,
                     ", ".join(f"{rid}={why}" for rid, why in unmet),
                 )
+                pending[signal.rule_id] = self._make_pending_enter(signal)
             else:
                 logger.debug(
                     "task %s 的进入仍被前提拦下 (rule=%s): %s",
@@ -392,7 +421,7 @@ class TaskStateMachine:
                     signal.rule_id,
                     ", ".join(f"{rid}={why}" for rid, why in unmet),
                 )
-            pending.setdefault(signal.rule_id, signal)
+                entry.deadline_at = self._pending_deadline()
             return self._done(TransitionOutcome.BLOCKED_BY_GUARD, signal)
 
         if not topology.is_session_type:
@@ -414,6 +443,7 @@ class TaskStateMachine:
     def release_pending_enters(self, task_id: str) -> list[TaskSignal]:
         """释放当前仍有效、且全部 guard 已满足的进入请求。
 
+        过期的条目在这里丢弃并记一次 ``EXPIRED_BLOCKED_ENTER``, 不出现在返回值里。
         只返回原始信号，由上游保留的执行上下文负责真正派发动作；状态机只完成
         Task 级进入许可和状态转移。
         """
@@ -427,7 +457,9 @@ class TaskStateMachine:
             return []
 
         releasable: list[TaskSignal] = []
-        for rule_id, signal in list(pending.items()):
+        now = self._clock()
+        for rule_id, entry in list(pending.items()):
+            signal = entry.signal
             direction = topology.directions.get(rule_id)
             if direction not in (RuleDirection.ENTER, RuleDirection.SESSION):
                 pending.pop(rule_id, None)
@@ -435,6 +467,25 @@ class TaskStateMachine:
             condition_state = self._is_condition_satisfied(rule_id)
             if condition_state is False:
                 pending.pop(rule_id, None)
+                continue
+            if (
+                not entry.no_defer
+                and entry.deadline_at is not None
+                and now >= entry.deadline_at
+            ):
+                # 到期作废, 不补发。这一判必须排在下面几条「继续等」之前 —— 前提
+                # 一直不成立或条件未就绪时, 否则条目会永远留在挂起表里。
+                pending.pop(rule_id, None)
+                logger.info(
+                    "task %s 的进入等待前提超过 %g 秒, 本次进入已作废 (rule=%s)",
+                    task_id,
+                    self._defer_blocked_enter_timeout_sec,
+                    rule_id,
+                )
+                self._done(TransitionOutcome.EXPIRED_BLOCKED_ENTER, signal)
+                continue
+            if entry.no_defer:
+                # timeout == 0: 只留去重标记, 前提之后成立也不补发。
                 continue
             if condition_state is None:
                 continue
@@ -464,6 +515,21 @@ class TaskStateMachine:
         if not pending:
             self._pending_enters.pop(task_id, None)
         return releasable
+
+    def _pending_deadline(self) -> float | None:
+        """本次观测对应的到期时刻；timeout <= 0 时没有墙钟上限。"""
+        timeout = self._defer_blocked_enter_timeout_sec
+        if timeout <= 0:
+            return None
+        return self._clock() + timeout
+
+    def _make_pending_enter(self, signal: TaskSignal) -> PendingEnter:
+        # timeout == 0 是「不补发」: 留一条去重标记, 既不设 deadline 也不释放。
+        return PendingEnter(
+            signal=signal,
+            deadline_at=self._pending_deadline(),
+            no_defer=self._defer_blocked_enter_timeout_sec == 0,
+        )
 
     def clear_pending_enters(self, task_id: str, rule_id: str | None = None) -> None:
         pending = self._pending_enters.get(task_id)
@@ -592,8 +658,8 @@ class TaskStateMachine:
             pending = self._pending_enters.get(task_id)
             if pending is not None:
                 pending = {
-                    rule_id: signal
-                    for rule_id, signal in pending.items()
+                    rule_id: entry
+                    for rule_id, entry in pending.items()
                     if new_topology.directions.get(rule_id)
                     in (RuleDirection.ENTER, RuleDirection.SESSION)
                 }

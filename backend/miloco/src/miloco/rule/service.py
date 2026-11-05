@@ -598,6 +598,7 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
 
     重启一律从 ``off`` 起 (§7): 拓扑登记不恢复任何运行态。
     """
+    from miloco.config import get_settings
     from miloco.database.task_repo import TaskRepo
     from miloco.task.state_machine import TaskStateMachine
     from miloco.task.tracking import DecisionTracker
@@ -617,6 +618,10 @@ def attach_task_state_machine(rule_runner: RuleRunner, rule_repo: RuleRepo) -> N
             signal.task_id, signal.rule_id, outcome.value, now_ms()
         ),
         on_forget=tracker.forget,
+        # 只在装配时读一次; 状态机不重建, 改这个值要重启生效。
+        defer_blocked_enter_timeout_sec=(
+            get_settings().rule.defer_blocked_enter_timeout_sec
+        ),
     )
     rule_runner.attach_state_machine(state_machine)
     rule_runner.attach_tracker(tracker)

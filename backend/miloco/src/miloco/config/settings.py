@@ -308,6 +308,16 @@ class RuleSettings(BaseModel):
             "规则创建时未显式指定 --duration-ratio 则使用此值"
         ),
     )
+    defer_blocked_enter_timeout_sec: float = Field(
+        default=60.0,
+        description=(
+            "被前提拦下的进入在挂起表里的最长存活时长（秒）。每次重问续期；"
+            ">0 = 到期丢弃、不再补发；==0 = 不挂起，直接丢弃本次进入；"
+            "<0 = 不设上限，一直等到前提成立。"
+        ),
+    )
+    # 不加 ge=0.0：0 与负数是语义值，与 notify.dedup_window_sec 同理；加 ge 会让
+    # 误配负值直接崩掉整个 settings 加载（后端起不来）。
 
 
 class PerceptionCollectSettings(BaseModel):
