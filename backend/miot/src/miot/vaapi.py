@@ -205,6 +205,7 @@ class FFmpegVAAPIDecoder:
                 if chunk:
                     self._stderr_tail = (self._stderr_tail + chunk)[-4096:]
             except OSError:
+                # Stderr is diagnostic only; process/deadline checks still run.
                 pass
             with self._lock:
                 waiting = bool(self._pending)
@@ -217,6 +218,7 @@ class FFmpegVAAPIDecoder:
                 try:
                     self._process.kill()
                 except ProcessLookupError:
+                    # The worker exited between poll() and kill().
                     pass
                 return
 
@@ -228,6 +230,7 @@ class FFmpegVAAPIDecoder:
             try:
                 process.terminate()
             except ProcessLookupError:
+                # The worker exited between poll() and terminate().
                 pass
             try:
                 process.wait(timeout=1)
@@ -252,6 +255,7 @@ class FFmpegVAAPIDecoder:
             try:
                 self._mux.close()
             except (av.error.FFmpegError, OSError):
+                # The child is already reaped; its closed pipe cannot be flushed.
                 pass
             self._mux = None
         if process is not None:
