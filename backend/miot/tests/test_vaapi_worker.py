@@ -73,3 +73,41 @@ def test_timestamp_regression_is_rejected():
     worker._last_pts = 67
     with pytest.raises(RuntimeError, match="non-monotonic"):
         worker.push(SimpleNamespace(timestamp=166))
+
+
+def test_stalled_worker_is_killed_to_unblock_packet_writer(monkeypatch):
+    worker = object.__new__(vaapi.FFmpegVAAPIDecoder)
+    worker._stop = Mock()
+    worker._stop.wait.return_value = False
+    worker._lock = threading.Lock()
+    worker._pending = {1: None}
+    worker._progress = 0.0
+    worker._timeout = 5.0
+    worker._error = None
+    worker._stderr_tail = b""
+    worker._process = Mock()
+    worker._process.poll.return_value = None
+    worker._process.stderr.read.side_effect = OSError("diagnostic pipe unavailable")
+    monkeypatch.setattr(vaapi.time, "monotonic", lambda: 6.0)
+    worker._watch()
+    assert isinstance(worker._error, TimeoutError)
+    worker._process.kill.assert_called_once()
+
+
+def test_idle_worker_is_not_killed_without_pending_packets(monkeypatch):
+    worker = object.__new__(vaapi.FFmpegVAAPIDecoder)
+    worker._stop = Mock()
+    worker._stop.wait.side_effect = [False, True]
+    worker._lock = threading.Lock()
+    worker._pending = {}
+    worker._progress = 0.0
+    worker._timeout = 5.0
+    worker._error = None
+    worker._stderr_tail = b""
+    worker._process = Mock()
+    worker._process.poll.return_value = None
+    worker._process.stderr.read.return_value = b""
+    monkeypatch.setattr(vaapi.time, "monotonic", lambda: 100.0)
+    worker._watch()
+    assert worker._error is None
+    worker._process.kill.assert_not_called()
