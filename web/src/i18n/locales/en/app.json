@@ -34,6 +34,11 @@
     "miotBound": "Xiaomi Home connected",
     "miotBoundScopeKept": "Xiaomi Home reconnected — your existing homes and cameras were kept",
     "homeStatusUnavailable": "Can't reach the backend right now, retrying…",
-    "loadOnDemandLogsFail": "Failed to load on-demand logs"
+    "loadOnDemandLogsFail": "Failed to load on-demand logs",
+    "refresh": "Refresh",
+    "refreshing": "Refreshing…",
+    "refreshDone": "Refreshed",
+    "refreshFail": "Refresh failed: {{msg}}",
+    "refreshHint": "Re-fetch devices, cameras and scenes from Xiaomi Home"
   }
 }

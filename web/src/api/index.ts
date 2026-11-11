@@ -460,6 +460,17 @@ export async function refreshCameraOnline(
   return impl.realRefreshCameraOnline(force);
 }
 
+/**
+ * 用户主动刷新：重新拉取设备 / 相机 / 场景 / 账号信息。
+ *
+ * 后端不再对「列表为空」这类常驻状态周期性回源，所以这条是住户发现数据过期的
+ * 唯一手动入口；调用方刷新完要自己 reload 各自的列表。
+ */
+export async function refreshAll(homeId?: HomeId): Promise<void> {
+  if (!isPrimary(homeId)) return;
+  return impl.realRefreshAll();
+}
+
 export async function toggleScopeCamera(
   dids: string[],
   inUse: boolean,
