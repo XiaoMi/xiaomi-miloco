@@ -58,9 +58,10 @@ async def _acquire_rate_slot(url: str) -> None:
                 else:
                     buckets.append((current, 1))
                 return
-            # 等最老的桶滑出窗口（下一个分钟边界）
+            # 等最老的桶滑出窗口（下一个分钟边界）；只补一个小余量，
+            # 不要用 step 兜底，否则差几秒到期也会白等一整分钟。
             wait = (buckets[0][0] + slots) * step - now + 0.01
-            await asyncio.sleep(max(wait, step))
+            await asyncio.sleep(max(wait, 0.01))
 
 
 def gen_absolute_path(relative_path: str) -> str:

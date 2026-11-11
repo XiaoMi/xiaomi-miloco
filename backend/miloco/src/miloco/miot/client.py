@@ -315,6 +315,10 @@ class MiotProxy:
         self._cloud_server = cloud_server
 
         self._miot_client: MIoTClient = None  # type: ignore
+        #: 拆除时是否有相机因 start 未返回而被迫放弃（原生实例泄漏）。
+        self._camera_native_leaked = False
+        #: 常规刷新路径的泄漏告警只打一次，避免刷屏。
+        self._native_leak_warned = False
 
         _settings = get_settings()
         self._frame_interval: int = _settings.camera.frame_interval
@@ -545,6 +549,11 @@ class MiotProxy:
         return self._miot_client
 
     @property
+    def camera_native_leaked(self) -> bool:
+        """上次拆除是否放弃了卡住的相机实例（原生资源泄漏，需重启回收）。"""
+        return self._camera_native_leaked
+
+    @property
     def is_authenticated(self) -> bool:
         """凭据**存在**——住户完成过授权，库里有一对令牌。
 
@@ -593,6 +602,9 @@ class MiotProxy:
 
     #: get_cameras 的单飞锁。类级默认 None，首次用到时创建（测试替身同样适用）。
     _camera_get_lock: asyncio.Lock | None = None
+
+    #: 正在拆除。deinit 与相机刷新的互斥靠它：拿到相机锁之后若已置位，刷新直接放弃。
+    _closing: bool = False
 
     def _refuse_if_not_operational(self, what: str) -> str | None:
         """授权已被云端永久拒绝时，给出拒绝理由；仍可用则返回 ``None``。
@@ -720,6 +732,12 @@ class MiotProxy:
 
     async def init(self):
         """Initialize MIoT proxy: create new client, init it, refresh info, start token refresh."""
+        # deinit 置的拆除标记必须在这里放开：解绑/换号走的是同一个实例上的
+        # deinit → init，不经过 __init__；忘了复位会让所有相机刷新被入口挡掉。
+        self._closing = False
+        # 上一轮解绑已消费过泄漏标记；新一轮从这里重新计。
+        self._camera_native_leaked = False
+        self._native_leak_warned = False
         self._miot_client = self._create_miot_client()
         # Rebuild listeners + register the push callbacks BEFORE init_async().
         # init_async runs _setup_mips_async, which (re)subscribes mips topics —
@@ -812,9 +830,23 @@ class MiotProxy:
         self._camera_state_listener.deinit()
 
         # 2. Destroy all camera_img_managers
-        for mgr in self._camera_img_managers.values():
-            await mgr.destroy()
-        self._camera_img_managers.clear()
+        #
+        # 与 refresh_cameras 互斥：那边会创建实例并起原生 start，这边 destroy
+        # 会 free 原生实例；两者并发会 use-after-free。先置 closing 让新刷新
+        # 直接放弃，再等手上的刷新跑完。
+        self._closing = True
+        lock = getattr(self, "_refresh_cameras_lock", None)
+        if lock is None:
+            lock = self._refresh_cameras_lock = asyncio.Lock()
+        async with lock:
+            # 逐台兜异常：一台拆失败不能让后面的 client deinit 和泄漏标记
+            # 读取整个跳过（泄漏标记只能从 camera client 上取到）。
+            for did, mgr in list(self._camera_img_managers.items()):
+                try:
+                    await mgr.destroy()
+                except Exception as e:
+                    logger.warning("destroy camera manager %s failed: %s", did, e)
+            self._camera_img_managers.clear()
 
         # 3. Deinit MIoTClient and invalidate reference
         if self._miot_client:
@@ -824,6 +856,10 @@ class MiotProxy:
                 # Keep going: leaking a sub-client is still better than
                 # leaving the whole client half-torn-down on the next init.
                 logger.warning("miot_client.deinit_async failed, proceeding: %s", e)
+            # 粘滞：已经检测到的泄漏不能被后续 deinit 覆盖成 False。
+            self._camera_native_leaked = self._camera_native_leaked or (
+                getattr(self._miot_client, "native_camera_leaked", False) is True
+            )
             self._miot_client = None  # type: ignore
 
         # 4. Clear auth/user data from KV store (device/camera/scene are
@@ -910,6 +946,7 @@ class MiotProxy:
         self._scene_info_dict: dict[str, MIoTManualSceneInfo] = {}
         self._camera_retry_at: float = 0.0
         self._camera_load_gen = 0
+        self._closing = False
         self._devices_loaded = False
         self._scenes_loaded = False
         self._user_loaded = False
@@ -1346,7 +1383,11 @@ class MiotProxy:
         return (time.monotonic() - since) >= self._STREAM_NAT_TIMEOUT
 
     async def refresh_cameras(self) -> dict[str, MIoTCameraInfo] | None:
+        if self._closing:
+            return None
         async with self._refresh_cameras_lock:
+            if self._closing:
+                return None
             try:
                 cameras = await self._miot_client.get_cameras_async()
                 cameras = copy.deepcopy(cameras)
@@ -1359,7 +1400,11 @@ class MiotProxy:
                 # 而下面会按空 active 集销毁全部 manager——若就此认作「确实没相机」，
                 # 流断了之后没有任何时间驱动的恢复点。先不认，留一次复核机会：
                 # 下次读取会再拉一次，若仍为空（此时 had_cameras 已是假）才认。
-                unconfirmed_empty = had_cameras and not cameras
+                # 复核窗未到期也算未确认：事件驱动的重刷（bind/meta/重连）
+                # 不能把窗口内的第二次空结果直接确认掉。
+                unconfirmed_empty = not cameras and (
+                    had_cameras or time.monotonic() < self._camera_retry_at
+                )
                 self._cameras_loaded = not unconfirmed_empty
                 if unconfirmed_empty:
                     # 未确认的返空先不动 manager：这一轮若只是云端抖动，现有流不该
@@ -1503,6 +1548,22 @@ class MiotProxy:
                             camera_did,
                             e,
                         )
+                # 常规刷新路径也可能撞上在飞 start 而放弃 free（实例泄漏）。
+                # 这条路径不重启进程，至少让运维能看见；回收发生在下次解绑。
+                if (
+                    getattr(
+                        getattr(self._miot_client, "camera_client", None),
+                        "native_start_leaked",
+                        False,
+                    )
+                    is True
+                    and not getattr(self, "_native_leak_warned", False)
+                ):
+                    self._native_leak_warned = True
+                    logger.warning(
+                        "相机原生实例在常规刷新路径泄漏，将累积到下次解绑才回收；"
+                        "若频繁出现请排查卡住的 miot_camera_start"
+                    )
                 # 独立走 refresh_cameras 也顺带对账订阅,派后台任务不挡相机路径
                 self._spawn_subscription_sync()
                 return cameras
@@ -1531,16 +1592,28 @@ class MiotProxy:
 
         # 与 refresh_devices 同口径：代号在打云端之前记
         scope = get_manager().current_scope()
+        if self._closing:
+            return None
         async with self._refresh_cameras_lock:
+            if self._closing:
+                return None
             try:
                 prev_had_cameras = bool(self._camera_info_dict)
                 cameras = await self._miot_client.get_cameras_async()
                 self._camera_info_dict = copy.deepcopy(cameras)
                 self._camera_load_gen += 1
-                # 与 refresh_cameras 同口径：非空→空不算「确实没有相机」，留给
-                # 读取路径复核。这条轻刷由上下线事件（60s 防抖）和开页面触发，
-                # 无条件置真会把那次复核机会抹掉。
-                self._cameras_loaded = not (prev_had_cameras and not cameras)
+                if cameras:
+                    self._cameras_loaded = True
+                elif prev_had_cameras or not self._cameras_loaded:
+                    # 轻刷不销毁 manager，空结果一律不在这一层确认：否则会出现
+                    # 「缓存空 + _cameras_loaded=True、manager 还在拉流」且读取路径
+                    # 不再自刷新。「确实没有相机」交给 refresh_cameras（它同时销毁
+                    # manager）。这里不提前返回——get_cameras_async 的别名副作用
+                    # 已刷新全量设备 online，后面的标志同步仍要跑。
+                    self._cameras_loaded = False
+                    self._camera_retry_at = (
+                        time.monotonic() + _CAMERA_FAILURE_RETRY_SEC
+                    )
             except Exception as e:
                 logger.error("Failed to refresh camera online status: %s", e)
                 return None
@@ -1576,7 +1649,13 @@ class MiotProxy:
         cache）+ create_camera_instance_async + start_async 才能重走 MTPEntryConnect 建连。
         与 refresh_cameras 共用锁，防并发改 _camera_img_managers / 注册。
         """
+        # 与 refresh_cameras 同口径：本方法会重建 manager 并发起原生 start，
+        # 拆除中（尤其是排队等锁的那条）不能越过 clear() 再建出新实例。
+        if self._closing:
+            return
         async with self._refresh_cameras_lock:
+            if self._closing:
+                return
             manager = self._camera_img_managers.get(did)
             if manager is not None:
                 try:

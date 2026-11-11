@@ -174,6 +174,7 @@ class TestUnconfirmedEmpty:
             _camera_load_gen=0,
             _cameras_loaded=True,
             _camera_retry_at=0.0,
+            _closing=False,
             _miot_client=types.SimpleNamespace(get_cameras_async=get_cameras_async),
             _spawn_subscription_sync=lambda: None,
         )
@@ -182,3 +183,72 @@ class TestUnconfirmedEmpty:
         assert proxy._camera_info_dict == {}
         assert proxy._cameras_loaded is False, "未确认的返空不能标成已加载"
         assert proxy._camera_retry_at > time.monotonic() + 5, "复核要排短窗"
+
+
+class TestClosing:
+    """deinit 与相机刷新互斥：closing 置位后刷新必须直接放弃，不去碰原生相机。"""
+
+    def test_refresh_cameras_aborts_when_closing(self):
+        called = []
+
+        async def get_cameras_async():
+            called.append(1)
+            return {}
+
+        proxy = types.SimpleNamespace(
+            _closing=True,
+            _refresh_cameras_lock=asyncio.Lock(),
+            _camera_info_dict={"cam1": object()},
+            _miot_client=types.SimpleNamespace(get_cameras_async=get_cameras_async),
+        )
+        assert asyncio.run(MiotProxy.refresh_cameras(proxy)) is None
+        assert called == [], "拆除中不能再发起相机启动"
+
+    def test_light_refresh_never_confirms_empty(self, monkeypatch):
+        """轻刷不销毁 manager：第二次空结果也不能在这一层被「确认」。"""
+        import miloco.manager as manager_mod
+
+        class _Mgr:
+            def current_scope(self):
+                return "s1"
+
+        monkeypatch.setattr(manager_mod, "get_manager", lambda: _Mgr())
+
+        async def get_cameras_async():
+            return {}
+
+        proxy = types.SimpleNamespace(
+            _refresh_cameras_lock=asyncio.Lock(),
+            _camera_info_dict={},  # 第一次返空后缓存已空
+            _camera_load_gen=0,
+            _cameras_loaded=False,
+            _camera_retry_at=time.monotonic() + 10,
+            _closing=False,
+            _miot_client=types.SimpleNamespace(get_cameras_async=get_cameras_async),
+            _spawn_subscription_sync=lambda: None,
+        )
+        asyncio.run(MiotProxy.refresh_camera_online_status(proxy))
+
+        assert proxy._cameras_loaded is False, "轻刷不能把第二次空结果确认掉"
+        assert proxy._camera_retry_at > time.monotonic() + 5
+
+    def test_refresh_cameras_respects_active_window(self):
+        """重刷在复核窗内拿到空结果同样不确认，避免事件驱动把第二次空认掉。"""
+
+        async def get_cameras_async():
+            return {}
+
+        proxy = types.SimpleNamespace(
+            _refresh_cameras_lock=asyncio.Lock(),
+            _camera_info_dict={},
+            _camera_load_gen=0,
+            _cameras_loaded=False,
+            _camera_retry_at=time.monotonic() + 10,
+            _closing=False,
+            _miot_client=types.SimpleNamespace(get_cameras_async=get_cameras_async),
+            _spawn_subscription_sync=lambda: None,
+        )
+        asyncio.run(MiotProxy.refresh_cameras(proxy))
+
+        assert proxy._cameras_loaded is False
+        assert proxy._camera_retry_at > time.monotonic() + 5

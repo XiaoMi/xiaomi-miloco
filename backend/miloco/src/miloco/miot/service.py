@@ -8,6 +8,7 @@ MiOT service module
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -82,6 +83,16 @@ SCOPE_SWITCH_SOURCE = "scope_switch"
 
 # 持有后台 task 引用，避免 CPython GC 回收 fire-and-forget task。
 _background_tasks: set[asyncio.Task] = set()
+
+#: 解绑收尾固定等 1s 再退出，尽量让响应先写出（不是严格绑定）；非 0 退出码
+#: 触发 launchd/supervisord 重拉。
+_RESTART_AFTER_UNBIND_DELAY_S = 1.0
+
+
+def _schedule_backend_restart(reason: str, delay: float = _RESTART_AFTER_UNBIND_DELAY_S) -> None:
+    """让进程退出一次，由 supervisor 以干净状态拉起（回收泄漏的原生相机实例）。"""
+    logger.error("重启后端以回收原生相机资源: %s", reason)
+    asyncio.get_running_loop().call_later(delay, os._exit, 1)
 
 
 def _parse_prop_iid(iid: str) -> tuple[int, int]:
@@ -1049,18 +1060,44 @@ class MiotService:
             logger.error("Failed to bind MIoT: %s", e)
             raise MiotServiceException(f"Failed to bind MIoT: {str(e)}") from e
 
+    async def _stop_perception_for_teardown(self) -> None:
+        """拆除前先停感知：让相机流在相机实例销毁之前断开。
+
+        感知同步循环此刻可能正在 connect_device（起原生 start）或重建 manager，
+        与这边的 destroy/free 并发会 use-after-free。先停引擎，把在飞的连接收掉。
+        重新绑定时 ``_restart_perception_engine`` 会按用户的休息意图再拉起。
+        """
+        try:
+            from miloco.manager import get_manager
+
+            await get_manager().perception_service.stop_engine()  # 未运行时是 no-op
+        except Exception as e:  # noqa: BLE001 - 停不下来也不该挡住解绑
+            logger.warning("解绑前停止感知引擎失败: %s", e)
+
     async def unbind_miot(self) -> None:
         """
         Unbind MIoT: fully clean up MIoT state and reinitialize to a clean state.
         """
+        native_leaked = False
         try:
 
             async def _rebuild() -> None:
+                nonlocal native_leaked
+                # 必须先停感知：否则同步循环会与相机拆除并发，重建出新的 manager。
+                await self._stop_perception_for_teardown()
                 self._clear_account_scope_state()
                 # Logout: drop the local central-hub identity (cert + virtual did)
                 # before tearing down; the re-init below rebuilds with a fresh did.
                 await self._miot_proxy.reset_central_identity_async()
-                await self._miot_proxy.deinit()
+                try:
+                    await self._miot_proxy.deinit()
+                finally:
+                    # deinit 自己抛错也要读：标记是粘滞的，晚一步读会被 init()
+                    # 复位，永不再触发重启。
+                    native_leaked = (
+                        getattr(self._miot_proxy, "camera_native_leaked", False)
+                        is True
+                    )
                 # deinit 已清空 _camera_info_dict 和 token；init 重建 client 但无
                 # 有效 token，refresh_cameras 大概率静默失败（返回 None）。
                 # 仍调用一次：若 token 残留则清掉旧摄像机 managers；失败无副作用。
@@ -1072,7 +1109,19 @@ class MiotService:
             await self._reset_state_scope(_rebuild, realign=False)
         except Exception as e:
             logger.error("Failed to unbind MIoT: %s", e)
+            # 感知引擎在拆除第一步就停了；若失败发生在清凭据之前，账号其实还
+            # 绑着，不拉回来就再没有自动路径会启动采集。
+            if getattr(self._miot_proxy, "is_authenticated", False):
+                try:
+                    await self._restart_perception_engine()
+                except Exception as err:  # noqa: BLE001 - 不掩盖原始解绑错误
+                    logger.warning("解绑失败后恢复感知引擎失败: %s", err)
             raise MiotServiceException(f"Failed to unbind MIoT: {str(e)}") from e
+        finally:
+            # 泄漏检测在 deinit 之后；后面的 init/refresh 抛异常也必须重启，
+            # 否则安全网失效，重试时新 client 的标记已归 False，永不再触发。
+            if native_leaked:
+                _schedule_backend_restart("相机 start 未返回，原生实例已泄漏")
 
     async def get_miot_login_status(self) -> dict:
         """
