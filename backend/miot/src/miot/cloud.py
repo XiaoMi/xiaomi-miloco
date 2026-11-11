@@ -29,6 +29,7 @@ from .action_result import (
     MIoTActionResult,
     build_action_result,
 )
+from .backoff import EndpointBackoff
 from .common import calc_group_id
 from .const import (
     MIHOME_HTTP_API_PUBKEY,
@@ -58,6 +59,22 @@ from .types import (
 _LOGGER = logging.getLogger(__name__)
 
 TOKEN_EXPIRES_TS_RATIO = 0.7
+
+#: 用户主动刷新允许解开退避的接口。只放只读的拉取口，控制类
+#: （``miotspec/prop/set``、``miotspec/action``、场景执行、推送）不在其中：
+#: 刷新列表不该顺带把一次设备控制放出去。
+_REFRESHABLE_PATHS = frozenset(
+    {
+        "/app/v2/homeroom/gethome",
+        "/app/v2/homeroom/get_dev_room_page",
+        "/app/v2/home/device_list_page",
+        "/app/v2/miotspec/prop/get",
+        "/app/v2/oauth/get_uid_by_unionid",
+        "/app/appgateway/miot/appsceneservice/AppSceneService/GetManualSceneList",
+        "urn-by-model",
+        "icon",
+    }
+)
 
 
 def _cloud_device_to_info(device: Dict[str, Any], urn: str) -> Optional[MIoTDeviceInfo]:
@@ -194,6 +211,28 @@ def _redact_response(res_obj, res_str: str) -> str:
         return json.dumps(safe, ensure_ascii=False)
     except (TypeError, ValueError):
         return f"<unserializable len={len(res_str or '')}>"
+
+
+def _wait_second(obj: Any) -> float | None:
+    """取响应里的 ``wait_second``；取不到返回 None，由退避器按自身节奏走。"""
+    if not isinstance(obj, dict):
+        return None
+    try:
+        return float(obj.get("wait_second"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_retry_after(res_str: str) -> float | None:
+    """从限流响应体里取 ``wait_second``。
+
+    云端对限流回的是明文 JSON（``{"code": -127, "wait_second": 30}``），
+    不是加密体；解析不出就交给退避器按指数节奏走。
+    """
+    try:
+        return _wait_second(json.loads(res_str))
+    except (TypeError, ValueError):
+        return None
 
 
 def _redact_body(res_str: str) -> str:
@@ -476,6 +515,7 @@ class MIoTHttpClient:
     _get_prop_list: Dict[str, Dict]
     # icon is persisted in the cache.
     _icon_map: Dict[str, str]
+    _icon_missing: Set[str]
 
     def __init__(
         self,
@@ -492,6 +532,14 @@ class MIoTHttpClient:
         self._get_prop_timer = None
         self._get_prop_list = {}
         self._icon_map = {}
+        # 确认没有图标的机型（404）：稳定答案，不必每次刷新重打。
+        self._icon_missing: Set[str] = set()
+        # 确认没有 urn 的机型：与图标同理，稳定答案不必每次重打。
+        self._urn_missing: Set[str] = set()
+        # 按接口维度的失败退避。所有云请求都从这里走，业务模块无法绕过：
+        # 持续失败时窗口内的调用直接抛错、不发包，避免上层「缓存为空就再拉」
+        # 被放大成高频请求。
+        self._backoff: Dict[str, EndpointBackoff] = {}
 
         if not isinstance(cloud_server, str) or not isinstance(access_token, str):
             raise MIoTHttpError("invalid params")
@@ -515,6 +563,42 @@ class MIoTHttpClient:
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(loop=self._main_loop)
         return self._session
+
+    def _backoff_for(self, key: str) -> EndpointBackoff:
+        """取某个接口的退避器（懒创建）。key 用 url_path，粒度与云端限流一致。"""
+        entry = self._backoff.get(key)
+        if entry is None:
+            entry = self._backoff[key] = EndpointBackoff()
+        return entry
+
+    def clear_backoff(self, key: str | None = None) -> int:
+        """用户主动刷新时清掉退避窗口，返回真正被清掉的数量。
+
+        只清**只读接口**（见 ``_REFRESHABLE_PATHS``）：一次"刷新设备列表"不该
+        顺带给控制类接口（``prop/set``、``action``、场景执行）开绿灯。
+        每个接口每 5 分钟最多被强刷 6 次（见 ``EndpointBackoff.force``）：强刷
+        通道要是没有兜底，一个脚本循环点刷新就能把保护绕过去。
+        """
+        if key is None:
+            entries = [
+                entry
+                for path, entry in self._backoff.items()
+                if path in _REFRESHABLE_PATHS
+            ]
+        elif key in _REFRESHABLE_PATHS:
+            entry = self._backoff.get(key)
+            entries = [entry] if entry is not None else []
+        else:
+            # 显式传 key 也不能绕过白名单：否则 clear_backoff("prop/set")
+            # 就把控制类接口的窗口清掉了。
+            entries = []
+        # 404 负缓存也随用户主动刷新失效：网关错误页可能冒充 404，不清的话
+        # 该机型到进程重启前都不会再要图标 / urn。
+        if key is None or key in ("icon", "urn-by-model"):
+            self._icon_missing.clear()
+            self._urn_missing.clear()
+        # 只数真被清掉的：本来没窗口的接口不该算进"清掉 N 个"里。
+        return sum(1 for item in entries if item.remaining() > 0 and item.force())
 
     async def deinit_async(self) -> None:
         """Deinit the client."""
@@ -576,48 +660,6 @@ class MIoTHttpClient:
         # _LOGGER.info("aes decrypt, %s", result)
         return result
 
-    async def __mihome_api_get_async(
-        self, url_path: str, params: Dict, timeout: int = MIHOME_HTTP_API_TIMEOUT
-    ) -> Dict:
-        """Get data from mihome api with http get."""
-
-        http_res = await self._ensure_session().get(
-            url=f"{self._base_url}{url_path}",
-            params=params,
-            headers=self.__api_request_headers,
-            timeout=timeout,
-        )
-        if http_res.status == 401:
-            _LOGGER.error(
-                "mihome api get unauthorized(401), %s, %s -> %s",
-                url_path,
-                params,
-                _redact_body(await http_res.text(encoding="utf-8")),
-            )
-            raise MIoTHttpError(
-                "mihome api get failed, unauthorized(401)",
-                MIoTErrorCode.CODE_HTTP_INVALID_ACCESS_TOKEN,
-            )
-        if http_res.status != 200:
-            _LOGGER.error(
-                "mihome api get failed, %s, %s, %s -> %s",
-                http_res.status,
-                url_path,
-                params,
-                _redact_body(await http_res.text(encoding="utf-8")),
-            )
-            raise MIoTHttpError(
-                f"mihome api get failed, {http_res.status}, {url_path}, {params}"
-            )
-        res_str = await http_res.text()
-        res_obj: Dict = self.aes_decrypt_with_b64(res_str)
-        if res_obj.get("code", None) != 0:
-            raise MIoTHttpError(
-                f"invalid response code, {res_obj.get('code', None)}, {res_obj.get('message', '')}"
-            )
-        # _LOGGER.debug("mihome api get, %s%s, %s -> %s", self._base_url, url_path, params, res_obj)
-        return res_obj
-
     async def __mihome_api_post_async(
         self, url_path: str, data: Dict, timeout: int = MIHOME_HTTP_API_TIMEOUT
     ) -> Dict:
@@ -626,17 +668,25 @@ class MIoTHttpClient:
             raise MIoTHttpError(
                 "access token is empty", MIoTErrorCode.CODE_HTTP_INVALID_ACCESS_TOKEN
             )
-        http_res = await self._ensure_session().post(
-            url=f"{self._base_url}{url_path}",
-            data=self.aes_encrypt_with_b64(data),
-            headers=self.__api_request_headers,
-            timeout=timeout,
-        )
+        backoff = self._backoff_for(url_path)
+        # 退避窗口内直接失败，不发包：调用方多数是"缓存空就再拉"，由它自己
+        # 反复触发就会变成高频请求。
+        backoff.check()
+        token = backoff.begin()
+        try:
+            http_res = await self._ensure_session().post(
+                url=f"{self._base_url}{url_path}",
+                data=self.aes_encrypt_with_b64(data),
+                headers=self.__api_request_headers,
+                timeout=timeout,
+            )
+        except Exception:
+            backoff.on_failure()
+            raise
         if http_res.status == 401:
             _LOGGER.error(
-                "mihome api post unauthorized(401), %s, %s, %s -> %s",
+                "mihome api post unauthorized(401), %s, %s -> %s",
                 url_path,
-                data,
                 _redact_map(self.__api_request_headers),
                 _redact_body(await http_res.text(encoding="utf-8")),
             )
@@ -645,23 +695,49 @@ class MIoTHttpClient:
                 MIoTErrorCode.CODE_HTTP_INVALID_ACCESS_TOKEN,
             )
         if http_res.status != 200:
+            body = await http_res.text(encoding="utf-8")
+            # 只有限流(429)与服务端故障(5xx)进退避。其它 4xx 是「这次请求不对」
+            # ——参数非法/接口下线都会让同接口的正常请求被一起冻结。
+            if http_res.status == 429 or http_res.status >= 500:
+                wait = backoff.on_failure(retry_after=_parse_retry_after(body))
+            else:
+                wait = 0.0
+            # 请求体不进日志：device_list_page 的 data 是上百个 did，高频失败时
+            # 既是日志放大器也是设备清单泄露。
             _LOGGER.error(
-                "mihome api post failed, %s, %s, %s, %s -> %s",
+                "mihome api post failed, %s, %s -> %s (backoff %.1fs)",
                 http_res.status,
                 url_path,
-                data,
-                _redact_map(self.__api_request_headers),
-                _redact_body(await http_res.text(encoding="utf-8")),
+                _redact_body(body),
+                wait,
             )
             raise MIoTHttpError(
-                f"mihome api post failed, {http_res.status}, {url_path}, {data}"
+                f"mihome api post failed, {http_res.status}, {url_path}",
+                MIoTErrorCode.CODE_HTTP_RATE_LIMITED
+                if http_res.status == 429
+                else MIoTErrorCode.CODE_UNKNOWN,
             )
         res_str = await http_res.text()
-        res_obj: Dict = self.aes_decrypt_with_b64(res_str)
+        try:
+            res_obj: Dict = self.aes_decrypt_with_b64(res_str)
+        except Exception:
+            # 200 但不是加密体（门户页 / 代理错误页）：当成一次失败，否则上层
+            # 的「缓存空就再拉」循环完全不受网络层约束。
+            backoff.on_failure()
+            raise
         if res_obj.get("code", None) != 0:
+            # 只有限流码进退避：其它业务错误是「这次请求不对」，退避会把同一
+            # 接口上的正常请求一起拖慢（控制类接口尤其不能）。
+            if res_obj.get("code", None) == -127:
+                backoff.on_failure(retry_after=_wait_second(res_obj))
+                raise MIoTHttpError(
+                    f"invalid response code, {res_obj.get('code', None)}, {res_obj.get('message', '')}",
+                    MIoTErrorCode.CODE_HTTP_RATE_LIMITED,
+                )
             raise MIoTHttpError(
                 f"invalid response code, {res_obj.get('code', None)}, {res_obj.get('message', '')}"
             )
+        backoff.on_success(token)
         # _LOGGER.debug("mihome api post, %s%s, %s -> %s", self._base_url, url_path, data, res_obj)
         return res_obj
 
@@ -847,35 +923,52 @@ class MIoTHttpClient:
 
     async def __get_device_icon_async(self, model: str) -> Tuple[str, str]:
         """Get device icon."""
-        http_res = await self._ensure_session().post(
-            url=f"{self._base_url}/app/v2/productconfig/get_icon",
-            data=self.aes_encrypt_with_b64(
-                {
-                    "icon_name": "icon_real",
-                    "model": model,
-                }
-            ),
-            headers=self.__api_request_headers,
-            timeout=MIHOME_HTTP_API_TIMEOUT,
-        )
+        backoff = self._backoff_for("icon")
+        backoff.check()
+        token = backoff.begin()
+        try:
+            http_res = await self._ensure_session().post(
+                url=f"{self._base_url}/app/v2/productconfig/get_icon",
+                data=self.aes_encrypt_with_b64(
+                    {
+                        "icon_name": "icon_real",
+                        "model": model,
+                    }
+                ),
+                headers=self.__api_request_headers,
+                timeout=MIHOME_HTTP_API_TIMEOUT,
+            )
+        except Exception:
+            backoff.on_failure()
+            raise
         if http_res.status not in [200, 302, 403]:
+            # 404 = 这个机型没有图标，是稳定答案：不计失败、记下来不再重打。
+            # 否则一次 404 会让共享的 icon 窗口越滚越长，整份设备列表跟着没图标。
+            if http_res.status == 429 or http_res.status >= 500:
+                backoff.on_failure()
+            elif http_res.status == 404:
+                self._icon_missing.add(model)
             raise MIoTHttpError(
                 f"get icon failed, code={http_res.status}, model={model}"
             )
 
+        backoff.on_success(token)
         icon_url = str(http_res.url)
         self._icon_map[model] = icon_url
         return model, icon_url
 
     async def __get_device_icon_batch_async(self, models: Set[str]) -> Dict[str, str]:
         """Get device icon batch."""
-        icons: Dict[str, str] = {}
+        # 缓存命中的图标与网络无关：先填好，退避期只跳过需要发包的部分。
+        icons: Dict[str, str] = {
+            model: self._icon_map[model] for model in models if model in self._icon_map
+        }
+        # 退避期内整批跳过：图标是装饰数据，缺失无碍；逐个发只会把限流打成风暴。
+        if self._backoff_for("icon").remaining() > 0:
+            return icons
         task_list = []
         for model in models:
-            if model in self._icon_map:
-                # _LOGGER.info(
-                #     "get device icon from cache, %s, %s", model, self._icon_map[model])
-                icons[model] = self._icon_map[model]
+            if model in icons or model in self._icon_missing:
                 continue
             task_list.append(self.__get_device_icon_async(model=model))
         if task_list:
@@ -891,16 +984,37 @@ class MIoTHttpClient:
         self, model: str, version: int = 0
     ) -> Optional[str]:
         """Get urn by model."""
-        http_res = await self._ensure_session().get(
-            url="https://miot-spec.org/internal/urn-by-model-version",
-            params={"model": model, "version": 0},
-            timeout=10,
-        )
+        backoff = self._backoff_for("urn-by-model")
+        if model in self._urn_missing:
+            # 确认过没有 urn 的机型：稳定答案，不必每次刷新重打。
+            return None
+        if backoff.remaining() > 0:
+            # 契约保持「取不到就 None」：这里抛出去会让整份设备列表失败。
+            return None
+        token = backoff.begin()
+        try:
+            http_res = await self._ensure_session().get(
+                url="https://miot-spec.org/internal/urn-by-model-version",
+                params={"model": model, "version": 0},
+                timeout=10,
+            )
+        except Exception as e:
+            backoff.on_failure()
+            _LOGGER.info("get urn by model error, %s, %s", model, e)
+            return None
         if http_res.status != 200:
+            body = await http_res.text(encoding="utf-8")
+            # 与主 API 同口径：只有限流 / 服务端故障推进退避。404（这个机型没有
+            # spec）是稳定答案，退避它会让同一轮里其它机型的查询一起被跳过。
+            if http_res.status == 429 or http_res.status >= 500:
+                backoff.on_failure(retry_after=_parse_retry_after(body))
+            elif http_res.status == 404:
+                self._urn_missing.add(model)
             _LOGGER.info(
                 "get urn by model failed, %s, %s, %s", http_res.status, model, version
             )
             return None
+        backoff.on_success(token)
         res_obj: Dict = await http_res.json()
         if not isinstance(res_obj, Dict):
             return None

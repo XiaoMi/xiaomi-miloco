@@ -8,6 +8,7 @@ MiOT service module
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -82,6 +83,16 @@ SCOPE_SWITCH_SOURCE = "scope_switch"
 
 # 持有后台 task 引用，避免 CPython GC 回收 fire-and-forget task。
 _background_tasks: set[asyncio.Task] = set()
+
+#: 解绑收尾固定等 1s 再退出，尽量让响应先写出（不是严格绑定）；非 0 退出码
+#: 触发 launchd/supervisord 重拉。
+_RESTART_AFTER_UNBIND_DELAY_S = 1.0
+
+
+def _schedule_backend_restart(reason: str, delay: float = _RESTART_AFTER_UNBIND_DELAY_S) -> None:
+    """让进程退出一次，由 supervisor 以干净状态拉起（回收泄漏的原生相机实例）。"""
+    logger.error("重启后端以回收原生相机资源: %s", reason)
+    asyncio.get_running_loop().call_later(delay, os._exit, 1)
 
 
 def _parse_prop_iid(iid: str) -> tuple[int, int]:
@@ -558,8 +569,33 @@ class MiotService:
             if realign:
                 manager.start_state_alignment()
 
+    def _mark_info_stale(self) -> None:
+        """换号后作废旧账号的「已加载」标记。
+
+        与 ``_reset_cloud_backoff`` 同样用 ``getattr``：测试里的替身 proxy 不带
+        这个方法，而缺了它只意味着「下次读取多回源一次」，不该让换号流程失败。
+        """
+        mark = getattr(self._miot_proxy, "mark_info_stale", None)
+        if callable(mark):
+            mark()
+
+    def _reset_cloud_backoff(self) -> None:
+        """用户主动刷新时打破网络层退避（绑定 / 切家庭 / refresh 接口专用）。
+
+        ``getattr`` 是给测试里的替身 proxy 留的余地：退避是可选能力，缺了它
+        不该让整条刷新路径失败。
+        """
+        reset = getattr(self._miot_proxy, "reset_cloud_backoff", None)
+        if callable(reset):
+            reset()
+
     async def _refresh_all_caches(self) -> None:
-        """把设备 / 相机 / 场景缓存换成新作用域的。单个失败不拖垮另外两个。"""
+        """把设备 / 相机 / 场景缓存换成新作用域的。单个失败不拖垮另外两个。
+
+        调用方是绑定 / 换号 / 切家庭这类用户动作，允许打破退避——否则刚被限流
+        过一次，住户切家庭后看到的会是一份空缓存。
+        """
+        self._reset_cloud_backoff()
         results = await asyncio.gather(
             self._miot_proxy.refresh_devices(),
             self._miot_proxy.refresh_cameras(),
@@ -750,6 +786,9 @@ class MiotService:
                         "set" if new_uid else "unknown",
                     )
                     self._clear_account_scope_state()
+                    # 旧账号的「已加载」标记对新账号无效：旧账号空列表时，
+                    # 新账号的读取入口否则不会再自刷新。
+                    self._mark_info_stale()
 
                 # 建立启用集必须排在刷新和对齐之前：上一行在换账号时把启用集删了，而
                 # is_home_allowed 对空启用集一律返回假 —— 这时候刷新，所有摄像头
@@ -872,6 +911,7 @@ class MiotService:
         Returns:
             dict: Dictionary containing result of each refresh operation
         """
+        self._reset_cloud_backoff()
         try:
             return await self._miot_proxy.refresh_miot_info()
         except Exception as e:
@@ -886,6 +926,8 @@ class MiotService:
         见 client.refresh_camera_online_status——专给前端「列相机」前调,解决相机重新
         上线后 is_online 不自愈,而又不像 refresh_miot_cameras 那样会瞬时卡流。
         """
+        # 不打破退避：这个接口由前端「打开相机列表」自动调用（force 标志只在前端
+        # 用于绕 8s 节流，传不到这里），自动路径不能清窗口。
         result = await self._miot_proxy.refresh_camera_online_status()
         return result is not None
 
@@ -893,6 +935,7 @@ class MiotService:
         """
         Refresh MiOT camera information
         """
+        self._reset_cloud_backoff()
         try:
             result = await self._miot_proxy.refresh_cameras()
             if not result:
@@ -908,6 +951,7 @@ class MiotService:
         """
         Refresh MiOT scene information
         """
+        self._reset_cloud_backoff()
         try:
             result = await self._miot_proxy.refresh_scenes()
             # None means call failed; an empty dict just means no scenes available and should not be treated as an error
@@ -924,6 +968,7 @@ class MiotService:
         """
         Refresh MiOT user information
         """
+        self._reset_cloud_backoff()
         try:
             result = await self._miot_proxy.refresh_user_info()
             if not result:
@@ -939,6 +984,7 @@ class MiotService:
         """
         Refresh MiOT device information
         """
+        self._reset_cloud_backoff()
         try:
             result = await self._miot_proxy.refresh_devices()
             if not result:
@@ -1014,18 +1060,44 @@ class MiotService:
             logger.error("Failed to bind MIoT: %s", e)
             raise MiotServiceException(f"Failed to bind MIoT: {str(e)}") from e
 
+    async def _stop_perception_for_teardown(self) -> None:
+        """拆除前先停感知：让相机流在相机实例销毁之前断开。
+
+        感知同步循环此刻可能正在 connect_device（起原生 start）或重建 manager，
+        与这边的 destroy/free 并发会 use-after-free。先停引擎，把在飞的连接收掉。
+        重新绑定时 ``_restart_perception_engine`` 会按用户的休息意图再拉起。
+        """
+        try:
+            from miloco.manager import get_manager
+
+            await get_manager().perception_service.stop_engine()  # 未运行时是 no-op
+        except Exception as e:  # noqa: BLE001 - 停不下来也不该挡住解绑
+            logger.warning("解绑前停止感知引擎失败: %s", e)
+
     async def unbind_miot(self) -> None:
         """
         Unbind MIoT: fully clean up MIoT state and reinitialize to a clean state.
         """
+        native_leaked = False
         try:
 
             async def _rebuild() -> None:
+                nonlocal native_leaked
+                # 必须先停感知：否则同步循环会与相机拆除并发，重建出新的 manager。
+                await self._stop_perception_for_teardown()
                 self._clear_account_scope_state()
                 # Logout: drop the local central-hub identity (cert + virtual did)
                 # before tearing down; the re-init below rebuilds with a fresh did.
                 await self._miot_proxy.reset_central_identity_async()
-                await self._miot_proxy.deinit()
+                try:
+                    await self._miot_proxy.deinit()
+                finally:
+                    # deinit 自己抛错也要读：标记是粘滞的，晚一步读会被 init()
+                    # 复位，永不再触发重启。
+                    native_leaked = (
+                        getattr(self._miot_proxy, "camera_native_leaked", False)
+                        is True
+                    )
                 # deinit 已清空 _camera_info_dict 和 token；init 重建 client 但无
                 # 有效 token，refresh_cameras 大概率静默失败（返回 None）。
                 # 仍调用一次：若 token 残留则清掉旧摄像机 managers；失败无副作用。
@@ -1037,7 +1109,19 @@ class MiotService:
             await self._reset_state_scope(_rebuild, realign=False)
         except Exception as e:
             logger.error("Failed to unbind MIoT: %s", e)
+            # 感知引擎在拆除第一步就停了；若失败发生在清凭据之前，账号其实还
+            # 绑着，不拉回来就再没有自动路径会启动采集。
+            if getattr(self._miot_proxy, "is_authenticated", False):
+                try:
+                    await self._restart_perception_engine()
+                except Exception as err:  # noqa: BLE001 - 不掩盖原始解绑错误
+                    logger.warning("解绑失败后恢复感知引擎失败: %s", err)
             raise MiotServiceException(f"Failed to unbind MIoT: {str(e)}") from e
+        finally:
+            # 泄漏检测在 deinit 之后；后面的 init/refresh 抛异常也必须重启，
+            # 否则安全网失效，重试时新 client 的标记已归 False，永不再触发。
+            if native_leaked:
+                _schedule_backend_restart("相机 start 未返回，原生实例已泄漏")
 
     async def get_miot_login_status(self) -> dict:
         """
@@ -1323,6 +1407,9 @@ class MiotService:
         """Get home info。refresh=True 时先刷新云端数据。"""
         try:
             if refresh:
+                # refresh=True 只来自用户主动操作（CLI `device refresh` / 面板刷新），
+                # 允许它打破退避；自动轮询走不到这里。
+                self._reset_cloud_backoff()
                 await asyncio.gather(
                     self._miot_proxy.refresh_devices(),
                     self._miot_proxy.refresh_scenes(),
@@ -1369,24 +1456,18 @@ class MiotService:
             if not allow:
                 data["home_name"] = None
             else:
-                # 优先 cache,cache 空 *或* cache 跟 allow 无交集时 fallback list_homes
-                # (家里所有摄像头都离线导致 device cache 不含启用集 hid 的 case)。
+                # 只从设备/相机缓存反查家庭名。此前这里在缓存缺失时会 fallback 调
+                # list_homes（一次 gethome），而 /api/miot/home 是前端 30s 轮询的
+                # ——「选中的家庭里没有设备/相机」这种常驻状态下就变成每 30s 一次
+                # 云端请求。删掉之后，空家庭在这里没有名字（Web 的家庭名走
+                # /api/miot/scope/homes，不受影响；CLI 的 device list 只是少一行
+                # 「# home=」表头），不在轮询路径上回源。
                 home_name: str | None = None
                 if home_id_to_name:
                     sorted_hids = sorted(home_id_to_name.keys())
                     pick_hids = [h for h in sorted_hids if h in allow]
                     if pick_hids:
                         home_name = home_id_to_name[pick_hids[0]]
-                if home_name is None:
-                    try:
-                        homes = await self.list_homes()
-                    except Exception as e:
-                        logger.warning("list_homes failed in get_home_info: %s", e)
-                        homes = []
-                    sorted_homes = sorted(homes, key=lambda h: h["home_id"])
-                    pick = [h for h in sorted_homes if h["home_id"] in allow]
-                    if pick:
-                        home_name = pick[0].get("home_name")
                 data["home_name"] = home_name
             # home_id_to_name 是 backend 内部用的中转，前端不需要。
             # client.py::get_home_info_data 每次 build 新 dict（dict literal 现构造），

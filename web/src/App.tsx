@@ -17,6 +17,7 @@ import {
   listScopeCameras,
   listScopeHomes,
   listTasks,
+  refreshAll,
   refreshCameraOnline,
   pausePerception,
   resumePerception,
@@ -205,6 +206,37 @@ function MainApp() {
   const features = useAsync(() => getFeatures(), [], {
     errorLabel: t("app.loadFeaturesFail"),
   });
+
+  // 用户主动刷新：后端不再对「列表为空」这类常驻状态周期性回源，这是住户发现
+  // 数据过期的唯一入口。先让后端重新拉取，再并行 reload 各列表。
+  const onRefreshAll = async () => {
+    let err: unknown = null;
+    try {
+      await refreshAll(homeId);
+    } catch (e) {
+      err = e;
+    }
+    // 部分失败时成功的项后端缓存已经换过了：不 reload 的话住户永远看不到它们，
+    // 而这是去轮询之后唯一的恢复入口。先刷新界面，再统一提示结果。
+    await Promise.all([
+      status.reload(),
+      devices.reload(),
+      cameras.reload(),
+      scopeCameras.reload(),
+      scenes.reload(),
+      scopeHomes.reload(),
+    ]);
+    if (err) {
+      toast(
+        t("app.refreshFail", {
+          msg: err instanceof Error ? err.message : String(err),
+        }),
+        "warn",
+      );
+    } else {
+      toast(t("app.refreshDone"), "ok");
+    }
+  };
 
   // ── 字号 / 抽屉 / 弹层 ─────────────────────────
   // (原本有 now state + 30s setInterval 给 Sidebar 显示时间，现 Sidebar
@@ -520,6 +552,7 @@ function MainApp() {
         <TopBar
           miotBound={status.data?.miot.bound}
           homes={scopeHomes.data ?? []}
+          onRefresh={onRefreshAll}
           onSwitchHome={async (targetHomeId) => {
             // 切家走 backend 端点 PUT /api/miot/scope/homes:
             // 单事务把 home_id 设为唯一 in_use=true,其它全 false。代替之前的
@@ -716,13 +749,16 @@ function TopBar({
   miotBound,
   homes,
   onSwitchHome,
+  onRefresh,
 }: {
   miotBound: boolean | undefined;
   homes: { homeId: string; homeName: string; inUse: boolean }[];
   onSwitchHome: (homeId: string) => void;
+  onRefresh: () => Promise<void>;
 }) {
   const { effective, toggle } = useTheme();
   const { t } = useTranslation();
+  const [refreshing, setRefreshing] = useState(false);
   // 当前 in_use 的家（已启用）—— 多个 in_use 时取首个；
   // 后端 list_homes 兜底保证至少一个 in_use=true（含启用家失效后自动重选），
   // 此处 ?? sortedHomes[0] 仅作防御性 fallback。
@@ -752,6 +788,25 @@ function TopBar({
         )}
       </div>
       <div className="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          onClick={async () => {
+            if (refreshing) return;
+            setRefreshing(true);
+            try {
+              await onRefresh();
+            } finally {
+              setRefreshing(false);
+            }
+          }}
+          disabled={refreshing}
+          title={t("app.refreshHint")}
+          aria-label={t("app.refresh")}
+          className="inline-flex items-center justify-center rounded-md px-3 text-body text-text-secondary hover:bg-bg-tertiary hover:text-text-primary transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+          style={{ height: 32 }}
+        >
+          {refreshing ? t("app.refreshing") : t("app.refresh")}
+        </button>
         <LanguageSwitcher />
         <button
           type="button"

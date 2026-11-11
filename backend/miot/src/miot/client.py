@@ -345,6 +345,8 @@ class MIoTClient:
         self._camera_client = None  # type: ignore
 
         self._init_done = False
+        #: 拆除时是否有相机因 start 未返回而被迫放弃（原生实例泄漏）。
+        self._native_camera_leaked = False
         # Serializes init/deinit so a shielded rollback blocks the next init.
         self._lifecycle_lock = asyncio.Lock()
 
@@ -385,9 +387,25 @@ class MIoTClient:
         return self._camera_client
 
     @property
+    def native_camera_leaked(self) -> bool:
+        """上次拆除是否放弃了卡住的相机实例（原生资源泄漏，需重启回收）。"""
+        return self._native_camera_leaked
+
+    @property
     def http_client(self) -> MIoTHttpClient:
         """HTTP client."""
         return self._http_client
+
+    def clear_backoff(self, key: str | None = None) -> int:
+        """用户主动刷新时清掉云端接口的失败退避，返回被清掉的数量。
+
+        转发到 ``http_client``：调用方（miloco 的 MiotProxy）持有的是
+        ``MIoTClient``，不该为了清退避再穿两层去拿 HTTP 客户端。
+        """
+        client = self._http_client
+        if client is None:
+            return 0
+        return client.clear_backoff(key)
 
     @property
     def central_hub(self) -> Optional[CentralHubManager]:
@@ -1022,6 +1040,10 @@ class MIoTClient:
                 lambda: (
                     self._camera_client.deinit_async() if self._camera_client else None
                 ),
+            )
+            # deinit 不拆原生库，但可能放弃卡住的实例；记下来给上层决定是否重启。
+            self._native_camera_leaked = (
+                getattr(self._camera_client, "native_start_leaked", False) is True
             )
             await _safe(
                 "lan_unregister",

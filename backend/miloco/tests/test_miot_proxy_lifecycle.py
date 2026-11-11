@@ -455,3 +455,14 @@ async def test_deinit_also_clears_the_original_auth_keys(proxy_env):
 
     assert kv.get(AuthConfigKeys.MIOT_TOKEN_INFO_KEY) is None
     assert kv.get(DeviceInfoKeys.USER_INFO_KEY) is None
+
+
+@pytest.mark.asyncio
+async def test_init_reopens_closing_gate(proxy_env):
+    """deinit() 置的 _closing 必须由 init() 复位，否则重登后相机刷新永久被挡。"""
+    p, _ = proxy_env
+    p._closing = True
+
+    await p.init()
+
+    assert p._closing is False

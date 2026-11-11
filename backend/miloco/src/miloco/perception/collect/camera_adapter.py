@@ -63,6 +63,10 @@ _CAMERA_TRACKS = ["decoded_video", "decoded_audio"]
 # 按需补建 refresh_cameras 的最小间隔：无设备态下 sync 循环 1s 一轮，
 # 不节流会变成每秒一次重 SDK 调用 + 建连尝试。10s 足够让相机就绪后及时恢复。
 _ONDEMAND_REFRESH_MIN_INTERVAL_MS = 10_000
+# 连续补建多少次仍没有新相机连上，就把间隔降到「慢档」——这条路径不是发现新
+# 相机，而是救「已启用但没建起 manager」的相机；一直救不活时不该每 10s 全量拉取。
+_ONDEMAND_REFRESH_MAX_STREAK = 6
+_ONDEMAND_REFRESH_SLOW_INTERVAL_MS = 60_000
 
 # 静默检测：感知视频流 N 秒无帧 → 判僵尸连接。miss 层对「连接在但不出帧」的静默
 # 无解（keepalive 只探连接活性、不探数据流），只能上层检测 + destroy/create 重拉。
@@ -139,6 +143,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self._on_window_ready = on_window_ready
         self._devices: dict[str, _CameraDeviceState] = {}
         self._last_ondemand_refresh_ms = 0
+        self._ondemand_streak = 0
         # 静默重连防抖标记：did -> 最近一次重连的 monotonic ms。
         self._last_reconnect_ms: dict[str, int] = {}
 
@@ -279,11 +284,17 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 # 断掉使数量下降、间接触发补建;超集化拿走了那条自愈路径,而
                 # _converge_feed_cap 只处理「数量 > 上限」,看不见成员漂移。
                 missing = set(expected) - self._devices.keys()
-                if missing and (
-                    now_ms - self._last_ondemand_refresh_ms
-                    >= _ONDEMAND_REFRESH_MIN_INTERVAL_MS
-                ):
+                # 连续补建不推进就降频：相机一直连不上时，每 10s 一次全量拉取会
+                # 无限持续。「有新相机连上」是唯一的进展信号（见 connect_device），
+                # 一旦有进展就恢复 10s 档。
+                interval = (
+                    _ONDEMAND_REFRESH_MIN_INTERVAL_MS
+                    if self._ondemand_streak < _ONDEMAND_REFRESH_MAX_STREAK
+                    else _ONDEMAND_REFRESH_SLOW_INTERVAL_MS
+                )
+                if missing and now_ms - self._last_ondemand_refresh_ms >= interval:
                     self._last_ondemand_refresh_ms = now_ms
+                    self._ondemand_streak += 1
                     await self._miot_proxy.refresh_cameras()
             except Exception as e:  # noqa: BLE001
                 logger.warning("On-demand camera manager refresh failed: %s", e)
@@ -513,6 +524,10 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         # 只有视频订上、音频没订上（或反之）的通道也走到这里——视频恒无帧时靠
         # 这个时刻在 _FIRST_FRAME_THRESHOLD_MS 后被判僵尸并重建，而不是永久静默。
         state.connected_at_ms = _monotonic_ms()
+        # 真的订上了才算「补建推进」，把连续无进展计数清零。放在这而不是放进
+        # _devices 之后：两路订阅全失败时上面已经 pop 掉该 did，那正是要降频的
+        # 「救不活」形态，提前清零会让慢档永远触发不到。
+        self._ondemand_streak = 0
 
     async def disconnect_device(self, did: str) -> None:
         state = self._devices.pop(did, None)
