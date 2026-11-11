@@ -26,9 +26,13 @@ from PIL import Image
 from .error import MIoTMediaDecoderError
 from .tuning import DECODE_THREADS, SWSCALE_THREADS
 from .types import MIoTCameraCodec, MIoTCameraFrameData
-from .vaapi import FFmpegVAAPIDecoder
+from .vaapi import FFmpegVAAPIDecoder, HardwareWorkerError, TimestampDiscontinuity
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _monotonic_ms():
+    return time.monotonic_ns() // 1_000_000
 
 
 # H.264 NAL unit types that contain an IDR coded slice.
@@ -210,6 +214,7 @@ class MIoTMediaDecoder(threading.Thread):
         self._last_decoded_frame_ts = 0
         self._hw_decoder = None
         self._hw_failed = False
+        self._hw_recoveries = 0
         self._hw_wait_key = False
         self._hw_extradata = None
         self._hw_reconfigure = False
@@ -284,17 +289,42 @@ class MIoTMediaDecoder(threading.Thread):
     def push_audio_frame(self, frame_data: MIoTCameraFrameData) -> None:
         self._queue.put_audio(frame_data)
 
-    def set_decoded_frame_interval(self, interval_ms: int) -> None:
-        """Change BGR admission; an active hardware worker falls back at a keyframe."""
+    def set_decoded_frame_interval(
+        self, interval_ms: int, reason: str = "unspecified"
+    ) -> None:
+        """Change BGR admission; rebuild active hardware at the next keyframe."""
         interval_ms = max(0, interval_ms)
+        if interval_ms != self._decoded_frame_interval:
+            _LOGGER.warning(
+                "Decoder sampling change: %s -> %s ms reason=%s hardware_active=%s hardware_failed=%s",
+                self._decoded_frame_interval,
+                interval_ms,
+                reason,
+                self._hw_decoder is not None,
+                self._hw_failed,
+            )
         if interval_ms != self._decoded_frame_interval and self._hw_decoder is not None:
             self._hw_reconfigure = True
         self._decoded_frame_interval = interval_ms
 
     def _try_hw_video(self, data: MIoTCameraFrameData) -> bool:
+        if not getattr(self, "_canary_probed", False):
+            _LOGGER.warning(
+                "VAAPI canary probe codec=%s eligible=%s key=%s",
+                data.codec_id,
+                self._enable_hw_accel,
+                _is_key_access_unit(data),
+            )
+            self._canary_probed = True
         if self._stop_requested:
             return True
-        if data.codec_id != MIoTCameraCodec.VIDEO_H264 and self._hw_decoder is not None:
+        if self._hw_wait_key:
+            if not _is_key_access_unit(data):
+                return True
+            self._hw_wait_key = False
+        if self._hw_decoder is not None and data.codec_id != getattr(
+            self, "_hw_codec_id", data.codec_id
+        ):
             self._hw_decoder.close()
             self._hw_decoder = None
             self._hw_failed = True
@@ -310,18 +340,28 @@ class MIoTMediaDecoder(threading.Thread):
         if (
             not self._enable_hw_accel
             or not executable
-            or data.codec_id != MIoTCameraCodec.VIDEO_H264
+            or data.codec_id
+            not in (MIoTCameraCodec.VIDEO_H264, MIoTCameraCodec.VIDEO_H265)
         ):
             return False
         if self._hw_decoder is None and not _is_key_access_unit(data):
             return False
         was_running = self._hw_decoder is not None
         try:
-            if self._hw_reconfigure:
-                raise RuntimeError("decoded frame interval changed")
+            if self._hw_reconfigure and _is_key_access_unit(data):
+                # Keep decoding with the old filter until a clean random-access point.
+                if self._hw_decoder is not None:
+                    self._hw_decoder.close()
+                    self._hw_decoder = None
+                self._hw_reconfigure = False
+                _LOGGER.warning(
+                    "VA-API reconfiguring at keyframe: interval=%s ms",
+                    self._decoded_frame_interval,
+                )
             if self._hw_decoder is None:
+                requested_interval = self._decoded_frame_interval
                 interval = (
-                    self._decoded_frame_interval
+                    requested_interval
                     if self._video_frame_callback
                     else self._frame_interval
                 )
@@ -330,17 +370,56 @@ class MIoTMediaDecoder(threading.Thread):
                 self._hw_decoder = FFmpegVAAPIDecoder(
                     data,
                     ffmpeg=executable,
+                    label=getattr(self, "_vaapi_label", "unknown"),
                     interval_ms=interval,
                     on_frame=lambda frame, metadata: self._emit_video_frames(
                         [frame], metadata
                     ),
                 )
+                self._hw_reconfigure = (
+                    self._decoded_frame_interval != requested_interval
+                )
                 self._hw_extradata = self._hw_decoder.extradata
+                self._hw_codec_id = data.codec_id
                 self._video_decoder = None
-                _LOGGER.info("VA-API worker started")
+                _LOGGER.warning(
+                    "VA-API worker started: stream=%s pid=%s interval_ms=%s",
+                    getattr(self, "_vaapi_label", "unknown"),
+                    self._hw_decoder._process.pid,
+                    interval,
+                )
             self._hw_decoder.push(data)
             return True
         except Exception as exc:
+            if isinstance(exc, TimestampDiscontinuity) and was_running:
+                self._hw_decoder.close()
+                self._hw_decoder = None
+                self._video_decoder = None
+                self._hw_reconfigure = False
+                self._hw_wait_key = True
+                _LOGGER.warning(
+                    "VA-API timeline reset; rebuild at keyframe: stream=%s",
+                    getattr(self, "_vaapi_label", "unknown"),
+                )
+                if _is_key_access_unit(data):
+                    return self._try_hw_video(data)
+                return True
+            if (
+                isinstance(exc, HardwareWorkerError)
+                and was_running
+                and self._hw_recoveries < 1
+            ):
+                self._hw_extradata = self._hw_decoder.extradata
+                self._hw_decoder.close()
+                self._hw_decoder = None
+                self._video_decoder = None
+                self._hw_reconfigure = False
+                self._hw_recoveries += 1
+                self._hw_wait_key = True
+                _LOGGER.warning(
+                    "VA-API device failure; one recovery at next keyframe: %s", exc
+                )
+                return True
             self._hw_failed = True
             if self._hw_decoder is not None:
                 self._hw_extradata = self._hw_decoder.extradata
@@ -379,17 +458,20 @@ class MIoTMediaDecoder(threading.Thread):
         if self._stop_requested:
             return
         decoded_unix_ms = int(time.time() * 1000)
-        now_ms = time.monotonic_ns() // 1_000_000
-        due = (
-            self._decoded_frame_interval <= 0
-            or self._last_decoded_frame_ts == 0
-            or now_ms - self._last_decoded_frame_ts >= self._decoded_frame_interval
-        )
-        # Emit decoded frames as BGR numpy arrays (no rate limiting).
+        # Keep decoding every packet so inter-frame codec references remain valid,
+        # but avoid the expensive BGR conversion and asyncio dispatch above the
+        # configured callback rate. A zero interval preserves legacy behaviour.
         # Converting to ndarray HERE in the decoder thread avoids cross-thread
         # FFmpeg access — the main thread only ever sees numpy data.
-        if self._video_frame_callback and frames and due:
-            self._last_decoded_frame_ts = now_ms
+        decoded_now_ms = _monotonic_ms()
+        decoded_frame_due = (
+            self._decoded_frame_interval <= 0
+            or self._last_decoded_frame_ts == 0
+            or decoded_now_ms - self._last_decoded_frame_ts
+            >= self._decoded_frame_interval
+        )
+        emitted_decoded_frame = False
+        if self._video_frame_callback and frames and decoded_frame_due:
             for frame in frames:
                 try:
                     # 像素转换(swscale)默认按 CPU 核数开满 slice 线程池,而上下文每帧
@@ -411,6 +493,9 @@ class MIoTMediaDecoder(threading.Thread):
                         decoded_unix_ms,
                     ),
                 )
+                emitted_decoded_frame = True
+        if emitted_decoded_frame:
+            self._last_decoded_frame_ts = decoded_now_ms
         # Rate-limited JPEG conversion for preview callback
         now_ts = int(time.time() * 1000)
         if now_ts - self._last_jpeg_ts >= self._frame_interval:

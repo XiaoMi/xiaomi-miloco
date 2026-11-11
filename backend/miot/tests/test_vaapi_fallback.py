@@ -4,9 +4,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from miot.types import MIoTCameraCodec, MIoTCameraFrameData, MIoTCameraFrameType
-
 from miot import decoder as module
+from miot.types import MIoTCameraCodec, MIoTCameraFrameData, MIoTCameraFrameType
 
 pytestmark = pytest.mark.unit
 
@@ -122,20 +121,65 @@ def test_stop_closes_hardware_before_thread_join(setup, monkeypatch):
     assert order == ["abort", "join", "close"]
 
 
-def test_interval_change_falls_back_at_key(setup, monkeypatch):
+def test_interval_change_rebuilds_hardware_at_key(setup, monkeypatch):
     dec, soft, _, factory, _ = setup
+    monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
+    old, new = Mock(), Mock()
+    factory.side_effect = [old, new]
+    dec._on_video_callback(packet())
+    dec.set_decoded_frame_interval(333)
+    dec._on_video_callback(packet(False, 167))
+    old.close.assert_not_called()
+    assert old.push.call_count == 2
+    dec._on_video_callback(packet(True, 234))
+    old.close.assert_called_once()
+    new.push.assert_called_once()
+    soft.decode.assert_not_called()
+    assert not dec._hw_failed
+    assert factory.call_count == 2
+    assert factory.call_args.kwargs["interval_ms"] == 333
+
+
+def test_pending_rate_changes_coalesce(setup, monkeypatch):
+    dec, soft, _, factory, _ = setup
+    monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
+    old, new = Mock(), Mock()
+    factory.side_effect = [old, new]
+    dec._on_video_callback(packet())
+    dec.set_decoded_frame_interval(333)
+    dec.set_decoded_frame_interval(200)
+    dec._on_video_callback(packet(True, 234))
+    assert factory.call_count == 2
+    assert factory.call_args.kwargs["interval_ms"] == 200
+    assert not dec._hw_failed
+    soft.decode.assert_not_called()
+
+
+def test_unchanged_rate_keeps_worker(setup, monkeypatch):
+    dec, _, _, factory, _ = setup
     monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
     dec._on_video_callback(packet())
     dec.set_decoded_frame_interval(0)
-    dec.set_decoded_frame_interval(333)
-    dec._on_video_callback(packet(False, 167))
-    soft.decode.assert_not_called()
     dec._on_video_callback(packet(True, 234))
-    soft.decode.assert_called_once()
     assert factory.call_count == 1
+    factory.return_value.close.assert_not_called()
 
 
-def test_h265_uses_software(setup, monkeypatch):
+def test_failed_reconfiguration_stays_on_software(setup, monkeypatch):
+    dec, soft, _, factory, _ = setup
+    monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
+    old = Mock()
+    factory.side_effect = [old, RuntimeError("device unavailable")]
+    dec._on_video_callback(packet())
+    dec.set_decoded_frame_interval(333)
+    dec._on_video_callback(packet(True, 234))
+    dec._on_video_callback(packet(False, 301))
+    assert factory.call_count == 2
+    assert dec._hw_failed
+    assert soft.decode.call_count == 2
+
+
+def test_hevc_non_key_uses_software_until_keyframe(setup, monkeypatch):
     dec, soft, create, factory, _ = setup
     monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
     item = packet().model_copy(update={"codec_id": MIoTCameraCodec.VIDEO_H265})
@@ -150,3 +194,91 @@ def test_stopped_decoder_does_not_emit(setup):
     dec._stop_requested = True
     dec._emit_video_frames([Mock()], packet())
     callback.assert_not_called()
+
+
+def test_rate_change_during_worker_creation_is_not_lost(setup, monkeypatch):
+    dec, _, _, factory, _ = setup
+    monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
+    dec.set_decoded_frame_interval(333)
+    first, second = Mock(), Mock()
+
+    def create(*args, **kwargs):
+        dec.set_decoded_frame_interval(200)
+        return first
+
+    factory.side_effect = create
+    dec._on_video_callback(packet())
+    assert dec._hw_reconfigure
+    factory.side_effect = None
+    factory.return_value = second
+    dec._on_video_callback(packet(True, 234))
+    assert dec._hw_decoder is second
+    assert factory.call_args.kwargs["interval_ms"] == 200
+
+
+def test_runtime_device_failure_retries_hardware_once_at_next_key(setup, monkeypatch):
+    dec, soft, _, factory, _ = setup
+    monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
+    old, new = Mock(), Mock()
+    factory.side_effect = [old, new]
+    old.push.side_effect = [None, module.HardwareWorkerError("device lost")]
+    dec._on_video_callback(packet())
+    dec._on_video_callback(packet(False, 167))
+    assert not dec._hw_failed
+    assert dec._hw_wait_key
+    old.close.assert_called_once()
+    dec._on_video_callback(packet(False, 234))
+    assert factory.call_count == 1
+    dec._on_video_callback(packet(True, 301))
+    assert factory.call_count == 2
+    assert dec._hw_decoder is new
+    soft.decode.assert_not_called()
+
+
+def test_second_runtime_device_failure_falls_back_without_retry_loop(
+    setup, monkeypatch
+):
+    dec, soft, _, factory, _ = setup
+    monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
+    old, new = Mock(), Mock()
+    factory.side_effect = [old, new]
+    old.push.side_effect = [None, module.HardwareWorkerError("device lost")]
+    new.push.side_effect = [None, module.HardwareWorkerError("still unavailable")]
+    dec._on_video_callback(packet())
+    dec._on_video_callback(packet(False, 167))
+    dec._on_video_callback(packet(True, 234))
+    dec._on_video_callback(packet(False, 301))
+    dec._on_video_callback(packet(True, 368))
+    assert dec._hw_failed
+    assert factory.call_count == 2
+    soft.decode.assert_called_once()
+
+
+def test_timestamp_jump_restarts_at_key_without_device_retry_budget(setup, monkeypatch):
+    dec, soft, _, factory, _ = setup
+    monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
+    old, new = Mock(), Mock()
+    factory.side_effect = [old, new]
+    old.push.side_effect = [None, module.TimestampDiscontinuity("timestamp reset")]
+    dec._on_video_callback(packet())
+    dec._on_video_callback(packet(False, 50))
+    assert dec._hw_wait_key
+    assert not dec._hw_failed
+    assert dec._hw_recoveries == 0
+    dec._on_video_callback(packet(True, 117))
+    assert dec._hw_decoder is new
+    soft.decode.assert_not_called()
+
+
+def test_timestamp_jump_on_key_replays_current_key(setup, monkeypatch):
+    dec, soft, _, factory, _ = setup
+    monkeypatch.setenv("MIOT_VAAPI_FFMPEG", "/usr/bin/ffmpeg")
+    old, new = Mock(), Mock()
+    factory.side_effect = [old, new]
+    old.push.side_effect = [None, module.TimestampDiscontinuity("timestamp reset")]
+    dec._on_video_callback(packet())
+    item = packet(True, 50)
+    dec._on_video_callback(item)
+    new.push.assert_called_once_with(item)
+    assert not dec._hw_failed
+    soft.decode.assert_not_called()
