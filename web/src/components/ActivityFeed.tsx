@@ -77,6 +77,8 @@ interface Props {
   activeHomeId?: string;
   /** 事件初始页仍在加载。App 现无条件挂载本组件(让动作流独立于事件加载态),事件到达后
    *  经 setEvents 合并;加载中在事件区顶部显一条内联提示,不阻断动作流。 */
+  /** Own initial and filtered requests instead of using a parent preload. */
+  ownEventRequests?: boolean;
   eventsLoading?: boolean;
   /** 事件初始页加载失败——内联提示 + 重试,同样不阻断动作流。 */
   eventsError?: Error | null;
@@ -214,6 +216,7 @@ export function ActivityFeed({
   homeId,
   activeHomeId,
   eventsLoading,
+  ownEventRequests = false,
   eventsError,
   onRetryEvents,
   onDemandLogs: initialOdLogs,
@@ -475,7 +478,7 @@ export function ActivityFeed({
   // 之后每次 SSE 重连的补漏都被在途守卫静默跳过(而跳过路径不碰旗),本 PR 要修的
   // "事件悄悄不见"又回来了,且全量视图不翻页时没有任何自愈路径。
   useEffect(() => {
-    if (!filterActive) {
+    if (!filterActive && !ownEventRequests) {
       ++fetchGenRef.current; // 作废可能仍在途的 filtered fetch
       fetchInFlightRef.current = false; // 被作废那代不会替我们收旗(同上)
       setLoading(false);
@@ -486,14 +489,14 @@ export function ActivityFeed({
       setFetchError(null);
     }
     // filterActive 时 ignore initial 变化 — 由 filter useEffect 主导
-  }, [initial, homeId, filterActive]);
+  }, [initial, homeId, filterActive, ownEventRequests]);
 
   // filter 变化时主动拉取(homeId 也走这里)
   useEffect(() => {
-    if (!filterActive) return; // 未筛选时由 prop sync useEffect 接管
+    if (!filterActive && !ownEventRequests) return;
     fetchPage({ mode: "replace", pageOffset: 0 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appliedSince, appliedBefore, homeId]);
+  }, [appliedSince, appliedBefore, homeId, ownEventRequests]);
 
   // SSE:实时事件流.
   // M7 仍订阅 + 越界丢弃;M6 dedup → merge;S6 visibility 守 + onopen reload.

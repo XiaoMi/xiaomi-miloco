@@ -25,6 +25,8 @@ export interface AsyncState<T> {
 export interface UseAsyncOptions {
   /** 错误时 toast 显示的描述（"加载家人信息失败"等）。空 = 不 toast */
   errorLabel?: string;
+  /** Do not fetch while the owning page is inactive; retain successful data. */
+  enabled?: boolean;
 }
 
 /**
@@ -46,7 +48,7 @@ export function createErrorToastGate(): { ok: () => void; fail: () => boolean } 
 }
 
 export function useAsync<T>(
-  fn: () => Promise<T>,
+  fn: (publish: (data: T) => void) => Promise<T>,
   deps: unknown[] = [],
   options: UseAsyncOptions = {},
 ): AsyncState<T> {
@@ -61,10 +63,14 @@ export function useAsync<T>(
   /** 把 toast 收成「转入错误时一次」（原因见文件头）。 */
   const gateRef = useRef(createErrorToastGate());
 
+  const enabled = options.enabled !== false;
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
   const pendingResolvers = useRef<Array<() => void>>([]);
   const reload = useCallback(
     () =>
       new Promise<void>((resolve) => {
+        if (!enabledRef.current) { resolve(); return; }
         pendingResolvers.current.push(resolve);
         setTick((x) => x + 1);
       }),
@@ -73,8 +79,17 @@ export function useAsync<T>(
 
   useEffect(() => {
     let cancelled = false;
+    if (!enabled) {
+      setLoading(false);
+      const waiting = pendingResolvers.current;
+      pendingResolvers.current = [];
+      waiting.forEach((resolve) => resolve());
+      return;
+    }
     setLoading(true);
-    fn()
+    fn((partial) => {
+      if (!cancelled) setData(partial);
+    })
       .then((d) => {
         if (!cancelled) {
           setData(d);
@@ -109,7 +124,7 @@ export function useAsync<T>(
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, tick]);
+  }, [...deps, tick, enabled]);
 
   // unmount 兜底:卸载后不再有接棒的新一轮拉取,把仍在等待的 reload() 全部唤醒,防调用方
   // await 永挂。(主 effect 的 cleanup 无法区分「卸载」与「deps/tick 变化重跑」,故单独用
