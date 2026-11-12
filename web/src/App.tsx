@@ -6,7 +6,6 @@ import { useEffect, useMemo, useState } from "react";
 import {
   getFeatures,
   getHomeStatus,
-  listActivity,
   listOnDemandLogs,
   listCameras,
   listDevices,
@@ -29,7 +28,7 @@ import {
 } from "./api";
 import { useAsync } from "./hooks/useAsync";
 import { miotTone } from "@/lib/miotTone";
-import type { Pet, Person } from "./lib/types";
+import type { Device, Pet, Person } from "./lib/types";
 import { Sidebar, MobileTabBar, type TabKey } from "./components/Sidebar";
 import { SettingsDrawer } from "./components/SettingsDrawer";
 import { HomeSwitcher } from "./components/HomeSwitcher";
@@ -124,6 +123,7 @@ function MainApp() {
   // backend 多家庭未上线,前端 homeId 永远 "primary"。切家走 onSwitchHome 调
   // switchScopeHome + window.location.reload(),不靠前端 homeId 状态触发 reload。
   const homeId: HomeId = "primary";
+  const [activeTab, setActiveTab] = useState<TabKey>("now");
 
   // ── 数据加载（按当前家拉取；mock 家走 empty）─────────
   // 传 errorLabel：这份状态按固定间隔重拉，但提示是**边沿触发**的——useAsync 的
@@ -174,16 +174,17 @@ function MainApp() {
   const scopeHomes = useAsync(() => listScopeHomes(homeId), [homeId], {
     errorLabel: t("app.loadScopeHomesFail"),
   });
-  const devices = useAsync(() => listDevices(homeId), [homeId], {
+  // Full property reads are needed only by the device controls page.
+  const devices = useAsync<Device[]>((publish) => listDevices(homeId, publish), [homeId], {
+    enabled: activeTab === "devices",
     errorLabel: t("app.loadDevicesFail"),
   });
   const scenes = useAsync(() => listScenes(homeId), [homeId], {
+    enabled: activeTab === "devices",
     errorLabel: t("app.loadScenesFail"),
   });
-  const activity = useAsync(() => listActivity(homeId), [homeId], {
-    errorLabel: t("app.loadActivityFail"),
-  });
   const onDemandLogs = useAsync(() => listOnDemandLogs(homeId), [homeId], {
+    enabled: activeTab === "activity",
     errorLabel: t("app.loadOnDemandLogsFail", "Failed to load on-demand logs"),
   });
   const deviceNames = useMemo(
@@ -192,10 +193,12 @@ function MainApp() {
   );
   // 家庭档案（候选区 + 正式区记忆）——家庭 tab 用，成员抽屉与非人面板共享。
   const home = useAsync(() => listHomeEntries(homeId), [homeId], {
+    enabled: activeTab === "family",
     errorLabel: t("app.loadHomeEntriesFail"),
   });
   // miloco 为家庭创建的持续任务——家庭 tab 家庭档案卡下方展示。
   const tasks = useAsync(() => listTasks(homeId), [homeId], {
+    enabled: activeTab === "tasks",
     errorLabel: t("app.loadTasksFail"),
   });
   // 宠物花名册（实验性，pet_recognition 开启才有意义）+ 功能开关状态。
@@ -210,7 +213,7 @@ function MainApp() {
   // (原本有 now state + 30s setInterval 给 Sidebar 显示时间，现 Sidebar
   // 已不展示时间；HeroNow 的 cam card 内部各自维护 1min 时钟。)
 
-  const [activeTab, setActiveTab] = useState<TabKey>("now");
+
   // 活动 tab 现为单流(事件 + 动作合并);筛选 checkbox 在 ActivityFeed 内部,不占 App state。
   const [editingPerson, setEditingPerson] = useState<Person | null | undefined>(
     undefined,
@@ -239,10 +242,8 @@ function MainApp() {
         // 网络断），不能让 HeroNow 拿 `scopeCameras.data ?? []` 退化成"账号下没
         // 相机"假态——cameras（PerceptionCamera 子集）可能仍有值,会让 hero 显
         // 空但状态条显"在看家"语义割裂,且没有 retry 入口。
-        // devices 也纳入聚合:HeroNow 用 devices 推 miotHasCamera,devices 拉
-        // 失败时 `(devices.data ?? []).some(...)` 会兜底成 false → 米家上明明有
-        // 摄像头但 hero 显"家里还没有摄像头",住户被误导去米家 app 加而非排查网络。
-        const err = persons.error ?? cameras.error ?? scopeCameras.error ?? devices.error;
+        // Scope cameras already establish camera presence; unrelated device properties must not block preview.
+        const err = persons.error ?? cameras.error ?? scopeCameras.error;
         if (err) {
           return (
             <TabPanelError
@@ -256,7 +257,7 @@ function MainApp() {
             />
           );
         }
-        if (!persons.data || !cameras.data || !scopeCameras.data || !devices.data) {
+        if (!persons.data || !cameras.data || !scopeCameras.data) {
           return <TabPanelLoading text={t("app.tabHomeLoading")} />;
         }
         return (
@@ -266,9 +267,7 @@ function MainApp() {
               pets={pets.data}
               petsEnabled={features.data?.petRecognition ?? false}
               scopeCameras={scopeCameras.data}
-              miotHasCamera={devices.data.some(
-                (d) => d.category === "camera",
-              )}
+              miotHasCamera={scopeCameras.data.length > 0}
               miotAuthDegraded={
                 status.data ? miotTone(status.data.miot) === "degraded" : false
               }
@@ -354,6 +353,7 @@ function MainApp() {
         }
         return (
           <div className="space-y-6">
+            {devices.loading && <div role="status" className="text-caption text-text-secondary">{t("app.tabDevicesLoading")}</div>}
             <DevicesByRoom
               devices={devices.data}
               scenes={scenes.data}
@@ -482,12 +482,10 @@ function MainApp() {
         return (
           <div className="space-y-6">
             <ActivityFeed
-              events={activity.data ?? []}
+              events={[]}
+              ownEventRequests
               homeId={homeId}
               activeHomeId={(scopeHomes.data ?? []).find((h) => h.inUse)?.homeId}
-              eventsLoading={activity.loading}
-              eventsError={activity.error}
-              onRetryEvents={() => activity.reload()}
               onDemandLogs={onDemandLogs.data}
               onDemandLoading={onDemandLogs.loading}
               onDemandError={onDemandLogs.error}

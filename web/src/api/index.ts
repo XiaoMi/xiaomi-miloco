@@ -319,9 +319,9 @@ export async function updateRuleQuery(
 }
 
 // ── 设备 ──────────────────────────────────────────────────
-export async function listDevices(homeId?: HomeId): Promise<Device[]> {
+export async function listDevices(homeId?: HomeId, onDirectory?: (devices: Device[]) => void): Promise<Device[]> {
   if (!isPrimary(homeId)) return [];
-  return impl.realListDevices();
+  return impl.realListDevices(onDirectory);
 }
 
 /** did → 该设备的 spec 表。日志页把台账里的 iid 翻成人话用。

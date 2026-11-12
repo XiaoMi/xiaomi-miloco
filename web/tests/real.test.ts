@@ -1016,3 +1016,24 @@ describe("realListTasks — summary 契约", () => {
     });
   });
 });
+
+describe("progressive device directory", () => {
+ it("publishes the catalog before a slow status request completes", async () => {
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 9_000_000);
+  let release!: (value: Response) => void;
+  globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+   const url = String(input);
+   if (url.includes("/api/miot/home")) return new Response(JSON.stringify({
+    code: 0, data: { devices: [{ did: "slow-device", name: "Lamp", category: "light", room: "Room", online: true }], areas: [], scenes: [], persons: [] },
+   }), { status: 200 });
+   return new Promise<Response>(resolve => { release = resolve; });
+  }) as typeof fetch;
+  const publish = vi.fn();
+  const finished = realListDevices(publish);
+  for (let i = 0; i < 20 && !release; i++) await new Promise(resolve => setTimeout(resolve, 0));
+  expect(publish).toHaveBeenCalledOnce();
+  expect(publish.mock.calls[0][0][0]).toMatchObject({ did: "slow-device", mainSwitch: undefined, props: [] });
+  release(new Response(JSON.stringify({ code: 0, data: { properties: [] } }), { status: 200 }));
+  expect((await finished)[0].did).toBe("slow-device");
+ });
+});

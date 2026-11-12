@@ -927,9 +927,53 @@ export async function realDeviceSpecs(): Promise<
   return byDid;
 }
 
-export async function realListDevices(): Promise<Device[]> {
+export async function realListDevices(onDirectory?: (devices: Device[]) => void): Promise<Device[]> {
   const r = await fetchMiotHome();
   const devices = r.data.devices;
+  function mapDevices(statusResults: BackendDeviceStatus["properties"][] | null): Device[] {
+  const mapped = devices.map((d, i) => {
+    const props = statusResults?.[i] ?? [];
+    const valueByIid = new Map(props.map((p) => [p.iid, p.value]));
+    const cat = mapCategory(d.category);
+    const dangerous = DANGEROUS_CATEGORIES.has(d.category ?? "");
+
+    // mainSwitch：约定 prop.2.1（开关）；只在它真的存在且 readable 时使用
+    const mainSwitchSpec = d.spec?.["prop.2.1"];
+    const mainSwitch =
+      statusResults !== null && mainSwitchSpec && mainSwitchSpec.format === "bool"
+        ? {
+            iid: "prop.2.1",
+            current: Boolean(valueByIid.get("prop.2.1") ?? false),
+          }
+        : undefined;
+
+    const allProps: DeviceProperty[] = Object.entries(d.spec ?? {})
+      .filter(([iid]) => iid.startsWith("prop."))
+      .map(([iid, spec]) => mapProp(iid, spec, valueByIid.get(iid)));
+    const statusKind = deviceStatusKind(d, mainSwitch?.current, valueByIid);
+
+    return {
+      did: d.did,
+      name: cleanDeviceName(d.name),
+      category: cat,
+      room: cleanRoom(d.room),
+      online: d.online,
+      statusText: statusResults === null && d.online ? i18n.t("common.loading", "Loading…") : humanDeviceStatus(d, valueByIid, statusKind),
+      statusKind,
+      dangerous,
+      mainSwitch,
+      props: statusResults === null ? [] : allProps,
+    };
+  });
+
+  // 按 (room, name) 排序，避免 backend 返回顺序抖动
+  return mapped.sort((a, b) => {
+    if (a.room !== b.room) return a.room.localeCompare(b.room, "zh");
+    return a.name.localeCompare(b.name, "zh");
+  });
+  }
+  onDirectory?.(mapDevices(null));
+
 
   // 拉每个设备的属性 status；单个 2.5s 超时——超了就当空属性。
   // 设备列表能立即出来，sheet 打开时再单独重新拉 status（TODO 后续做）。
@@ -951,46 +995,7 @@ export async function realListDevices(): Promise<Device[]> {
     6,
   );
 
-  const mapped = devices.map((d, i) => {
-    const props = statusResults[i];
-    const valueByIid = new Map(props.map((p) => [p.iid, p.value]));
-    const cat = mapCategory(d.category);
-    const dangerous = DANGEROUS_CATEGORIES.has(d.category ?? "");
-
-    // mainSwitch：约定 prop.2.1（开关）；只在它真的存在且 readable 时使用
-    const mainSwitchSpec = d.spec?.["prop.2.1"];
-    const mainSwitch =
-      mainSwitchSpec && mainSwitchSpec.format === "bool"
-        ? {
-            iid: "prop.2.1",
-            current: Boolean(valueByIid.get("prop.2.1") ?? false),
-          }
-        : undefined;
-
-    const allProps: DeviceProperty[] = Object.entries(d.spec ?? {})
-      .filter(([iid]) => iid.startsWith("prop."))
-      .map(([iid, spec]) => mapProp(iid, spec, valueByIid.get(iid)));
-    const statusKind = deviceStatusKind(d, mainSwitch?.current, valueByIid);
-
-    return {
-      did: d.did,
-      name: cleanDeviceName(d.name),
-      category: cat,
-      room: cleanRoom(d.room),
-      online: d.online,
-      statusText: humanDeviceStatus(d, valueByIid, statusKind),
-      statusKind,
-      dangerous,
-      mainSwitch,
-      props: allProps,
-    };
-  });
-
-  // 按 (room, name) 排序，避免 backend 返回顺序抖动
-  return mapped.sort((a, b) => {
-    if (a.room !== b.room) return a.room.localeCompare(b.room, "zh");
-    return a.name.localeCompare(b.name, "zh");
-  });
+  return mapDevices(statusResults);
 }
 
 /** iid → 住户能读的名字。`prop_description` 是 miot spec 的英文原名，`description`
