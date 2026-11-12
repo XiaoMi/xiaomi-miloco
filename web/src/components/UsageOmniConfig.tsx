@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { createConfigResponseGate } from "@/lib/configResponseGate";
 import { useTranslation } from "react-i18next";
 import {
   OMNI_CONFIG_STALE_EVENT,
@@ -216,14 +217,29 @@ export function UsageOmniConfig() {
     // 让当前页面同步 refetch 最新 config,避免视觉与实际状态错位。
     const onStale = () => void load();
     window.addEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
-    return () => window.removeEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
+    return () => {
+      configResponses.current.invalidate();
+      window.removeEventListener(OMNI_CONFIG_STALE_EVENT, onStale);
+    };
   }, []);
 
+  const configResponses = useRef(createConfigResponseGate());
+
+  function applyState(next: OmniConfigState) {
+    configResponses.current.invalidate();
+    setState(next);
+    setLoadErr(null);
+  }
+
   async function load() {
+    const ticket = configResponses.current.beginRead();
     try {
-      setState(await getOmniConfig());
+      const next = await getOmniConfig();
+      if (!configResponses.current.isCurrent(ticket)) return;
+      setState(next);
       setLoadErr(null);
     } catch (e) {
+      if (!configResponses.current.isCurrent(ticket)) return;
       setLoadErr(e instanceof Error ? e.message : t("usage.configLoadError"));
     }
   }
@@ -325,7 +341,7 @@ export function UsageOmniConfig() {
         original_label: target,
         activate: false, // 只入列表;启用由模型列表的「启用」负责
       });
-      setState(s);
+      applyState(s);
       setAdding(false);
       setEditing(null);
       // 保存后清掉该条旧的行内测试结果(key/model 可能已变,旧 ✓ 会误导)。
@@ -414,7 +430,7 @@ export function UsageOmniConfig() {
         toast(`${t("usage.cannotEnable")}：${testReason(res)}`, severityOf(res) === "warn" ? "warn" : "danger");
         return;
       }
-      setState(await activateOmniConfig({ label: p.label }));
+      applyState(await activateOmniConfig({ label: p.label }));
       toast(t("usage.activateSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.activateFailed"), "danger");
@@ -427,7 +443,7 @@ export function UsageOmniConfig() {
   async function onDeactivate(p: OmniProfile) {
     setDeactivating(p.label);
     try {
-      setState(await deactivateOmniConfig({ label: p.label }));
+      applyState(await deactivateOmniConfig({ label: p.label }));
       toast(t("usage.deactivateSuccess"), "ok");
     } catch (e) {
       toast(e instanceof Error ? e.message : t("usage.deactivateFailed"), "danger");
@@ -442,7 +458,7 @@ export function UsageOmniConfig() {
     if (!p) return;
     setDeleting(true);
     try {
-      setState(await deleteOmniConfig({ label: p.label }));
+      applyState(await deleteOmniConfig({ label: p.label }));
       setRowTestResults((m) => {
         const next = { ...m };
         delete next[p.label];
