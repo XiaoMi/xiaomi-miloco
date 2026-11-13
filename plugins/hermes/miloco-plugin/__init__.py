@@ -63,10 +63,9 @@ def register(ctx) -> None:
     # 现在:backend AgentPlatformAdapter (plugins/hermes/miloco-plugin/hermes_adapter/
     # adapter.py::build_system) 组装 OpenAI <system> 消息,塞硬约束/工具索引/感知格式
     # /数据源/档案/目录,缓存友好。
-    # 注:hook 仍然要注册(否则 Hermes 报 "plugin X 已加载但无 hook"),所以注册一个空函数。
     try:
-        ctx.register_hook("pre_llm_call", lambda *a, **kw: None)
-    except Exception as exc:  # noqa: BLE001
+        ctx.register_hook("pre_llm_call", lambda *args, **kwargs: None)
+    except Exception as exc:
         logger.exception("注册 pre_llm_call (空 noop) 失败: %s", exc)
 
     try:

@@ -217,6 +217,8 @@ def _wired_proxy_from(store, fake, *, home=("d1",), online=True):
 
     manager = object.__new__(Manager)
     manager._state_store = store
+    manager._observation_service = None
+    manager._observation_collector = None
     manager._miot_proxy = proxy
     manager._scope = 0
     manager._aligned_scope = 0

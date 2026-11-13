@@ -13,6 +13,7 @@ from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo, SystemConfigKeys
 from miloco.database.person_repo import PersonRepo
 from miloco.home_profile.service import HomeProfileService
+from miloco.iot_observation.integration import ObservationService, family_identity
 from miloco.miot.client import MiotProxy
 from miloco.miot.mips_listeners import PropTopUpListener
 from miloco.miot.service import MiotService
@@ -73,6 +74,9 @@ class Manager:
             cls._instance._top_up_attempts = {}
             # 对齐窗口里被早退掉的补拉需求。对齐完成后补一轮；切作用域时连同额度一起清
             cls._instance._top_up_pending = set()
+            cls._instance._observation_repository = None
+            cls._instance._observation_collector = None
+            cls._instance._observation_service = None
         return cls._instance
 
     def __init__(self):
@@ -208,6 +212,43 @@ class Manager:
             except Exception as e:
                 logger.error("对齐后补拉失败 did=%s: %s", did, e, exc_info=True)
 
+    async def _initialize_observation(self) -> None:
+        settings = get_settings().iot_observation
+        if not settings.enabled:
+            return
+        service = None
+        try:
+            service = ObservationService(
+                self, settings,
+                get_settings().directories.workspace_dir / "iot-observation.sqlite3",
+            )
+            await service.start()
+            self._observation_service = service
+            self._observation_repository = service.repository
+            self._observation_collector = service.collector
+        except Exception:
+            logger.warning("event=iot_observation_health reason=initialization_failed mode=observe_only")
+            if service is not None:
+                await service.stop()
+
+    async def stop_observation(self) -> None:
+        try:
+            if self._observation_service is not None:
+                await self._observation_service.stop()
+        except Exception:
+            logger.warning("event=iot_observation_health reason=shutdown_failed mode=observe_only")
+        finally:
+            self._observation_service = None
+            self._observation_collector = None
+            self._observation_repository = None
+
+    async def forget_observation_account(self, account_id: str | None) -> None:
+        if self._observation_service is not None and account_id:
+            try:
+                await self._observation_service.forget_account(account_id)
+            except Exception:
+                logger.warning("event=iot_observation_health reason=account_cleanup_failed mode=observe_only")
+
     def deinit_iot_push(self) -> None:
         """取消补拉的待触发计时器。
 
@@ -222,6 +263,8 @@ class Manager:
 
     def begin_scope_switch(self) -> int:
         """代号 +1 并返回新值。唯一的递增入口。"""
+        if self._observation_service is not None:
+            self._observation_service.scope_switched()
         self._scope += 1
         self._top_up_attempts.clear()
         self._top_up_pending.clear()
@@ -231,6 +274,8 @@ class Manager:
         """标记这一代已完成对齐。不是当前代就忽略 —— 那是迟到的旧对齐。"""
         if scope == self._scope:
             self._aligned_scope = scope
+            if self._observation_service is not None:
+                self._observation_service.aligned()
 
     def scope_is_aligned(self) -> bool:
         return self._aligned_scope == self._scope
@@ -245,6 +290,8 @@ class Manager:
         初始化还没跑完时只记一条日志、不起对齐 —— 这一代因此停在「未对齐」，依赖它的
         属性订阅门是关着的，正是安全的那一侧。
         """
+        if self._observation_collector is not None:
+            self._observation_collector.mark_alignment_started()
         if not self._initialized:
             logger.warning("初始化还没跑完，这一代不做状态对齐")
             return None
@@ -331,9 +378,11 @@ class Manager:
         self._miot_service = MiotService(
             self._miot_proxy,
             self._person_repo,
+            forget_observation_account=self.forget_observation_account,
         )
         self._person_service = PersonService(self._person_repo)
         self._home_profile_service = HomeProfileService(self._person_service)
+        await self._initialize_observation()
 
         # Initialize rule module
         async with mon.track_async(NodeName.RULE_SERVICE, "init"):
@@ -364,6 +413,17 @@ class Manager:
         self.device_uuid = device_uuid
 
     # Service access properties
+    @property
+    def observation_service(self):
+        return self._observation_service
+
+    def observation_family_id(self) -> str | None:
+        if not hasattr(self, "_kv_repo"):
+            return None
+        from miloco.miot.filter import allowed_home_ids
+
+        return family_identity(self._miot_service._current_uid_from_kv(), allowed_home_ids(self._kv_repo))
+
     @property
     def state_store(self) -> StateStore:
         return self._state_store

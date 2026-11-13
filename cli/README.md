@@ -43,6 +43,26 @@ Override with environment variables using `MILOCO_` prefix and `__` for nesting:
 MILOCO_SERVER__URL=https://192.168.1.100:1810 miloco-cli service status
 ```
 
+### IoT Observe sidecar
+
+IoT 事实旁路默认关闭；更新代码不会自动启用。部署新版后，在对应宿主的
+`MILOCO_HOME` 下启用：
+
+```bash
+miloco-cli config set iot_observation.enabled true
+miloco-cli config get iot_observation.enabled
+miloco-cli observe batch
+```
+
+`config set` 会在后端运行中尝试重启使配置生效；若服务未运行，需要执行
+`miloco-cli service start`。使用 `--no-restart` 写入配置时，需自行重启后端。
+`observe` 支持 `batch` / `submit`，与 `miloco-home-observe` Skill 和后端批次契约一致。
+
+`batch` 只读取事实，不推进水位，也不触发 Agent 分析。`disabled` 表示旁路未启用；
+`empty` 表示当前没有可读的新事件。共性总结与提交由家庭知识 Observe 执行，
+不是每轮家庭巡检执行；需要等待或通过宿主触发相应任务。旁路不自动晋升正式档案、
+发送通知或控制设备。
+
 ## License
 
 For license details, please see [LICENSE.md](https://raw.githubusercontent.com/XiaoMi/xiaomi-miloco/main/LICENSE.md).

@@ -1629,6 +1629,31 @@ class MIoTClient:
         """Whether the cloud MQTT (mips) client is currently connected."""
         return self._mips_cloud is not None and self._mips_cloud.is_connected
 
+    def _observation_health_changed(self, topic: str | None = None, *, ready: bool = False) -> None:
+        self._observation_health_epoch = getattr(self, "_observation_health_epoch", 0) + 1
+        topics = getattr(self, "_observation_health_topics", set())
+        self._observation_health_topics = topics
+        if topic is None:
+            topics.clear()
+        elif ready:
+            topics.add(topic)
+        else:
+            topics.discard(topic)
+
+    def observation_health(self) -> tuple[int, frozenset[str]]:
+        topics = getattr(self, "_observation_health_topics", set())
+        ready = frozenset(
+            did for did, source in self._props_sub_sources.items()
+            if source == SOURCE_CLOUD
+            and f"device/{did}/up/properties_changed/#" in topics
+            and f"device/{did}/state/#" in topics
+        ) if self.mips_connected else frozenset()
+        return getattr(self, "_observation_health_epoch", 0), ready
+
+    @property
+    def observation_generation(self) -> int:
+        return getattr(self, "_observation_health_epoch", 0)
+
     @property
     def mips_user_sub_error(self) -> Optional[str]:
         """Last user-level (`user/{uid}/g_op/...`) subscribe error.
@@ -2034,9 +2059,11 @@ class MIoTClient:
             )
         await mips.sub_device_state_async(did, self._on_device_state_msg)
         self._state_sub_dids.add(did)
+        self._observation_health_changed(f"device/{did}/state/#", ready=True)
 
     async def unsub_device_state_async(self, did: str) -> None:
         """Unsubscribe one device's cloud state topic."""
+        self._observation_health_changed(f"device/{did}/state/#")
         self._state_sub_dids.discard(did)
         mips = self._mips_cloud
         if mips is None:
@@ -2079,6 +2106,7 @@ class MIoTClient:
 
     async def _subscribe_props(self, did: str, source: str) -> None:
         """按指定通道订上,订不上就抛(调用方据此不记账)。"""
+        self._observation_health_changed(f"device/{did}/up/properties_changed/#")
         if source == SOURCE_LOCAL_CENTRAL:
             ch = getattr(self, "_central_hub", None)
             if ch is None:
@@ -2095,10 +2123,12 @@ class MIoTClient:
                 f"mips_cloud unavailable; device-props subscribe not issued did={did}"
             )
         await mips.sub_device_props_async(did, self._on_device_props_msg)
+        self._observation_health_changed(f"device/{did}/up/properties_changed/#", ready=True)
 
     async def _unsubscribe_props(
         self, did: str, source: str, keep: Optional[str] = None
     ) -> None:
+        self._observation_health_changed(f"device/{did}/up/properties_changed/#")
         if source == SOURCE_LOCAL_CENTRAL:
             ch = getattr(self, "_central_hub", None)
             if ch is not None:
@@ -2437,6 +2467,7 @@ class MIoTClient:
         self._callback_subscription_reset = callback
 
     def _on_mips_connect(self, connected: bool) -> None:
+        self._observation_health_changed()
         if not connected:
             return
         cb = self._callback_mips_connect
@@ -2459,6 +2490,7 @@ class MIoTClient:
         SUBACK has no bearing on whether bind detection is healthy.
         """
         topic, code, reason = info
+        self._observation_health_changed(topic)
         if not topic.startswith("user/"):
             return
         if code >= 0:
@@ -2483,6 +2515,7 @@ class MIoTClient:
         topics — a device-meta / home-scene re-subscribe success must not clear
         a genuine user-bind error (it would mask a real bind-detection outage).
         """
+        self._observation_health_changed(topic, ready=True)
         if not topic.startswith("user/"):
             return
         if self._mips_user_sub_error is not None:

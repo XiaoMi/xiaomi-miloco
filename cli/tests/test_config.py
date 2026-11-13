@@ -45,6 +45,21 @@ def test_load_config_returns_defaults_when_no_file():
     assert "tls_verify" not in cfg
 
 
+def test_iot_observation_can_be_enabled_from_cli(isolated_config):
+    from click.testing import CliRunner
+
+    from miloco_cli.main import cli
+
+    assert get_value("iot_observation.enabled") is False
+    result = CliRunner().invoke(cli, ["config", "set", "iot_observation.enabled", "true", "--no-restart"])
+    assert result.exit_code == 0, result.output
+    assert get_value("iot_observation.enabled") is True
+    assert json.loads(isolated_config.read_text())["iot_observation"]["enabled"] is True
+    result = CliRunner().invoke(cli, ["config", "set", "iot_observation.enabled", "false", "--no-restart"])
+    assert result.exit_code == 0, result.output
+    assert get_value("iot_observation.enabled") is False
+
+
 def test_load_config_merges_file(isolated_config):
     isolated_config.parent.mkdir(parents=True, exist_ok=True)
     isolated_config.write_text(
