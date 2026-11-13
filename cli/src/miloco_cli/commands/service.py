@@ -443,7 +443,7 @@ def _supervisorctl(*args: str, timeout: float = 8.0) -> subprocess.CompletedProc
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
-            args, returncode=1, stdout="", stderr="timeout"
+            args, returncode=1, stdout="", stderr=f"timeout after {timeout:g}s"
         )
 
 
@@ -499,28 +499,89 @@ def _resolve_backend_pid(cfg: dict, timeout: float = 8.0) -> int | None:
     return _find_pid_by_port(cfg["server"]["url"])
 
 
+def _startup_timeout_s() -> float:
+    """启动就绪等待上限：默认 90s，``MILOCO_STARTUP_TIMEOUT``（秒）可覆盖。"""
+    raw = os.environ.get(_STARTUP_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _STARTUP_TIMEOUT_DEFAULT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return _STARTUP_TIMEOUT_DEFAULT_S
+    return value if value > 0 else _STARTUP_TIMEOUT_DEFAULT_S
+
+
+def _port_open(url: str, timeout: float = 1.0) -> bool:
+    """端口是否已监听。uvicorn 先跑完 lifespan 再 bind，端口通即已进入 serve 阶段。"""
+    parsed = urlparse(url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def _wait_for_health(
     cfg: dict, pretty: bool, fatal_check: Callable[[], bool] | None = None
 ) -> None:
-    """轮询 /health，超时 30 秒。``fatal_check`` 返回 True 时判定启动失败提前退出
-    （supervisord 传 FATAL 检测；launchd 传 crashloop 检测，见
-    ``_launchd_crashloop_check``）。"""
+    """轮询 /health，上限 ``MILOCO_STARTUP_TIMEOUT``（默认 90s）。``fatal_check``
+    返回 True 时判定启动失败提前退出（supervisord 传 FATAL 检测；launchd 传
+    crashloop 检测，见 ``_launchd_crashloop_check``）。
+
+    超时不再一律判失败：慢启动与启动失败要分开。超时后若端口已监听（uvicorn 已
+    bind，只是感知管线/相机连接尚未就绪）就放行并告警；只有进程确实没起来才返回
+    非零。否则安装器会把「还在预热」当成失败，跳过账号绑定与插件部署。
+    """
     import httpx
 
+    timeout_s = _startup_timeout_s()
     health_url = cfg["server"]["url"].rstrip("/") + "/health"
-    deadline = time.time() + 30
+    deadline = time.time() + timeout_s
+    last_error = "no response yet"
     while time.time() < deadline:
         if fatal_check and fatal_check():
             print_result({"error": "process failed to start, check logs"}, pretty)
             sys.exit(1)
         try:
-            if httpx.get(health_url, timeout=2, verify=False).status_code == 200:
+            # 本地 backend 是 http（main.py 起 uvicorn 不带 ssl 参数），httpx 对 http 不做
+            # 证书校验，不传 verify —— verify=False 对 http 无作用，还会挂一条
+            # CodeQL request-without-cert-validation（回环地址上的误报）。
+            resp = httpx.get(health_url, timeout=2)
+            if resp.status_code == 200:
                 return
-        except Exception:
-            pass
+            last_error = f"HTTP {resp.status_code}"
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
         time.sleep(0.5)
+
+    if _port_open(cfg["server"]["url"]):
+        print_result(
+            {
+                "code": 0,
+                "message": "service still warming up",
+                "detail": (
+                    f"/health 未在 {timeout_s:g}s 内就绪（最后探测：{last_error}），"
+                    "但端口已监听、进程存活；继续执行，后续请求可能首次较慢"
+                ),
+                "hint": f"如需更长等待，设置 {_STARTUP_TIMEOUT_ENV}",
+            },
+            pretty,
+        )
+        return
+
+    try:
+        status = _supervisorctl("status", _PROGRAM_NAME).stdout.strip()
+    except Exception:
+        status = ""
     print_result(
-        {"error": "service did not become ready within 30s, check logs"}, pretty
+        {
+            "error": f"service did not become ready within {timeout_s:g}s",
+            "detail": f"最后探测：{last_error}；supervisor：{status or '(no status)'}",
+            "hint": f"确认日志后再调大 {_STARTUP_TIMEOUT_ENV}（当前 {timeout_s:g}s）",
+        },
+        pretty,
     )
     sys.exit(1)
 
@@ -1046,6 +1107,19 @@ _MILOCO_STOP_GRACE_S = 30.0
 # 等它没有意义。就绪的后端仍走 _MILOCO_STOP_GRACE_S，理由见上。
 _STOP_BUDGET_S = 3.0
 
+# 启动就绪等待上限。容器/低配机型上冷启动不只是 uvicorn bind：后端在 lifespan 之后
+# 才加载感知管线（5 个 ONNX 模型）、IdentityEngine 和相机连接，实测「Starting →
+# startup complete」16s、「→ 感知管线可用」25s+，再叠加首次模型解压就到 30s 边界。
+# 原实现写死 30s，安装器据此判失败并跳过后续步骤；这里放宽默认值并允许用
+# MILOCO_STARTUP_TIMEOUT（秒）覆盖。
+_STARTUP_TIMEOUT_ENV = "MILOCO_STARTUP_TIMEOUT"
+_STARTUP_TIMEOUT_DEFAULT_S = 90.0
+
+# restart 命令自身的 subprocess 预算。supervisord 的 stopwaitsecs 是 30s，就绪态
+# 后端的关停序列可能真的跑满这个窗口（#594 实测 Linux 容器 40.4s），调用方若按
+# 默认 8s 掐断，命令会在进程正常收尾途中被杀，表现为「restart failed: 」（空串）。
+_RESTART_CMD_TIMEOUT_S = _MILOCO_STOP_GRACE_S + 10.0
+
 
 def _cleanup_stale_port_holder(
     cfg: dict, pretty: bool, grace: float = _MILOCO_STOP_GRACE_S
@@ -1492,10 +1566,24 @@ def service_restart(ctx, pretty):
         _generate_supervisor_conf(shlex.join(cmd))
         _supervisorctl("reread")
         _supervisorctl("update")
-        result = _supervisorctl("restart", _PROGRAM_NAME)
+        result = _supervisorctl(
+            "restart", _PROGRAM_NAME, timeout=_RESTART_CMD_TIMEOUT_S
+        )
         if result.returncode != 0:
+            # supervisorctl 的失败原因写在 stderr（超时兜底还会带 "timeout after Ns"），
+            # 只拼 stdout 会得到空串，完全丢掉可诊断信息。
+            detail = " ".join(
+                part
+                for part in (result.stdout.strip(), (result.stderr or "").strip())
+                if part
+            )
             print_result(
-                {"error": f"supervisorctl restart failed: {result.stdout.strip()}"},
+                {
+                    "error": (
+                        f"supervisorctl restart failed (rc={result.returncode}): "
+                        f"{detail or 'no output'}"
+                    )
+                },
                 pretty,
             )
             sys.exit(1)
