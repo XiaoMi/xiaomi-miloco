@@ -5,37 +5,33 @@ import json
 import click
 
 
-@click.group(hidden=True)
-def observation_group() -> None:
+@click.group()
+def observe_group() -> None:
     """家庭知识 Observe 的 IoT 事实旁路。"""
 
 
-@observation_group.command("run", hidden=True)
+@observe_group.command("batch")
 @click.option("--pretty", is_flag=True)
-@click.option("--run-id", default=None)
-def observation_run(pretty: bool, run_id: str | None) -> None:
-    """兼容旧巡检调用，后端返回 retired，不执行分析。"""
-    from miloco_cli.client import api_post
-    from miloco_cli.output import print_result
-
-    print_result(api_post("/api/iot-observation/run", {"run_id": run_id}), pretty)
-
-
-@observation_group.command("batch")
-@click.option("--pretty", is_flag=True)
-def observation_batch(pretty: bool) -> None:
+def observe_batch(pretty: bool) -> None:
     """读取一批有界事实；不推进观察水位。"""
     from miloco_cli.client import api_post
+
     result = api_post("/api/iot-observation/batch")
-    click.echo(json.dumps(result, ensure_ascii=False, indent=2 if pretty else None,
-                         separators=None if pretty else (",", ":")))
+    click.echo(
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2 if pretty else None,
+            separators=None if pretty else (",", ":"),
+        )
+    )
 
 
-@observation_group.command("submit")
+@observe_group.command("submit")
 @click.option("--data", default=None, help="共性、差异与证据 JSON；空 observations 表示无发现")
 @click.option("--data-file", type=click.File("r", encoding="utf-8"), default=None)
 @click.option("--pretty", is_flag=True)
-def observation_submit(data, data_file, pretty: bool) -> None:
+def observe_submit(data, data_file, pretty: bool) -> None:
     """原子保存观察结果并确认批次；支持空结果。"""
     from miloco_cli.client import api_post
     from miloco_cli.output import print_result
