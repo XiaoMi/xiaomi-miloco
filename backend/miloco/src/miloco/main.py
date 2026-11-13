@@ -32,6 +32,7 @@ from miloco.config import get_settings, register_reset_hook
 from miloco.database.connector import init_database
 from miloco.dispatch import AgentDispatcher, set_agent_dispatcher
 from miloco.home_profile.router import router as home_profile_router
+from miloco.iot_observation.router import router as iot_observation_router
 from miloco.manager import get_manager
 from miloco.middleware.exception_handler import handle_exception
 from miloco.miot.router import router as miot_router
@@ -487,6 +488,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if iot_source is not None:
         await iot_source.stop()
     get_manager().deinit_iot_push()
+    await get_manager().stop_observation()
     get_manager().state_store.stop()
 
     # 关闭顺序遵循"生产者先于消费者":
@@ -571,6 +573,7 @@ app.include_router(miot_router, prefix="/api")
 app.include_router(person_router, prefix="/api")
 app.include_router(pet_router, prefix="/api")
 app.include_router(home_profile_router, prefix="/api")
+app.include_router(iot_observation_router, prefix="/api")
 app.include_router(rule_router, prefix="/api")
 app.include_router(schedule_router, prefix="/api")
 app.include_router(task_router, prefix="/api")

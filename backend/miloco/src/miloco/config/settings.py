@@ -484,6 +484,27 @@ class FeaturesSettings(BaseModel):
     )
 
 
+class IoTObservationSettings(BaseModel):
+    """家庭知识 Observe 的有界 IoT 事实旁路。"""
+
+    enabled: bool = Field(default=False, description="是否启用 IoT 离散状态观察")
+    timeout_seconds: float = Field(default=5.0, gt=0, le=30)
+    queue_size: int = Field(default=4096, gt=0, le=4096)
+    max_changes: int = Field(default=200_000, gt=0)
+    max_coverage: int = Field(default=100_000, gt=0)
+    max_attributes: int = Field(default=4096, gt=0)
+    soft_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
+    hard_bytes: int = Field(default=160 * 1024 * 1024, gt=0)
+    retention_days: int = Field(default=28, ge=28)
+    timezone: str = Field(default="Asia/Shanghai")
+    batch_events: int = Field(default=48, ge=1, le=48)
+    batch_bytes: int = Field(default=12288, ge=2048, le=12288)
+    max_observations: int = Field(default=128, ge=1, le=128)
+    max_evidence: int = Field(default=8192, ge=1, le=8192)
+    accumulated_days: int = Field(default=3, ge=3)
+    review_days: int = Field(default=7, ge=7)
+
+
 class DirectorySettings(BaseModel):
     """目录配置；派生路径均由 ``$MILOCO_HOME`` + ``storage`` 计算。"""
 
@@ -651,6 +672,10 @@ class MilocoSettings(BaseSettings):
     database: DatabaseSettings = Field(
         default_factory=DatabaseSettings,
         description="SQLite 数据库连接参数",
+    )
+    iot_observation: IoTObservationSettings = Field(
+        default_factory=IoTObservationSettings,
+        description="IoT 离散状态观察配置",
     )
     app: AppSettings = Field(
         default_factory=AppSettings,

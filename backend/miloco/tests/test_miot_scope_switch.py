@@ -47,6 +47,7 @@ class _FakeManager:
         self._scope = 0
         self._aligned_scope = -1
         self.aligns_started = 0
+        self.forget_observation_account = AsyncMock()
 
     def current_scope(self) -> int:
         return self._scope
@@ -235,6 +236,7 @@ async def test_unbinding_empties_the_container_and_starts_no_alignment(scene):
     scene.store.set("iot/device/old_account/status/online", True, source="iot_align")
 
     await scene.service.unbind_miot()
+    scene.manager.forget_observation_account.assert_awaited_once()
 
     assert scene.store.snapshot("iot/**") == {}
     assert scene.manager.aligns_started == 0

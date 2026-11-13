@@ -1019,6 +1019,7 @@ class MiotService:
         Unbind MIoT: fully clean up MIoT state and reinitialize to a clean state.
         """
         try:
+            observation_account = self._current_uid_from_kv()
 
             async def _rebuild() -> None:
                 self._clear_account_scope_state()
@@ -1035,6 +1036,9 @@ class MiotService:
 
             # 解绑之后没有账号，不起新对齐：只会拿不到设备、白打一轮日志
             await self._reset_state_scope(_rebuild, realign=False)
+            from miloco.manager import get_manager
+
+            await get_manager().forget_observation_account(observation_account)
         except Exception as e:
             logger.error("Failed to unbind MIoT: %s", e)
             raise MiotServiceException(f"Failed to unbind MIoT: {str(e)}") from e
