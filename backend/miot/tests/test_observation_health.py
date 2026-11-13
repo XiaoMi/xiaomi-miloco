@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from miot.client import MIoTClient
 from miot.action_result import SOURCE_CLOUD, SOURCE_LOCAL_CENTRAL
+from miot.client import MIoTClient
 
 
 def test_subscription_intent_is_not_health_and_reconnect_invalidates_proof():
