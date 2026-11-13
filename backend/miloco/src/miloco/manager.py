@@ -378,6 +378,7 @@ class Manager:
         self._miot_service = MiotService(
             self._miot_proxy,
             self._person_repo,
+            forget_observation_account=self.forget_observation_account,
         )
         self._person_service = PersonService(self._person_repo)
         self._home_profile_service = HomeProfileService(self._person_service)

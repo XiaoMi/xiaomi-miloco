@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import suppress
 from datetime import datetime, timedelta
 
 from miloco.iot_observation.catalog_policy import load_catalog_policy
@@ -210,10 +211,8 @@ class ObservationService:
                 self.collector.mark_alignment_started()
                 self.coverage = CoverageTracker()
                 logger.warning("event=iot_observation_health reason=collection_unavailable mode=observe_only")
-            try:
+            with suppress(TimeoutError):
                 await asyncio.wait_for(self._wake.wait(), timeout=60)
-            except TimeoutError:
-                pass
 
     async def forget_account(self, account_id):
         self.scope_switched()

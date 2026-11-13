@@ -1,3 +1,4 @@
+import pytest
 from miloco.iot_observation.models import ObservationAttribute
 
 
@@ -52,3 +53,42 @@ def test_service_sidecar_rejects_unaligned_and_changed_scope(tmp_path):
             service.read_batch()
     finally:
         service.repository.close()
+
+
+@pytest.mark.parametrize("wake_by_timeout", [True, False])
+def test_maintenance_repeats_after_timeout_or_wake_and_propagates_cancellation(tmp_path, monkeypatch, wake_by_timeout):
+    import asyncio
+    from unittest.mock import Mock
+
+    from miloco.config.settings import IoTObservationSettings
+    from miloco.iot_observation.integration import ObservationService
+
+    async def scenario():
+        service = ObservationService(Mock(), IoTObservationSettings(enabled=True), tmp_path / "db")
+        service.repository.open()
+        refreshes = []
+
+        async def refresh():
+            refreshes.append(True)
+            return False
+
+        async def wait_once(awaitable, timeout):
+            assert timeout == 60
+            if len(refreshes) == 1 and not wake_by_timeout:
+                service.aligned()
+                return await awaitable
+            awaitable.close()
+            if len(refreshes) == 1:
+                raise TimeoutError
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(service, "_refresh", refresh)
+        monkeypatch.setattr(asyncio, "wait_for", wait_once)
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await service._maintain()
+            assert len(refreshes) == 2
+        finally:
+            service.repository.close()
+
+    asyncio.run(scenario())

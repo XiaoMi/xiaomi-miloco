@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -144,10 +145,8 @@ class ObservationCollector:
         if self._worker is not None:
             await self.queue.join()
             self._worker.cancel()
-            try:
+            with suppress(asyncio.CancelledError):
                 await self._worker
-            except asyncio.CancelledError:
-                pass
             self._worker = None
 
     def mark_alignment_started(self) -> None:

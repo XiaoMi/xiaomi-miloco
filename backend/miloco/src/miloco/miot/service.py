@@ -448,9 +448,12 @@ class MiotService:
         self,
         miot_proxy: MiotProxy,
         person_repo: PersonRepo | None = None,
+        *,
+        forget_observation_account: Callable[[str | None], Awaitable[None]] | None = None,
     ):
         self._miot_proxy = miot_proxy
         self._person_repo = person_repo
+        self._forget_observation_account = forget_observation_account
         self._lru = LRUStore(miot_proxy._kv_repo.db_connector)
         # 相同通知文案的短窗去重兜底（窗口来自 config.json / settings.yaml
         # notify.dedup_window_sec）。防住 agent 顺序循环里同一条文案被反复重发、
@@ -1036,9 +1039,8 @@ class MiotService:
 
             # 解绑之后没有账号，不起新对齐：只会拿不到设备、白打一轮日志
             await self._reset_state_scope(_rebuild, realign=False)
-            from miloco.manager import get_manager
-
-            await get_manager().forget_observation_account(observation_account)
+            if self._forget_observation_account is not None:
+                await self._forget_observation_account(observation_account)
         except Exception as e:
             logger.error("Failed to unbind MIoT: %s", e)
             raise MiotServiceException(f"Failed to unbind MIoT: {str(e)}") from e
