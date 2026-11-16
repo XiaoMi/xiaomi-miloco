@@ -7,30 +7,48 @@
  *    并给示例话术一键复制。
  *  - 任务行：描述 + 进度摘要 + 启停开关；整行点击打开详情抽屉。
  *  - 详情抽屉：复用列表已加载的 summary 数据（含驱动规则 / 关联 / 进度），无需再拉
- *    单条全量视图。驱动规则在前（触发条件 / 执行动作结构化展示），进度可视化（进度条 /
- *    计时 / 计数），创建时间作次要信息。
+ *    单条全量视图。**先驱动规则、后执行动作**：前者回答「什么时候触发」，后者回答
+ *    「触发了做什么」，顺序与运行时的因果一致。
+ *  - 驱动规则按方向分块：进入（含前提）一块、退出一块。前提是闸门不是触发器，所以嵌
+ *    在进入块内部，与「触发条件」同级。
+ *  - 执行动作翻成人话：设备（房间）· 能力 · 值，一条一行。动作来自 task 的边界槽
+ *    （运行期唯一来源），规则上的旧动作列不展示——那是回退遗留，两处都显示会让人以为
+ *    动作配了两遍。
  *  - 抽屉编辑是「整屉一档」：底部一个「编辑」按钮把任务描述与每条规则的触发条件一起
  *    变成可填写状态，底部同一组「取消 / 保存」收口；保存只提交真正改过的字段——描述走
  *    PATCH /api/tasks/{id}，触发条件走 PATCH /api/rules/{id}（落库后 backend 会重新
  *    装载进 RuleRunner，新条件即时生效）。执行动作与推送仍由 Agent 接线，此处只读。
  */
 
-import type { ReactNode } from "react";
-import { useState } from "react";
+import type { ComponentType, ReactNode, SVGProps } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   deleteTask,
+  listDeviceMeta,
   setTaskEnabled,
   updateRuleQuery,
   updateTaskDescription,
 } from "@/api";
+import { useAsync } from "@/hooks/useAsync";
 import { useEscClose } from "@/hooks/useEscClose";
-import { IconHelp, IconPencil, IconTrash, IconX } from "@/lib/icons";
+import {
+  IconDoorIn,
+  IconDoorOut,
+  IconFunnel,
+  IconHelp,
+  IconPencil,
+  IconPlay,
+  IconShield,
+  IconTrash,
+  IconX,
+} from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
 import { ruleConditionIsEditable } from "@/lib/ruleBrief";
+import { describeTaskAction, type ActionCatalog } from "@/lib/taskAction";
 import type {
   Task,
-  TaskBoundaryActions,
+  TaskAction,
   TaskRecordSummary,
   TaskRuleBrief,
   TaskRuleDirection,
@@ -47,6 +65,7 @@ interface Props {
 }
 
 type TFn = ReturnType<typeof useTranslation>["t"];
+type IconComp = ComponentType<SVGProps<SVGSVGElement>>;
 
 // record 摘要 → 一行人话进度文案（列表行用）；无 record 返空串。
 function recordText(record: TaskRecordSummary | null, t: TFn): string {
@@ -77,14 +96,6 @@ function recordText(record: TaskRecordSummary | null, t: TFn): string {
   return parts.join(" · ");
 }
 
-// 动作文案切分：actions_desc 每条可能用「；」串了多个动作，拆成短句便于分行阅读。
-function splitActions(actionsDesc: string[]): string[] {
-  return actionsDesc
-    .flatMap((a) => a.split(/[；;]/))
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
 const DIRECTION_LABEL_KEY: Record<TaskRuleDirection, string> = {
   enter: "tasks.directionEnter",
   exit: "tasks.directionExit",
@@ -92,36 +103,14 @@ const DIRECTION_LABEL_KEY: Record<TaskRuleDirection, string> = {
   guard: "tasks.directionGuard",
 };
 
-// task 的动作槽 → 展示用的行。三个槽里 *_desc（交给 Agent）和 *_actions（设备直控）
-// 二者取其一，都空的槽不出现。
-function slotRows(
-  actions: TaskBoundaryActions,
-  t: TFn,
-): { key: string; label: string; text: string }[] {
-  const slots = [
-    [
-      "enter",
-      "tasks.slotEnter",
-      actions.onEnterDesc,
-      actions.onEnterActionCount,
-    ],
-    ["exit", "tasks.slotExit", actions.onExitDesc, actions.onExitActionCount],
-    [
-      "target",
-      "tasks.slotTarget",
-      actions.onTargetDesc,
-      actions.onTargetActionCount,
-    ],
-  ] as const;
-  return slots.flatMap(([key, labelKey, desc, count]) => {
-    const text = desc?.trim()
-      ? desc.trim()
-      : count > 0
-        ? t("tasks.slotDeviceActions", { count })
-        : "";
-    return text ? [{ key, label: t(labelKey), text }] : [];
-  });
-}
+// 方向 → 图标。进入/会话共用「门 + 向内箭头」，退出用「门 + 向外箭头」；
+// 前提是闸门，用盾。会话同时承载进出，取进入那枚。
+const DIRECTION_ICON: Record<TaskRuleDirection, IconComp> = {
+  enter: IconDoorIn,
+  session: IconDoorIn,
+  exit: IconDoorOut,
+  guard: IconShield,
+};
 
 // 轻量开关——on=品牌色 / off=中性边框色，无障碍 role="switch"。
 function Switch({
@@ -276,17 +265,20 @@ function ProgressViz({
   );
 }
 
-// 一节：小标题 + 内容。
+// 一节：图标 + 小标题 + 内容。图标是可选的——只有「驱动规则 / 执行动作」这两节用。
 function Section({
   title,
+  icon: Icon,
   children,
 }: {
   title: string;
+  icon?: IconComp;
   children: ReactNode;
 }) {
   return (
     <section>
-      <h3 className="text-caption font-semibold text-text-secondary uppercase tracking-wide mb-2">
+      <h3 className="flex items-center gap-1.5 text-caption font-semibold text-text-secondary uppercase tracking-wide mb-2">
+        {Icon && <Icon width={14} height={14} className="text-text-tertiary shrink-0" />}
         {title}
       </h3>
       {children}
@@ -294,36 +286,84 @@ function Section({
   );
 }
 
-// 单条驱动规则卡片：触发条件（编辑态下可改文本）+ 执行动作（只读，由 Agent 接线）。
-// 卡片自己不持编辑状态：编辑由外层抽屉整屉切换，草稿也存在抽屉里，这样描述与所有
-// 触发条件共用底部同一组「取消 / 保存」，不会每张卡各挂一副小按钮。
-function RuleBriefCard({
+// 方向徽标：图标 + 文字。同一个组件用在「触发条件」与「动作组」的标题上，
+// 两处指的是同一个方向（进入规则 → 进入动作），图标一致才能对上。
+function DirectionTag({ direction, t }: { direction: TaskRuleDirection; t: TFn }) {
+  const Icon = DIRECTION_ICON[direction];
+  return (
+    <span className="inline-flex items-center gap-1 text-caption px-1.5 py-0.5 rounded bg-bg-secondary text-text-secondary shrink-0">
+      <Icon width={14} height={14} />
+      {t(DIRECTION_LABEL_KEY[direction])}
+    </span>
+  );
+}
+
+// 规则名：等宽 + 浅底 pill。它是 prompt 里的标识、也是规则日志的检索键，
+// 做成「标识符」而不是标题——读正文时能跳过，要复制去查日志时一眼找到。
+function RuleNameBadge({ name }: { name: string }) {
+  if (!name) return null;
+  return (
+    <span className="font-mono text-caption text-text-tertiary bg-bg-secondary border border-border rounded-md px-2 py-0.5 break-all">
+      {name}
+    </span>
+  );
+}
+
+// 前提：暖色块 + 圆点列表。它是闸门不是触发器，颜色与「触发条件」分开，
+// 但层级上与它并列（同属「进入」的两个条件）。
+function GuardBlock({ rules }: { rules: TaskRuleBrief[] }) {
+  const { t } = useTranslation();
+  if (rules.length === 0) return null;
+  return (
+    <div className="mt-2 rounded-lg bg-warning-bg px-2.5 py-2">
+      <div className="flex items-center gap-2 mb-1 flex-wrap">
+        <span
+          className="inline-flex items-center gap-1 text-caption px-1.5 py-0.5 rounded text-white shrink-0"
+          style={{ background: "var(--color-warning)" }}
+        >
+          <IconShield width={14} height={14} />
+          {t("tasks.directionGuard")}
+        </span>
+        <span className="text-caption text-text-tertiary">
+          {t("tasks.guardsConjunction", { count: rules.length })}
+        </span>
+      </div>
+      <ul className="space-y-1 list-disc pl-[18px]">
+        {rules.map((r) => (
+          <li key={r.ruleId} className="text-body text-text-primary leading-relaxed break-words">
+            {r.query}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// 一条规则的卡片：方向 + 规则名 + 触发条件（可编辑）+ 前提（若有）。
+function RuleCard({
   rule,
-  t,
+  guards,
   editing,
   draft,
   onDraftChange,
 }: {
   rule: TaskRuleBrief;
-  t: TFn;
+  guards: TaskRuleBrief[];
   editing: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
 }) {
-  const actions = splitActions(rule.actionsDesc);
+  const { t } = useTranslation();
   const conditionIsReadOnly = !ruleConditionIsEditable(rule);
   return (
     <div className="rounded-xl bg-bg-primary border border-border overflow-hidden">
-      <div className="px-3.5 py-3 border-b border-border">
-        <div className="flex items-center gap-2 mb-1.5">
-          {/* 方向标签：一个 task 可以挂多条规则，进出各走各的路，不带这个就分不出
-              哪条把任务推进去、哪条推出来。 */}
-          <span className="text-caption px-1.5 py-0.5 rounded bg-bg-secondary text-text-secondary shrink-0">
-            {t(DIRECTION_LABEL_KEY[rule.direction])}
-          </span>
-          <div className="text-caption text-text-tertiary">
-            {t("tasks.triggerCondition")}
-          </div>
+      <div className="px-3.5 py-3">
+        <div className="flex items-start justify-between gap-3 mb-1.5">
+          <DirectionTag direction={rule.direction} t={t} />
+          <RuleNameBadge name={rule.name} />
+        </div>
+        <div className="text-caption text-text-tertiary mb-1">
+          {t("tasks.triggerCondition")}
         </div>
         {editing && !conditionIsReadOnly ? (
           <>
@@ -354,62 +394,99 @@ function RuleBriefCard({
             )}
           </>
         )}
+        <GuardBlock rules={guards} />
       </div>
-      {/* 动作只在 rule 自己带的时候显示。多条规则的 task 动作按设计不落在 rule 上,
-          由上方独立的动作块统一展示 —— 这里再写一句「无动作」是错的。 */}
-      {actions.length > 0 && (
-        <div className="px-3.5 py-3">
-          <div className="text-caption text-text-tertiary mb-1.5">
-            {t("tasks.ruleActions")}
-          </div>
-          <ul className="space-y-1.5">
-            {actions.map((a, i) => (
-              <li
-                key={i}
-                className="flex gap-2 text-body text-text-secondary leading-relaxed"
-              >
-                <span className="mt-[7px] h-1.5 w-1.5 rounded-full bg-brand-primary shrink-0" />
-                <span className="break-words">{a}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
     </div>
   );
 }
 
-// task 级动作：三个槽属于 task 而不属于任何单条规则, 所以独立成块放在规则列表上方。
-// 一个槽都没配时整个分区不渲染, 判断在调用处 —— 这里不再有空态分支
-function TaskActionsBlock({
-  rows,
+// 单个动作槽：交给 Agent 的文案 + 一条一行的人话动作。
+// 槽里既没有直控动作、也没有 Agent 文案时整块不渲染（判断在调用处）。
+function ActionSlot({
+  label,
+  actions,
+  desc,
+  catalog,
 }: {
-  rows: { key: string; label: string; text: string }[];
+  label: string;
+  actions: TaskAction[];
+  desc: string | null;
+  catalog: ActionCatalog;
 }) {
+  const { t } = useTranslation();
   return (
-    <div className="rounded-xl bg-bg-primary border border-border divide-y divide-border">
-      {rows.map((row) => (
-        <div key={row.key} className="flex gap-3 px-3.5 py-2.5">
-          <span className="text-caption text-text-tertiary shrink-0 w-8 mt-[3px]">
-            {row.label}
-          </span>
-          <span className="text-body text-text-secondary leading-relaxed break-words">
-            {row.text}
-          </span>
-        </div>
-      ))}
+    <div className="mb-2 last:mb-0">
+      <div className="mb-1 text-caption text-text-tertiary">{label}</div>
+      <div className="rounded-xl bg-bg-primary border border-border divide-y divide-border">
+        {desc?.trim() && (
+          <div className="px-3.5 py-2.5 text-body text-text-secondary leading-relaxed break-words">
+            {t("tasks.agentAction", { desc: desc.trim() })}
+          </div>
+        )}
+        {actions.map((action, i) => {
+          const d = describeTaskAction(action, catalog);
+          return (
+            <div
+              key={i}
+              title={d.raw}
+              className="px-3.5 py-2.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-body text-text-secondary"
+            >
+              <span
+                className={`text-caption px-1.5 py-0.5 rounded shrink-0 ${
+                  d.kind === "broadcast"
+                    ? "bg-brand-soft text-brand-primary"
+                    : "bg-bg-secondary text-text-secondary"
+                }`}
+              >
+                {t(
+                  d.kind === "broadcast"
+                    ? "tasks.actionKindBroadcast"
+                    : d.kind === "scene"
+                      ? "tasks.actionKindScene"
+                      : "tasks.actionKindControl",
+                )}
+              </span>
+              <span className="font-semibold text-text-primary break-all">
+                {d.device}
+              </span>
+              {d.room && (
+                <span className="text-caption text-text-tertiary">（{d.room}）</span>
+              )}
+              <span className="text-text-disabled">·</span>
+              <span className="break-all">{d.capability}</span>
+              {d.detail && (
+                <span className="text-text-primary break-words">{d.detail}</span>
+              )}
+              {d.chips.map((chip) => (
+                <span
+                  key={chip}
+                  className="text-caption px-1.5 py-0.5 rounded bg-bg-tertiary text-text-tertiary"
+                >
+                  {chip}
+                </span>
+              ))}
+              {d.unresolved && (
+                <span className="text-caption px-1.5 py-0.5 rounded bg-warning-bg text-warning">
+                  {t("tasks.chipUnresolvedTarget")}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
 
-// 详情抽屉：驱动规则在前，进度可视化，创建时间作次要信息；一个编辑态改描述 + 触发条件，
-// 外加删除。
+// 详情抽屉：驱动规则在前、执行动作在后；一个编辑态改描述 + 触发条件，外加删除。
 function TaskDetailSheet({
   task,
+  catalog,
   onClose,
   onChanged,
 }: {
   task: Task;
+  catalog: ActionCatalog;
   onClose: () => void;
   onChanged: () => void | Promise<void>;
 }) {
@@ -440,8 +517,42 @@ function TaskDetailSheet({
   });
 
   const paused = task.status === "paused";
-  const taskActionRows = slotRows(task.actions, t);
   const ruleDraft = (r: TaskRuleBrief) => ruleDrafts[r.ruleId] ?? r.query;
+
+  // 规则按方向分块：进入（或会话）一块并带上前提，退出一块。
+  // 前提是闸门、只能拦进入，所以不单列——单列会让人以为它也是一条触发路径。
+  const entryRule = task.ruleBriefs.find(
+    (r) => r.direction === "enter" || r.direction === "session",
+  );
+  const exitRule = task.ruleBriefs.find((r) => r.direction === "exit");
+  const guardRules = task.ruleBriefs.filter((r) => r.direction === "guard");
+
+  const enterActions = task.actions.onEnterActions;
+  const exitActions = task.actions.onExitActions;
+  const targetActions = task.actions.onTargetActions;
+
+  // 标题区统计：数量为 0 的项整条不渲染（与「没有前提就不显示前提」同一条规则），
+  // 量词统一（前提论「项」，动作论「条」）。
+  const stats: string[] = [];
+  if (guardRules.length > 0) {
+    stats.push(t("tasks.statGuards", { count: guardRules.length }));
+  }
+  if (enterActions.length > 0) {
+    stats.push(t("tasks.statEnterActions", { count: enterActions.length }));
+  }
+  if (exitActions.length > 0) {
+    stats.push(t("tasks.statExitActions", { count: exitActions.length }));
+  }
+  if (targetActions.length > 0) {
+    stats.push(t("tasks.statTargetActions", { count: targetActions.length }));
+  }
+
+  const enterSlotFilled =
+    enterActions.length > 0 || Boolean(task.actions.onEnterDesc?.trim());
+  const exitSlotFilled =
+    exitActions.length > 0 || Boolean(task.actions.onExitDesc?.trim());
+  const targetSlotFilled =
+    targetActions.length > 0 || Boolean(task.actions.onTargetDesc?.trim());
 
   // 一次保存整屉改动：描述 → PATCH /api/tasks/{id}；每条触发条件 → PATCH /api/rules/{id}
   // （只带 condition.query，感知设备 perceive_device_ids 由 backend 保留）。
@@ -518,7 +629,7 @@ function TaskDetailSheet({
         role="dialog"
         aria-modal="true"
         aria-labelledby="task-detail-title"
-        className="flex w-full max-h-[85vh] flex-col bg-bg-secondary border border-border rounded-t-2xl md:max-w-md md:rounded-2xl shadow-lg anim-in"
+        className="flex w-full max-h-[85vh] flex-col bg-bg-secondary border border-border rounded-t-2xl md:max-w-2xl md:rounded-2xl shadow-lg anim-in"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 头部 */}
@@ -571,6 +682,16 @@ function TaskDetailSheet({
                     )}
                   </span>
                 )}
+                {/* 结构统计：同为「任务现在是什么样」的状态展示，与上面两枚同族；
+                    与元信息（创建时间）分开——后者在主体末尾。 */}
+                {stats.map((s) => (
+                  <span
+                    key={s}
+                    className="ml-2 inline-block text-caption px-1.5 py-0.5 rounded bg-info-bg text-info"
+                  >
+                    {s}
+                  </span>
+                ))}
                 {paused && task.pausedAt && (
                   <span className="ml-2 text-caption text-text-tertiary num">
                     {t("tasks.pausedAtLabel", {
@@ -593,7 +714,7 @@ function TaskDetailSheet({
           </button>
         </div>
 
-        {/* 主体：驱动规则在前 → 进度 → 创建时间（次要） */}
+        {/* 主体：驱动规则 → 执行动作 → 进度 → 创建时间（次要） */}
         <div className="px-5 py-5 overflow-y-auto space-y-6">
           {/* 描述字段只在编辑态出现——浏览态它就是上面的大标题。 */}
           {editing && (
@@ -610,27 +731,36 @@ function TaskDetailSheet({
             </Section>
           )}
 
-          {taskActionRows.length > 0 && (
-            <Section title={t("tasks.taskActionsTitle")}>
-              <TaskActionsBlock rows={taskActionRows} />
-            </Section>
-          )}
-
-          <Section title={t("tasks.rulesTitle")}>
+          <Section title={t("tasks.rulesTitle")} icon={IconFunnel}>
             {task.ruleBriefs.length > 0 ? (
               <div className="space-y-3">
-                {task.ruleBriefs.map((r) => (
-                  <RuleBriefCard
-                    key={r.ruleId}
-                    rule={r}
-                    t={t}
+                {entryRule && (
+                  <RuleCard
+                    rule={entryRule}
+                    guards={guardRules}
                     editing={editing}
-                    draft={ruleDraft(r)}
+                    draft={ruleDraft(entryRule)}
                     onDraftChange={(v) =>
-                      setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
+                      setRuleDrafts((m) => ({ ...m, [entryRule.ruleId]: v }))
                     }
                   />
-                ))}
+                )}
+                {!entryRule && guardRules.length > 0 && (
+                  <div className="rounded-xl bg-bg-primary border border-border px-3.5 py-3">
+                    <GuardBlock rules={guardRules} />
+                  </div>
+                )}
+                {exitRule && (
+                  <RuleCard
+                    rule={exitRule}
+                    guards={[]}
+                    editing={editing}
+                    draft={ruleDraft(exitRule)}
+                    onDraftChange={(v) =>
+                      setRuleDrafts((m) => ({ ...m, [exitRule.ruleId]: v }))
+                    }
+                  />
+                )}
                 <p className="text-caption text-text-tertiary">
                   {task.ruleBriefs.some(ruleConditionIsEditable)
                     ? t("tasks.rulesManagedHint")
@@ -643,6 +773,35 @@ function TaskDetailSheet({
               </div>
             )}
           </Section>
+
+          {(enterSlotFilled || exitSlotFilled || targetSlotFilled) && (
+            <Section title={t("tasks.taskActionsTitle")} icon={IconPlay}>
+              {enterSlotFilled && (
+                <ActionSlot
+                  label={t("tasks.slotEnter")}
+                  actions={enterActions}
+                  desc={task.actions.onEnterDesc}
+                  catalog={catalog}
+                />
+              )}
+              {exitSlotFilled && (
+                <ActionSlot
+                  label={t("tasks.slotExit")}
+                  actions={exitActions}
+                  desc={task.actions.onExitDesc}
+                  catalog={catalog}
+                />
+              )}
+              {targetSlotFilled && (
+                <ActionSlot
+                  label={t("tasks.slotTarget")}
+                  actions={targetActions}
+                  desc={task.actions.onTargetDesc}
+                  catalog={catalog}
+                />
+              )}
+            </Section>
+          )}
 
           {task.record && (
             <Section title={t("tasks.progressLabel")}>
@@ -741,6 +900,19 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
   // null，抽屉自然收起。useAsync 重拉期间保留旧 data，故加载中不会闪空。
   const [detailId, setDetailId] = useState<string | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+
+  // 设备名 / 房间 / spec 与场景表：动作翻人话用。与设备页共用同一个 /api/miot/home
+  // 缓存，不额外拉每台设备的状态。拉不到时 catalog.ready=false，动作回落成裸 did。
+  const meta = useAsync(() => listDeviceMeta(), []);
+  const catalog = useMemo<ActionCatalog>(
+    () => ({
+      devices: new Map((meta.data?.devices ?? []).map((d) => [d.did, d])),
+      scenes: new Map((meta.data?.scenes ?? []).map((s) => [s.id, s.name])),
+      ready: meta.data !== undefined,
+      t,
+    }),
+    [meta.data, t],
+  );
 
   const run = async (taskId: string, fn: () => Promise<void>, okMsg: string) => {
     setBusyId(taskId);
@@ -873,6 +1045,7 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
         <TaskDetailSheet
           key={detail.taskId}
           task={detail}
+          catalog={catalog}
           onClose={() => setDetailId(null)}
           onChanged={onChanged}
         />

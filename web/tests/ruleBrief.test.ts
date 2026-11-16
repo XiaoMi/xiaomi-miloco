@@ -10,6 +10,7 @@ import type { TaskRuleBrief } from "@/lib/types";
 function brief(overrides: Partial<TaskRuleBrief> = {}): TaskRuleBrief {
   return {
     ruleId: "r1",
+    name: "[r1] 有人在门口",
     query: "有人在门口",
     direction: "enter",
     sourceType: "omni",

@@ -979,9 +979,10 @@ describe("realListTasks — summary 契约", () => {
     expect(task.ruleBriefs.map((r) => r.direction)).toEqual(["enter", "exit"]);
     expect(task.actions?.onEnterDesc).toBe("推一条消息");
     expect(task.actions?.onExitDesc).toBe("推一条下线");
-    // *_actions 只留条数：住户界面不渲染设备指令的原始结构
-    expect(task.actions?.onTargetActionCount).toBe(1);
-    expect(task.actions?.onEnterActionCount).toBe(0);
+    // *_actions 原样带出：抽屉要把 did/iid 翻成「哪个设备的哪个动作」
+    expect(task.actions?.onTargetActions).toHaveLength(1);
+    expect(task.actions?.onTargetActions[0]?.did).toBe("d1");
+    expect(task.actions?.onEnterActions).toHaveLength(0);
   });
 
   it("旧 backend 不返这三样时给缺省值，不崩", async () => {
@@ -1010,9 +1011,9 @@ describe("realListTasks — summary 契约", () => {
       onEnterDesc: null,
       onExitDesc: null,
       onTargetDesc: null,
-      onEnterActionCount: 0,
-      onExitActionCount: 0,
-      onTargetActionCount: 0,
+      onEnterActions: [],
+      onExitActions: [],
+      onTargetActions: [],
     });
   });
 });

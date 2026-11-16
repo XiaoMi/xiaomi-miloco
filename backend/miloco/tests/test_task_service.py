@@ -129,6 +129,8 @@ def test_create_task_then_rule_auto_links(service):
     assert len(view.rule_briefs) == 1
     assert view.rule_briefs[0].rule_id == rule_id
     assert view.rule_briefs[0].query == "客厅有人"
+    # 规则名要跟着带上：prompt 的「# 待判断规则」段用的就是它，详情页要照它查日志
+    assert view.rule_briefs[0].name == "[t1] r"
 
 
 def test_create_task_defaults_to_permanent(service):

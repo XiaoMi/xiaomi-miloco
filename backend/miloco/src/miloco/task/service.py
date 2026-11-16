@@ -216,6 +216,7 @@ class TaskService:
             rule_briefs.append(
                 RuleBrief(
                     rule_id=rule.id,
+                    name=rule.name,
                     query=rule.condition.query,
                     direction=rule.resolved_direction.value,
                     source_type=rule.resolved_source_type,

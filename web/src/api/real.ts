@@ -45,6 +45,7 @@ import type {
   OmniModelsResult,
   UpgradeCheck,
   UpgradeStatus,
+  TaskAction,
   TaskRuleDirection,
   TaskRuleSourceType,
 } from "@/lib/types";
@@ -1195,6 +1196,39 @@ export async function realListScenes(): Promise<Scene[]> {
   return r.data.scenes.map((s) => ({ id: s.scene_id, name: s.scene_name }));
 }
 
+// ── 任务详情用：设备名 / 房间 / spec（不拉状态） ──────────────
+export interface TaskDeviceMeta {
+  did: string;
+  name: string;
+  room?: string;
+  spec?: Record<string, BackendPropSpec>;
+}
+
+export interface TaskSceneMeta {
+  id: string;
+  name: string;
+}
+
+/** 动作台账要回答「哪个设备的哪个动作」，只需要 did → 名字/房间/spec 与场景表。
+ *
+ * 不复用 ``realListDevices``：那个会为**每台设备**打一次 /status（30+ 设备时几十个
+ * 请求，受 MiOT 云端限频），而详情页只做文案翻译，一个状态都用不到。 */
+export async function realListDeviceMeta(): Promise<{
+  devices: TaskDeviceMeta[];
+  scenes: TaskSceneMeta[];
+}> {
+  const r = await fetchMiotHome();
+  return {
+    devices: r.data.devices.map((d) => ({
+      did: d.did,
+      name: cleanDeviceName(d.name),
+      room: cleanRoom(d.room),
+      spec: d.spec,
+    })),
+    scenes: r.data.scenes.map((s) => ({ id: s.scene_id, name: s.scene_name })),
+  };
+}
+
 export async function realTriggerScene(id: string): Promise<void> {
   await apiFetch<Normal<unknown>>(`/api/miot/scenes/${id}/trigger`, {
     method: "POST",
@@ -2320,6 +2354,17 @@ async function fetchUsageStats(
 // TaskSummaryView 继承 TaskFullView，除基础字段 + record 外，本就带驱动规则
 // （rule_briefs）/ paused_at；一并映射，详情抽屉直接复用列表数据，
 // 不再单独拉 GET /api/tasks/{id}。
+interface BackendAction {
+  did: string;
+  iid: string;
+  value?: unknown;
+  params?: unknown[] | null;
+  idempotent?: boolean;
+  cooldown_minutes?: number | null;
+  cooldown_seconds?: number | null;
+  generate?: unknown;
+}
+
 interface BackendTaskSummary {
   task_id: string;
   description: string;
@@ -2329,17 +2374,18 @@ interface BackendTaskSummary {
   runtime_state?: "off" | "on";
   rule_briefs?: {
     rule_id: string;
+    name?: string;
     query: string;
     direction?: TaskRuleDirection;
     source_type?: TaskRuleSourceType;
     actions_desc?: string[];
   }[];
   actions?: {
-    on_enter_actions?: unknown[];
+    on_enter_actions?: BackendAction[];
     on_enter_desc?: string | null;
-    on_exit_actions?: unknown[];
+    on_exit_actions?: BackendAction[];
     on_exit_desc?: string | null;
-    on_target_actions?: unknown[];
+    on_target_actions?: BackendAction[];
     on_target_desc?: string | null;
   } | null;
   record: {
@@ -2349,6 +2395,19 @@ interface BackendTaskSummary {
     window_remaining: { seconds: number; display: string } | null;
     derived: Record<string, unknown>;
   } | null;
+}
+
+function mapTaskAction(a: BackendAction): TaskAction {
+  return {
+    did: a.did,
+    iid: a.iid,
+    value: a.value,
+    params: a.params ?? null,
+    idempotent: a.idempotent,
+    cooldownSeconds: a.cooldown_seconds ?? null,
+    cooldownMinutes: a.cooldown_minutes ?? null,
+    generate: a.generate,
+  };
 }
 
 export async function realListTasks(): Promise<Task[]> {
@@ -2364,6 +2423,7 @@ export async function realListTasks(): Promise<Task[]> {
     runtimeState: t.runtime_state ?? "off",
     ruleBriefs: (t.rule_briefs ?? []).map((b) => ({
       ruleId: b.rule_id,
+      name: b.name ?? "",
       query: b.query,
       direction: b.direction ?? "enter",
       sourceType: b.source_type ?? "omni",
@@ -2375,9 +2435,9 @@ export async function realListTasks(): Promise<Task[]> {
       onEnterDesc: t.actions?.on_enter_desc ?? null,
       onExitDesc: t.actions?.on_exit_desc ?? null,
       onTargetDesc: t.actions?.on_target_desc ?? null,
-      onEnterActionCount: (t.actions?.on_enter_actions ?? []).length,
-      onExitActionCount: (t.actions?.on_exit_actions ?? []).length,
-      onTargetActionCount: (t.actions?.on_target_actions ?? []).length,
+      onEnterActions: (t.actions?.on_enter_actions ?? []).map(mapTaskAction),
+      onExitActions: (t.actions?.on_exit_actions ?? []).map(mapTaskAction),
+      onTargetActions: (t.actions?.on_target_actions ?? []).map(mapTaskAction),
     },
     record: t.record
       ? {

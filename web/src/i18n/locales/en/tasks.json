@@ -60,6 +60,26 @@
     "example3": "Let me know if a window is left open when nobody's home",
     "viewExamples": "How to add a task",
     "triggerNotEditable": "This condition is generated from a device property and cannot be edited here.",
-    "rulesManagedHintReadOnly": "Trigger conditions are generated from device properties and cannot be edited. Actions and push notifications are created and managed by the Agent; chat with it to adjust."
+    "rulesManagedHintReadOnly": "Trigger conditions are generated from device properties and cannot be edited. Actions and push notifications are created and managed by the Agent; chat with it to adjust.",
+    "statGuards": "{{count}} precondition(s)",
+    "statEnterActions": "{{count}} enter action(s)",
+    "statExitActions": "{{count}} exit action(s)",
+    "statTargetActions": "{{count}} target action(s)",
+    "actionKindBroadcast": "Announce",
+    "actionKindControl": "Control",
+    "actionKindScene": "Trigger scene",
+    "sceneTarget": "Mi Home scene \"{{name}}\"",
+    "sceneTargetUnknown": "Unknown scene",
+    "unknownDevice": "Unknown device {{did}}",
+    "generatedByOmni": "Text generated from the scene",
+    "actionParamSep": ", ",
+    "chipCooldownSeconds": "cooldown {{n}}s",
+    "chipCooldownMinutes": "cooldown {{n}}min",
+    "chipNoCooldown": "no cooldown",
+    "chipIdempotent": "idempotent",
+    "chipNonIdempotent": "not idempotent",
+    "chipUnresolvedTarget": "device not visible now",
+    "guardsConjunction": "all {{count}} must hold",
+    "agentAction": "Handled by the Agent: {{desc}}"
   }
 }
