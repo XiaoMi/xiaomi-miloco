@@ -93,7 +93,7 @@ UNREACHABLE_MESSAGES = {
     "camera_unreachable_cross_subnet": (
         "跨网段拉流失败，建议将摄像头与主机接入同一网络，或把路由器设置为 全锥/开放 NAT"
     ),
-    "camera_unreachable": "暂未收到摄像头画面，可重试连接",
+    "camera_unreachable": "暂未收到摄像头画面",
 }
 
 
@@ -124,7 +124,7 @@ async def _first_frame_watchdog(
     ``CancelledError`` 直接向上抛,不吞。
 
     跨网段相机即便探测/注册成功也可能因路由器 NAT 类型限制拉流建不起来(首帧永不到),
-    此时给跨 NAT 专属提示,而不是笼统的「可能不在同一局域网/离线」——后者对已跨网段
+    此时给跨 NAT 专属提示,而不是笼统的「暂未收到摄像头画面」——后者对已跨网段
     的住户没有任何信息量。判据一律在**判定时刻现取** ``_nat_blocked``,不接受调用方
     传进来的快照:跨网段标记要等局域网首次探到这台相机才从空翻真(探测周期 5~45s,
     见 ``lan.py``),而住户往往在主机刚起、首包还没回来时就点开了播放页,那一刻的
@@ -168,8 +168,8 @@ async def _first_frame_watchdog(
     # NAT 阻断判据在选文案时**重新取一次**：走续等那条路时又过了 60s，会话可能
     # 刚跨过 _STREAM_NAT_TIMEOUT。与列表接口的 stream_error 共用 stream_nat_blocked
     # 这个唯一入口（云端离线 / 局域网探不到 → 不给 NAT 提示），保证同一台相机在
-    # 播放页与「家里此刻」卡片上不会各说一套——相机只是断电时，通用文案里的
-    # 「或摄像头离线」才是对住户有用的线索，指向路由器 NAT 是错误方向。
+    # 播放页与「家里此刻」卡片上不会各说一套——无帧不足以证明离线，
+    # 不应在没有证据时指向路由器 NAT。
     reason = (
         "camera_unreachable_cross_subnet"
         if _nat_blocked(camera_id)

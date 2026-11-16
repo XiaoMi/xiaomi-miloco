@@ -83,6 +83,7 @@ const I18N = {
   zh: {
     camPlaceholder: "加载摄像头列表中…",
     reconnect: "重连",
+    connectRetry: (s) => `无法连接服务，请检查网络或重新打开页面刷新授权；${s} 秒后重试…`,
     streamWaiting: "暂未收到摄像头画面，等待恢复…",
     streamRetry: (s) => `暂未收到画面，${s} 秒后自动重连…`,
     refreshTitle: "刷新摄像头列表",
@@ -100,7 +101,7 @@ const I18N = {
     disconnected: (code, reason) => `已断开 (${code})${reason ? " — " + reason : ""}`,
     wsError: "WebSocket 错误",
     camConnectedWaiting: "已连接摄像头，等待画面…",
-    camUnreachable: "连不上摄像头（可能不在同一局域网，或摄像头离线）",
+    camUnreachable: "暂未收到摄像头画面，可稍后重试",
     // 与 web/src/i18n/locales/zh/hero.json 的 hero.streamErrorCrossSubnetNat 是同一句
     // 的两份独立副本（播放页查这张表，「家里此刻」卡片查 hero.json）。改措辞要同时改。
     // tests/crossSubnetCopySync.test.ts 会断言两份相等，漏改一处会红。
@@ -123,6 +124,7 @@ const I18N = {
   en: {
     camPlaceholder: "Loading camera list…",
     reconnect: "Reconnect",
+    connectRetry: (s) => `Cannot connect; check network or reopen this page to refresh authorization. Retrying in ${s}s…`,
     streamWaiting: "No camera frames yet; waiting for recovery…",
     streamRetry: (s) => `No camera frames; retrying in ${s}s…`,
     refreshTitle: "Refresh camera list",
@@ -140,7 +142,7 @@ const I18N = {
     disconnected: (code, reason) => `Disconnected (${code})${reason ? " — " + reason : ""}`,
     wsError: "WebSocket error",
     camConnectedWaiting: "Camera connected, waiting for video…",
-    camUnreachable: "Couldn't reach the camera (it may be on another network, or offline)",
+    camUnreachable: "No camera frames yet; you can retry shortly",
     // Keep in sync with hero.streamErrorCrossSubnetNat in
     // web/src/i18n/locales/en/hero.json — see tests/crossSubnetCopySync.test.ts.
     camUnreachableCrossSubnet: "Cross-subnet streaming failed. Try putting the camera and host on the same network, or set the router to Full Cone / Open NAT",
@@ -448,11 +450,11 @@ function connect() {
   beginConnection();
 }
 
-function scheduleReconnect() {
+function scheduleReconnect(key = "streamRetry") {
   if (!pageActive || retryTimer !== null) return;
   const delay = Math.min(30000, 1000 * 2 ** Math.min(retryAttempt++, 5));
   $("loading")?.classList.remove("hidden");
-  setState(t("streamRetry", Math.ceil(delay / 1000)), true);
+  setState(t(key, Math.ceil(delay / 1000)), true);
   retryTimer = setTimeout(() => {
     retryTimer = null;
     if (pageActive) beginConnection();
@@ -484,6 +486,7 @@ function beginConnection() {
   // 可有可无的"冗余"——在不支持 {signal} 的老 webview 上它是唯一的正确性保证,在新
   // 浏览器上则兜"事件已入队、abort 在派发前一刻才到"的极端时序。
   const thisWs = ws;
+  let wsOpened = false;
   wsAbort = new AbortController();
   const sig = wsAbort.signal;
 
@@ -492,6 +495,7 @@ function beginConnection() {
   // 看到"已连接"却永远没画面。真正的"已连接"语义留给收到 init 信令(见 onMessage)。
   thisWs.addEventListener("open", () => {
     if (thisWs !== ws) return;
+    wsOpened = true;
     setState(t("connectingCam"));
   }, { signal: sig });
   thisWs.addEventListener("close", (ev) => {
@@ -507,7 +511,7 @@ function beginConnection() {
     // Retry only this known transient error, or transient transport close codes.
     if (retryCameraError || (!serverWillClose &&
         [1001, 1005, 1006, 1011, 1012, 1013, 1014].includes(ev.code))) {
-      scheduleReconnect();
+      scheduleReconnect(wsOpened ? "streamRetry" : "connectRetry");
     }
   }, { signal: sig });
   thisWs.addEventListener("error", () => {

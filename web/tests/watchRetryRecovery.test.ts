@@ -139,3 +139,15 @@ it("honors an explicit non-retryable server verdict", () => {
     vi.useRealTimers();
   }
 });
+
+it("does not diagnose handshake rejection as a camera failure", () => {
+  vi.useFakeTimers();
+  try {
+    const page = boot();
+    page.sockets[0].disconnect(1006);
+    expect(page.get("state").textContent).toContain("授权");
+    expect(page.get("state").textContent).not.toContain("画面");
+    vi.advanceTimersByTime(1000);
+    expect(page.sockets).toHaveLength(2);
+  } finally { vi.clearAllTimers(); vi.useRealTimers(); }
+});

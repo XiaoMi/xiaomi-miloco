@@ -189,8 +189,7 @@ def test_without_nat_evidence_sends_generic_reason():
     典型场景：相机被拔电，云端心跳先超时把 online 置 False，LAN 侧 100s 保活窗
     未到期。此刻 ``stream_nat_blocked`` 因云端离线门返回 False，列表接口不给 NAT
     诊断；播放页必须同口径。历史失败模式是绕开这个唯一入口另看一份跨网段标记：
-    相机只是断电，住户却被指去改路由器 NAT，且通用文案里「或摄像头离线」这条真正
-    有用的线索反而没出现。
+    相机只是断电，住户却被指去改路由器 NAT。
     """
     ws = _run_watchdog(nat_blocked=False)
     payload = _sent_payload(ws)
@@ -245,3 +244,10 @@ def test_fired_log_reports_full_wait_on_normal_path(caplog):
     assert _fired_wait_seconds(caplog) == (
         router._FIRST_FRAME_TIMEOUT_S + router._GRACE_EXTENSION_S
     )
+
+def test_generic_timeout_is_retryable():
+    assert _sent_payload(_run_watchdog())["retryable"] is True
+
+
+def test_nat_verdict_is_terminal():
+    assert _sent_payload(_run_watchdog(nat_blocked=True))["retryable"] is False
