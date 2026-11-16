@@ -7,7 +7,7 @@
  */
 
 import * as realImpl from "./real";
-import type { BackendPropSpec, TaskDeviceMeta, TaskSceneMeta } from "./real";
+import type { BackendPropSpec, TaskDeviceMeta } from "./real";
 import { apiFetch } from "./client";
 import { decodeGraphResponse } from "@/lib/graphDecode";
 import type {
@@ -337,7 +337,7 @@ export async function listDeviceSpecs(
  *  与 listDeviceSpecs 走同一个 /api/miot/home 取数与缓存，不拉每台设备的状态。 */
 export async function listDeviceMeta(
   homeId?: HomeId,
-): Promise<{ devices: TaskDeviceMeta[]; scenes: TaskSceneMeta[] }> {
+): Promise<{ devices: TaskDeviceMeta[]; scenes: Scene[] }> {
   if (!isPrimary(homeId)) return { devices: [], scenes: [] };
   return impl.realListDeviceMeta();
 }

@@ -15,20 +15,14 @@
  * 这边读的是**任务动作槽里的原始动作对象**，两者字段形态不同，不要合并。
  */
 
-import { propValueText, specLabel, type BackendPropSpec } from "@/api/real";
+import { propValueText, specLabel, type TaskDeviceMeta } from "@/api/real";
 import type { TaskAction } from "@/lib/types";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
-export interface ActionDeviceMeta {
-  did: string;
-  name: string;
-  room?: string;
-  spec?: Record<string, BackendPropSpec>;
-}
-
 export interface ActionCatalog {
-  devices: Map<string, ActionDeviceMeta>;
+  /** 与 realListDeviceMeta 返回的设备元数据同源，不另立一份。 */
+  devices: Map<string, TaskDeviceMeta>;
   /** scene_id → 场景名 */
   scenes: Map<string, string>;
   /** 设备表是否已落地。未落地时 did 原样显示（不报「未知设备」——那是「查过了没有」）。 */
@@ -75,7 +69,9 @@ export function describeTaskAction(
         : catalog.ready
           ? t("tasks.sceneTargetUnknown")
           : did,
-      capability: t("tasks.actionKindScene"),
+      // 场景行没有「能力」这一层：类型徽标已经写了「触发场景」，这里再填一遍
+      // 会变成「[触发场景] 米家场景「回家」· 触发场景」。
+      capability: "",
       detail: name || !catalog.ready ? null : did,
       chips: cooldownChips(action, t),
       raw,
@@ -92,7 +88,7 @@ export function describeTaskAction(
 
   let detail: string | null;
   if (action.generate) {
-    // params 里是 {{result}} 占位符，直接显示会被当成最终文案。
+    // 生成式动作：带该标记时 params 里是 {{result}} 占位符，直接显示会被当成最终文案。
     detail = t("tasks.generatedByOmni");
   } else if (isActionCall) {
     const params = (action.params ?? [])
@@ -119,7 +115,7 @@ export function describeTaskAction(
   };
 }
 
-/** 冷却：秒级优先；0 是显式关闭。与后端 `effective_cooldown_seconds` 同口径。 */
+/** 冷却：秒级字段优先、0 表示显式关闭；后端只给分钟级时回落到分钟。 */
 function cooldownChips(action: TaskAction, t: Translate): string[] {
   const seconds = action.cooldownSeconds;
   if (seconds !== null && seconds !== undefined) {

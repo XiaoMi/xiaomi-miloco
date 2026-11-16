@@ -5,11 +5,8 @@
  */
 
 import { describe, expect, it } from "vitest";
-import {
-  describeTaskAction,
-  type ActionCatalog,
-  type ActionDeviceMeta,
-} from "@/lib/taskAction";
+import type { TaskDeviceMeta } from "@/api/real";
+import { describeTaskAction, type ActionCatalog } from "@/lib/taskAction";
 import type { TaskAction } from "@/lib/types";
 
 /** i18n 桩：把 key 与插值原样带出，断言时能同时看到「用了哪个 key」和「传了什么参数」。
@@ -22,7 +19,7 @@ const t = (key: string, opts?: Record<string, unknown>): string => {
   return `${key}(${args})`;
 };
 
-function device(over: Partial<ActionDeviceMeta> = {}): ActionDeviceMeta {
+function device(over: Partial<TaskDeviceMeta> = {}): TaskDeviceMeta {
   return {
     did: "d1",
     name: "米家智能晾衣机 3 MAX",
@@ -90,6 +87,8 @@ describe("describeTaskAction", () => {
     );
     expect(d.kind).toBe("scene");
     expect(d.device).toBe("tasks.sceneTarget(name=回家模式)");
+    // 能力名留空：类型徽标已经写了「触发场景」，再填一遍会同一行出现两次
+    expect(d.capability).toBe("");
     expect(d.unresolved).toBe(false);
   });
 

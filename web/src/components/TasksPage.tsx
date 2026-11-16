@@ -44,7 +44,7 @@ import {
   IconX,
 } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
-import { ruleConditionIsEditable } from "@/lib/ruleBrief";
+import { groupRuleBriefs, ruleConditionIsEditable } from "@/lib/ruleBrief";
 import { describeTaskAction, type ActionCatalog } from "@/lib/taskAction";
 import type {
   Task,
@@ -311,7 +311,19 @@ function RuleNameBadge({ name }: { name: string }) {
 
 // 前提：暖色块 + 圆点列表。它是闸门不是触发器，颜色与「触发条件」分开，
 // 但层级上与它并列（同属「进入」的两个条件）。
-function GuardBlock({ rules }: { rules: TaskRuleBrief[] }) {
+// 编辑态下 omni 源的前提也要能改 —— 那同样是住户写的自然语言，旧版逐卡编辑时
+// 一直是可改的；把它降级成静态文本属于能力回退。
+export function GuardBlock({
+  rules,
+  editing,
+  draftOf,
+  onDraftChange,
+}: {
+  rules: TaskRuleBrief[];
+  editing: boolean;
+  draftOf: (rule: TaskRuleBrief) => string;
+  onDraftChange: (rule: TaskRuleBrief, value: string) => void;
+}) {
   const { t } = useTranslation();
   if (rules.length === 0) return null;
   return (
@@ -328,10 +340,33 @@ function GuardBlock({ rules }: { rules: TaskRuleBrief[] }) {
           {t("tasks.guardsConjunction", { count: rules.length })}
         </span>
       </div>
-      <ul className="space-y-1 list-disc pl-[18px]">
+      <ul className="space-y-1.5 list-disc pl-[18px]">
         {rules.map((r) => (
           <li key={r.ruleId} className="text-body text-text-primary leading-relaxed break-words">
-            {r.query}
+            {editing && ruleConditionIsEditable(r) ? (
+              <>
+                <textarea
+                  value={draftOf(r)}
+                  onChange={(e) => onDraftChange(r, e.target.value)}
+                  rows={2}
+                  maxLength={200}
+                  placeholder={t("tasks.triggerPlaceholder")}
+                  className="w-full resize-none rounded-lg bg-bg-secondary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary"
+                />
+                <p className="text-caption text-text-tertiary leading-relaxed mt-1">
+                  {t("tasks.triggerPhrasingHint")}
+                </p>
+              </>
+            ) : (
+              <>
+                {r.query}
+                {editing && (
+                  <p className="text-caption text-text-tertiary leading-relaxed mt-1">
+                    {t("tasks.triggerNotEditable")}
+                  </p>
+                )}
+              </>
+            )}
           </li>
         ))}
       </ul>
@@ -346,12 +381,16 @@ function RuleCard({
   editing,
   draft,
   onDraftChange,
+  guardDraftOf,
+  onGuardDraftChange,
 }: {
   rule: TaskRuleBrief;
   guards: TaskRuleBrief[];
   editing: boolean;
   draft: string;
   onDraftChange: (value: string) => void;
+  guardDraftOf: (rule: TaskRuleBrief) => string;
+  onGuardDraftChange: (rule: TaskRuleBrief, value: string) => void;
 }) {
   const { t } = useTranslation();
   const conditionIsReadOnly = !ruleConditionIsEditable(rule);
@@ -394,7 +433,12 @@ function RuleCard({
             )}
           </>
         )}
-        <GuardBlock rules={guards} />
+        <GuardBlock
+          rules={guards}
+          editing={editing}
+          draftOf={guardDraftOf}
+          onDraftChange={onGuardDraftChange}
+        />
       </div>
     </div>
   );
@@ -450,10 +494,17 @@ function ActionSlot({
                 {d.device}
               </span>
               {d.room && (
-                <span className="text-caption text-text-tertiary">（{d.room}）</span>
+                <span className="text-caption text-text-tertiary">
+                  {t("tasks.roomParen", { room: d.room })}
+                </span>
               )}
-              <span className="text-text-disabled">·</span>
-              <span className="break-all">{d.capability}</span>
+              {/* 场景行没有能力名，跳过分隔点，别留一个孤立的「·」 */}
+              {d.capability && (
+                <>
+                  <span className="text-text-disabled">·</span>
+                  <span className="break-all">{d.capability}</span>
+                </>
+              )}
               {d.detail && (
                 <span className="text-text-primary break-words">{d.detail}</span>
               )}
@@ -467,7 +518,11 @@ function ActionSlot({
               ))}
               {d.unresolved && (
                 <span className="text-caption px-1.5 py-0.5 rounded bg-warning-bg text-warning">
-                  {t("tasks.chipUnresolvedTarget")}
+                  {t(
+                    d.kind === "scene"
+                      ? "tasks.chipUnresolvedScene"
+                      : "tasks.chipUnresolvedTarget",
+                  )}
                 </span>
               )}
             </div>
@@ -479,7 +534,7 @@ function ActionSlot({
 }
 
 // 详情抽屉：驱动规则在前、执行动作在后；一个编辑态改描述 + 触发条件，外加删除。
-function TaskDetailSheet({
+export function TaskDetailSheet({
   task,
   catalog,
   onClose,
@@ -521,11 +576,9 @@ function TaskDetailSheet({
 
   // 规则按方向分块：进入（或会话）一块并带上前提，退出一块。
   // 前提是闸门、只能拦进入，所以不单列——单列会让人以为它也是一条触发路径。
-  const entryRule = task.ruleBriefs.find(
-    (r) => r.direction === "enter" || r.direction === "session",
-  );
-  const exitRule = task.ruleBriefs.find((r) => r.direction === "exit");
-  const guardRules = task.ruleBriefs.filter((r) => r.direction === "guard");
+  // 同一方向可以有多条规则，分组恒为数组（见 groupRuleBriefs）。
+  const { entry: entryRules, exit: exitRules, guard: guardRules } =
+    groupRuleBriefs(task.ruleBriefs);
 
   const enterActions = task.actions.onEnterActions;
   const exitActions = task.actions.onExitActions;
@@ -734,33 +787,53 @@ function TaskDetailSheet({
           <Section title={t("tasks.rulesTitle")} icon={IconFunnel}>
             {task.ruleBriefs.length > 0 ? (
               <div className="space-y-3">
-                {entryRule && (
+                {/* 同方向可以有多条规则（后端只强制 session 独占），逐条渲染：
+                    取第一条会把其余规则的条件与规则名从界面上抹掉，而它们仍在运行。 */}
+                {entryRules.map((r, i) => (
                   <RuleCard
-                    rule={entryRule}
-                    guards={guardRules}
+                    key={r.ruleId}
+                    rule={r}
+                    // 前提只挂第一张进入卡：它是 task 级闸门，重复挂会读成多份。
+                    guards={i === 0 ? guardRules : []}
                     editing={editing}
-                    draft={ruleDraft(entryRule)}
+                    draft={ruleDraft(r)}
                     onDraftChange={(v) =>
-                      setRuleDrafts((m) => ({ ...m, [entryRule.ruleId]: v }))
+                      setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
+                    }
+                    guardDraftOf={ruleDraft}
+                    onGuardDraftChange={(g, v) =>
+                      setRuleDrafts((m) => ({ ...m, [g.ruleId]: v }))
                     }
                   />
-                )}
-                {!entryRule && guardRules.length > 0 && (
+                ))}
+                {entryRules.length === 0 && guardRules.length > 0 && (
                   <div className="rounded-xl bg-bg-primary border border-border px-3.5 py-3">
-                    <GuardBlock rules={guardRules} />
+                    <GuardBlock
+                      rules={guardRules}
+                      editing={editing}
+                      draftOf={ruleDraft}
+                      onDraftChange={(g, v) =>
+                        setRuleDrafts((m) => ({ ...m, [g.ruleId]: v }))
+                      }
+                    />
                   </div>
                 )}
-                {exitRule && (
+                {exitRules.map((r) => (
                   <RuleCard
-                    rule={exitRule}
+                    key={r.ruleId}
+                    rule={r}
                     guards={[]}
                     editing={editing}
-                    draft={ruleDraft(exitRule)}
+                    draft={ruleDraft(r)}
                     onDraftChange={(v) =>
-                      setRuleDrafts((m) => ({ ...m, [exitRule.ruleId]: v }))
+                      setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
+                    }
+                    guardDraftOf={ruleDraft}
+                    onGuardDraftChange={(g, v) =>
+                      setRuleDrafts((m) => ({ ...m, [g.ruleId]: v }))
                     }
                   />
-                )}
+                ))}
                 <p className="text-caption text-text-tertiary">
                   {task.ruleBriefs.some(ruleConditionIsEditable)
                     ? t("tasks.rulesManagedHint")

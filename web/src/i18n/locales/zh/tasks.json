@@ -35,12 +35,10 @@
     "progressLabel": "进度",
     "rulesTitle": "驱动规则",
     "triggerCondition": "触发条件",
-    "ruleActions": "执行动作",
     "taskActionsTitle": "执行动作",
     "slotEnter": "进入",
     "slotExit": "退出",
     "slotTarget": "达标",
-    "slotDeviceActions": "{{count}} 个设备动作",
     "directionEnter": "进入",
     "directionExit": "退出",
     "directionSession": "会话",
@@ -80,6 +78,8 @@
     "chipNonIdempotent": "非幂等",
     "chipUnresolvedTarget": "目标设备当前不可见",
     "guardsConjunction": "需同时满足 · {{count}} 项",
-    "agentAction": "交给 Agent 执行：{{desc}}"
+    "agentAction": "交给 Agent 执行：{{desc}}",
+    "roomParen": "（{{room}}）",
+    "chipUnresolvedScene": "场景当前不可见"
   }
 }

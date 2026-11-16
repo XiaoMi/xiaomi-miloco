@@ -35,12 +35,10 @@
     "progressLabel": "Progress",
     "rulesTitle": "Driving rules",
     "triggerCondition": "Trigger",
-    "ruleActions": "Actions",
     "taskActionsTitle": "Actions",
     "slotEnter": "On enter",
     "slotExit": "On exit",
     "slotTarget": "On target",
-    "slotDeviceActions": "{{count}} device action(s)",
     "directionEnter": "Enter",
     "directionExit": "Exit",
     "directionSession": "Session",
@@ -80,6 +78,8 @@
     "chipNonIdempotent": "not idempotent",
     "chipUnresolvedTarget": "device not visible now",
     "guardsConjunction": "all {{count}} must hold",
-    "agentAction": "Handled by the Agent: {{desc}}"
+    "agentAction": "Handled by the Agent: {{desc}}",
+    "roomParen": "({{room}})",
+    "chipUnresolvedScene": "scene not visible now"
   }
 }

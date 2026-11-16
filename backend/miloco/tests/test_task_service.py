@@ -842,8 +842,10 @@ def test_action_desc_keeps_prop_and_action_shape():
 
 
 def test_state_action_desc_keeps_payload_out():
-    """state 摘要只带形态。前端按「；」切分摘要串(TasksPage.splitActions),
-    TTS 文案里的分号会把一条动作切成几行残句。"""
+    """state 摘要只带形态、不带 payload —— 摘要只表达「有哪些动作」。
+
+    TTS 文案里的分号曾把按「；」切分的摘要串切成残句；摘要不再承载文案后，
+    具体文案由前端从 task 边界动作槽的原始动作对象渲染。"""
     from miloco.rule.schema import RuleAction
     from miloco.task.service import _action_desc_short
 

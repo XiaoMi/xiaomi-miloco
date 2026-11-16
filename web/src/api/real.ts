@@ -972,12 +972,13 @@ export async function realListDevices(): Promise<Device[]> {
       .filter(([iid]) => iid.startsWith("prop."))
       .map(([iid, spec]) => mapProp(iid, spec, valueByIid.get(iid)));
     const statusKind = deviceStatusKind(d, mainSwitch?.current, valueByIid);
+    const meta = mapDeviceMeta(d);
 
     return {
-      did: d.did,
-      name: cleanDeviceName(d.name),
+      did: meta.did,
+      name: meta.name,
       category: cat,
-      room: cleanRoom(d.room),
+      room: meta.room,
       online: d.online,
       statusText: humanDeviceStatus(d, valueByIid, statusKind),
       statusKind,
@@ -1200,32 +1201,35 @@ export async function realListScenes(): Promise<Scene[]> {
 export interface TaskDeviceMeta {
   did: string;
   name: string;
-  room?: string;
+  // cleanRoom 恒返回字符串（无房间时为空串），与设备页的 Device.room 同口径
+  room: string;
   spec?: Record<string, BackendPropSpec>;
 }
 
-export interface TaskSceneMeta {
-  id: string;
-  name: string;
+/** 一台设备的「展示元数据」只有这一处口径：did / 名字 / 房间 / spec。
+ *  设备页与任务详情都从这里取，避免哪天清洗规则改了只改一边。 */
+function mapDeviceMeta(d: BackendDevice): TaskDeviceMeta {
+  return {
+    did: d.did,
+    name: cleanDeviceName(d.name),
+    room: cleanRoom(d.room),
+    spec: d.spec,
+  };
 }
 
-/** 动作台账要回答「哪个设备的哪个动作」，只需要 did → 名字/房间/spec 与场景表。
+/** 任务详情把动作翻成人话要的全部目录：did → 名字/房间/spec + 场景表。
  *
  * 不复用 ``realListDevices``：那个会为**每台设备**打一次 /status（30+ 设备时几十个
- * 请求，受 MiOT 云端限频），而详情页只做文案翻译，一个状态都用不到。 */
+ * 请求，受 MiOT 云端限频），而详情页只做文案翻译，一个状态都用不到。
+ * 场景表直接复用 ``realListScenes``，两者共用 ``fetchMiotHome`` 的缓存 promise。 */
 export async function realListDeviceMeta(): Promise<{
   devices: TaskDeviceMeta[];
-  scenes: TaskSceneMeta[];
+  scenes: Scene[];
 }> {
-  const r = await fetchMiotHome();
+  const [r, scenes] = await Promise.all([fetchMiotHome(), realListScenes()]);
   return {
-    devices: r.data.devices.map((d) => ({
-      did: d.did,
-      name: cleanDeviceName(d.name),
-      room: cleanRoom(d.room),
-      spec: d.spec,
-    })),
-    scenes: r.data.scenes.map((s) => ({ id: s.scene_id, name: s.scene_name })),
+    devices: r.data.devices.map(mapDeviceMeta),
+    scenes,
   };
 }
 
