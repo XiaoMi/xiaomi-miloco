@@ -93,7 +93,7 @@ UNREACHABLE_MESSAGES = {
     "camera_unreachable_cross_subnet": (
         "跨网段拉流失败，建议将摄像头与主机接入同一网络，或把路由器设置为 全锥/开放 NAT"
     ),
-    "camera_unreachable": "连不上摄像头(可能不在同一局域网,或摄像头离线)",
+    "camera_unreachable": "暂未收到摄像头画面，可重试连接",
 }
 
 
@@ -161,8 +161,8 @@ async def _first_frame_watchdog(
     # 实际等待时长按走过的出口算：短路那条只过了 12s，写死 72s 会让运维按 6 倍的
     # 时长反推「是不是等得不够久」，还和上一行刚打的 "skipping 60s grace" 自相矛盾。
     logger.warning(
-        "First-frame watchdog fired, %s — no frame in %.0fs, camera likely "
-        "unreachable (cross-LAN / offline / PPCS relay not established)",
+        "First-frame watchdog fired, %s — no frame in %.0fs; "
+        "stream recovery timed out (not proof of offline status)",
         _cam_tag(camera_id, channel), waited_s,
     )
     # NAT 阻断判据在选文案时**重新取一次**：走续等那条路时又过了 60s，会话可能
@@ -184,6 +184,7 @@ async def _first_frame_watchdog(
                 "type": "error",
                 "reason": reason,
                 "message": message,
+                "retryable": reason == "camera_unreachable",
             })
         )
     except Exception as err:

@@ -83,6 +83,8 @@ const I18N = {
   zh: {
     camPlaceholder: "加载摄像头列表中…",
     reconnect: "重连",
+    streamWaiting: "暂未收到摄像头画面，等待恢复…",
+    streamRetry: (s) => `暂未收到画面，${s} 秒后自动重连…`,
     refreshTitle: "刷新摄像头列表",
     loading: "拉流中…",
     ready: "就绪",
@@ -121,6 +123,8 @@ const I18N = {
   en: {
     camPlaceholder: "Loading camera list…",
     reconnect: "Reconnect",
+    streamWaiting: "No camera frames yet; waiting for recovery…",
+    streamRetry: (s) => `No camera frames; retrying in ${s}s…`,
     refreshTitle: "Refresh camera list",
     loading: "Streaming…",
     ready: "Ready",
@@ -272,6 +276,10 @@ let codecHint = null;            // "h264" | "h265" from init JSON
 // 后端发了 error 信令(如 camera_unreachable)即将主动关连接 —— 标记后让 close
 // 事件不要用泛泛的"已断开 (code)"覆盖掉那条更具体的原因文案。
 let serverWillClose = false;
+let retryTimer = null;
+let retryAttempt = 0;
+let retryCameraError = false;
+let pageActive = true;
 let stats = {
   frames: 0,
   lastSec: performance.now(),
@@ -374,10 +382,14 @@ function setState(text, isErr=false) {
   }
 }
 function hideLoading() {
+  retryAttempt = 0; // A WS handshake alone does not prove the camera recovered.
   $("loading")?.classList.add("hidden");
 }
 
 function tearDown() {
+  clearTimeout(retryTimer);
+  retryTimer = null;
+  retryCameraError = false;
   configured = false;
   codecHint = null;
   serverWillClose = false;
@@ -432,6 +444,23 @@ function tearDown() {
 }
 
 function connect() {
+  retryAttempt = 0;
+  beginConnection();
+}
+
+function scheduleReconnect() {
+  if (!pageActive || retryTimer !== null) return;
+  const delay = Math.min(30000, 1000 * 2 ** Math.min(retryAttempt++, 5));
+  $("loading")?.classList.remove("hidden");
+  setState(t("streamRetry", Math.ceil(delay / 1000)), true);
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (pageActive) beginConnection();
+  }, delay);
+}
+
+function beginConnection() {
+  if (!pageActive) return;
   tearDown();
   const camId = $("cam").value;
   const channel = $("ch").value;
@@ -474,6 +503,12 @@ function connect() {
                ev.code !== 1000);
     }
     configured = false;
+    // A first-frame timeout says nothing conclusive about cloud/LAN reachability.
+    // Retry only this known transient error, or transient transport close codes.
+    if (retryCameraError || (!serverWillClose &&
+        [1001, 1005, 1006, 1011, 1012, 1013, 1014].includes(ev.code))) {
+      scheduleReconnect();
+    }
   }, { signal: sig });
   thisWs.addEventListener("error", () => {
     if (thisWs !== ws) return;
@@ -507,12 +542,15 @@ function onMessage(ev) {
       // 后端 message 是中文;信令带机器码 reason,已知 reason 改用本地译文(随 UI 语言),
       // 未知 reason 才回退后端 message —— 否则英文模式下仍会显后端那句中文。
       serverWillClose = true;
+      retryCameraError = msg.retryable === true ||
+        (msg.retryable === undefined && msg.reason === "camera_unreachable");
       const REASON_KEY = {
         camera_unreachable: "camUnreachable",
         camera_unreachable_cross_subnet: "camUnreachableCrossSubnet",
       };
       const rk = REASON_KEY[msg.reason];
-      setState(rk ? t(rk) : (msg.message || t("camUnreachable")), true);
+      setState(retryCameraError ? t("streamWaiting") :
+        (rk ? t(rk) : (msg.message || t("camUnreachable"))), true);
     }
     return;
   }
@@ -829,6 +867,17 @@ setInterval(() => {
     connect();
   }
 }, 2000);
+
+addEventListener("pagehide", () => {
+  pageActive = false;
+  tearDown();
+});
+addEventListener("pageshow", (event) => {
+  if (event.persisted) {
+    pageActive = true;
+    connect();
+  }
+});
 
 // Page boot: load camera list, then auto-connect if a camera is selected.
 (async () => {
