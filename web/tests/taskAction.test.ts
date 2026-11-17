@@ -114,27 +114,28 @@ describe("describeTaskAction", () => {
     expect(d.unresolved).toBe(false);
   });
 
-  it("生成式动作不显示 {{result}} 占位符", () => {
+  it("生成式动作的 {{result}} 占位符不裸展示", () => {
     const d = describeTaskAction(
-      action({ iid: "action.7.3", params: ["{{result}}"], generate: { sources: ["d1"] } }),
+      action({ iid: "action.7.3", params: ["{{result}}"] }),
       catalog(),
     );
     expect(d.detail).toBe("tasks.generatedByOmni");
   });
 
-  it("冷却：秒级优先，0 是显式关闭", () => {
-    const sec = describeTaskAction(
-      action({ cooldownSeconds: 6, cooldownMinutes: 1 }),
+  it("普通文案里的花括号不被误判成占位符", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.7.3", params: ["温度 {{x}} 已到"] }),
       catalog(),
     );
-    expect(sec.chips).toContain("tasks.chipCooldownSeconds(n=6)");
-    expect(sec.chips).not.toContain("tasks.chipCooldownMinutes(n=1)");
+    expect(d.detail).toBe("温度 {{x}} 已到");
+  });
 
-    const off = describeTaskAction(action({ cooldownSeconds: 0 }), catalog());
-    expect(off.chips).toContain("tasks.chipNoCooldown");
-
+  it("冷却：只认后端产出的分钟级字段", () => {
     const min = describeTaskAction(action({ cooldownMinutes: 3 }), catalog());
     expect(min.chips).toContain("tasks.chipCooldownMinutes(n=3)");
+
+    // 未配置就不显示——「没写」不是一种冷却状态
+    expect(describeTaskAction(action(), catalog()).chips).toEqual([]);
   });
 
   it("幂等三态：true / false / 未配置时不显示", () => {

@@ -137,6 +137,13 @@ function fetchMiotHome(): Promise<Normal<MiotHome>> {
   return homeCache;
 }
 
+/** 测试用:清掉 /api/miot/home 的请求级缓存。5s TTL 会让相邻用例拿到上一个用例的
+ *  mock 数据,表现为「改了 mock 却不生效」——与本文件 usage 那边的 _resetUsageStatsCache 同款。 */
+export function _resetMiotHomeCache(): void {
+  homeCache = null;
+  homeCacheTs = 0;
+}
+
 // PUT 后写穿 cache:把 cache 直接换成新一轮的 fetch promise,不等下次 caller
 // 触发 fetch。同时盖掉可能仍 in-flight 的旧 promise(它会 resolve 出 PUT 前的
 // 旧数据)。这样新 caller(典型:status.reload 紧接着 switchScopeHome)拿到的
@@ -978,7 +985,8 @@ export async function realListDevices(): Promise<Device[]> {
       did: meta.did,
       name: meta.name,
       category: cat,
-      room: meta.room,
+      // 设备页保留「未分配」分组：那是它自己的展示口径，与任务详情的括号无关
+      room: meta.room ?? cleanRoom(d.room),
       online: d.online,
       statusText: humanDeviceStatus(d, valueByIid, statusKind),
       statusKind,
@@ -1201,18 +1209,23 @@ export async function realListScenes(): Promise<Scene[]> {
 export interface TaskDeviceMeta {
   did: string;
   name: string;
-  // cleanRoom 恒返回字符串（无房间时为空串），与设备页的 Device.room 同口径
-  room: string;
+  /** 有房间时的房间名；未分配 / 脏值（纯数字 home_id）为 undefined。
+   *
+   *  任务详情据此决定要不要渲染括号。**不能复用 cleanRoom 的返回值**：它给未分配
+   *  设备返回的是 i18n 的「未分配」标签，那是取数时按当时 UI 语言烘进字符串的，
+   *  跨语言页面上切语言后会停在旧语言，而同一行的能力名却是渲染时翻译的。 */
+  room?: string;
   spec?: Record<string, BackendPropSpec>;
 }
 
 /** 一台设备的「展示元数据」只有这一处口径：did / 名字 / 房间 / spec。
  *  设备页与任务详情都从这里取，避免哪天清洗规则改了只改一边。 */
 function mapDeviceMeta(d: BackendDevice): TaskDeviceMeta {
+  const raw = d.room;
   return {
     did: d.did,
     name: cleanDeviceName(d.name),
-    room: cleanRoom(d.room),
+    room: raw && !/^\d+$/.test(raw) ? raw : undefined,
     spec: d.spec,
   };
 }
@@ -2365,8 +2378,6 @@ interface BackendAction {
   params?: unknown[] | null;
   idempotent?: boolean;
   cooldown_minutes?: number | null;
-  cooldown_seconds?: number | null;
-  generate?: unknown;
 }
 
 interface BackendTaskSummary {
@@ -2408,9 +2419,7 @@ function mapTaskAction(a: BackendAction): TaskAction {
     value: a.value,
     params: a.params ?? null,
     idempotent: a.idempotent,
-    cooldownSeconds: a.cooldown_seconds ?? null,
     cooldownMinutes: a.cooldown_minutes ?? null,
-    generate: a.generate,
   };
 }
 

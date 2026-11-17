@@ -20,6 +20,9 @@ import type { TaskAction } from "@/lib/types";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
+/** 生成式动作 params 里的回填占位符；后端执行前替换，展示层永远不该原样露出。 */
+const RESULT_PLACEHOLDER = /\{\{\s*result\s*\}\}/;
+
 export interface ActionCatalog {
   /** 与 realListDeviceMeta 返回的设备元数据同源，不另立一份。 */
   devices: Map<string, TaskDeviceMeta>;
@@ -87,14 +90,17 @@ export function describeTaskAction(
   const capability = spec ? specLabel(iid, spec) : iid;
 
   let detail: string | null;
-  if (action.generate) {
-    // 生成式动作：带该标记时 params 里是 {{result}} 占位符，直接显示会被当成最终文案。
-    detail = t("tasks.generatedByOmni");
-  } else if (isActionCall) {
+  if (isActionCall) {
     const params = (action.params ?? [])
       .filter((p) => p !== null && p !== undefined && p !== "")
       .map((p) => (typeof p === "string" ? p : JSON.stringify(p)));
-    detail = params.length ? params.join(t("tasks.actionParamSep")) : null;
+    // 生成式动作的 params 里是 {{result}} 占位符（执行前由 omni 按画面回填）；
+    // 拼出来展示等于把模板当成品给住户看。
+    detail = params.length
+      ? params.some((p) => RESULT_PLACEHOLDER.test(p))
+        ? t("tasks.generatedByOmni")
+        : params.join(t("tasks.actionParamSep"))
+      : null;
   } else {
     const text = spec ? propValueText(spec, action.value) : null;
     detail = text ?? (action.value === null || action.value === undefined ? null : String(action.value));
@@ -115,21 +121,12 @@ export function describeTaskAction(
   };
 }
 
-/** 冷却：秒级字段优先、0 表示显式关闭；后端只给分钟级时回落到分钟。 */
+/** 冷却：后端只给分钟级 cooldown_minutes；未配置就不显示。 */
 function cooldownChips(action: TaskAction, t: Translate): string[] {
-  const seconds = action.cooldownSeconds;
-  if (seconds !== null && seconds !== undefined) {
-    return [
-      seconds === 0
-        ? t("tasks.chipNoCooldown")
-        : t("tasks.chipCooldownSeconds", { n: seconds }),
-    ];
-  }
   const minutes = action.cooldownMinutes;
-  if (minutes !== null && minutes !== undefined) {
-    return [t("tasks.chipCooldownMinutes", { n: minutes })];
-  }
-  return [];
+  return minutes === null || minutes === undefined
+    ? []
+    : [t("tasks.chipCooldownMinutes", { n: minutes })];
 }
 
 /** 幂等三态：true / false / 未配置。未配置不显示——那是「没写」，不是一种状态。 */

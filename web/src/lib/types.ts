@@ -1058,10 +1058,7 @@ export interface TaskAction {
   value?: unknown;
   params?: unknown[] | null;
   idempotent?: boolean;
-  cooldownSeconds?: number | null;
   cooldownMinutes?: number | null;
-  // 生成式动作：执行前先调一次 omni，把结果替换进 params 的 {{result}}
-  generate?: unknown;
 }
 
 // task 的三个动作槽。*_actions 是设备直控，*_desc 交给 Agent。

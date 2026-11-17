@@ -16,6 +16,8 @@ import { ApiError } from "@/api/client";
 import {
   realListActivity,
   realListDevices,
+  realListDeviceMeta,
+  _resetMiotHomeCache,
   realGetUsageStats,
   realGetOmniConfig,
   realUpdateOmniConfig,
@@ -41,6 +43,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   i18n.changeLanguage("zh");
   _resetUsageStatsCache(); // 清掉用量请求级缓存，保证用例间隔离
+  _resetMiotHomeCache(); // 同一个 5s TTL 缓存：不清的话改 mock 也不生效
 });
 
 /**
@@ -1015,5 +1018,43 @@ describe("realListTasks — summary 契约", () => {
       onExitActions: [],
       onTargetActions: [],
     });
+  });
+});
+
+describe("realListDeviceMeta — 任务详情的设备元数据", () => {
+  const home = (devices: unknown[]) => ({
+    code: 0,
+    message: "ok",
+    data: { devices, areas: [], scenes: [], persons: [] },
+  });
+
+  it("未分配 / 脏房间名不带给任务详情，避免渲染「（未分配）」且语言冻结", async () => {
+    mockFetchByUrl({
+      "/api/miot/home": home([
+        { did: "d1", name: "台灯", online: true, model: "m", room: "", spec: {} },
+        { did: "d2", name: "音箱", online: true, model: "m", room: "123456", spec: {} },
+        { did: "d3", name: "空调", online: true, model: "m", room: "客厅", spec: {} },
+      ]),
+    });
+
+    const meta = await realListDeviceMeta();
+    const roomOf = (did: string) =>
+      meta.devices.find((d) => d.did === did)?.room;
+
+    // 空房间与纯数字 home_id 都是「没有房间」，交给调用方决定不渲染括号
+    expect(roomOf("d1")).toBeUndefined();
+    expect(roomOf("d2")).toBeUndefined();
+    expect(roomOf("d3")).toBe("客厅");
+  });
+
+  it("设备页仍把未分配归到「未分配」分组（口径不受任务详情影响）", async () => {
+    mockFetchByUrl({
+      "/api/miot/home": home([
+        { did: "d1", name: "台灯", online: true, model: "m", room: "", spec: {} },
+      ]),
+    });
+
+    const devices = await realListDevices();
+    expect(devices[0]?.room).toBe(i18n.t("miot.unassigned"));
   });
 });
