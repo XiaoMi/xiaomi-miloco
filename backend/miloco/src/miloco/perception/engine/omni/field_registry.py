@@ -153,7 +153,7 @@ MATCHED_RULES = FieldSpec(
     schema_literal='"matched_rules":[{"rule_name":"规则名","reason":"判断依据","hit":true}]',
     spec_md="""## matched_rules
 - 基于本轮观察判断"# 待判断规则"是否满足；只输出 hit=true 的规则，未命中（hit=false）的一律不要列出（系统只对 hit=true 触发）
-- reason 先写证据、再定 hit：hit=true 必须 reason 给出"规则每个要素都满足"的本轮证据——规则点名的人须按总原则确认在场及姓名来源；名册姓名、bbox、人体检测框本身都不能证明有人；活动 / 状态只据本轮画面判断（听到的话 / 声音不作规则命中依据，音频不稳；见总原则）且不得与 caption 相矛盾；证据不全、靠推测、或与 caption / 本轮可用身份结果抵触 → hit=false
+- reason 先写证据、再定 hit：hit=true 必须 reason 给出"规则每个要素都满足"的本轮证据——规则点名的人须按总原则确认在场及姓名来源；名册姓名、bbox、人体检测框本身都不能证明有人；活动 / 状态只据本轮画面判断（听到的话 / 声音不作规则命中依据，音频不稳；见总原则）且不得与 caption 相矛盾；证据不全、靠推测、或与 caption / 本轮可用身份结果抵触 → 判为未命中，不输出该条
 - rule_name 只能从"# 待判断规则"段原样照抄某一条完整名称（方括号开头那串，如 [pet_safety] 宠物破坏家具），严禁自创；reason 引用本轮具体观察、别复述规则原文；该段为空则 matched_rules 输出 []""",
     # 规则判断本质需视觉证据（现有规则全是"见到人/姿势/在场"这类）；纯音频无画面，
     # 做 matched_rules 只会脑补或恒空、零正当价值——故 audio-only 轮直接剥离本字段
@@ -258,7 +258,7 @@ def render_schema(scene: SceneDescriptor) -> str:
 # 一套命名纪律"两套打架（D1）。仅 has_pets 且 video 路由时追加进「# 字段说明」。
 PET_NAMING_SPEC = """## 宠物称呼（据 pet_identities 派生）
 - caption / suggestions / matched_rules 里提及宠物，一律按本轮 pet_identities 的判定称呼：conf=high → 直呼其名（如"小黑在沙发上"）；conf=mid → 用"疑似<名>"；未列入 pet_identities（含空数组）→ 用泛称（"一只黑猫" / "一只卷毛狗"），不从家庭档案给没判出的宠物硬安名字（与对人「不从 gallery / 家庭档案取名安到没识别出的主体」一致）
-- matched_rules：规则点名某只宠物时，须该宠物本轮以 conf=high 列入 pet_identities 才可 hit=true；仅 mid 或未列入 → 该（点名宠物的）规则 hit=false（宁漏不误触发）
+- matched_rules：规则点名某只宠物时，须该宠物本轮以 conf=high 列入 pet_identities 才可 hit=true；仅 mid 或未列入 → 判为未命中，不输出该条（宁漏不误触发）
 - suggestions：event / action 指称宠物同上（high 直呼 / mid 疑似 / 否则泛称）；涉及"某只宠物的约定或禁忌"（家庭档案显式记录）须该宠物以 high 列入 pet_identities 确认在场才成立"""
 
 
