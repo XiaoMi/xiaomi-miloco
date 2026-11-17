@@ -21,14 +21,13 @@ import {
   propValueText,
   type TaskDeviceMeta,
 } from "@/api/real";
+import {
+  containsResultPlaceholder,
+  paramsPhrase,
+} from "@/lib/actionText";
 import type { TaskAction } from "@/lib/types";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
-
-/** 生成式动作 params 里的回填占位符。**后端尚未产出**（预留给「执行前按画面生成
- *  文案」的能力）；接入后由服务端替换，展示层任何时候都不该把模板原样露给住户。
- *  在那之前这条判断走不到，是刻意的前向兜底而不是已生效的契约。 */
-const RESULT_PLACEHOLDER = /\{\{\s*result\s*\}\}/;
 
 /** `action.<siid>.<aiid>` 是通用设备动作通道，不等于 TTS：只有「逐字念出」的
  *  播报（音箱 play-text）才贴「播报」；`execute-text-directive` 是让小爱理解后自己
@@ -120,9 +119,6 @@ export function describeTaskAction(
 
   let detail: string | null;
   if (isActionCall) {
-    const text = (v: unknown): string =>
-      typeof v === "string" ? v : JSON.stringify(v ?? null);
-    const names = spec?.in_params ?? [];
     // task 边界槽在后端是 list[dict]，params 的元素形状没有校验：CLI 接受任意 JSON，
     // 写成字符串 / 对象都能落库。收敛成数组再走后面的逻辑，别让一条脏动作把整页抛崩。
     const params = Array.isArray(action.params)
@@ -130,25 +126,12 @@ export function describeTaskAction(
       : action.params === null || action.params === undefined
         ? []
         : [action.params];
-    // 名字按**原始下标**取，再滤掉空值：先 filter 会让后面参数的名字整体前移，
-    // 把「text-content」贴到下一个参数上。
-    const kept = params
-      .map((p, i) => ({ p, name: names[i]?.name }))
-      .filter(({ p }) => p !== null && p !== undefined && p !== "");
-    // 若将来接入「执行前按画面生成文案」，params 里会是 {{result}} 占位符（后端暂未
-    // 产出，见 RESULT_PLACEHOLDER 的注释）；真拼出来展示等于把模板当成品给住户看。
-    // 只有一个入参时加引号、不贴参数名；多个入参时按 in_params 补名，否则布尔标志
-    // 会变成孤零零的 false、数值会变成无标签数字。引号与分隔符都用活动流那套 key
-    // （actions.quoted / actions.listSep）——同一条动作在两页必须长得一样。
-    detail = kept.length
-      ? kept.some(({ p }) => RESULT_PLACEHOLDER.test(text(p)))
-        ? t("tasks.generatedByOmni")
-        : params.length === 1
-          ? t("actions.quoted", { v: text(kept[0].p) })
-          : kept
-              .map(({ p, name }) => (name ? `${name} ${text(p)}` : text(p)))
-              .join(t("actions.listSep"))
-      : null;
+    // 入参拼接与活动流共用同一个实现（paramsPhrase）：绑名、滤空位、引号、分隔符
+    // 只有一套，否则同一条动作在两页会长得不一样。占位符这一档任务详情要换成
+    // 「文案由画面生成」，所以先判一次。
+    detail = containsResultPlaceholder(params)
+      ? t("tasks.generatedByOmni")
+      : paramsPhrase(spec, params, t);
   } else {
     const text = spec ? propValueText(spec, action.value) : null;
     // 与 params 那条同口径：非字符串按 JSON 显示。String() 会把对象 / 数组压成
