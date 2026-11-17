@@ -75,7 +75,7 @@
     "chipIdempotent": "idempotent",
     "chipNonIdempotent": "not idempotent",
     "chipUnresolvedTarget": "device not visible now",
-    "guardsConjunction": "all {{count}} must hold",
+    "guardsConjunction": "all {{count}} must hold, otherwise entry is blocked",
     "agentAction": "Handled by the Agent: {{desc}}",
     "roomParen": "({{room}})",
     "chipUnresolvedScene": "scene not visible now",

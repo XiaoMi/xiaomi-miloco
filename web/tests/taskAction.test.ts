@@ -45,6 +45,11 @@ function device(over: Partial<TaskDeviceMeta> = {}): TaskDeviceMeta {
         prop_description: "ptz-calibrate",
         type_name: "ptz-calibrate",
       },
+      "action.7.4": {
+        description: "execute-text-directive",
+        prop_description: "execute-text-directive",
+        type_name: "execute-text-directive",
+      },
     },
     ...over,
   };
@@ -98,6 +103,15 @@ describe("describeTaskAction", () => {
     expect(d.unresolved).toBe(false);
   });
 
+  it("场景行也带幂等标签：后端强制场景动作非幂等", () => {
+    const d = describeTaskAction(
+      action({ iid: "scene", did: "s1", value: null, idempotent: false, cooldownMinutes: 5 }),
+      catalog(),
+    );
+    expect(d.chips).toContain("tasks.chipNonIdempotent");
+    expect(d.chips).toContain("tasks.chipCooldownMinutes(n=5)");
+  });
+
   it("场景查不到 → 显式标未知场景，不把 scene_id 当名字", () => {
     const d = describeTaskAction(
       action({ iid: "scene", did: "nope", value: null }),
@@ -123,6 +137,14 @@ describe("describeTaskAction", () => {
   it("action.* 不都是播报：非文本类设备动作单独归类", () => {
     const d = describeTaskAction(
       action({ iid: "action.2.1", value: null, params: [] }),
+      catalog(),
+    );
+    expect(d.kind).toBe("deviceAction");
+  });
+
+  it("execute-text-directive 不算播报：它是让小爱执行的指令，不保证出声", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.7.4", value: null, params: ["打开客厅灯"] }),
       catalog(),
     );
     expect(d.kind).toBe("deviceAction");

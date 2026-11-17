@@ -25,9 +25,11 @@ type Translate = (key: string, options?: Record<string, unknown>) => string;
  *  在那之前这条判断走不到，是刻意的前向兜底而不是已生效的契约。 */
 const RESULT_PLACEHOLDER = /\{\{\s*result\s*\}\}/;
 
-/** `action.<siid>.<aiid>` 是通用设备动作通道，不等于 TTS：只有 spec 自己标明是
- *  文本类动作（如音箱的 play-text / text-directive）时才当播报，其余按设备动作展示。 */
-const TEXT_ACTION_TYPE = /play-text|text-directive|tts/i;
+/** `action.<siid>.<aiid>` 是通用设备动作通道，不等于 TTS：只有「逐字念出」的
+ *  播报（音箱 play-text）才贴「播报」；`execute-text-directive` 是让小爱理解后自己
+ *  执行的一句话、还带 silent-execution，不保证出声，按设备动作展示。
+ *  接入别的厂商 TTS 时按实测的 type_name 逐个加进正则，别用 `tts` 这种宽匹配。 */
+const SPEECH_ACTION_TYPE = /play-text/i;
 
 export interface ActionCatalog {
   /** 与 realListDeviceMeta 返回的设备元数据同源，不另立一份。 */
@@ -82,7 +84,7 @@ export function describeTaskAction(
       // 会变成「[触发场景] 米家场景「回家」· 触发场景」。
       capability: "",
       detail: name || !catalog.ready ? null : did,
-      chips: cooldownChips(action, t),
+      chips: [...cooldownChips(action, t), ...idempotentChips(action, t)],
       raw,
       unresolved: !name && catalog.ready,
     };
@@ -96,7 +98,7 @@ export function describeTaskAction(
   const actionType = spec?.type_name ?? spec?.prop_description ?? spec?.description ?? "";
   const kind: TaskActionKind = !isActionCall
     ? "control"
-    : TEXT_ACTION_TYPE.test(actionType)
+    : SPEECH_ACTION_TYPE.test(actionType)
       ? "broadcast"
       : "deviceAction";
   const capability = spec ? specLabel(iid, spec) : iid;

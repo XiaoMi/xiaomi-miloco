@@ -94,6 +94,11 @@ describe("TaskDetailSheet · 规则分块", () => {
       />,
     );
     expect(count(html, "客厅灯开着")).toBe(1);
+    // 前提是 task 级闸门：必须排在所有进入规则之前，不能只挂在第一条规则里
+    const guardAt = html.indexOf("客厅灯开着");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(html.indexOf("有人进入客厅"));
+    expect(guardAt).toBeLessThan(html.indexOf("门磁被打开"));
   });
 
   it("会话规则与退出规则各自成块", () => {

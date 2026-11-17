@@ -75,7 +75,7 @@
     "chipIdempotent": "幂等",
     "chipNonIdempotent": "非幂等",
     "chipUnresolvedTarget": "目标设备当前不可见",
-    "guardsConjunction": "需同时满足 · {{count}} 项",
+    "guardsConjunction": "需同时满足 · {{count}} 项，未满足时不进入",
     "agentAction": "交给 Agent 执行：{{desc}}",
     "roomParen": "（{{room}}）",
     "chipUnresolvedScene": "场景当前不可见",

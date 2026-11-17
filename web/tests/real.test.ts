@@ -1028,7 +1028,7 @@ describe("realListDeviceMeta — 任务详情的设备元数据", () => {
     data: { devices, areas: [], scenes: [], persons: [] },
   });
 
-  it("未分配 / 脏房间名不带给任务详情，避免渲染「（未分配）」且语言冻结", async () => {
+  it("未分配 / 脏房间名不带给任务详情，避免渲染「（未分配）」", async () => {
     mockFetchByUrl({
       "/api/miot/home": home([
         { did: "d1", name: "台灯", online: true, model: "m", room: "", spec: {} },
