@@ -255,6 +255,11 @@ class TestRuleCodeResolution:
         mapping = {"A": "rid-1", "[party] 派对": "rid-1"}
         assert _resolve_rule_name("[party] 派对", mapping) == "rid-1"
 
+    def test_short_rule_name_still_fuzzy_matches(self):
+        """2–3 字的真实规则名不能因为短就被当成代号跳过。"""
+        mapping = {"A": "rid-1", "开灯": "rid-2"}
+        assert _resolve_rule_name("开灯提醒", mapping) == "rid-2"
+
     def test_empty_rule_name_is_dropped(self):
         """模型漏填 rule_name 时不要兜底——旧口径会把它绑到排序第一条规则上。"""
         mapping = {"A": "rid-1", "[x] 摔倒": "rid-1"}

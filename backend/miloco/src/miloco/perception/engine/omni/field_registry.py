@@ -153,7 +153,7 @@ MATCHED_RULES = FieldSpec(
     schema_literal='"matched_rules":[{"rule_name":"<代号>","reason":"判断依据","hit":true|false}]',
     spec_md="""## matched_rules
 - 基于本轮观察判断"# 待判断规则"是否满足；与本轮明显无关的可不列；规则列表每条前有代号（A、B、C…），输出时 rule_name 只填该代号（系统只对 hit=true 触发）
-- reason 先写证据、再定 hit：hit=true 必须 reason 给出"规则每个要素都满足"的本轮证据——规则点名的人须按总原则确认在场及姓名来源；名册姓名、bbox、人体检测框本身都不能证明有人；活动 / 状态只据本轮画面判断（听到的话 / 声音不作规则命中依据，音频不稳；见总原则）且不得与 caption 相矛盾；证据不全、靠推测、或与 caption / 本轮可用身份结果抵触 → hit=false；每条 reason 不超过 10 个字
+- reason 先写证据、再定 hit：hit=true 必须 reason 给出"规则每个要素都满足"的本轮证据——规则点名的人须按总原则确认在场及姓名来源；名册姓名、bbox、人体检测框本身都不能证明有人；活动 / 状态只据本轮画面判断（听到的话 / 声音不作规则命中依据，音频不稳；见总原则）且不得与 caption 相矛盾；证据不全、靠推测、或与 caption / 本轮可用身份结果抵触 → hit=false；reason 尽量控制在 10 个字以内，多要素规则以证据完整优先、允许略长
 - rule_name 只填"# 待判断规则"段里对应的代号（A、B、C…），不要写完整规则名，严禁自创；reason 引用本轮具体观察、别复述规则原文；该段为空则 matched_rules 输出 []""",
     # 规则判断本质需视觉证据（现有规则全是"见到人/姿势/在场"这类）；纯音频无画面，
     # 做 matched_rules 只会脑补或恒空、零正当价值——故 audio-only 轮直接剥离本字段

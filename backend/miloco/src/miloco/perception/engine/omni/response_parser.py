@@ -310,6 +310,9 @@ def _parse_caption(raw: Any) -> list[CaptionEntry]:
     return []
 
 
+_CODE_KEY = re.compile(r"^[A-Z]{1,2}$")
+
+
 def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | None":
     """rule_name → rule_id(UUID)。``mapping is None``（调用方未提供映射，仅测试 / streaming
     benchmark 走此路）时原样返回 name（best-effort）；有映射（含空 dict=本轮零规则）但匹配
@@ -328,8 +331,9 @@ def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | No
     if len(upper) <= 2 and upper in mapping:
         return mapping[upper]
     # 完整规则名的子串容错保留，但跳过代号键：单个字母太短，会把任意含该字母的规则名配错。
+    # 按形状（1–2 个大写字母）识别，不按长度——2–3 字的真实规则名仍需要这条兜底。
     for rn, rid in mapping.items():
-        if len(rn) < 4:
+        if _CODE_KEY.fullmatch(rn):
             continue
         if rn in key or key in rn:
             return rid
