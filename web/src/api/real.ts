@@ -2404,7 +2404,9 @@ interface BackendAction {
   did: string;
   iid: string;
   value?: unknown;
-  params?: unknown[] | null;
+  // 形态没有保证：task 边界槽在后端是 list[dict]，内层 params 可以是任意 JSON。
+  // 与 TaskAction.params 保持同一口径，别在这里给调用方「一定是数组」的错觉。
+  params?: unknown;
   idempotent?: boolean;
   cooldown_minutes?: number | null;
 }
