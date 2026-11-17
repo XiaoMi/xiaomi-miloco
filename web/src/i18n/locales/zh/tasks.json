@@ -47,7 +47,7 @@
     "rulesAllDisabled": "关联规则当前均未生效（共 {{count}} 条），可让 Agent 检查启用状态",
     "rulesOnlyGuards": "没有生效中的进入规则，{{count}} 项前提暂不生效",
     "disabledRulesTitle": "已停用的规则（{{count}}）",
-    "disabledRulesHint": "不参与运行期判定，启用后才能修改",
+    "disabledRulesHint": "不参与运行期判定，如需启用可与 Agent 对话",
     "rulesManagedHint": "触发条件可修改，保存后立即生效；执行动作与推送由 Agent 创建管理，如需调整可与 Agent 对话。",
     "editTitle": "编辑任务",
     "descriptionLabel": "任务描述",

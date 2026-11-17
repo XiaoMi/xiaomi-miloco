@@ -167,9 +167,10 @@ describe("TaskDetailSheet · 停用规则", () => {
     expect(html).toContain(i18n.t("tasks.rulesAllDisabled", { count: 1 }));
     // 停用规则不是「没有规则」：落进 noRules 会把住户引去查 Agent 接线
     expect(html).not.toContain(i18n.t("tasks.noRules"));
-    // 全停用也把规则本身列出来——只给一句「共 N 条」等于没交代是哪条
+    // 全停用也把规则本身列出来——只给一句「共 N 条」等于没交代是哪条；
+    // 且只应出现一次（不能同时被画进任何生效组）
     expect(html).toContain(i18n.t("tasks.disabledRulesTitle", { count: 1 }));
-    expect(html).toContain("有人进入客厅");
+    expect(count(html, "有人进入客厅")).toBe(1);
   });
 
   it("部分停用时，停用规则单独成块，条件与规则名都在", () => {
@@ -186,9 +187,10 @@ describe("TaskDetailSheet · 停用规则", () => {
     );
     // 生效规则照常画在进入组里
     expect(html).toContain("有人进入客厅");
-    // 停用规则在库存区块里：条件、规则名（日志检索键）都在
-    expect(html).toContain("门磁被打开");
-    expect(html).toContain("[t1] e2");
+    // 停用规则只在库存区块里出现一次：条件、规则名（日志检索键）都在，
+    // 且不能被同时画进进入组——count === 1 钉住「不塞回生效组」这条不变量
+    expect(count(html, "门磁被打开")).toBe(1);
+    expect(count(html, "[t1] e2")).toBe(1);
     expect(html).toContain(i18n.t("tasks.disabledRulesTitle", { count: 1 }));
     // 不能落进「均未生效」——还有一条在跑
     expect(html).not.toContain(i18n.t("tasks.rulesAllDisabled", { count: 2 }));
@@ -212,8 +214,8 @@ describe("TaskDetailSheet · 停用规则", () => {
       />,
     );
     expect(html).toContain("客厅灯开着");
-    // 进入组缺席也不能把那一条停用的进入规则一起丢掉
-    expect(html).toContain("有人进入客厅");
+    // 进入组缺席也不能把那一条停用的进入规则一起丢掉，且只出现在库存块里
+    expect(count(html, "有人进入客厅")).toBe(1);
     expect(html).toContain(i18n.t("tasks.disabledRulesTitle", { count: 1 }));
   });
 
