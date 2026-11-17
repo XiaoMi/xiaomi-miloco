@@ -221,6 +221,44 @@ describe("describeAction · 调用方法（call_action）", () => {
     // 活动流是「能力名 入参」一句话，任务详情把两者拆成两个字段；拼起来必须一致
     expect(feed).toBe(`${d.capability} ${d.detail}`);
   });
+
+  it("占位符不原样露出，与任务详情同一档", () => {
+    expect(
+      describeAction(
+        {
+          action_type: "call_action",
+          iid: "action.9.1",
+          value_json: '["", "{{result}}", 30]',
+        },
+        spec,
+        t,
+      ),
+    ).toBe("三入参动作 文案由画面生成");
+  });
+
+  it("占位符在两页换成同一句说明", () => {
+    const params = ["{{result}}"];
+    const feed = describeAction(
+      {
+        action_type: "call_action",
+        iid: "action.9.1",
+        value_json: JSON.stringify(params),
+      },
+      spec,
+      t,
+    );
+    const d = describeTaskAction(
+      { did: "d1", iid: "action.9.1", params },
+      {
+        devices: new Map([["d1", { did: "d1", name: "测试设备", spec }]]),
+        scenes: new Map(),
+        ready: true,
+        t: (k, o) => String(i18n.t(k, o as never)),
+      } satisfies ActionCatalog,
+    );
+    expect(feed).toBe(`${d.capability} ${d.detail}`);
+    expect(d.detail).toBe("文案由画面生成");
+  });
 });
 
 describe("describeAction · 场景（scene_trigger）", () => {

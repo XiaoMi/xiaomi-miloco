@@ -15,6 +15,7 @@
     "rawKeyTitle": "Raw ledger key: ",
     "listSep": ", ",
     "quoted": "“{{v}}”",
+    "generatedByOmni": "Text generated from the scene",
     "foldToggle": "Fold actions",
     "foldToggleTitle": "Fold actions into their trigger events; turn off to give each action its own row",
     "foldStrengthAria": "Fold strength",

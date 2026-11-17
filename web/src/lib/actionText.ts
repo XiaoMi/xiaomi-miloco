@@ -152,6 +152,11 @@ export function describeAction(
     // 能力名走与任务详情同一个口径：动作的英文原名在中文界面读不出来，
     // 两页必须同名，否则住户拿任务详情去活动流核对时会以为是两件事。
     const label = capabilityLabel(iid, s);
+    // 与任务详情同一档：占位符是「执行时按画面生成」的模板，
+    // 原样露出等于把模板当成执行结果给住户看。
+    if (containsResultPlaceholder(value)) {
+      return `${label} ${t("actions.generatedByOmni")}`;
+    }
     const phrase = paramsPhrase(s, value, t);
     return phrase === null ? label : `${label} ${phrase}`;
   }
