@@ -312,10 +312,18 @@ def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | No
     不上时返回 None（丢弃，防 bogus rule_id 入下游）。容错模型对名称的轻微改写。"""
     if mapping is None:
         return name or None
-    if name in mapping:
-        return mapping[name]
+    key = str(name).strip().strip("：:").strip()
+    if key in mapping:
+        return mapping[key]
+    # 模型偶尔回小写或带引号，代号只有 1–2 个字符，容错成本很低。
+    upper = key.upper()
+    if len(upper) <= 2 and upper in mapping:
+        return mapping[upper]
+    # 完整规则名的子串容错保留，但跳过代号键：单个字母太短，会把任意含该字母的规则名配错。
     for rn, rid in mapping.items():
-        if rn and (rn in name or name in rn):
+        if len(rn) < 4:
+            continue
+        if rn in key or key in rn:
             return rid
     return None
 
@@ -361,7 +369,7 @@ def _parse_matched_rules(
         if hit is False or (isinstance(hit, str) and hit.strip().lower() in ("false", "0", "no")):
             continue
         # rule_name（模型照抄的完整规则名）→ 还原 rule_id（下游稳定键）；rule_name 一并存供展示
-        name = str(item.get("rule_name", ""))
+        name = str(item.get("rule_name", "")).strip()
         rid = _resolve_rule_name(name, rule_name_to_id)
         if rid is None:
             logger.error(

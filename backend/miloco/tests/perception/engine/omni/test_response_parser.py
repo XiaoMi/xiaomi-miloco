@@ -3,6 +3,8 @@
 import json
 
 from miloco.perception.engine.omni.response_parser import (
+    _parse_matched_rules,
+    _resolve_rule_name,
     extract_json,
     parse_omni_response,
     parse_tier_c_verify_response,
@@ -228,3 +230,36 @@ class TestParseTierCVerifyResponse:
     def test_non_numeric_confidence_defaults_zero(self):
         out = parse_tier_c_verify_response(_wrap('{"same_person": true, "confidence": "high"}'))
         assert out["confidence"] == 0.0
+
+
+class TestRuleCodeResolution:
+    """代号方案：模型在 matched_rules 里回 A/B/C，解析层还原成 rule_id。"""
+
+    def test_code_exact_match(self):
+        mapping = {"A": "rid-1", "[party] 派对": "rid-1", "B": "rid-2"}
+        assert _resolve_rule_name("A", mapping) == "rid-1"
+        assert _resolve_rule_name("B", mapping) == "rid-2"
+
+    def test_code_lowercase_and_trailing_colon_tolerated(self):
+        mapping = {"A": "rid-1"}
+        assert _resolve_rule_name("a", mapping) == "rid-1"
+        assert _resolve_rule_name("A：", mapping) == "rid-1"
+
+    def test_short_code_skipped_by_fuzzy_match(self):
+        # 旧口径会把 "PARTY" 因含 "A" 配到 rid-1；代号键必须跳过子串匹配。
+        mapping = {"A": "rid-1", "[party] 派对": "rid-1"}
+        assert _resolve_rule_name("PARTY", mapping) is None
+
+    def test_full_rule_name_still_resolves(self):
+        # 模型偶尔仍照抄旧格式时按精确/子串匹配兜住。
+        mapping = {"A": "rid-1", "[party] 派对": "rid-1"}
+        assert _resolve_rule_name("[party] 派对", mapping) == "rid-1"
+
+    def test_parse_matched_rules_with_codes(self):
+        raw = [
+            {"rule_name": "A", "reason": "证据", "hit": True},
+            {"rule_name": "C", "reason": "不成立", "hit": False},
+            {"rule_name": "Z", "reason": "编的", "hit": True},
+        ]
+        out = _parse_matched_rules(raw, {"A": "rid-1"})
+        assert [m.rule_id for m in out] == ["rid-1"]

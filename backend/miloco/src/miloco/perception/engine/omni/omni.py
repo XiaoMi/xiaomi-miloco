@@ -44,6 +44,8 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_prompt,
     build_stream_prompt,
     format_person_label,
+    ordered_rule_conditions,
+    rule_code,
 )
 from miloco.perception.engine.omni.provider import build_request_headers, get_adapter
 from miloco.perception.engine.omni.response_parser import (
@@ -81,15 +83,17 @@ def _has_loopback_tail(buffer: str) -> bool:
 
 
 def _rule_name_to_id(context: OmniContext) -> dict[str, str]:
-    """本窗 rule_name → rule_id(UUID) 映射，供 response_parser 把 matched_rules 里模型
-    照抄的 rule_name 还原回 rule_id（下游去重/触发用 UUID）。
+    """本窗「代号 / 完整规则名」→ rule_id(UUID) 映射，供 response_parser 把 matched_rules
+    里模型回的标识还原回 rule_id（下游去重/触发用 UUID）。
 
-    key 必须与 _render_rule_conditions 写进 prompt 的标识一致：rule_name 为空时同样回退
-    [rule_id]，否则模型照抄的 [rule_id] 在映射里找不到，命中的 matched_rules 会被静默丢弃。"""
-    return {
-        (rc.rule_name or f"[{rc.rule_id}]"): rc.rule_id
-        for rc in context.rule_conditions
-    }
+    代号部分必须与 ``_render_rule_conditions`` 用**同一个排序**（按 rule_id）分配，
+    否则模型回的 B 会映射到另一条规则——这比映射不上更危险，因为它不会报错。
+    完整规则名一并保留：模型偶尔仍照抄旧格式时按精确匹配兜住。"""
+    mapping: dict[str, str] = {}
+    for i, rc in enumerate(ordered_rule_conditions(context)):
+        mapping[rule_code(i)] = rc.rule_id
+        mapping.setdefault(rc.rule_name or f"[{rc.rule_id}]", rc.rule_id)
+    return mapping
 
 
 async def run_omni(
