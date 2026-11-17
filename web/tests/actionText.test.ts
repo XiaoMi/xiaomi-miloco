@@ -41,6 +41,12 @@ const spec: Record<string, BackendPropSpec> = {
       { name: "speed", format: "uint8" },
     ],
   },
+  "action.7.1": {
+    description: "音箱 播放文本",
+    prop_description: "Play Text",
+    service_description: "音箱",
+    in_params: [{ name: "text", format: "string" }],
+  },
 };
 
 describe("describeAction · 单属性（set_property）", () => {
@@ -138,6 +144,17 @@ describe("describeAction · 调用方法（call_action）", () => {
         t,
       ),
     ).toBe("窗帘 开到百分比 percent 50、speed 3");
+  });
+
+  it("动作能力名取云端译名并剥掉服务名前缀，与任务详情同一个名字", () => {
+    // spec 里 prop_description 是英文 Play Text；任务详情对同一份 spec 也渲染「播放文本」
+    expect(
+      describeAction(
+        { action_type: "call_action", iid: "action.7.1", value_json: '["关灯"]' },
+        spec,
+        t,
+      ),
+    ).toBe("播放文本 「关灯」");
   });
 });
 

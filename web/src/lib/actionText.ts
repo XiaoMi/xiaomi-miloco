@@ -4,7 +4,8 @@
  *
  * 三类取数，各自有各自的来源与回落：
  * - **名字**：`iid` → spec 的 `prop_description || description`，过 zhLabel 词表
- *   （与设备控制页同一个 `specLabel`，同一个属性两页同名）。
+ *   （与设备控制页同一个 `specLabel`，同一个属性两页同名）；`action.*` 改走
+ *   `capabilityLabel` 取云端译名，与任务详情同一个口径。
  * - **值**：`value_json` 按 `action_type` 分派，再按 spec 的 format / value_list /
  *   unit / in_params 读成人话。
  * - **回落**：spec 取不到（设备不在 home 里 / 规格缓存没热起来）、值 JSON 读不出来、
@@ -14,7 +15,12 @@
  * 中文拼接（顿号、书名号内的引号）走 i18next，不写死标点——英文语境下「、」是错的。
  */
 
-import { propValueText, specLabel, type BackendPropSpec } from "@/api/real";
+import {
+  capabilityLabel,
+  propValueText,
+  specLabel,
+  type BackendPropSpec,
+} from "@/api/real";
 
 /** 本模块只读台账行的这三个字段；用结构类型而不是 import BackendActionRow，
  *  免得 lib 层反向依赖 components 层（后者带 React 与 i18n 初始化）。 */
@@ -125,7 +131,9 @@ export function describeAction(
   if (row.action_type === "call_action") {
     const s = spec[iid];
     if (!s || !Array.isArray(value)) return null;
-    const label = specLabel(iid, s);
+    // 能力名走与任务详情同一个口径：动作的英文原名在中文界面读不出来，
+    // 两页必须同名，否则住户拿任务详情去活动流核对时会以为是两件事。
+    const label = capabilityLabel(iid, s);
     const phrase = paramsPhrase(s, value, t);
     return phrase === null ? label : `${label} ${phrase}`;
   }

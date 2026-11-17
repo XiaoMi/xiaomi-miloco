@@ -8,7 +8,7 @@
  *   不拿裸 did 冒充名字——那看起来像解析成功了。
  * - **能力**：`prop.*` 的 `iid` → 设备 spec 的 `prop_description || description`，与设备页、
  *   日志页共用同一个 `specLabel`，同一个属性三处同名；`action.*` 的 `prop_description`
- *   是英文 type_name（play-text），改取云端译名，见 `actionCapability`。
+ *   是英文的人类可读名（Play Text），改取云端译名，见 `capabilityLabel`。
  * - **值**：`prop.*` 走 `propValueText`（bool / 枚举 / 单位三态）；`action.*` 取 params；
  *   `scene` 取场景名。读不出来时回落成原始值，不猜。
  *
@@ -17,9 +17,8 @@
  */
 
 import {
+  capabilityLabel,
   propValueText,
-  specLabel,
-  type BackendPropSpec,
   type TaskDeviceMeta,
 } from "@/api/real";
 import type { TaskAction } from "@/lib/types";
@@ -36,6 +35,12 @@ const RESULT_PLACEHOLDER = /\{\{\s*result\s*\}\}/;
  *  执行的一句话、还带 silent-execution，不保证出声，按设备动作展示。
  *  接入别的厂商 TTS 时按实测的 type_name 逐个加进正则，别用 `tts` 这种宽匹配。 */
 const SPEECH_ACTION_TYPE = /play-text/i;
+
+/** 老 spec 缺 `type_name` 时退回 `prop_description`——它是英文的人类可读名
+ *  （``Play Text``），不是 URN 里的 `play-text`，直接过正则匹配不上。按 CLI
+ *  catalog 的同款规则归一化（小写、空格与下划线转连字符）再比。 */
+const normalizeActionType = (s: string): string =>
+  s.trim().toLowerCase().replace(/[\s_]+/g, "-");
 
 export interface ActionCatalog {
   /** 与 realListDeviceMeta 返回的设备元数据同源，不另立一份。 */
@@ -100,18 +105,18 @@ export function describeTaskAction(
   const spec = device?.spec?.[iid];
 
   const isActionCall = iid.startsWith("action.");
-  // type_name 最准（如 play-text）；老 spec 缺这个字段时退回描述文案。
-  const actionType = spec?.type_name ?? spec?.prop_description ?? spec?.description ?? "";
+  // type_name 最准（URN 里的 play-text）；老 spec 缺这个字段时退回 prop_description，
+  // 归一化后再过正则，否则 "Play Text" 会被误判成设备动作。
+  const actionType = normalizeActionType(
+    spec?.type_name ?? spec?.prop_description ?? spec?.description ?? "",
+  );
   const kind: TaskActionKind = !isActionCall
     ? "control"
     : SPEECH_ACTION_TYPE.test(actionType)
       ? "broadcast"
       : "deviceAction";
-  const capability = isActionCall
-    ? actionCapability(spec, iid)
-    : spec
-      ? specLabel(iid, spec)
-      : iid;
+  // 与活动流（actionText.describeAction）共用同一个能力名口径。
+  const capability = spec ? capabilityLabel(iid, spec) : iid;
 
   let detail: string | null;
   if (isActionCall) {
@@ -161,25 +166,6 @@ export function describeTaskAction(
     raw,
     unresolved: !device && catalog.ready,
   };
-}
-
-/** 动作的能力名。动作 spec 的 `prop_description` 是 MiOT 英文 type_name
- *  （play-text / ptz-calibrate），中文词表里没有，直接过 `specLabel` 会在中文界面
- *  露出机器名；云端译名在 `description`，形如「服务名 动作名」，而设备名里通常
- *  已经含服务名，剥掉前缀只留动作名。译名为空时回落到 `specLabel`。 */
-function actionCapability(
-  spec: BackendPropSpec | undefined,
-  iid: string,
-): string {
-  if (!spec) return iid;
-  const full = spec.description?.trim();
-  if (!full) return specLabel(iid, spec);
-  const service = spec.service_description?.trim();
-  if (service && full.startsWith(`${service} `)) {
-    const rest = full.slice(service.length + 1).trim();
-    if (rest) return rest;
-  }
-  return full;
 }
 
 /** 冷却：后端只给分钟级 cooldown_minutes；未配置就不显示。 */

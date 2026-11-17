@@ -1010,6 +1010,27 @@ export function specLabel(iid: string, spec: BackendPropSpec): string {
   return zhLabel(spec.prop_description || spec.description || iid);
 }
 
+/** 能力名：`prop.*` 与 `specLabel` 完全一致；`action.*` 改取云端译名。
+ *
+ *  动作 spec 的 `prop_description` 是英文的人类可读名（``Play Text``），中文词表里
+ *  没有，`specLabel` 只能原样回退——中文界面会露出英文。云端译名在 `description`，
+ *  形如「服务名 动作名」，而设备名里通常已含服务名，剥掉前缀只留动作名；译名为空
+ *  （老 spec）才回落 `specLabel`。
+ *
+ *  与 `specLabel` 一样导出给动作台账（活动流）复用：同一个能力在任务详情和活动流
+ *  必须同名，否则住户拿两页的串对不上。 */
+export function capabilityLabel(iid: string, spec: BackendPropSpec): string {
+  if (!iid.startsWith("action.")) return specLabel(iid, spec);
+  const full = spec.description?.trim();
+  if (!full) return specLabel(iid, spec);
+  const service = spec.service_description?.trim();
+  if (service && full.startsWith(`${service} `)) {
+    const rest = full.slice(service.length + 1).trim();
+    if (rest) return rest;
+  }
+  return full;
+}
+
 /** spec + 值 → 一句话。分支与 mapProp 同源（bool / value_list / unit 三种），
  *  差别只在输出形态：mapProp 给的是控件（开关、下拉、滑杆），这里给的是文本。
  *  读不出意思时返回 null，由调用方回落成原始 JSON——不猜。 */

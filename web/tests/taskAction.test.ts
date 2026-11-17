@@ -255,6 +255,21 @@ describe("describeTaskAction", () => {
     expect(d.capability).not.toContain("play-text");
   });
 
+  it("老 spec 缺 type_name 时，prop_description 归一化后仍判为播报", () => {
+    // prop_description 是英文人类可读名（Play Text），不是 URN 里的 play-text；
+    // 不归一化会被误判成设备动作
+    const dev = device();
+    dev.spec = {
+      ...(dev.spec ?? {}),
+      "action.8.1": { prop_description: "Play Text" },
+    };
+    const d = describeTaskAction(
+      action({ iid: "action.8.1", value: null, params: ["关灯"] }),
+      catalog({ devices: new Map([["d1", dev]]) }),
+    );
+    expect(d.kind).toBe("broadcast");
+  });
+
   it("动作没有云端译名时回落到 specLabel", () => {
     const dev = device();
     dev.spec = {
