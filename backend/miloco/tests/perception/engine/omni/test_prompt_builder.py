@@ -16,6 +16,7 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_stream_prompt,
     build_system_prompt,
     build_tier_c_verify_payload,
+    rule_code,
 )
 from miloco.perception.engine.types import (
     AudioAnalysis,
@@ -3809,3 +3810,18 @@ class TestPersonCropInject:
         )
         assert imgs[-1] == guide + 1, _dbg     # 引导语紧跟的那张，仍是 video 前最后一张
         assert self._note_idx(content) < guide, _dbg  # 人像注入整段在引导语之前
+
+
+class TestRuleCode:
+    """代号分配：A–Z → AA–ZZ，容量边界逐点钉住。"""
+
+    @pytest.mark.parametrize("index,expected", [
+        (0, "A"), (25, "Z"), (26, "AA"), (27, "AB"),
+        (51, "AZ"), (52, "BA"), (701, "ZZ"),
+    ])
+    def test_boundaries(self, index, expected):
+        assert rule_code(index) == expected
+
+    def test_over_capacity_rejected(self):
+        with pytest.raises(ValueError):
+            rule_code(702)

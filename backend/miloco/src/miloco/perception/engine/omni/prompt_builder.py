@@ -638,16 +638,22 @@ def _assemble_fused_messages(
 _CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
+_CODE_CAPACITY = len(_CODE_ALPHABET) + len(_CODE_ALPHABET) ** 2
+
+
 def rule_code(index: int) -> str:
-    """规则代号：0→A、1→B…25→Z、26→AA、27→AB…
+    """规则代号：0→A、25→Z、26→AA、51→AZ、701→ZZ。
 
     单个大写字母在这套模型的分词表里只占 1 个 token，两位字母同样是 1 个 token，
-    所以超过 26 条时扩到两位不额外收费。
+    所以超过 26 条时扩到两位不额外收费。两位用尽即到容量上限（702 条），
+    再往上没有可用的短代号，显式报错而不是回绕或渲染超长代号。
     """
+    if index >= _CODE_CAPACITY:
+        raise ValueError(f"rule_code 超出两位代号容量: index={index}")
     if index < len(_CODE_ALPHABET):
         return _CODE_ALPHABET[index]
     index -= len(_CODE_ALPHABET)
-    return _CODE_ALPHABET[index // 26] + _CODE_ALPHABET[index % 26]
+    return _CODE_ALPHABET[index // len(_CODE_ALPHABET)] + _CODE_ALPHABET[index % len(_CODE_ALPHABET)]
 
 
 def ordered_rule_conditions(context: OmniContext) -> list:
