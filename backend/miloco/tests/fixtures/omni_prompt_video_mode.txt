@@ -24,7 +24,7 @@
 
 # 输出格式
 
-{"caption":"详细描述","speeches":[{"speaker":"人","content":"原文","is_complete":true|false,"needs_response":true|false}],"env_sounds":"环境音描述","matched_rules":[{"rule_name":"规则名","reason":"判断依据","hit":true|false}],"suggestions":[{"event":"事件","action":"建议","urgency":"high|medium|low"}]}
+{"caption":"详细描述","speeches":[{"speaker":"人","content":"原文","is_complete":true|false,"needs_response":true|false}],"env_sounds":"环境音描述","matched_rules":[{"rule_name":"规则名","reason":"判断依据","hit":true}],"suggestions":[{"event":"事件","action":"建议","urgency":"high|medium|low"}]}
 
 # 字段说明
 
