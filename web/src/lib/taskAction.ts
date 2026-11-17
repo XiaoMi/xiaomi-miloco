@@ -190,9 +190,9 @@ function cooldownChips(action: TaskAction, t: Translate): string[] {
     : [t("tasks.chipCooldownMinutes", { n: minutes })];
 }
 
-/** 幂等三态：true / false / 未配置。未配置不显示——那是「没写」，不是一种状态。 */
+/** 幂等：只标显式声明的 false。后端 `RuleAction.idempotent` 默认 true，rule 的动作
+ *  整槽透传到 task 时走 `model_dump`、默认值被实体化——前端拿到的 true 分不清
+ *  「显式声明幂等」与「没写」，绝大多数设备直控又都是幂等的，逐行挂一枚等于没说。 */
 function idempotentChips(action: TaskAction, t: Translate): string[] {
-  if (action.idempotent === true) return [t("tasks.chipIdempotent")];
-  if (action.idempotent === false) return [t("tasks.chipNonIdempotent")];
-  return [];
+  return action.idempotent === false ? [t("tasks.chipNonIdempotent")] : [];
 }

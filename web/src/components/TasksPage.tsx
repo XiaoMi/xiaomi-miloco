@@ -856,6 +856,12 @@ export function TaskDetailSheet({
                     : t("tasks.rulesManagedHintReadOnly")}
                 </p>
               </div>
+            ) : guardRules.length > 0 ? (
+              // 生效中的只剩前提（进入规则被停用或还没接线）：没有可画的触发路径，
+              // 但前提本身是开着的，不能说「均未生效」——标题区的「前提 N 项」会跟着矛盾。
+              <div className="text-caption text-text-tertiary">
+                {t("tasks.rulesOnlyGuards", { count: guardRules.length })}
+              </div>
             ) : task.ruleBriefs.length > 0 ? (
               // 有规则但一条都没在生效：停用规则不参与运行期判定，
               // 落进下面的「暂无关联规则」会把住户引向查 Agent 接线。

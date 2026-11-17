@@ -235,16 +235,14 @@ describe("describeTaskAction", () => {
     expect(describeTaskAction(action(), catalog()).chips).toEqual([]);
   });
 
-  it("幂等三态：true / false / 未配置时不显示", () => {
-    expect(describeTaskAction(action({ idempotent: true }), catalog()).chips).toContain(
-      "tasks.chipIdempotent",
-    );
-    expect(describeTaskAction(action({ idempotent: false }), catalog()).chips).toContain(
-      "tasks.chipNonIdempotent",
-    );
-    const none = describeTaskAction(action(), catalog()).chips;
-    expect(none).not.toContain("tasks.chipIdempotent");
-    expect(none).not.toContain("tasks.chipNonIdempotent");
+  it("幂等：只在显式非幂等时提示", () => {
+    // 后端 RuleAction.idempotent 默认 true，透传到 task 槽时会被实体化——拿到的
+    // true 分不清「显式声明」与「没写」，逐行挂一枚「幂等」等于没说
+    expect(describeTaskAction(action({ idempotent: true }), catalog()).chips).toEqual([]);
+    expect(
+      describeTaskAction(action({ idempotent: false }), catalog()).chips,
+    ).toEqual(["tasks.chipNonIdempotent"]);
+    expect(describeTaskAction(action(), catalog()).chips).toEqual([]);
   });
 
   it("动作的能力名取云端译名，不把 MiOT 英文 type_name 露给住户", () => {

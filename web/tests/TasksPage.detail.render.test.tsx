@@ -186,7 +186,9 @@ describe("TaskDetailSheet · 停用规则", () => {
     );
     // 前提是进入的闸门，没有可拦的进入时不单独出现——那是对空承诺的「未满足时不进入」
     expect(html).not.toContain("客厅灯开着");
-    expect(html).toContain(i18n.t("tasks.rulesAllDisabled", { count: 1 }));
+    // 但前提本身是开着的，不能说「均未生效」——标题区的「前提 1 项」会跟着矛盾
+    expect(html).toContain(i18n.t("tasks.rulesOnlyGuards", { count: 1 }));
+    expect(html).not.toContain(i18n.t("tasks.rulesAllDisabled", { count: 1 }));
   });
 });
 
