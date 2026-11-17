@@ -112,7 +112,7 @@ describe("describeTaskAction", () => {
     );
     expect(d.kind).toBe("broadcast");
     // 多参数按 in_params 补参数名：第一个参数有名字（text），第二个没有
-    expect(d.detail).toBe("text 关灯tasks.actionParamSep客厅");
+    expect(d.detail).toBe("text 关灯actions.listSep客厅");
   });
 
   it("场景：did 位置放的是 scene_id，名字从场景表取", () => {
@@ -172,16 +172,16 @@ describe("describeTaskAction", () => {
       catalog(),
     );
     // 名字按原始下标取：'' 占住 mode 位，「关灯」是 text、30 是 volume
-    expect(d.detail).toBe("text 关灯tasks.actionParamSepvolume 30");
+    expect(d.detail).toBe("text 关灯actions.listSepvolume 30");
     expect(d.detail).not.toContain("mode 关灯");
   });
 
-  it("单参数不加参数名，保留原文", () => {
+  it("单参数加引号、不贴参数名（与活动流同一个文案键）", () => {
     const d = describeTaskAction(
       action({ iid: "action.7.3", params: ["你好"] }),
       catalog(),
     );
-    expect(d.detail).toBe("你好");
+    expect(d.detail).toBe("actions.quoted(v=你好)");
   });
 
   it("多参数按 in_params 带名，布尔标志不再裸成一个 false", () => {
@@ -224,7 +224,7 @@ describe("describeTaskAction", () => {
       action({ iid: "action.7.3", params: ["温度 {{x}} 已到"] }),
       catalog(),
     );
-    expect(d.detail).toBe("温度 {{x}} 已到");
+    expect(d.detail).toBe("actions.quoted(v=温度 {{x}} 已到)");
   });
 
   it("冷却：只认后端产出的分钟级字段", () => {
@@ -292,12 +292,12 @@ describe("describeTaskAction", () => {
       action({ iid: "action.7.3", value: null, params: "晚安" }),
       catalog(),
     );
-    expect(asText.detail).toBe("晚安");
+    expect(asText.detail).toBe("actions.quoted(v=晚安)");
     const asObject = describeTaskAction(
       action({ iid: "action.7.3", value: null, params: { text: "晚安" } }),
       catalog(),
     );
-    expect(asObject.detail).toBe('{"text":"晚安"}');
+    expect(asObject.detail).toBe('actions.quoted(v={"text":"晚安"})');
   });
 
   it("多入参动作只填了一个非空值时仍带参数名", () => {
@@ -309,11 +309,12 @@ describe("describeTaskAction", () => {
     expect(d.detail).toBe("silent-execution false");
   });
 
-  it("单入参动作即使有空位也保留原文", () => {
+  it("单入参动作存了空位时，幸存值不带名字", () => {
     const d = describeTaskAction(
       action({ iid: "action.7.3", params: ["", "你好"] }),
       catalog(),
     );
+    // 原始 params 有两个、走多入参分支；names[1] 不存在，所以只给原文不加名
     expect(d.detail).toBe("你好");
   });
 

@@ -62,7 +62,9 @@ const DEVICE_CATALOG: ActionCatalog = {
   ]),
   scenes: new Map(),
   ready: true,
-  t: (key) => key,
+  // 动作行会用到 actions.* 的文案键（引号 / 分隔符），这里必须过真 i18n
+  // 才能断言实际渲染出的字符；桩会把 key 原样吐出来。
+  t: (key, opts) => String(i18n.t(key, opts as never)),
 };
 
 function task(
@@ -190,6 +192,9 @@ describe("TaskDetailSheet · 停用规则", () => {
     expect(html).not.toContain(i18n.t("tasks.guardsConjunction", { count: 1 }));
     // 也不能说「均未生效」——这条前提本身是开着的
     expect(html).not.toContain(i18n.t("tasks.rulesAllDisabled", { count: 1 }));
+    // 说明条不能丢：这条前提是 iot 源（只读），所以落在 ReadOnly 文案上；
+    // 关键是与「全部停用」那支一样，这里也得有这句解释
+    expect(html).toContain(i18n.t("tasks.rulesManagedHintReadOnly"));
   });
 
   it("退出规则仍在、进入规则被停用时，前提单独成块而不是消失", () => {
@@ -235,7 +240,8 @@ describe("TaskDetailSheet · 动作行", () => {
     );
     expect(html).toContain("小爱音箱");
     expect(html).toContain("播放文本");
-    expect(html).toContain("关灯");
+    // 单入参加引号，与活动流同一个文案键
+    expect(html).toContain("「关灯」");
     // 英文 type_name 不该出现在界面上；did · iid 只留在 title 里排查用
     expect(html).not.toContain("play-text");
   });

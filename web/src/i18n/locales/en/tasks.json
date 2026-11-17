@@ -72,7 +72,6 @@
     "sceneTargetUnknown": "Unknown scene",
     "unknownDevice": "Unknown device {{did}}",
     "generatedByOmni": "Text generated from the scene",
-    "actionParamSep": ", ",
     "chipCooldownMinutes": "cooldown {{n}}min",
     "chipNonIdempotent": "not idempotent",
     "chipUnresolvedTarget": "device not visible now",

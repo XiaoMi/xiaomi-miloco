@@ -137,16 +137,17 @@ export function describeTaskAction(
       .filter(({ p }) => p !== null && p !== undefined && p !== "");
     // 若将来接入「执行前按画面生成文案」，params 里会是 {{result}} 占位符（后端暂未
     // 产出，见 RESULT_PLACEHOLDER 的注释）；真拼出来展示等于把模板当成品给住户看。
-    // 只声明一个入参的动作保留原文（「你好」不必写成「text 你好」）；声明了多个入参时
-    // 即便空位被滤掉，剩下那个也要带名，否则布尔标志又会变成孤零零的 false。
+    // 只有一个入参时加引号、不贴参数名；多个入参时按 in_params 补名，否则布尔标志
+    // 会变成孤零零的 false、数值会变成无标签数字。引号与分隔符都用活动流那套 key
+    // （actions.quoted / actions.listSep）——同一条动作在两页必须长得一样。
     detail = kept.length
       ? kept.some(({ p }) => RESULT_PLACEHOLDER.test(text(p)))
         ? t("tasks.generatedByOmni")
-        : names.length <= 1 && kept.length === 1
-          ? text(kept[0].p)
+        : params.length === 1
+          ? t("actions.quoted", { v: text(kept[0].p) })
           : kept
               .map(({ p, name }) => (name ? `${name} ${text(p)}` : text(p)))
-              .join(t("tasks.actionParamSep"))
+              .join(t("actions.listSep"))
       : null;
   } else {
     const text = spec ? propValueText(spec, action.value) : null;

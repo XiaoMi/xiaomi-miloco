@@ -878,17 +878,26 @@ export function TaskDetailSheet({
                 </p>
               </div>
             ) : guardRules.length > 0 ? (
-              // 只剩前提（进入 / 退出规则被停用或还没接线）：条件仍可见、omni 前提仍可改，
-              // 但不画空的进入组——那会让「未满足时不进入」成为空承诺。
-              <GuardBlock
-                rules={guardRules}
-                editing={editing}
-                draftOf={ruleDraft}
-                onDraftChange={(r, v) =>
-                  setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
-                }
-                idle
-              />
+              <div className="space-y-3">
+                {/* 只剩前提（进入 / 退出规则被停用或还没接线）：条件仍可见、omni 前提
+                    仍可改，但不画空的进入组——那会让「未满足时不进入」成为空承诺。 */}
+                <GuardBlock
+                  rules={guardRules}
+                  editing={editing}
+                  draftOf={ruleDraft}
+                  onDraftChange={(r, v) =>
+                    setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
+                  }
+                  idle
+                />
+                {/* 说明条与「有进入 / 退出规则」那支同源：这里同样能改，
+                    同样要讲清楚动作与推送由谁管。 */}
+                <p className="text-caption text-text-tertiary">
+                  {visibleRules.some(ruleConditionIsEditable)
+                    ? t("tasks.rulesManagedHint")
+                    : t("tasks.rulesManagedHintReadOnly")}
+                </p>
+              </div>
             ) : task.ruleBriefs.length > 0 ? (
               // 有规则但一条都没在生效：停用规则不参与运行期判定，
               // 落进下面的「暂无关联规则」会把住户引向查 Agent 接线。

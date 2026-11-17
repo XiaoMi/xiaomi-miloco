@@ -72,7 +72,6 @@
     "sceneTargetUnknown": "未知场景",
     "unknownDevice": "未知设备 {{did}}",
     "generatedByOmni": "文案由画面生成",
-    "actionParamSep": "，",
     "chipCooldownMinutes": "冷却 {{n}} 分钟",
     "chipNonIdempotent": "非幂等",
     "chipUnresolvedTarget": "目标设备当前不可见",
