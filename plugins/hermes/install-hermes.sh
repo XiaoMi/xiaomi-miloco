@@ -402,14 +402,18 @@ if [ "$NO_START_BACKEND" -eq 0 ] && [ "$POST_INSTALL_ONLY" -eq 0 ]; then
     info "miloco backend 未跑（upstream install 退出时 atexit 杀的），自动 service start"
     if miloco-cli service start 2>&1 | tail -5; then
       info "service start 成功，等 backend /health..."
-      for i in $(seq 1 30); do
+      # 窗口跟着 CLI 的口径走：CLI 的就绪等待由 MILOCO_STARTUP_TIMEOUT 决定（默认 90s），
+      # 这里再写死 30s 会在慢机上退化成「CLI 说成功、脚本说可能挂」的自相矛盾告警。
+      _ML_HEALTH_WAIT_S="${MILOCO_STARTUP_TIMEOUT:-90}"
+      case "$_ML_HEALTH_WAIT_S" in ''|*[!0-9]*) _ML_HEALTH_WAIT_S=90 ;; esac
+      for i in $(seq 1 "$_ML_HEALTH_WAIT_S"); do
         sleep 1
         if curl -fsS --max-time 2 "http://127.0.0.1:$(_read_backend_port)/health" >/dev/null 2>&1; then
           info "backend 就绪（等了 ${i}s）"
           break
         fi
-        if [ "$i" = "30" ]; then
-          warn "30s 内 backend /health 未 200 — 继续装但后续 Step 可能挂（看 miloco-cli service logs）"
+        if [ "$i" = "$_ML_HEALTH_WAIT_S" ]; then
+          warn "${_ML_HEALTH_WAIT_S}s 内 backend /health 未 200 — 继续装但后续 Step 可能挂（看 miloco-cli service logs）"
         fi
       done
     else
