@@ -167,7 +167,66 @@ describe("TaskDetailSheet · 停用规则", () => {
     expect(html).toContain(i18n.t("tasks.rulesAllDisabled", { count: 1 }));
     // 停用规则不是「没有规则」：落进 noRules 会把住户引去查 Agent 接线
     expect(html).not.toContain(i18n.t("tasks.noRules"));
-    expect(html).not.toContain("有人进入客厅");
+    // 全停用也把规则本身列出来——只给一句「共 N 条」等于没交代是哪条
+    expect(html).toContain(i18n.t("tasks.disabledRulesTitle", { count: 1 }));
+    expect(html).toContain("有人进入客厅");
+  });
+
+  it("部分停用时，停用规则单独成块，条件与规则名都在", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([
+          rule({ ruleId: "e1", query: "有人进入客厅" }),
+          rule({ ruleId: "e2", enabled: false, query: "门磁被打开" }),
+        ])}
+        catalog={CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    // 生效规则照常画在进入组里
+    expect(html).toContain("有人进入客厅");
+    // 停用规则在库存区块里：条件、规则名（日志检索键）都在
+    expect(html).toContain("门磁被打开");
+    expect(html).toContain("[t1] e2");
+    expect(html).toContain(i18n.t("tasks.disabledRulesTitle", { count: 1 }));
+    // 不能落进「均未生效」——还有一条在跑
+    expect(html).not.toContain(i18n.t("tasks.rulesAllDisabled", { count: 2 }));
+  });
+
+  it("只剩前提时也列出停用规则", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([
+          rule({
+            ruleId: "g1",
+            direction: "guard",
+            sourceType: "iot",
+            query: "客厅灯开着",
+          }),
+          rule({ ruleId: "e1", enabled: false, query: "有人进入客厅" }),
+        ])}
+        catalog={CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    expect(html).toContain("客厅灯开着");
+    // 进入组缺席也不能把那一条停用的进入规则一起丢掉
+    expect(html).toContain("有人进入客厅");
+    expect(html).toContain(i18n.t("tasks.disabledRulesTitle", { count: 1 }));
+  });
+
+  it("没有停用规则时不画库存区块", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([rule({ ruleId: "e1", query: "有人进入客厅" })])}
+        catalog={CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    expect(html).not.toContain(i18n.t("tasks.disabledRulesTitle", { count: 1 }));
   });
 
   it("只有前提、没有生效中的进入规则时，条件仍可见但不画空的进入组", () => {

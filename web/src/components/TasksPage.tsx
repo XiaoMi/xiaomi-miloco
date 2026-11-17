@@ -321,6 +321,48 @@ function RuleNameBadge({ name }: { name: string }) {
   );
 }
 
+/** 已停用的规则：只读列出，排在所有生效分组之后。
+ *
+ *  与生效组在结构上分开，而不是塞回进入 / 退出组：停用规则不参与运行期判定，
+ *  放进组里就得重新回答「需同时满足 N 项」「未满足时不进入」这些话到底数谁，
+ *  等于对一条不再拦人的闸门做承诺。这里只回答「库存里还有哪些规则、它们属于
+ *  哪个方向」。
+ *
+ *  刻意不接 editing / draftOf：组件的入参里根本没有可写通路，保存链路
+ *  （visibleRules）也就永远不会碰到它们。 */
+function DisabledRulesSection({ rules }: { rules: TaskRuleBrief[] }) {
+  const { t } = useTranslation();
+  if (rules.length === 0) return null;
+  return (
+    <div className="rounded-xl bg-bg-primary border border-border overflow-hidden">
+      <div className="px-3.5 py-2.5 border-b border-border flex items-center gap-2">
+        <span className="text-caption text-text-tertiary">
+          {t("tasks.disabledRulesTitle", { count: rules.length })}
+        </span>
+      </div>
+      <div className="px-3.5 py-3 space-y-3">
+        <p className="text-caption text-text-tertiary">
+          {t("tasks.disabledRulesHint")}
+        </p>
+        {rules.map((r, i) => (
+          <div
+            key={r.ruleId}
+            className={i > 0 ? "pt-3 border-t border-border" : ""}
+          >
+            <div className="flex items-start justify-between gap-3 mb-1.5">
+              <DirectionTag direction={r.direction} t={t} />
+              <RuleNameBadge name={r.name} />
+            </div>
+            <div className="text-body text-text-secondary leading-relaxed break-words">
+              {r.query}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // 前提：暖色块 + 圆点列表。它是闸门不是触发器，颜色与「触发条件」分开，
 // 但层级上与它并列（同属「进入」的两个条件）。
 // 编辑态下 omni 源的前提也要能改 —— 那同样是住户写的自然语言，旧版逐卡编辑时
@@ -615,6 +657,8 @@ export function TaskDetailSheet({
   // 同一方向可以有多条规则，分组恒为数组（见 groupRuleBriefs）。
   const { entry: entryRules, exit: exitRules, guard: guardRules } =
     groupRuleBriefs(task.ruleBriefs);
+  // 停用规则只作「规则库存」展示：不进分组、不进草稿、不进保存链路。
+  const disabledRules = task.ruleBriefs.filter((r) => !r.enabled);
   // 停用的规则不画：它们不进运行期拓扑、也不进感知 prompt。判断「有没有规则」
   // 也要用它，否则全被停用时会显示一句「可修改」却一条规则都没有。
   const visibleRules = task.ruleBriefs.filter((r) => r.enabled);
@@ -909,6 +953,13 @@ export function TaskDetailSheet({
             ) : (
               <div className="text-caption text-text-tertiary">
                 {t("tasks.noRules")}
+              </div>
+            )}
+            {/* 规则库存：停用规则在哪个状态档下都要交代清楚（部分停用 / 全停用 /
+                只剩前提）。挂在三元之外、Section 末尾这一处，避免某一档漏掉。 */}
+            {disabledRules.length > 0 && (
+              <div className="mt-3">
+                <DisabledRulesSection rules={disabledRules} />
               </div>
             )}
           </Section>
