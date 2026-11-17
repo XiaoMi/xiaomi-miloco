@@ -214,6 +214,8 @@ describe("TaskDetailSheet · 停用规则", () => {
     expect(html).toContain("客厅灯开着");
     expect(html).toContain(i18n.t("tasks.rulesOnlyGuards", { count: 1 }));
     expect(html).not.toContain(i18n.t("tasks.rulesAllDisabled", { count: 2 }));
+    // 前提是拦进入的闸门：进入组缺席时也不能掉到退出组后面，否则读起来是倒的
+    expect(html.indexOf("客厅灯开着")).toBeLessThan(html.indexOf("客厅无人"));
   });
 });
 

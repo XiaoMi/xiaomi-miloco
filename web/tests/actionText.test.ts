@@ -156,6 +156,23 @@ describe("describeAction · 调用方法（call_action）", () => {
       ),
     ).toBe("播放文本 「关灯」");
   });
+
+  it("英文界面下动作能力名不露中文译名", async () => {
+    // backend 的 description 恒为 zh-Hans，不随界面语言变；非中文界面必须回落
+    // 到英文 prop_description，否则英文界面里会混进中文动作名
+    await i18n.changeLanguage("en");
+    try {
+      expect(
+        describeAction(
+          { action_type: "call_action", iid: "action.7.1", value_json: '["关灯"]' },
+          spec,
+          i18n.t.bind(i18n),
+        ),
+      ).toContain("Play Text");
+    } finally {
+      await i18n.changeLanguage("zh");
+    }
+  });
 });
 
 describe("describeAction · 场景（scene_trigger）", () => {

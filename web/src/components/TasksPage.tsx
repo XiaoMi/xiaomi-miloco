@@ -844,6 +844,21 @@ export function TaskDetailSheet({
                     }
                   />
                 )}
+                {/* 进入规则被停用或还没接线时，前提块不在任何进入组里；补一个独立块，
+                    排在退出组之前——前提是拦进入的闸门，「前提 → 进入 → 退出」的顺序
+                    不能因为进入组缺席就倒过来。顺带让标题区的「前提 N 项」在正文里
+                    有落点、omni 前提这一轮仍可改。 */}
+                {entryRules.length === 0 && guardRules.length > 0 && (
+                  <GuardBlock
+                    rules={guardRules}
+                    editing={editing}
+                    draftOf={ruleDraft}
+                    onDraftChange={(r, v) =>
+                      setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
+                    }
+                    idle
+                  />
+                )}
                 {exitRules.length > 0 && (
                   <RuleGroupCard
                     direction="exit"
@@ -854,20 +869,6 @@ export function TaskDetailSheet({
                     onDraftChange={(r, v) =>
                       setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
                     }
-                  />
-                )}
-                {/* 进入规则被停用或还没接线时，前提块不在任何进入组里；退出组照画，
-                    这里补一个独立块——否则标题区的「前提 N 项」在正文里找不到对应物，
-                    omni 前提也没法在这一轮改。 */}
-                {entryRules.length === 0 && guardRules.length > 0 && (
-                  <GuardBlock
-                    rules={guardRules}
-                    editing={editing}
-                    draftOf={ruleDraft}
-                    onDraftChange={(r, v) =>
-                      setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
-                    }
-                    idle
                   />
                 )}
                 <p className="text-caption text-text-tertiary">

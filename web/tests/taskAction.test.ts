@@ -317,6 +317,15 @@ describe("describeTaskAction", () => {
     expect(d.detail).toBe("你好");
   });
 
+  it("属性值不是标量时按 JSON 显示，不压成 [object Object]", () => {
+    // 与 params 那条同口径：同一个边界槽里的两种形状不该有两种回落
+    const d = describeTaskAction(
+      action({ iid: "prop.9.9", value: { level: 3 } }),
+      catalog(),
+    );
+    expect(d.detail).toBe('{"level":3}');
+  });
+
   it("spec 缺失时能力回落成 iid，值回落成原始字面量", () => {
     const d = describeTaskAction(
       action({ iid: "prop.9.9", value: "abc" }),

@@ -150,7 +150,16 @@ export function describeTaskAction(
       : null;
   } else {
     const text = spec ? propValueText(spec, action.value) : null;
-    detail = text ?? (action.value === null || action.value === undefined ? null : String(action.value));
+    // 与 params 那条同口径：非字符串按 JSON 显示。String() 会把对象 / 数组压成
+    // [object Object] / "3,4" 这种读不出信息的字，而同样的脏数据在 params 那侧
+    // 是原样 JSON——同一个槽里的两种形状不该有两种回落。
+    const literal =
+      action.value === null || action.value === undefined
+        ? null
+        : typeof action.value === "string"
+          ? action.value
+          : JSON.stringify(action.value);
+    detail = text ?? literal;
   }
 
   return {
