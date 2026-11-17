@@ -330,11 +330,15 @@ export function GuardBlock({
   editing,
   draftOf,
   onDraftChange,
+  idle = false,
 }: {
   rules: TaskRuleBrief[];
   editing: boolean;
   draftOf: (rule: TaskRuleBrief) => string;
   onDraftChange: (rule: TaskRuleBrief, value: string) => void;
+  /** 没有生效中的进入规则时的独立渲染：条件仍可见、omni 前提仍可改，
+   *  但副标题不承诺「未满足时不进入」——当前根本没有可拦的进入。 */
+  idle?: boolean;
 }) {
   const { t } = useTranslation();
   if (rules.length === 0) return null;
@@ -349,7 +353,9 @@ export function GuardBlock({
           {t("tasks.directionGuard")}
         </span>
         <span className="text-caption text-text-tertiary">
-          {t("tasks.guardsConjunction", { count: rules.length })}
+          {idle
+            ? t("tasks.rulesOnlyGuards", { count: rules.length })
+            : t("tasks.guardsConjunction", { count: rules.length })}
         </span>
       </div>
       <ul className="space-y-1.5 list-disc pl-[18px]">
@@ -850,6 +856,20 @@ export function TaskDetailSheet({
                     }
                   />
                 )}
+                {/* 进入规则被停用或还没接线时，前提块不在任何进入组里；退出组照画，
+                    这里补一个独立块——否则标题区的「前提 N 项」在正文里找不到对应物，
+                    omni 前提也没法在这一轮改。 */}
+                {entryRules.length === 0 && guardRules.length > 0 && (
+                  <GuardBlock
+                    rules={guardRules}
+                    editing={editing}
+                    draftOf={ruleDraft}
+                    onDraftChange={(r, v) =>
+                      setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
+                    }
+                    idle
+                  />
+                )}
                 <p className="text-caption text-text-tertiary">
                   {visibleRules.some(ruleConditionIsEditable)
                     ? t("tasks.rulesManagedHint")
@@ -857,11 +877,17 @@ export function TaskDetailSheet({
                 </p>
               </div>
             ) : guardRules.length > 0 ? (
-              // 生效中的只剩前提（进入规则被停用或还没接线）：没有可画的触发路径，
-              // 但前提本身是开着的，不能说「均未生效」——标题区的「前提 N 项」会跟着矛盾。
-              <div className="text-caption text-text-tertiary">
-                {t("tasks.rulesOnlyGuards", { count: guardRules.length })}
-              </div>
+              // 只剩前提（进入 / 退出规则被停用或还没接线）：条件仍可见、omni 前提仍可改，
+              // 但不画空的进入组——那会让「未满足时不进入」成为空承诺。
+              <GuardBlock
+                rules={guardRules}
+                editing={editing}
+                draftOf={ruleDraft}
+                onDraftChange={(r, v) =>
+                  setRuleDrafts((m) => ({ ...m, [r.ruleId]: v }))
+                }
+                idle
+              />
             ) : task.ruleBriefs.length > 0 ? (
               // 有规则但一条都没在生效：停用规则不参与运行期判定，
               // 落进下面的「暂无关联规则」会把住户引向查 Agent 接线。

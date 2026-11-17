@@ -168,7 +168,7 @@ describe("TaskDetailSheet · 停用规则", () => {
     expect(html).not.toContain("有人进入客厅");
   });
 
-  it("只有前提、没有生效中的进入规则时，不画空的进入组", () => {
+  it("只有前提、没有生效中的进入规则时，条件仍可见但不画空的进入组", () => {
     const html = renderToStaticMarkup(
       <TaskDetailSheet
         task={task([
@@ -184,11 +184,36 @@ describe("TaskDetailSheet · 停用规则", () => {
         onChanged={noop}
       />,
     );
-    // 前提是进入的闸门，没有可拦的进入时不单独出现——那是对空承诺的「未满足时不进入」
-    expect(html).not.toContain("客厅灯开着");
-    // 但前提本身是开着的，不能说「均未生效」——标题区的「前提 1 项」会跟着矛盾
+    // 条件仍可见、可回顾；但不能承诺「未满足时不进入」——当前没有可拦的进入
+    expect(html).toContain("客厅灯开着");
     expect(html).toContain(i18n.t("tasks.rulesOnlyGuards", { count: 1 }));
+    expect(html).not.toContain(i18n.t("tasks.guardsConjunction", { count: 1 }));
+    // 也不能说「均未生效」——这条前提本身是开着的
     expect(html).not.toContain(i18n.t("tasks.rulesAllDisabled", { count: 1 }));
+  });
+
+  it("退出规则仍在、进入规则被停用时，前提单独成块而不是消失", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([
+          rule({ ruleId: "x1", direction: "exit", query: "客厅无人" }),
+          rule({
+            ruleId: "g1",
+            direction: "guard",
+            sourceType: "iot",
+            query: "客厅灯开着",
+          }),
+        ])}
+        catalog={CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    expect(html).toContain("客厅无人");
+    // 退出组照画时前提也要有落点，否则标题区的「前提 1 项」在正文里找不到
+    expect(html).toContain("客厅灯开着");
+    expect(html).toContain(i18n.t("tasks.rulesOnlyGuards", { count: 1 }));
+    expect(html).not.toContain(i18n.t("tasks.rulesAllDisabled", { count: 2 }));
   });
 });
 
