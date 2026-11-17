@@ -11,6 +11,7 @@ function brief(overrides: Partial<TaskRuleBrief> = {}): TaskRuleBrief {
   return {
     ruleId: "r1",
     name: "[r1] 有人在门口",
+    enabled: true,
     query: "有人在门口",
     direction: "enter",
     sourceType: "omni",
@@ -55,6 +56,16 @@ describe("groupRuleBriefs", () => {
     expect(groups.entry.map((r) => r.ruleId)).toEqual(["s1"]);
     expect(groups.exit.map((r) => r.ruleId)).toEqual(["x1"]);
     expect(groups.guard.map((r) => r.ruleId)).toEqual(["g1", "g2"]);
+  });
+
+  it("停用的规则不进任何一组 —— 它们不参与运行期判定", () => {
+    const groups = groupRuleBriefs([
+      brief({ ruleId: "e1", direction: "enter" }),
+      brief({ ruleId: "e2", direction: "enter", enabled: false }),
+      brief({ ruleId: "g1", direction: "guard", enabled: false }),
+    ]);
+    expect(groups.entry.map((r) => r.ruleId)).toEqual(["e1"]);
+    expect(groups.guard).toEqual([]);
   });
 
   it("没有规则时三组都是空数组，不是 undefined", () => {

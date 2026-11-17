@@ -131,6 +131,18 @@ def test_create_task_then_rule_auto_links(service):
     assert view.rule_briefs[0].query == "客厅有人"
     # 规则名要跟着带上：prompt 的「# 待判断规则」段用的就是它，详情页要照它查日志
     assert view.rule_briefs[0].name == "[t1] r"
+    assert view.rule_briefs[0].enabled is True
+
+
+def test_rule_brief_carries_enabled(service):
+    """停用的 rule 不进运行期拓扑、也不进感知 prompt，摘要要带上 enabled 供界面区分。"""
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    rule = _make_rule_obj(task_id="t1", query="客厅有人")
+    rule.enabled = False
+    RuleRepo().create(rule)
+
+    view = service.get_full_view("t1")
+    assert view.rule_briefs[0].enabled is False
 
 
 def test_create_task_defaults_to_permanent(service):

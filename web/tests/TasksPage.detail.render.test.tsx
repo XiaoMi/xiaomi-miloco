@@ -23,6 +23,7 @@ const count = (haystack: string, needle: string): number =>
 function rule(over: Partial<TaskRuleBrief> & { ruleId: string }): TaskRuleBrief {
   return {
     name: `[t1] ${over.ruleId}`,
+    enabled: true,
     query: "条件",
     direction: "enter",
     sourceType: "omni",

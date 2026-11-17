@@ -2390,6 +2390,7 @@ interface BackendTaskSummary {
   rule_briefs?: {
     rule_id: string;
     name?: string;
+    enabled?: boolean;
     query: string;
     direction?: TaskRuleDirection;
     source_type?: TaskRuleSourceType;
@@ -2437,6 +2438,7 @@ export async function realListTasks(): Promise<Task[]> {
     ruleBriefs: (t.rule_briefs ?? []).map((b) => ({
       ruleId: b.rule_id,
       name: b.name ?? "",
+      enabled: b.enabled ?? true,
       query: b.query,
       direction: b.direction ?? "enter",
       sourceType: b.source_type ?? "omni",

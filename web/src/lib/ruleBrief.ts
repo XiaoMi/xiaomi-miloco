@@ -26,11 +26,13 @@ export interface RuleGroups {
  * 界面上静默消失，而它们仍在生效——住户看到的规则集合与后端装载的不一致。
  */
 export function groupRuleBriefs(rules: TaskRuleBrief[]): RuleGroups {
+  // 只保留生效中的规则：停用的不进运行期拓扑、也不进感知 prompt，画出来就是假承诺。
+  const live = rules.filter((r) => r.enabled);
   return {
-    entry: rules.filter(
+    entry: live.filter(
       (r) => r.direction === "enter" || r.direction === "session",
     ),
-    exit: rules.filter((r) => r.direction === "exit"),
-    guard: rules.filter((r) => r.direction === "guard"),
+    exit: live.filter((r) => r.direction === "exit"),
+    guard: live.filter((r) => r.direction === "guard"),
   };
 }

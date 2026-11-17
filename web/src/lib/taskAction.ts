@@ -105,26 +105,25 @@ export function describeTaskAction(
 
   let detail: string | null;
   if (isActionCall) {
-    const raw = (action.params ?? []).filter(
-      (p) => p !== null && p !== undefined && p !== "",
-    );
     const text = (v: unknown): string =>
       typeof v === "string" ? v : JSON.stringify(v ?? null);
-    // 位置参数按 spec 的 in_params 顺序填。多参数时补上参数名，否则布尔标志会变成
-    // 一个孤零零的 false、数值会变成「200，30」这种没有标签的数字；单参数保留原文。
     const names = spec?.in_params ?? [];
+    // 名字按**原始下标**取，再滤掉空值：先 filter 会让后面参数的名字整体前移，
+    // 把「text-content」贴到下一个参数上。
+    const kept = (action.params ?? [])
+      .map((p, i) => ({ p, name: names[i]?.name }))
+      .filter(({ p }) => p !== null && p !== undefined && p !== "");
     // 若将来接入「执行前按画面生成文案」，params 里会是 {{result}} 占位符（后端暂未
     // 产出，见 RESULT_PLACEHOLDER 的注释）；真拼出来展示等于把模板当成品给住户看。
-    detail = raw.length
-      ? raw.some((p) => RESULT_PLACEHOLDER.test(text(p)))
+    // 多参数补参数名，否则布尔标志会变成孤零零的 false、数值会变成无标签数字；
+    // 单参数保留原文。
+    detail = kept.length
+      ? kept.some(({ p }) => RESULT_PLACEHOLDER.test(text(p)))
         ? t("tasks.generatedByOmni")
-        : raw.length === 1
-          ? text(raw[0])
-          : raw
-              .map((p, i) => {
-                const name = names[i]?.name;
-                return name ? `${name} ${text(p)}` : text(p);
-              })
+        : kept.length === 1
+          ? text(kept[0].p)
+          : kept
+              .map(({ p, name }) => (name ? `${name} ${text(p)}` : text(p)))
               .join(t("tasks.actionParamSep"))
       : null;
   } else {

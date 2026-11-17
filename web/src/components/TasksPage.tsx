@@ -609,6 +609,9 @@ export function TaskDetailSheet({
   // 同一方向可以有多条规则，分组恒为数组（见 groupRuleBriefs）。
   const { entry: entryRules, exit: exitRules, guard: guardRules } =
     groupRuleBriefs(task.ruleBriefs);
+  // 停用的规则不画：它们不进运行期拓扑、也不进感知 prompt。判断「有没有规则」
+  // 也要用它，否则全被停用时会显示一句「可修改」却一条规则都没有。
+  const visibleRules = task.ruleBriefs.filter((r) => r.enabled);
 
   const enterActions = task.actions.onEnterActions;
   const exitActions = task.actions.onExitActions;
@@ -815,7 +818,7 @@ export function TaskDetailSheet({
           )}
 
           <Section title={t("tasks.rulesTitle")} icon={IconFunnel}>
-            {task.ruleBriefs.length > 0 ? (
+            {visibleRules.length > 0 ? (
               <div className="space-y-3">
                 {/* 进入与退出各成一组；前提是 task 级闸门，放在进入组的最前面，
                     对组内每一条进入规则都生效（见 RuleGroupCard 的说明）。 */}
@@ -844,7 +847,7 @@ export function TaskDetailSheet({
                   />
                 )}
                 <p className="text-caption text-text-tertiary">
-                  {task.ruleBriefs.some(ruleConditionIsEditable)
+                  {visibleRules.some(ruleConditionIsEditable)
                     ? t("tasks.rulesManagedHint")
                     : t("tasks.rulesManagedHintReadOnly")}
                 </p>

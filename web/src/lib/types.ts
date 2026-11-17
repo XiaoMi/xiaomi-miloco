@@ -1041,6 +1041,9 @@ export interface TaskRuleBrief {
   // 规则名，形如「[task_id] 短名」。感知 prompt 的「# 待判断规则」段用的就是它，
   // 规则日志也按它落库 —— 详情页把它当标识符展示，住户查日志时要照着找。
   name: string;
+  // 停用的规则不进运行期拓扑、也不进感知 prompt。详情页只画生效中的规则，
+  // 否则会对着一条不再拦人的闸门写「未满足时不进入」。
+  enabled: boolean;
   // 规则的自然语言条件（"孩子在书桌前学习" 之类）
   query: string;
   direction: TaskRuleDirection;

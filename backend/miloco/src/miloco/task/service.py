@@ -217,6 +217,7 @@ class TaskService:
                 RuleBrief(
                     rule_id=rule.id,
                     name=rule.name,
+                    enabled=rule.enabled,
                     query=rule.condition.query,
                     direction=rule.resolved_direction.value,
                     source_type=rule.resolved_source_type,

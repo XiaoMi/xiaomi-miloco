@@ -45,6 +45,16 @@ function device(over: Partial<TaskDeviceMeta> = {}): TaskDeviceMeta {
         prop_description: "ptz-calibrate",
         type_name: "ptz-calibrate",
       },
+      "action.9.1": {
+        description: "three-params",
+        prop_description: "three-params",
+        type_name: "three-params",
+        in_params: [
+          { name: "mode", format: "string" },
+          { name: "text", format: "string" },
+          { name: "volume", format: "uint8" },
+        ],
+      },
       "action.7.4": {
         description: "execute-text-directive",
         prop_description: "execute-text-directive",
@@ -145,6 +155,16 @@ describe("describeTaskAction", () => {
       catalog(),
     );
     expect(d.kind).toBe("deviceAction");
+  });
+
+  it("中间有空参数时，后面参数的名字不前移", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.9.1", params: ["", "关灯", 30] }),
+      catalog(),
+    );
+    // 名字按原始下标取：'' 占住 mode 位，「关灯」是 text、30 是 volume
+    expect(d.detail).toBe("text 关灯tasks.actionParamSepvolume 30");
+    expect(d.detail).not.toContain("mode 关灯");
   });
 
   it("单参数不加参数名，保留原文", () => {
