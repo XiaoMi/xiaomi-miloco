@@ -6,8 +6,9 @@
  *
  * - **设备**：`did` → `/api/miot/home` 的设备名与房间。取不到就显式标「未知设备」，
  *   不拿裸 did 冒充名字——那看起来像解析成功了。
- * - **能力**：`iid` → 设备 spec 的 `prop_description || description`，与设备页、日志页
- *   共用同一个 `specLabel`，同一个属性三处同名。
+ * - **能力**：`prop.*` 的 `iid` → 设备 spec 的 `prop_description || description`，与设备页、
+ *   日志页共用同一个 `specLabel`，同一个属性三处同名；`action.*` 的 `prop_description`
+ *   是英文 type_name（play-text），改取云端译名，见 `actionCapability`。
  * - **值**：`prop.*` 走 `propValueText`（bool / 枚举 / 单位三态）；`action.*` 取 params；
  *   `scene` 取场景名。读不出来时回落成原始值，不猜。
  *
@@ -15,7 +16,12 @@
  * 这边读的是**任务动作槽里的原始动作对象**，两者字段形态不同，不要合并。
  */
 
-import { propValueText, specLabel, type TaskDeviceMeta } from "@/api/real";
+import {
+  propValueText,
+  specLabel,
+  type BackendPropSpec,
+  type TaskDeviceMeta,
+} from "@/api/real";
 import type { TaskAction } from "@/lib/types";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
@@ -101,26 +107,37 @@ export function describeTaskAction(
     : SPEECH_ACTION_TYPE.test(actionType)
       ? "broadcast"
       : "deviceAction";
-  const capability = spec ? specLabel(iid, spec) : iid;
+  const capability = isActionCall
+    ? actionCapability(spec, iid)
+    : spec
+      ? specLabel(iid, spec)
+      : iid;
 
   let detail: string | null;
   if (isActionCall) {
     const text = (v: unknown): string =>
       typeof v === "string" ? v : JSON.stringify(v ?? null);
     const names = spec?.in_params ?? [];
+    // task 边界槽在后端是 list[dict]，params 的元素形状没有校验：CLI 接受任意 JSON，
+    // 写成字符串 / 对象都能落库。收敛成数组再走后面的逻辑，别让一条脏动作把整页抛崩。
+    const params = Array.isArray(action.params)
+      ? action.params
+      : action.params === null || action.params === undefined
+        ? []
+        : [action.params];
     // 名字按**原始下标**取，再滤掉空值：先 filter 会让后面参数的名字整体前移，
     // 把「text-content」贴到下一个参数上。
-    const kept = (action.params ?? [])
+    const kept = params
       .map((p, i) => ({ p, name: names[i]?.name }))
       .filter(({ p }) => p !== null && p !== undefined && p !== "");
     // 若将来接入「执行前按画面生成文案」，params 里会是 {{result}} 占位符（后端暂未
     // 产出，见 RESULT_PLACEHOLDER 的注释）；真拼出来展示等于把模板当成品给住户看。
-    // 多参数补参数名，否则布尔标志会变成孤零零的 false、数值会变成无标签数字；
-    // 单参数保留原文。
+    // 只声明一个入参的动作保留原文（「你好」不必写成「text 你好」）；声明了多个入参时
+    // 即便空位被滤掉，剩下那个也要带名，否则布尔标志又会变成孤零零的 false。
     detail = kept.length
       ? kept.some(({ p }) => RESULT_PLACEHOLDER.test(text(p)))
         ? t("tasks.generatedByOmni")
-        : kept.length === 1
+        : names.length <= 1 && kept.length === 1
           ? text(kept[0].p)
           : kept
               .map(({ p, name }) => (name ? `${name} ${text(p)}` : text(p)))
@@ -144,6 +161,25 @@ export function describeTaskAction(
     raw,
     unresolved: !device && catalog.ready,
   };
+}
+
+/** 动作的能力名。动作 spec 的 `prop_description` 是 MiOT 英文 type_name
+ *  （play-text / ptz-calibrate），中文词表里没有，直接过 `specLabel` 会在中文界面
+ *  露出机器名；云端译名在 `description`，形如「服务名 动作名」，而设备名里通常
+ *  已经含服务名，剥掉前缀只留动作名。译名为空时回落到 `specLabel`。 */
+function actionCapability(
+  spec: BackendPropSpec | undefined,
+  iid: string,
+): string {
+  if (!spec) return iid;
+  const full = spec.description?.trim();
+  if (!full) return specLabel(iid, spec);
+  const service = spec.service_description?.trim();
+  if (service && full.startsWith(`${service} `)) {
+    const rest = full.slice(service.length + 1).trim();
+    if (rest) return rest;
+  }
+  return full;
 }
 
 /** 冷却：后端只给分钟级 cooldown_minutes；未配置就不显示。 */

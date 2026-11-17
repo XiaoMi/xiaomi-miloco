@@ -959,7 +959,12 @@ describe("realListTasks — summary 契约", () => {
         created_at: "2026-09-01T10:00:00+08:00",
         runtime_state: "on",
         rule_briefs: [
-          { rule_id: "r-in", query: "比出 V 手势", direction: "enter" },
+          {
+            rule_id: "r-in",
+            query: "比出 V 手势",
+            direction: "enter",
+            enabled: false,
+          },
           { rule_id: "r-out", query: "挥手", direction: "exit" },
         ],
         actions: {
@@ -980,6 +985,8 @@ describe("realListTasks — summary 契约", () => {
 
     expect(task.runtimeState).toBe("on");
     expect(task.ruleBriefs.map((r) => r.direction)).toEqual(["enter", "exit"]);
+    // 停用标记要跨层带出来：界面据此不画不再生效的规则（缺省视为启用）
+    expect(task.ruleBriefs.map((r) => r.enabled)).toEqual([false, true]);
     expect(task.actions?.onEnterDesc).toBe("推一条消息");
     expect(task.actions?.onExitDesc).toBe("推一条下线");
     // *_actions 原样带出：抽屉要把 did/iid 翻成「哪个设备的哪个动作」
@@ -1009,6 +1016,8 @@ describe("realListTasks — summary 契约", () => {
 
     expect(task.runtimeState).toBe("off");
     expect(task.ruleBriefs[0].direction).toBe("enter");
+    // 旧 backend 不带 enabled：按启用处理，否则老任务会被整片隐藏
+    expect(task.ruleBriefs[0].enabled).toBe(true);
     // 归一成"六个槽全空"而不是 null —— 调用方据此隐藏整个动作分区
     expect(task.actions).toEqual({
       onEnterDesc: null,

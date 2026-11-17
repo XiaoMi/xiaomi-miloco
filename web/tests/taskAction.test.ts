@@ -64,6 +64,15 @@ function device(over: Partial<TaskDeviceMeta> = {}): TaskDeviceMeta {
           { name: "silent-execution", format: "bool" },
         ],
       },
+      "action.6.1": {
+        // 云端译名的形态：description 是「服务名 动作名」，prop_description
+        // 仍是 MiOT 英文 type_name
+        description: "音箱 播放文本",
+        prop_description: "play-text",
+        type_name: "play-text",
+        service_description: "音箱",
+        in_params: [{ name: "text", format: "string" }],
+      },
     },
     ...over,
   };
@@ -236,6 +245,63 @@ describe("describeTaskAction", () => {
     const none = describeTaskAction(action(), catalog()).chips;
     expect(none).not.toContain("tasks.chipIdempotent");
     expect(none).not.toContain("tasks.chipNonIdempotent");
+  });
+
+  it("动作的能力名取云端译名，不把 MiOT 英文 type_name 露给住户", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.6.1", value: null, params: ["关灯"] }),
+      catalog(),
+    );
+    // description 是「服务名 动作名」，设备名里已经含服务名，只留动作名
+    expect(d.capability).toBe("播放文本");
+    expect(d.capability).not.toContain("play-text");
+  });
+
+  it("动作没有云端译名时回落到 specLabel", () => {
+    const dev = device();
+    dev.spec = {
+      ...(dev.spec ?? {}),
+      "action.2.1": {
+        prop_description: "ptz-calibrate",
+        type_name: "ptz-calibrate",
+      },
+    };
+    const d = describeTaskAction(
+      action({ iid: "action.2.1", value: null, params: [] }),
+      catalog({ devices: new Map([["d1", dev]]) }),
+    );
+    expect(d.capability).toBe("ptz-calibrate");
+  });
+
+  it("params 不是数组时按单参数渲染，不抛异常", () => {
+    // task 边界槽在后端是 list[dict]，params 写成字符串 / 对象都能落库
+    const asText = describeTaskAction(
+      action({ iid: "action.7.3", value: null, params: "晚安" }),
+      catalog(),
+    );
+    expect(asText.detail).toBe("晚安");
+    const asObject = describeTaskAction(
+      action({ iid: "action.7.3", value: null, params: { text: "晚安" } }),
+      catalog(),
+    );
+    expect(asObject.detail).toBe('{"text":"晚安"}');
+  });
+
+  it("多入参动作只填了一个非空值时仍带参数名", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.7.4", params: ["", false] }),
+      catalog(),
+    );
+    // 声明了两个入参，false 是 silent-execution，不能裸成一个 false
+    expect(d.detail).toBe("silent-execution false");
+  });
+
+  it("单入参动作即使有空位也保留原文", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.7.3", params: ["", "你好"] }),
+      catalog(),
+    );
+    expect(d.detail).toBe("你好");
   });
 
   it("spec 缺失时能力回落成 iid，值回落成原始字面量", () => {

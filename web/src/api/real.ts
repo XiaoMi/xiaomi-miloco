@@ -1218,8 +1218,11 @@ export interface TaskDeviceMeta {
   spec?: Record<string, BackendPropSpec>;
 }
 
-/** 一台设备的「展示元数据」只有这一处口径：did / 名字 / 房间 / spec。
- *  设备页与任务详情都从这里取，避免哪天清洗规则改了只改一边。 */
+/** 一台设备的「展示元数据」取数口径：did / 名字 / 房间 / spec。
+ *  设备页与任务详情都从这里取，避免哪天清洗规则改了只改一边。
+ *  房间的**呈现**仍分两套：这里把未分配 / 脏值（纯数字 home_id）归成 undefined，
+ *  设备页再 `meta.room ?? cleanRoom(d.room)` 回落进「未分配」分组——那是设备页
+ *  的分组语义；详情页的括号只回答「这台设备在哪个房间」，没有就不画。 */
 function mapDeviceMeta(d: BackendDevice): TaskDeviceMeta {
   const raw = d.room;
   return {

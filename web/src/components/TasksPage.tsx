@@ -649,7 +649,9 @@ export function TaskDetailSheet({
     if (nextDesc && nextDesc !== task.description) {
       jobs.push(() => updateTaskDescription(task.taskId, nextDesc));
     }
-    for (const r of task.ruleBriefs) {
+    // 只提交界面上看得到的规则：停用规则不渲染、也没有草稿可改，
+    // 遍历全量只会在它的条件带首尾空白时发出一次静默 PATCH。
+    for (const r of visibleRules) {
       // 判据就是源本身。靠 `next !== r.query` 跳过只读 rule 的话，依赖的是服务端渲染
       // 出的 query 首尾无空白——那是巧合不是保证，一旦带上空白就会对 iot rule 发一次
       // 必被拒的 PATCH，而这里是串行保存，同屉别的改动会「部分成功」。
@@ -818,11 +820,13 @@ export function TaskDetailSheet({
           )}
 
           <Section title={t("tasks.rulesTitle")} icon={IconFunnel}>
-            {visibleRules.length > 0 ? (
+            {/* 有生效中的进入 / 退出规则才画规则区：前提是进入组的闸门，
+                没有可拦的进入时单独画出来是一句空承诺。 */}
+            {entryRules.length > 0 || exitRules.length > 0 ? (
               <div className="space-y-3">
                 {/* 进入与退出各成一组；前提是 task 级闸门，放在进入组的最前面，
                     对组内每一条进入规则都生效（见 RuleGroupCard 的说明）。 */}
-                {(entryRules.length > 0 || guardRules.length > 0) && (
+                {entryRules.length > 0 && (
                   <RuleGroupCard
                     direction={entryRules[0]?.direction ?? "enter"}
                     rules={entryRules}
@@ -851,6 +855,14 @@ export function TaskDetailSheet({
                     ? t("tasks.rulesManagedHint")
                     : t("tasks.rulesManagedHintReadOnly")}
                 </p>
+              </div>
+            ) : task.ruleBriefs.length > 0 ? (
+              // 有规则但一条都没在生效：停用规则不参与运行期判定，
+              // 落进下面的「暂无关联规则」会把住户引向查 Agent 接线。
+              <div className="text-caption text-text-tertiary">
+                {t("tasks.rulesAllDisabled", {
+                  count: task.ruleBriefs.length,
+                })}
               </div>
             ) : (
               <div className="text-caption text-text-tertiary">

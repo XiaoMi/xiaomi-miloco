@@ -1059,7 +1059,9 @@ export interface TaskAction {
   did: string;
   iid: string;
   value?: unknown;
-  params?: unknown[] | null;
+  // 正常是位置参数数组，但 task 边界槽在后端是 list[dict]，params 的形状没有校验
+  // （CLI 接受任意 JSON）。渲染侧先收敛成数组，别把「可能不是数组」当数组去 map。
+  params?: unknown;
   idempotent?: boolean;
   cooldownMinutes?: number | null;
 }

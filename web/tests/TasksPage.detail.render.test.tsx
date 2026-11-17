@@ -39,6 +39,32 @@ const CATALOG: ActionCatalog = {
   t: (key) => key,
 };
 
+/** 带一台音箱的目录：动作行的设备名 / 能力名都靠它翻译。 */
+const DEVICE_CATALOG: ActionCatalog = {
+  devices: new Map([
+    [
+      "d1",
+      {
+        did: "d1",
+        name: "小爱音箱",
+        room: "客厅",
+        spec: {
+          "action.6.1": {
+            description: "音箱 播放文本",
+            prop_description: "play-text",
+            type_name: "play-text",
+            service_description: "音箱",
+            in_params: [{ name: "text", format: "string" }],
+          },
+        },
+      },
+    ],
+  ]),
+  scenes: new Map(),
+  ready: true,
+  t: (key) => key,
+};
+
 function task(
   ruleBriefs: TaskRuleBrief[],
   actions: Partial<Task["actions"]> = {},
@@ -121,6 +147,68 @@ describe("TaskDetailSheet · 规则分块", () => {
     );
     expect(count(html, "有人坐在椅子上")).toBe(1);
     expect(count(html, "客厅无人")).toBe(1);
+  });
+});
+
+describe("TaskDetailSheet · 停用规则", () => {
+  it("规则全部停用时说明是停用，而不是「暂无关联规则」", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([
+          rule({ ruleId: "e1", enabled: false, query: "有人进入客厅" }),
+        ])}
+        catalog={CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    expect(html).toContain(i18n.t("tasks.rulesAllDisabled", { count: 1 }));
+    // 停用规则不是「没有规则」：落进 noRules 会把住户引去查 Agent 接线
+    expect(html).not.toContain(i18n.t("tasks.noRules"));
+    expect(html).not.toContain("有人进入客厅");
+  });
+
+  it("只有前提、没有生效中的进入规则时，不画空的进入组", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([
+          rule({
+            ruleId: "g1",
+            direction: "guard",
+            sourceType: "iot",
+            query: "客厅灯开着",
+          }),
+        ])}
+        catalog={CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    // 前提是进入的闸门，没有可拦的进入时不单独出现——那是对空承诺的「未满足时不进入」
+    expect(html).not.toContain("客厅灯开着");
+    expect(html).toContain(i18n.t("tasks.rulesAllDisabled", { count: 1 }));
+  });
+});
+
+describe("TaskDetailSheet · 动作行", () => {
+  it("动作翻成设备名 + 能力名 + 值，不露英文 type_name", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([rule({ ruleId: "e1" })], {
+          onEnterActions: [
+            { did: "d1", iid: "action.6.1", value: null, params: ["关灯"] },
+          ],
+        })}
+        catalog={DEVICE_CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    expect(html).toContain("小爱音箱");
+    expect(html).toContain("播放文本");
+    expect(html).toContain("关灯");
+    // 英文 type_name 不该出现在界面上；did · iid 只留在 title 里排查用
+    expect(html).not.toContain("play-text");
   });
 });
 
