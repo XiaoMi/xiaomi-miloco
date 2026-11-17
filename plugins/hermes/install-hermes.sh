@@ -400,20 +400,48 @@ if [ "$NO_START_BACKEND" -eq 0 ] && [ "$POST_INSTALL_ONLY" -eq 0 ]; then
     info "miloco backend 已在跑"
   else
     info "miloco backend 未跑（upstream install 退出时 atexit 杀的），自动 service start"
-    if miloco-cli service start 2>&1 | tail -5; then
-      info "service start 成功，等 backend /health..."
-      for i in $(seq 1 30); do
-        sleep 1
-        if curl -fsS --max-time 2 "http://127.0.0.1:$(_read_backend_port)/health" >/dev/null 2>&1; then
-          info "backend 就绪（等了 ${i}s）"
-          break
-        fi
-        if [ "$i" = "30" ]; then
-          warn "30s 内 backend /health 未 200 — 继续装但后续 Step 可能挂（看 miloco-cli service logs）"
-        fi
-      done
+    if _ML_START_FULL="$(miloco-cli service start 2>&1)"; then
+      # 分档必须看完整输出：_check_lnp_blocked 的 7 行提示框会追加在归因之后，
+      # `tail -5` 会把「预热 / 不健康」两个标记挤出窗口、落到 * 分支当成已就绪
+      # （macOS 首次安装最可能触发，恰好是最需要收尾等待的现场）。
+      _ML_START_OUT="$(printf '%s\n' "$_ML_START_FULL" | tail -5)"
+      printf '%s\n' "$_ML_START_OUT"
+      # service start 的退出码已经携带就绪结论：0 有三种来源 —— /health 已 200、
+      # 「仍在预热」放行、「端口通但 unhealthy」放行。二次确认按归因分流，不再用完整
+      # 就绪窗口重等一遍：unhealthy 档 /health 等再久也不会变 200，而预热档的窗口
+      # 已由 CLI 按 MILOCO_STARTUP_TIMEOUT 等满。这样也不必在 shell 里再解析一次
+      # 那个变量（两端解析规则不同会把 0 / 小数处理出分歧）。
+      case "$_ML_START_FULL" in
+        *"up but unhealthy"*)
+          info "CLI 判 backend 端口已监听但 /health 不健康 — 按上面的归因处理，不再等待"
+          ;;
+        *"still warming up"*)
+          info "CLI 判 backend 仍在预热 — 再给 30s 收尾窗口"
+          for i in $(seq 1 30); do
+            sleep 1
+            if curl -fsS --max-time 2 "http://127.0.0.1:$(_read_backend_port)/health" >/dev/null 2>&1; then
+              info "backend 就绪（又等了 ${i}s）"
+              break
+            fi
+            if [ "$i" = 30 ]; then
+              warn "预热超过 CLI 窗口 + 30s 仍未就绪 — 后续 Step 可能 502，可调大 MILOCO_STARTUP_TIMEOUT 后重跑"
+            fi
+          done
+          ;;
+        *)
+          info "backend /health 已就绪（CLI 返回 0 且未报预热/不健康）"
+          ;;
+      esac
     else
       warn "miloco-cli service start 失败 — 继续装但后续 Step 2 OAuth 一定会 502"
+      # 失败时 if 条件里的 command substitution 仍会把输出赋给 _ML_START_FULL（只是
+      # 退出码非 0），_ML_START_OUT 此时还没赋值。退出码非 0 时 CLI 把 error /
+      # detail / hint 写在 stdout 的 JSON 里，不转出来用户就只剩这一句。
+      if [ -n "${_ML_START_FULL:-}" ]; then
+        printf '%s\n' "$_ML_START_FULL" | tail -5 | while IFS= read -r _ml_line; do
+          warn "$_ml_line"
+        done
+      fi
       warn "手动修：miloco-cli service start  或  重跑上游：curl -LsSf https://github.com/XiaoMi/xiaomi-miloco/releases/latest/download/install.sh | bash -s -- --agent-prepare --agent-platform=hermes"
     fi
   fi
@@ -941,14 +969,9 @@ else
   if [ -n "$START_OUTPUT" ]; then
     info "  $START_OUTPUT"
   fi
-  # 确认 /health
-  for i in 1 2 3 4 5 6 7 8; do
-    if curl -sSf "http://127.0.0.1:${BACKEND_PORT}/health" >/dev/null 2>&1; then
-      info "  backend /health OK (等了 ${i}s)"
-      break
-    fi
-    sleep 1
-  done
+  # 不再做二次 /health 轮询：service restart 只在拿到就绪结论（/health 200）或
+  # 「端口已监听 + 给出归因」后才返回 0，这里再等 8s 拿不到新信息；落在预热档时
+  # 那 8s 还是静默空转。
 fi
 mark_done 7
 
