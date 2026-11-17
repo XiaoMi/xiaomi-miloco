@@ -79,6 +79,7 @@
     "agentAction": "Handled by the Agent: {{desc}}",
     "roomParen": "({{room}})",
     "chipUnresolvedScene": "scene not visible now",
-    "actionKindDeviceAction": "Device action"
+    "actionKindDeviceAction": "Device action",
+    "deviceMetaFailed": "Device names are unavailable right now; actions show raw identifiers."
   }
 }

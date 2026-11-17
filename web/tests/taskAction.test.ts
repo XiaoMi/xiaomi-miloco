@@ -49,6 +49,10 @@ function device(over: Partial<TaskDeviceMeta> = {}): TaskDeviceMeta {
         description: "execute-text-directive",
         prop_description: "execute-text-directive",
         type_name: "execute-text-directive",
+        in_params: [
+          { name: "text-content", format: "string" },
+          { name: "silent-execution", format: "bool" },
+        ],
       },
     },
     ...over,
@@ -88,7 +92,8 @@ describe("describeTaskAction", () => {
       catalog(),
     );
     expect(d.kind).toBe("broadcast");
-    expect(d.detail).toBe("关灯tasks.actionParamSep客厅");
+    // 多参数按 in_params 补参数名：第一个参数有名字（text），第二个没有
+    expect(d.detail).toBe("text 关灯tasks.actionParamSep客厅");
   });
 
   it("场景：did 位置放的是 scene_id，名字从场景表取", () => {
@@ -142,6 +147,23 @@ describe("describeTaskAction", () => {
     expect(d.kind).toBe("deviceAction");
   });
 
+  it("单参数不加参数名，保留原文", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.7.3", params: ["你好"] }),
+      catalog(),
+    );
+    expect(d.detail).toBe("你好");
+  });
+
+  it("多参数按 in_params 带名，布尔标志不再裸成一个 false", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.7.4", params: ["打开客厅灯", false] }),
+      catalog(),
+    );
+    expect(d.detail).toContain("text-content 打开客厅灯");
+    expect(d.detail).toContain("silent-execution false");
+  });
+
   it("execute-text-directive 不算播报：它是让小爱执行的指令，不保证出声", () => {
     const d = describeTaskAction(
       action({ iid: "action.7.4", value: null, params: ["打开客厅灯"] }),
@@ -158,7 +180,9 @@ describe("describeTaskAction", () => {
     expect(d.kind).toBe("deviceAction");
   });
 
-  it("生成式动作的 {{result}} 占位符不裸展示", () => {
+  // 前向兜底：后端目前不产出 {{result}}（见 RESULT_PLACEHOLDER 的注释）。
+  // 这条只钉「若将来接入回填，展示层不把模板裸露给住户」，不代表该链路已存在。
+  it("生成式动作的 {{result}} 占位符不裸展示（前向兜底，后端暂未产出）", () => {
     const d = describeTaskAction(
       action({ iid: "action.7.3", params: ["{{result}}"] }),
       catalog(),

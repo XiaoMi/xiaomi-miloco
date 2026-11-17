@@ -12,6 +12,7 @@
 import { describe, it, expect } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import "@/i18n"; // 初始化 i18next 单例（组件里的 useTranslation 依赖它）
+import i18n from "@/i18n";
 import { GuardBlock, TaskDetailSheet } from "@/components/TasksPage";
 import type { ActionCatalog } from "@/lib/taskAction";
 import type { Task, TaskRuleBrief } from "@/lib/types";
@@ -37,7 +38,10 @@ const CATALOG: ActionCatalog = {
   t: (key) => key,
 };
 
-function task(ruleBriefs: TaskRuleBrief[]): Task {
+function task(
+  ruleBriefs: TaskRuleBrief[],
+  actions: Partial<Task["actions"]> = {},
+): Task {
   return {
     taskId: "t1",
     description: "书房无人时关闭空调",
@@ -54,6 +58,7 @@ function task(ruleBriefs: TaskRuleBrief[]): Task {
       onEnterActions: [],
       onExitActions: [],
       onTargetActions: [],
+      ...actions,
     },
   };
 }
@@ -118,6 +123,39 @@ describe("TaskDetailSheet · 规则分块", () => {
   });
 });
 
+describe("TaskDetailSheet · 设备目录失败态", () => {
+  it("拉取失败时给出提示与重试入口", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([rule({ ruleId: "e1", query: "有人进入客厅" })], {
+          onEnterActions: [{ did: "d1", iid: "prop.2.1", value: 1 }],
+        })}
+        catalog={CATALOG}
+        catalogError={new Error("boom")}
+        onRetryCatalog={noop}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    expect(html).toContain(i18n.t("tasks.deviceMetaFailed"));
+    expect(html).toContain(i18n.t("common.retry"));
+  });
+
+  it("加载中（无 error）不显示失败提示", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([rule({ ruleId: "e1", query: "有人进入客厅" })], {
+          onEnterActions: [{ did: "d1", iid: "prop.2.1", value: 1 }],
+        })}
+        catalog={CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    expect(html).not.toContain(i18n.t("tasks.deviceMetaFailed"));
+  });
+});
+
 describe("GuardBlock · 编辑态", () => {
   const omniGuard = rule({
     ruleId: "g1",
@@ -138,6 +176,19 @@ describe("GuardBlock · 编辑态", () => {
     );
     expect(html).toContain("<textarea");
     expect(html).toContain("客厅灯开着（草稿）");
+  });
+
+  it("前提项也展示规则名徽标，和进入 / 退出规则对得上", () => {
+    const html = renderToStaticMarkup(
+      <GuardBlock
+        rules={[omniGuard]}
+        editing={false}
+        draftOf={() => ""}
+        onDraftChange={noop}
+      />,
+    );
+    expect(html).toContain("客厅灯开着");
+    expect(html).toContain("[t1] g1");
   });
 
   it("iot 前提在编辑态仍是只读文本，并给出不可编辑提示", () => {

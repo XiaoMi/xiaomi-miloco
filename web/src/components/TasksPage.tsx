@@ -355,30 +355,36 @@ export function GuardBlock({
       <ul className="space-y-1.5 list-disc pl-[18px]">
         {rules.map((r) => (
           <li key={r.ruleId} className="text-body text-text-primary leading-relaxed break-words">
-            {editing && ruleConditionIsEditable(r) ? (
-              <>
-                <textarea
-                  value={draftOf(r)}
-                  onChange={(e) => onDraftChange(r, e.target.value)}
-                  rows={2}
-                  maxLength={200}
-                  placeholder={t("tasks.triggerPlaceholder")}
-                  className="w-full resize-none rounded-lg bg-bg-secondary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary"
-                />
-                <p className="text-caption text-text-tertiary leading-relaxed mt-1">
-                  {t("tasks.triggerPhrasingHint")}
-                </p>
-              </>
-            ) : (
-              <>
-                {r.query}
-                {editing && (
-                  <p className="text-caption text-text-tertiary leading-relaxed mt-1">
-                    {t("tasks.triggerNotEditable")}
-                  </p>
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                {editing && ruleConditionIsEditable(r) ? (
+                  <>
+                    <textarea
+                      value={draftOf(r)}
+                      onChange={(e) => onDraftChange(r, e.target.value)}
+                      rows={2}
+                      maxLength={200}
+                      placeholder={t("tasks.triggerPlaceholder")}
+                      className="w-full resize-none rounded-lg bg-bg-secondary border border-border px-3 py-2 text-body text-text-primary focus:outline-none focus:border-brand-primary"
+                    />
+                    <p className="text-caption text-text-tertiary leading-relaxed mt-1">
+                      {t("tasks.triggerPhrasingHint")}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    {r.query}
+                    {editing && (
+                      <p className="text-caption text-text-tertiary leading-relaxed mt-1">
+                        {t("tasks.triggerNotEditable")}
+                      </p>
+                    )}
+                  </>
                 )}
-              </>
-            )}
+              </div>
+              {/* 前提也是进 prompt 的规则，规则名要和进入 / 退出规则一样能对上 */}
+              <RuleNameBadge name={r.name} />
+            </div>
           </li>
         ))}
       </ul>
@@ -556,11 +562,16 @@ function ActionSlot({
 export function TaskDetailSheet({
   task,
   catalog,
+  catalogError,
+  onRetryCatalog,
   onClose,
   onChanged,
 }: {
   task: Task;
   catalog: ActionCatalog;
+  /** 设备目录拉取失败。加载中不带这个——两者在界面上是不同的话。 */
+  catalogError?: Error;
+  onRetryCatalog?: () => void;
   onClose: () => void;
   onChanged: () => void | Promise<void>;
 }) {
@@ -847,6 +858,18 @@ export function TaskDetailSheet({
 
           {(enterSlotFilled || exitSlotFilled || targetSlotFilled) && (
             <Section title={t("tasks.taskActionsTitle")} icon={IconPlay}>
+              {catalogError && (
+                <p className="mb-2 text-caption text-text-tertiary">
+                  {t("tasks.deviceMetaFailed")}{" "}
+                  <button
+                    type="button"
+                    onClick={onRetryCatalog}
+                    className="underline hover:text-text-primary transition-colors"
+                  >
+                    {t("common.retry")}
+                  </button>
+                </p>
+              )}
               {enterSlotFilled && (
                 <ActionSlot
                   label={t("tasks.slotEnter")}
@@ -1117,6 +1140,8 @@ export function TasksPage({ tasks, loading, onChanged }: Props) {
           key={detail.taskId}
           task={detail}
           catalog={catalog}
+          catalogError={meta.error}
+          onRetryCatalog={() => void meta.reload()}
           onClose={() => setDetailId(null)}
           onChanged={onChanged}
         />

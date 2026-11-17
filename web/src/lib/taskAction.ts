@@ -105,15 +105,27 @@ export function describeTaskAction(
 
   let detail: string | null;
   if (isActionCall) {
-    const params = (action.params ?? [])
-      .filter((p) => p !== null && p !== undefined && p !== "")
-      .map((p) => (typeof p === "string" ? p : JSON.stringify(p)));
-    // 生成式动作的 params 里是 {{result}} 占位符（执行前由 omni 按画面回填）；
-    // 拼出来展示等于把模板当成品给住户看。
-    detail = params.length
-      ? params.some((p) => RESULT_PLACEHOLDER.test(p))
+    const raw = (action.params ?? []).filter(
+      (p) => p !== null && p !== undefined && p !== "",
+    );
+    const text = (v: unknown): string =>
+      typeof v === "string" ? v : JSON.stringify(v ?? null);
+    // 位置参数按 spec 的 in_params 顺序填。多参数时补上参数名，否则布尔标志会变成
+    // 一个孤零零的 false、数值会变成「200，30」这种没有标签的数字；单参数保留原文。
+    const names = spec?.in_params ?? [];
+    // 若将来接入「执行前按画面生成文案」，params 里会是 {{result}} 占位符（后端暂未
+    // 产出，见 RESULT_PLACEHOLDER 的注释）；真拼出来展示等于把模板当成品给住户看。
+    detail = raw.length
+      ? raw.some((p) => RESULT_PLACEHOLDER.test(text(p)))
         ? t("tasks.generatedByOmni")
-        : params.join(t("tasks.actionParamSep"))
+        : raw.length === 1
+          ? text(raw[0])
+          : raw
+              .map((p, i) => {
+                const name = names[i]?.name;
+                return name ? `${name} ${text(p)}` : text(p);
+              })
+              .join(t("tasks.actionParamSep"))
       : null;
   } else {
     const text = spec ? propValueText(spec, action.value) : null;

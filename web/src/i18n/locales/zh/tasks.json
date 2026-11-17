@@ -79,6 +79,7 @@
     "agentAction": "交给 Agent 执行：{{desc}}",
     "roomParen": "（{{room}}）",
     "chipUnresolvedScene": "场景当前不可见",
-    "actionKindDeviceAction": "设备动作"
+    "actionKindDeviceAction": "设备动作",
+    "deviceMetaFailed": "设备名 / 房间暂时取不到，动作按原始标识显示。"
   }
 }
