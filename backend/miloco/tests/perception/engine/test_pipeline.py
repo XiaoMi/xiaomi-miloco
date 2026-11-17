@@ -882,7 +882,9 @@ MOCK_RULE_RESPONSE = {
                         "caption": [{"area": "客厅", "description": "爸爸站在门口"}],
                         "matched_rules": [
                             {
-                                "rule_id": "rule_dad_home",
+                                # 代号方案后模型回的是「# 待判断规则」里的代号；
+                                # rule_dad_home 按 rule_id 排序第一，故为 A。
+                                "rule_name": "A",
                                 "reason": "检测到爸爸出现在门口",
                             },
                         ],

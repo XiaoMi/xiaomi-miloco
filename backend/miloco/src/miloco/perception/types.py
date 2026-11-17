@@ -256,7 +256,13 @@ class MatchedRule(BaseModel):
     """Matched rule."""
 
     rule_id: str = Field(..., description="Unique identifier of the matched rule (stable key for downstream)")
-    rule_name: str = Field(default="", description="Display name copied from the model, e.g. '[task_id] 描述'")
+    rule_name: str = Field(
+        default="",
+        description=(
+            "Display name resolved from rule_id, e.g. '[task_id] 描述'. "
+            "The model replies a per-window code (A/B/…); that raw reply is not kept here."
+        ),
+    )
     reason: str = Field(..., description="Explanation of why this rule was matched")
     room_name: str = Field(
         default="",

@@ -255,6 +255,20 @@ class TestRuleCodeResolution:
         mapping = {"A": "rid-1", "[party] 派对": "rid-1"}
         assert _resolve_rule_name("[party] 派对", mapping) == "rid-1"
 
+    def test_empty_rule_name_is_dropped(self):
+        """模型漏填 rule_name 时不要兜底——旧口径会把它绑到排序第一条规则上。"""
+        mapping = {"A": "rid-1", "[x] 摔倒": "rid-1"}
+        assert _parse_matched_rules([{"reason": "有人摔倒", "hit": True}], mapping) == []
+        assert _parse_matched_rules([{"rule_name": "：", "hit": True}], mapping) == []
+        assert _parse_matched_rules([{"rule_name": "   ", "hit": True}], mapping) == []
+
+    def test_display_name_backfilled_from_rule_id(self):
+        """展示名用 rule_id 反查全名回填，代号不漏到下游。"""
+        raw = [{"rule_name": "A", "reason": "证据", "hit": True}]
+        out = _parse_matched_rules(raw, {"A": "rid-1"}, {"rid-1": "[party] 派对"})
+        assert out[0].rule_id == "rid-1"
+        assert out[0].rule_name == "[party] 派对"
+
     def test_parse_matched_rules_with_codes(self):
         raw = [
             {"rule_name": "A", "reason": "证据", "hit": True},

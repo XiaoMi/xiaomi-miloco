@@ -82,6 +82,15 @@ def _has_loopback_tail(buffer: str) -> bool:
     return bool(_LOOPBACK_NGRAM.search(buffer[-_LOOPBACK_TAIL_WINDOW:]))
 
 
+def _rule_id_to_name(context: OmniContext) -> dict[str, str]:
+    """rule_id → 展示用规则全名。只在解析完成后回填 ``MatchedRule.rule_name``，
+    **不进提示词、不参与模型推理**——代号方案的输入侧只认 ``_rule_name_to_id``。"""
+    return {
+        rc.rule_id: rc.rule_name or f"[{rc.rule_id}]"
+        for rc in context.rule_conditions
+    }
+
+
 def _rule_name_to_id(context: OmniContext) -> dict[str, str]:
     """本窗「代号 / 完整规则名」→ rule_id(UUID) 映射，供 response_parser 把 matched_rules
     里模型回的标识还原回 rule_id（下游去重/触发用 UUID）。
@@ -103,7 +112,7 @@ async def run_omni(
     """Run Omni layer: build prompt → call model → parse response."""
     payload = build_prompt(edge_packet, context, visual_input_mode=visual_input_mode)
     raw_response = await call_omni(payload, config)
-    output = parse_omni_response(raw_response, _rule_name_to_id(context))
+    output = parse_omni_response(raw_response, _rule_name_to_id(context), _rule_id_to_name(context))
     output.usage = extract_usage(raw_response)
     return output
 
@@ -115,7 +124,7 @@ async def run_omni_batch(
     """Run Omni layer for multiple devices in the same room."""
     payload = build_batch_prompt(edge_packets, context, visual_input_mode=visual_input_mode)
     raw_response = await call_omni(payload, config)
-    output = parse_omni_response(raw_response, _rule_name_to_id(context))
+    output = parse_omni_response(raw_response, _rule_name_to_id(context), _rule_id_to_name(context))
     output.usage = extract_usage(raw_response)
     return output
 
@@ -220,7 +229,7 @@ async def run_omni_fused(
     # 中途抛异常 → mark_dispatched 已置 inflight=True 的 track 漏清(永不 GC、永不重派,直到进程重启)。
     delivered = False
     try:
-        omni_output = parse_omni_response(raw_response, _rule_name_to_id(context))
+        omni_output = parse_omni_response(raw_response, _rule_name_to_id(context), _rule_id_to_name(context))
         omni_output.usage = extract_usage(raw_response)
 
         # 抽 identity_assignments 并写回 state（仅当有 candidate 才有意义）
@@ -494,6 +503,7 @@ async def run_omni_stream(
         on_early_matched_rules,
         on_early_suggestions,
         rule_name_to_id=_rule_name_to_id(context),
+        rule_id_to_name=_rule_id_to_name(context),
     )
 
 
@@ -516,6 +526,7 @@ async def run_omni_batch_stream(
         on_early_matched_rules,
         on_early_suggestions,
         rule_name_to_id=_rule_name_to_id(context),
+        rule_id_to_name=_rule_id_to_name(context),
     )
 
 
@@ -526,6 +537,7 @@ async def _stream_and_parse(
     on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]] | None,
     on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None,
     rule_name_to_id: "dict[str, str] | None" = None,
+    rule_id_to_name: "dict[str, str] | None" = None,
 ) -> OmniOutput:
     """Stream omni response, extract actionable fields early, then parse full output."""
     buffer = ""
@@ -564,7 +576,7 @@ async def _stream_and_parse(
                     await on_early_speeches(result)
 
         if not matched_rules_done:
-            result = try_extract_matched_rules(buffer, rule_name_to_id)
+            result = try_extract_matched_rules(buffer, rule_name_to_id, rule_id_to_name)
             if result is not None:
                 matched_rules_done = True
                 logger.info(
@@ -587,7 +599,7 @@ async def _stream_and_parse(
                 if on_early_suggestions and result:
                     await on_early_suggestions(result)
 
-    output = parse_omni_response_from_text(buffer, rule_name_to_id)
+    output = parse_omni_response_from_text(buffer, rule_name_to_id, rule_id_to_name)
     if usage_out:
         output.usage = dict(usage_out)
     return output
