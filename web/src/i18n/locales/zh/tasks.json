@@ -78,6 +78,7 @@
     "guardsConjunction": "需同时满足 · {{count}} 项",
     "agentAction": "交给 Agent 执行：{{desc}}",
     "roomParen": "（{{room}}）",
-    "chipUnresolvedScene": "场景当前不可见"
+    "chipUnresolvedScene": "场景当前不可见",
+    "actionKindDeviceAction": "设备动作"
   }
 }

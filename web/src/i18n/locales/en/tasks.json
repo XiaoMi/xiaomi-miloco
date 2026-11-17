@@ -78,6 +78,7 @@
     "guardsConjunction": "all {{count}} must hold",
     "agentAction": "Handled by the Agent: {{desc}}",
     "roomParen": "({{room}})",
-    "chipUnresolvedScene": "scene not visible now"
+    "chipUnresolvedScene": "scene not visible now",
+    "actionKindDeviceAction": "Device action"
   }
 }

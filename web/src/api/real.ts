@@ -1211,9 +1211,9 @@ export interface TaskDeviceMeta {
   name: string;
   /** 有房间时的房间名；未分配 / 脏值（纯数字 home_id）为 undefined。
    *
-   *  任务详情据此决定要不要渲染括号。**不能复用 cleanRoom 的返回值**：它给未分配
-   *  设备返回的是 i18n 的「未分配」标签，那是取数时按当时 UI 语言烘进字符串的，
-   *  跨语言页面上切语言后会停在旧语言，而同一行的能力名却是渲染时翻译的。 */
+   *  任务详情据此决定要不要渲染括号。**不能复用 cleanRoom 的返回值**：它把
+   *  「未分配」这个**设备页分组文案**当房间名返回，而详情页的括号语义是
+   *  「这台设备在哪个房间」——没有真实房间时就不该出括号。 */
   room?: string;
   spec?: Record<string, BackendPropSpec>;
 }

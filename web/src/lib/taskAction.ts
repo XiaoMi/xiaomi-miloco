@@ -20,8 +20,14 @@ import type { TaskAction } from "@/lib/types";
 
 type Translate = (key: string, options?: Record<string, unknown>) => string;
 
-/** 生成式动作 params 里的回填占位符；后端执行前替换，展示层永远不该原样露出。 */
+/** 生成式动作 params 里的回填占位符。**后端尚未产出**（预留给「执行前按画面生成
+ *  文案」的能力）；接入后由服务端替换，展示层任何时候都不该把模板原样露给住户。
+ *  在那之前这条判断走不到，是刻意的前向兜底而不是已生效的契约。 */
 const RESULT_PLACEHOLDER = /\{\{\s*result\s*\}\}/;
+
+/** `action.<siid>.<aiid>` 是通用设备动作通道，不等于 TTS：只有 spec 自己标明是
+ *  文本类动作（如音箱的 play-text / text-directive）时才当播报，其余按设备动作展示。 */
+const TEXT_ACTION_TYPE = /play-text|text-directive|tts/i;
 
 export interface ActionCatalog {
   /** 与 realListDeviceMeta 返回的设备元数据同源，不另立一份。 */
@@ -33,7 +39,7 @@ export interface ActionCatalog {
   t: Translate;
 }
 
-export type TaskActionKind = "broadcast" | "control" | "scene";
+export type TaskActionKind = "broadcast" | "deviceAction" | "control" | "scene";
 
 export interface DescribedTaskAction {
   kind: TaskActionKind;
@@ -86,7 +92,13 @@ export function describeTaskAction(
   const spec = device?.spec?.[iid];
 
   const isActionCall = iid.startsWith("action.");
-  const kind: TaskActionKind = isActionCall ? "broadcast" : "control";
+  // type_name 最准（如 play-text）；老 spec 缺这个字段时退回描述文案。
+  const actionType = spec?.type_name ?? spec?.prop_description ?? spec?.description ?? "";
+  const kind: TaskActionKind = !isActionCall
+    ? "control"
+    : TEXT_ACTION_TYPE.test(actionType)
+      ? "broadcast"
+      : "deviceAction";
   const capability = spec ? specLabel(iid, spec) : iid;
 
   let detail: string | null;

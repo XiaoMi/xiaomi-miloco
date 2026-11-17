@@ -45,7 +45,11 @@ import {
 } from "@/lib/icons";
 import { relativeTime } from "@/lib/relativeTime";
 import { groupRuleBriefs, ruleConditionIsEditable } from "@/lib/ruleBrief";
-import { describeTaskAction, type ActionCatalog } from "@/lib/taskAction";
+import {
+  describeTaskAction,
+  type ActionCatalog,
+  type TaskActionKind,
+} from "@/lib/taskAction";
 import type {
   Task,
   TaskAction,
@@ -110,6 +114,14 @@ const DIRECTION_ICON: Record<TaskRuleDirection, IconComp> = {
   session: IconDoorIn,
   exit: IconDoorOut,
   guard: IconShield,
+};
+
+// 动作类别 → 文案 key。新增类别时只改这一处，避免散在 JSX 的三元里漏分支。
+const ACTION_KIND_LABEL: Record<TaskActionKind, string> = {
+  broadcast: "tasks.actionKindBroadcast",
+  deviceAction: "tasks.actionKindDeviceAction",
+  control: "tasks.actionKindControl",
+  scene: "tasks.actionKindScene",
 };
 
 // 轻量开关——on=品牌色 / off=中性边框色，无障碍 role="switch"。
@@ -286,8 +298,8 @@ function Section({
   );
 }
 
-// 方向徽标：图标 + 文字。同一个组件用在「触发条件」与「动作组」的标题上，
-// 两处指的是同一个方向（进入规则 → 进入动作），图标一致才能对上。
+// 方向徽标：图标 + 文字，只用在规则卡的方向行上。
+// 动作区的槽标签是纯文字——达标槽没有方向，硬套徽标会让两处对不上。
 function DirectionTag({ direction, t }: { direction: TaskRuleDirection; t: TFn }) {
   const Icon = DIRECTION_ICON[direction];
   return (
@@ -482,13 +494,7 @@ function ActionSlot({
                     : "bg-bg-secondary text-text-secondary"
                 }`}
               >
-                {t(
-                  d.kind === "broadcast"
-                    ? "tasks.actionKindBroadcast"
-                    : d.kind === "scene"
-                      ? "tasks.actionKindScene"
-                      : "tasks.actionKindControl",
-                )}
+                {t(ACTION_KIND_LABEL[d.kind])}
               </span>
               <span className="font-semibold text-text-primary break-all">
                 {d.device}

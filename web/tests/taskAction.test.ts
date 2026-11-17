@@ -37,7 +37,13 @@ function device(over: Partial<TaskDeviceMeta> = {}): TaskDeviceMeta {
       "action.7.3": {
         description: "play-text",
         prop_description: "play-text",
+        type_name: "play-text",
         in_params: [{ name: "text", format: "string" }],
+      },
+      "action.2.1": {
+        description: "ptz-calibrate",
+        prop_description: "ptz-calibrate",
+        type_name: "ptz-calibrate",
       },
     },
     ...over,
@@ -112,6 +118,22 @@ describe("describeTaskAction", () => {
     const d = describeTaskAction(action({ did: "ghost" }), catalog({ ready: false }));
     expect(d.device).toBe("ghost");
     expect(d.unresolved).toBe(false);
+  });
+
+  it("action.* 不都是播报：非文本类设备动作单独归类", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.2.1", value: null, params: [] }),
+      catalog(),
+    );
+    expect(d.kind).toBe("deviceAction");
+  });
+
+  it("spec 缺字段时按设备动作兜底，不谎称在说话", () => {
+    const d = describeTaskAction(
+      action({ iid: "action.9.9", value: null, params: [] }),
+      catalog(),
+    );
+    expect(d.kind).toBe("deviceAction");
   });
 
   it("生成式动作的 {{result}} 占位符不裸展示", () => {
