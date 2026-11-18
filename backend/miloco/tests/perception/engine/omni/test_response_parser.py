@@ -255,6 +255,14 @@ class TestRuleCodeResolution:
         mapping = {"A": "rid-1", "[party] 派对": "rid-1"}
         assert _resolve_rule_name("[party] 派对", mapping) == "rid-1"
 
+    def test_hallucinated_code_not_fuzzy_matched(self):
+        """模型回了列表里不存在的代号形状串，不能被规则全名子串兜住。"""
+        mapping = {"A": "rid-1", "[TV] 电视": "rid-1", "B": "rid-2"}
+        # "TV" 不是代号，但 "[TV] 电视" 包含它——旧口径会静默返回 rid-1
+        assert _resolve_rule_name("TV", mapping) is None
+        assert _resolve_rule_name("tv", mapping) is None
+        assert _resolve_rule_name("Z", mapping) is None
+
     def test_short_rule_name_still_fuzzy_matches(self):
         """2–3 字的真实规则名不能因为短就被当成代号跳过。"""
         mapping = {"A": "rid-1", "开灯": "rid-2"}

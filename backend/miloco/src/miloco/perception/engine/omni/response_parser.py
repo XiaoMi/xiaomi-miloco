@@ -330,6 +330,10 @@ def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | No
     upper = key.upper()
     if len(upper) <= 2 and upper in mapping:
         return mapping[upper]
+    # 模型回传自身就是代号形状（1–2 个大写字母），而上面两次精确查都没命中 →
+    # 这是列表外的幻觉代号，不能再走子串兜底：`"TV" in "[TV] 电视"` 会把规则静默配错。
+    if _CODE_KEY.fullmatch(upper):
+        return None
     # 完整规则名的子串容错保留，但跳过代号键：单个字母太短，会把任意含该字母的规则名配错。
     # 按形状（1–2 个大写字母）识别，不按长度——2–3 字的真实规则名仍需要这条兜底。
     for rn, rid in mapping.items():
