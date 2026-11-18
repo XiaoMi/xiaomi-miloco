@@ -749,6 +749,20 @@ export interface OmniTestResult {
   message: string;
 }
 
+/** 图片输入能力探测结果(可选、用户显式触发;与连通性测试互补)。
+ *  status:supported=回答正确;unsupported=provider 明确拒绝图片;
+ *  failed=鉴权/网络/超时/限流/5xx 等,与图片能力无关、无结论;inconclusive=200 但回答不对/为空/无法解析,或被拒但看不出与图片有关。
+ *  reason 为短机器码,前端本地化,不含 provider 原始响应文本。 */
+export type OmniImageProbeStatus = "supported" | "unsupported" | "failed" | "inconclusive";
+export interface OmniImageProbeResult {
+  status: OmniImageProbeStatus;
+  reason: string;
+  http_status?: number;
+  latency_ms?: number;
+  /** 实际发出的探测请求数(0–2);第一张未识别成功即停止。 */
+  challenges?: number;
+}
+
 // ── 性能 tab（observability） ────────────────────────────────────
 // 直接对接 backend /api/stats 和 /api/traces，无 Normal 包装。
 
