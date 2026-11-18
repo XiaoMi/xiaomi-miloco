@@ -7,6 +7,7 @@ from miloco.perception.engine.omni.provider import (
     GeminiAdapter,
     LocalMediaInfo,
     MiMoAdapter,
+    MiniMaxAdapter,
     OpenAICompatAdapter,
     QwenOmniAdapter,
     build_request_headers,
@@ -81,16 +82,69 @@ class TestGetAdapter:
     def test_gemini_case_insensitive(self):
         assert isinstance(get_adapter("Gemini-3-Pro"), GeminiAdapter)
 
+    def test_minimax_m3(self):
+        assert isinstance(get_adapter("MiniMax-M3"), MiniMaxAdapter)
+
+    def test_minimax_m3_flash(self):
+        assert isinstance(get_adapter("MiniMax-M3.1-Flash"), MiniMaxAdapter)
+
+    def test_minimax_case_insensitive(self):
+        assert isinstance(get_adapter("minimax-m3.1-flash"), MiniMaxAdapter)
+
+    def test_minimax_drops_thinking_and_caps_reasoning(self):
+        adapter = MiniMaxAdapter()
+        body = adapter.build_request_body(
+            [{"role": "user", "content": "ping"}],
+            model="MiniMax-M3.1-Flash",
+            max_tokens=512,
+            temperature=0.0,
+            top_p=0.95,
+            stream=False,
+        )
+        # M3 rejects an explicit thinking switch with HTTP 400.
+        assert "thinking" not in body
+        # Reasoning tokens count against max_tokens, so the budget floor applies.
+        assert body["max_tokens"] >= 4096
+        # Unbounded adaptive thinking spends the whole budget on chain-of-thought
+        # and returns empty content; the adapter pins the cheap tier.
+        assert body["reasoning_effort"] == "low"
+
+    def test_minimax_keeps_caller_larger_budget(self):
+        adapter = MiniMaxAdapter()
+        body = adapter.build_request_body(
+            [{"role": "user", "content": "ping"}],
+            model="MiniMax-M3",
+            max_tokens=8192,
+            temperature=0.0,
+            top_p=0.95,
+            stream=False,
+        )
+        assert body["max_tokens"] == 8192
+
+    def test_mimo_keeps_thinking_disabled(self):
+        body = MiMoAdapter().build_request_body(
+            [{"role": "user", "content": "ping"}],
+            model="mimo-v2.6-flash",
+            max_tokens=512,
+            temperature=0.0,
+            top_p=0.95,
+            stream=False,
+        )
+        assert body["thinking"] == {"type": "disabled"}
+        assert "reasoning_effort" not in body
+
     def test_openai_compat_family(self):
-        # MiMo / Qwen 都归 OpenAI 兼容族；Gemini 不是。
+        # MiMo / Qwen / MiniMax 都归 OpenAI 兼容族；Gemini 不是。
         assert isinstance(get_adapter("mimo-v2.6-flash"), OpenAICompatAdapter)
         assert isinstance(get_adapter("qwen3.5-omni-flash"), OpenAICompatAdapter)
+        assert isinstance(get_adapter("MiniMax-M3.1-Flash"), OpenAICompatAdapter)
         assert not isinstance(get_adapter("gemini-3-flash-preview"), OpenAICompatAdapter)
 
     def test_singleton(self):
         assert get_adapter("mimo-v2.6-flash") is get_adapter("mimo-v2.6-flash")
         assert get_adapter("qwen3.5-omni-flash") is get_adapter("qwen3.5-omni-plus")
         assert get_adapter("gemini-3-flash") is get_adapter("gemini-3-pro")
+        assert get_adapter("MiniMax-M3") is get_adapter("MiniMax-M3.1-Flash")
 
 
 class TestMiMoAdapter:
@@ -136,6 +190,97 @@ class TestMiMoAdapter:
         assert body["stream"] is True
         assert body["stream_options"] == {"include_usage": True}
         assert body["thinking"] == {"type": "disabled"}
+
+
+class TestMiniMaxAdapter:
+    adapter = MiniMaxAdapter()
+
+    def test_request_body_has_no_thinking(self):
+        """根因回归守护:M3 要求 adaptive thinking,显式 thinking.disabled 会被上游拒(400/2013)。"""
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
+        )
+        assert "thinking" not in body
+
+    def test_request_body_stream_has_no_thinking(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=True,
+        )
+        assert "thinking" not in body
+        assert body["stream"] is True
+        assert body["stream_options"] == {"include_usage": True}
+        # 流式路径同样受 max_tokens 下限约束(生产 stream=True 走的就是这条)。
+        assert body["max_tokens"] == 4096
+
+    def test_request_body_otherwise_same_as_mimo(self):
+        """除 thinking / max_tokens 下限 / reasoning_effort 外与 MiMoAdapter 逐字段一致。"""
+        minimax = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=4096, temperature=0.1, top_p=0.95, stream=False,
+        )
+        mimo = MiMoAdapter().build_request_body(
+            _MESSAGES, model="mimo-v2.6-flash",
+            max_tokens=4096, temperature=0.1, top_p=0.95, stream=False,
+        )
+        assert set(minimax) == (set(mimo) - {"thinking"}) | {"reasoning_effort"}
+        # M3 的 adaptive thinking 默认档位会吃满预算，adapter 固定到低档。
+        assert minimax["reasoning_effort"] == "low"
+        assert minimax["max_tokens"] == mimo["max_tokens"]
+        assert minimax["temperature"] == mimo["temperature"]
+        assert minimax["top_p"] == mimo["top_p"]
+        assert minimax["stream"] == mimo["stream"]
+
+    def test_max_tokens_raised_to_floor(self):
+        """守护:adaptive thinking 计入 max_tokens,默认 512 会让 content 恒为空。
+
+        实测 identity 路径 reasoning 中位数约 743 / 单次峰值 1927,512 下 JSON 解析全失败。
+        """
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=512, temperature=0.1, top_p=0.95, stream=False,
+        )
+        assert body["max_tokens"] == 4096
+
+    def test_max_tokens_larger_config_untouched(self):
+        """配置比下限大时按配置走,不压回去。
+
+        用例必须传一个明显大于下限的值:传恰好等于下限(4096)的话,实现写成
+        「永远返回 4096」照样通过,「保留用户配置」这条分支实际没被覆盖。
+        """
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="MiniMax-M3.1-Flash",
+            max_tokens=8192, temperature=0.1, top_p=0.95, stream=False,
+        )
+        assert body["max_tokens"] == 8192
+
+    def test_inherits_mimo_block_shapes(self):
+        """块形态靠继承保证一致,而不是复制粘贴后靠人同步。"""
+        assert isinstance(self.adapter, MiMoAdapter)
+
+    def test_video_block_equals_mimo(self):
+        assert self.adapter.build_video_block("AAAA", _VIDEO_MEDIA) == (
+            MiMoAdapter().build_video_block("AAAA", _VIDEO_MEDIA)
+        )
+
+    def test_audio_block_equals_mimo(self):
+        assert self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA) == (
+            MiMoAdapter().build_audio_block("BBBB", _AUDIO_MEDIA)
+        )
+
+    def test_image_block_equals_mimo(self):
+        assert self.adapter.build_image_block(b"\xff\xd8rawjpeg") == (
+            MiMoAdapter().build_image_block(b"\xff\xd8rawjpeg")
+        )
+
+    def test_image_block_default_jpeg_data_uri(self):
+        block = self.adapter.build_image_block(b"\xff\xd8rawjpeg")
+        assert block["type"] == "image_url"
+        prefix = "data:image/jpeg;base64,"
+        url = block["image_url"]["url"]
+        assert url.startswith(prefix)
+        assert base64.b64decode(url[len(prefix):]) == b"\xff\xd8rawjpeg"
 
 
 class TestQwenOmniAdapter:

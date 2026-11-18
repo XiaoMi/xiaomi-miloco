@@ -5,7 +5,7 @@ from __future__ import annotations
 import httpx
 import pytest
 from miloco.perception.engine.config import OmniConfig
-from miloco.perception.engine.omni import omni_client
+from miloco.perception.engine.omni import omni, omni_client
 from miloco.perception.engine.omni.circuit_breaker import (
     get_omni_circuit_breaker,
     reset_omni_circuit_breaker_for_tests,
@@ -15,6 +15,7 @@ from miloco.perception.engine.omni.error_classifier import (
     ErrorCategory,
 )
 from miloco.perception.engine.omni.provider import build_request_headers, get_adapter
+from miloco.perception.snapshot_context import OmniEventArtifacts, event_artifacts_scope
 
 
 class _FakeResp:
@@ -97,6 +98,208 @@ def _cfg(base_url: str = "https://x/v1") -> OmniConfig:
 
 def _payload() -> dict:
     return {"system_prompt": "sys", "user_content": "u"}
+
+
+def _fake_stream_client(sent: list[dict]):
+    """流式路径的 AsyncClient stub:把 ``stream()`` 收到的请求体追加进 ``sent``。
+
+    ``_fake_async_client`` 只覆盖 ``post()``，流式出口走的是 ``client.stream()``，
+    所以单独一个 helper；供流式 trace 守护用例使用。
+    """
+
+    class _FakeStreamResp:
+        status_code = 200
+        text = ""
+        headers: dict = {}
+
+        def json(self):
+            return {}
+
+        def raise_for_status(self):
+            pass
+
+        async def aread(self):
+            pass
+
+        async def aiter_lines(self):
+            for line in [
+                'data: {"choices": [{"delta": {"content": "{}"}}]}',
+                "data: [DONE]",
+            ]:
+                yield line
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _C:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def stream(self, method, url, **k):
+            sent.append({"url": url, **k})
+            return _FakeStreamResp()
+
+    return _C
+
+
+# ─── trace 留痕:max_tokens 以 adapter 实际产出的 body 为准 ──────────────────
+
+
+async def test_trace_max_tokens_matches_sent_body_for_minimax(monkeypatch):
+    """MiniMax 的 trace 留痕必须记 adapter 抬高后的 max_tokens,不是配置原值。
+
+    留痕契约是「键名与 wire payload 对齐,供复现时可直接铺进请求体还原完整 API call」
+    (见 snapshot_context.push_omni_trace)。MiniMax adapter 会把 max_tokens 抬到 4096 下限,
+    若留痕仍记配置值(默认 512),按 trace 复现就会复现出本 PR 要消灭的空 content。
+    """
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        omni_client.httpx,
+        "AsyncClient",
+        _fake_async_client(
+            _FakeResp(200, {"choices": [], "usage": {}}), sent=captured
+        ),
+    )
+
+    artifacts = OmniEventArtifacts()
+    cfg = OmniConfig(
+        model="MiniMax-M3.1-Flash",
+        base_url="https://x/v1",
+        api_key="sk-1",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=512,
+        timeout=1.0,
+        stream=False,
+    )
+    with event_artifacts_scope(artifacts):
+        await omni_client.call_omni(_payload(), cfg)
+
+    assert captured, "请求没发出去,断言无效"
+    sent_max_tokens = captured[0]["json"]["max_tokens"]
+    assert sent_max_tokens == 4096, "adapter 没把 max_tokens 抬到下限"
+
+    calls = (artifacts.trace or {}).get("calls") or []
+    assert calls, "trace 没记到调用"
+    recorded = calls[-1]["inference_params"]["max_tokens"]
+    assert recorded == sent_max_tokens, (
+        f"trace 记的 max_tokens={recorded} 与实际发出的 {sent_max_tokens} 不一致"
+    )
+
+
+async def test_trace_max_tokens_unchanged_for_mimo(monkeypatch):
+    """非 MiniMax provider 的留痕行为不变(MiMo 没有下限,记的就是配置值)。"""
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        omni_client.httpx,
+        "AsyncClient",
+        _fake_async_client(
+            _FakeResp(200, {"choices": [], "usage": {}}), sent=captured
+        ),
+    )
+
+    artifacts = OmniEventArtifacts()
+    cfg = OmniConfig(
+        model="mimo-v2.6-flash",
+        base_url="https://x/v1",
+        api_key="sk-1",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=512,
+        timeout=1.0,
+        stream=False,
+    )
+    with event_artifacts_scope(artifacts):
+        await omni_client.call_omni(_payload(), cfg)
+
+    calls = (artifacts.trace or {}).get("calls") or []
+    assert calls
+    recorded = calls[-1]["inference_params"]["max_tokens"]
+    assert recorded == captured[0]["json"]["max_tokens"] == 512
+
+
+async def test_trace_max_tokens_matches_sent_body_for_minimax_stream(monkeypatch):
+    """流式路径（call_omni_stream）的 trace 留痕同样记 4096,不是配置原值。
+
+    留痕修复落在 3 个 push_omni_trace 站点（非流式 / 流式 / fused）,每个站点都要有
+    回归守护——任一处被改回 config.max_completion_tokens,CI 都应报警。
+    """
+    captured: list[dict] = []
+    monkeypatch.setattr(omni_client.httpx, "AsyncClient", _fake_stream_client(captured))
+
+    artifacts = OmniEventArtifacts()
+    cfg = OmniConfig(
+        model="MiniMax-M3.1-Flash",
+        base_url="https://x/v1",
+        api_key="sk-1",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=512,
+        timeout=1.0,
+        stream=True,
+    )
+    with event_artifacts_scope(artifacts):
+        async for _ in omni_client.call_omni_stream(_payload(), cfg):
+            pass
+
+    assert captured, "流式请求没发出去,断言无效"
+    sent_max_tokens = captured[0]["json"]["max_tokens"]
+    assert sent_max_tokens == 4096, "adapter 没把 max_tokens 抬到下限"
+
+    calls = (artifacts.trace or {}).get("calls") or []
+    assert calls, "trace 没记到调用"
+    recorded = calls[-1]["inference_params"]["max_tokens"]
+    assert recorded == sent_max_tokens, (
+        f"流式 trace 记的 max_tokens={recorded} 与实际发出的不一致"
+    )
+
+
+async def test_trace_max_tokens_matches_sent_body_for_minimax_fused(monkeypatch):
+    """fused 路径（_call_omni_messages）的 trace 留痕同样记 4096,不是配置原值。"""
+    captured: list[dict] = []
+    _fake = _fake_async_client(
+        _FakeResp(200, {"choices": [], "usage": {}}), sent=captured
+    )
+    monkeypatch.setattr(omni.httpx, "AsyncClient", _fake)
+    # 传实例而非类：_get_fused_http_client 的返回值会被当作 client 直接 await .post(...)，
+    # 给类的话 url 会落进未绑定函数的 self 形参，captured 里的 url 恒为 None。
+    monkeypatch.setattr(omni, "_get_fused_http_client", lambda timeout: _fake())
+
+    artifacts = OmniEventArtifacts()
+    cfg = OmniConfig(
+        model="MiniMax-M3.1-Flash",
+        base_url="https://x/v1",
+        api_key="sk-1",
+        temperature=0,
+        top_p=1,
+        max_completion_tokens=512,
+        timeout=1.0,
+        stream=False,
+    )
+    with event_artifacts_scope(artifacts):
+        await omni._call_omni_messages(
+            [{"role": "user", "content": "ping"}], cfg, type="realtime"
+        )
+
+    assert captured, "fused 请求没发出去,断言无效"
+    sent_max_tokens = captured[0]["json"]["max_tokens"]
+    assert sent_max_tokens == 4096, "adapter 没把 max_tokens 抬到下限"
+
+    calls = (artifacts.trace or {}).get("calls") or []
+    assert calls, "trace 没记到调用"
+    recorded = calls[-1]["inference_params"]["max_tokens"]
+    assert recorded == sent_max_tokens, (
+        f"fused trace 记的 max_tokens={recorded} 与实际发出的不一致"
+    )
 
 
 # ─── call_omni × 熔断 ───────────────────────────────────────────────────────
