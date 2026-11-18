@@ -9,6 +9,12 @@ local SDK is pushed `properties_changed` / `event_occured` / device-state /
 user-level bind/unbind events instead of polling the HTTP `device_list_page`
 endpoint.
 
+Cloud SUBSCRIBE and UNSUBSCRIBE share a FIFO sender and a 500-operation
+sliding one-second window. At most 32 subscriptions await SUBACK; completion
+of any subscription frees a slot without waiting for a batch. UNSUBSCRIBE
+does not wait for UNSUBACK. Disconnect invalidates queued sends and pending
+acknowledgements, but preserves rate history across reconnects.
+
 Connection params:
   host       = f"{cloud_server}-{MIHOME_MQTT_BROKER_HOST_SUFFIX}"
   port       = 8883 (TLS, MQTT v5)
@@ -36,13 +42,19 @@ from paho.mqtt.client import (
 )
 from paho.mqtt.enums import CallbackAPIVersion, MQTTErrorCode
 
+from ._mqtt_subscription_scheduler import (
+    _MqttOperationDispatcher,
+    _MqttOperationRateLimiter,
+)
 from .const import (
     MIHOME_MQTT_BROKER_HOST_SUFFIX,
     MIHOME_MQTT_KEEPALIVE,
     MIHOME_MQTT_PORT,
     MIHOME_MQTT_RECONNECT_MAX_SEC,
     MIHOME_MQTT_RECONNECT_MIN_SEC,
+    MIHOME_MQTT_SUBSCRIBE_PER_SEC,
     MIHOME_MQTT_SUBSCRIBE_TIMEOUT,
+    MIHOME_MQTT_SUBSCRIBE_WINDOW,
     SUBACK_SUCCESS_CODES,
 )
 from .types import (
@@ -62,6 +74,7 @@ _LOGGER = logging.getLogger(__name__)
 # publishes. Cloud broker bandwidth is not our bottleneck, and bind/unbind
 # events are unsafe to deduplicate at the app layer.
 _DEFAULT_QOS: int = 2
+
 
 # SUBACK rejections that retry can't fix; other failures (incl. timeout) are
 # kept in _subs so the next reconnect retries automatically.
@@ -205,6 +218,12 @@ class MIoTMipsCloud:
         self._host = f"{cloud_server}-{MIHOME_MQTT_BROKER_HOST_SUFFIX}"
         self._port = port
         self._client_id = f"miloco:{uuid}"
+        self._mqtt_operation_limiter = _MqttOperationRateLimiter(
+            MIHOME_MQTT_SUBSCRIBE_PER_SEC,
+            MIHOME_MQTT_SUBSCRIBE_WINDOW,
+        )
+        self._dispatcher = _MqttOperationDispatcher(self._mqtt_operation_limiter)
+        self._connection_epoch = 0
         # Allow tests to inject a fake paho Client.
         self._client_factory = client_factory or self._default_client_factory
 
@@ -341,6 +360,9 @@ class MIoTMipsCloud:
         if mqtt is None:
             return
         self._mqtt = None
+        with self._state_lock:
+            self._connection_epoch += 1
+        self._reset_operations()
         try:
             await self._main_loop.run_in_executor(None, mqtt.disconnect)
         except Exception as e:
@@ -352,14 +374,7 @@ class MIoTMipsCloud:
 
         with self._state_lock:
             self._connected = False
-        with self._pending_lock:
-            for fut in self._pending_subscribes.values():
-                if not fut.done():
-                    self._main_loop.call_soon_threadsafe(
-                        fut.set_exception,
-                        MipsConnectionError("mips_cloud deinit during subscribe"),
-                    )
-            self._pending_subscribes.clear()
+        # _reset_operations() already failed and cleared _pending_subscribes.
         with self._subs_lock:
             self._subs.clear()
 
@@ -524,6 +539,8 @@ class MIoTMipsCloud:
         qos: int = _DEFAULT_QOS,
         *,
         unattended: bool = False,
+        replay_epoch: Optional[int] = None,
+        replay_sub: Optional[_Subscription] = None,
     ) -> None:
         """Core subscribe: issue SUBSCRIBE, await SUBACK, validate codes.
 
@@ -533,6 +550,13 @@ class MIoTMipsCloud:
         ``_subscribe_success_handlers`` instead of raising.
         """
         try:
+            if replay_epoch is not None:
+                with self._subs_lock:
+                    if (
+                        replay_epoch != self._connection_epoch
+                        or self._subs.get(topic) is not replay_sub
+                    ):
+                        return
             mqtt = self._mqtt
             if mqtt is None or not self._connected:
                 raise MipsConnectionError(
@@ -557,16 +581,31 @@ class MIoTMipsCloud:
                     )
                 self._subs[topic] = sub
 
-            result, mid = mqtt.subscribe(topic, qos=qos)
-            if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
-                with self._subs_lock:
-                    self._subs.pop(topic, None)
-                raise MipsConnectionError(
-                    f"subscribe({topic}) failed locally: result={result} mid={mid}"
-                )
+            epoch = self._connection_epoch
 
-            with self._pending_lock:
-                self._pending_subscribes[mid] = future
+            def send():
+                if (
+                    not self._connected
+                    or self._mqtt is not mqtt
+                    or epoch != self._connection_epoch
+                ):
+                    raise MipsConnectionError(
+                        "MQTT connection changed before subscribe"
+                    )
+                if replay_epoch is not None:
+                    with self._subs_lock:
+                        if self._subs.get(topic) is not sub:
+                            raise MipsConnectionError("MQTT replay superseded")
+                with self._pending_lock:
+                    result, mid = mqtt.subscribe(topic, qos=qos)
+                    if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
+                        raise MipsConnectionError(
+                            f"subscribe({topic}) failed: {result}"
+                        )
+                    self._pending_subscribes[mid] = future
+                return mid
+
+            mid = await self._dispatcher.submit(send, future)
 
             try:
                 reason_codes = await asyncio.wait_for(
@@ -577,6 +616,10 @@ class MIoTMipsCloud:
                 with self._pending_lock:
                     self._pending_subscribes.pop(mid, None)
                 raise MipsSubscribeTimeoutError(topic) from None
+            finally:
+                with self._pending_lock:
+                    if self._pending_subscribes.get(mid) is future:
+                        self._pending_subscribes.pop(mid, None)
 
             # 等 SUBACK 期间若有并发退订(如上层 bind 作废路径)把本 topic 从
             # _subs 弹出并已发出 UNSUBSCRIBE:这次授权已过期,必须抛错让调用方
@@ -642,11 +685,35 @@ class MIoTMipsCloud:
         if mqtt is None or not self._connected:
             return
         try:
-            mqtt.unsubscribe(topic)
+            epoch = self._connection_epoch
+
+            def send():
+                if (
+                    not self._connected
+                    or self._mqtt is not mqtt
+                    or epoch != self._connection_epoch
+                ):
+                    raise MipsConnectionError(
+                        "MQTT connection changed before unsubscribe"
+                    )
+                result, _ = mqtt.unsubscribe(topic)
+                if result != MQTTErrorCode.MQTT_ERR_SUCCESS:
+                    raise MipsConnectionError(f"unsubscribe({topic}) failed: {result}")
+
+            await self._dispatcher.submit(send)
         except Exception as e:
             _LOGGER.warning("mips_cloud unsubscribe(%s) raised: %s", topic, e)
 
     # ----------------------------------------------------------- paho hooks
+
+    def _reset_operations(self) -> None:
+        self._dispatcher.reset()
+        with self._pending_lock:
+            pending = list(self._pending_subscribes.values())
+            self._pending_subscribes.clear()
+        for future in pending:
+            if not future.done():
+                future.set_exception(MipsConnectionError("MQTT connection closed"))
 
     def _on_connect(
         self,
@@ -683,12 +750,14 @@ class MIoTMipsCloud:
         with self._subs_lock:
             active = list(self._subs.values())
         for sub in active:
-            self._main_loop.call_soon_threadsafe(self._spawn_resubscribe, sub)
+            self._main_loop.call_soon_threadsafe(
+                self._spawn_resubscribe, sub, self._connection_epoch
+            )
 
         self._fire_connect_future(None)
         self._dispatch_state_handlers(True)
 
-    def _spawn_resubscribe(self, sub: _Subscription) -> None:
+    def _spawn_resubscribe(self, sub: _Subscription, epoch: int) -> None:
         """Spawn an unattended resubscribe task. Called via call_soon_threadsafe."""
         asyncio.create_task(
             self._subscribe_async(
@@ -697,6 +766,8 @@ class MIoTMipsCloud:
                 sub.decoder,
                 sub.qos,
                 unattended=True,
+                replay_epoch=epoch,
+                replay_sub=sub,
             )
         )
 
@@ -713,6 +784,8 @@ class MIoTMipsCloud:
         log("mips_cloud disconnected, reason_code=%s", reason_code)
         with self._state_lock:
             self._connected = False
+            self._connection_epoch += 1
+        self._main_loop.call_soon_threadsafe(self._reset_operations)
         # paho will auto-reconnect on its own thread per reconnect_delay_set.
         self._dispatch_state_handlers(False)
 
@@ -733,8 +806,12 @@ class MIoTMipsCloud:
                 "mips_cloud SUBACK for unknown mid=%d codes=%s", mid, codes_int
             )
             return
-        if not future.done():
-            self._main_loop.call_soon_threadsafe(future.set_result, codes_int)
+
+        def complete():
+            if not future.done():
+                future.set_result(codes_int)
+
+        self._main_loop.call_soon_threadsafe(complete)
 
     def _on_message(self, client: Client, userdata: Any, msg: MQTTMessage) -> None:
         topic = msg.topic
