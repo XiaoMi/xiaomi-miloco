@@ -124,6 +124,12 @@ class RuleBrief(BaseModel):
     """`task get` / `task list` 中的实时 rule 摘要。"""
 
     rule_id: str
+    # 规则名，形如 ``[task_id] 短名``。感知 prompt 的「# 待判断规则」段用的就是它，
+    # 规则日志也按它落库 —— 住户界面上要能看到「模型实际看到的是哪一句」。
+    name: str = ""
+    # 停用的 rule 不进运行期拓扑、也不进感知 prompt；界面据此判断能不能把它画成
+    # 生效中的触发条件 / 前提，否则会对着一条不再拦人的闸门写「未满足时不进入」。
+    enabled: bool = True
     query: str
     # 取值同 RuleDirection, 但 milestone 已被 _to_full_view 滤掉。mode 表达不了
     # exit 与 guard (两者存的 mode 都是 event), 不带这个字段就分不出一条 rule 是把

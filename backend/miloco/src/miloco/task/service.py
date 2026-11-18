@@ -70,8 +70,8 @@ def _action_desc(a) -> str:
 def _action_desc_short(a) -> str:
     """state 模式的动作展示串:只要形态,不带 payload。
 
-    值可能是整段 TTS 文案,而前端按「；」把摘要串切成短句显示
-    (TasksPage.splitActions),文案里的分号会把一条动作切成几行残句。
+    值可能是整段 TTS 文案,摘要是「有哪些动作」的粗看,不适合承载文案;
+    具体文案由前端从 task 边界动作槽的原始动作对象渲染。
     """
     return f"{a.iid}:{a.did}" if a.iid == SCENE_IID else a.iid
 
@@ -216,6 +216,8 @@ class TaskService:
             rule_briefs.append(
                 RuleBrief(
                     rule_id=rule.id,
+                    name=rule.name,
+                    enabled=rule.enabled,
                     query=rule.condition.query,
                     direction=rule.resolved_direction.value,
                     source_type=rule.resolved_source_type,

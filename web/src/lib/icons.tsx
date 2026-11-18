@@ -206,3 +206,37 @@ export const IconPerson = (p: Props) => (
     <path d="M512 538.1c130.9 0 237-106.1 237-237s-106.1-237-237-237-237 106.1-237 237 106.1 237 237 237zm0 110.6c-218.2 0-395.1 69.7-395.1 155.6S293.8 960 512 960s395.1-69.7 395.1-155.6S730.2 648.7 512 648.7z" />
   </svg>
 );
+
+// ── 任务详情：区块与方向（规格同 base：24 网格 / 1.6 描边 / 14px 下须可辨） ──
+
+/** 漏斗 —— 驱动规则（条件把场景筛成「命中 / 不命中」） */
+export const IconFunnel = (p: Props) => (
+  <svg {...base(p)}>
+    <path d="M3 5h18l-7 8.2V19l-4 2v-7.8L3 5z" />
+  </svg>
+);
+
+/** 播放 —— 执行动作（命中之后发生什么） */
+export const IconPlay = (p: Props) => (
+  <svg {...base(p)}>
+    <path d="M8.5 6.2v11.6L18.5 12z" />
+  </svg>
+);
+
+/** 门 + 向内箭头 —— 进入（进入条件 / 进入动作） */
+export const IconDoorIn = (p: Props) => (
+  <svg {...base(p)}>
+    <path d="M13 4h5a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-5" />
+    <path d="m15 8 4 4-4 4" />
+    <path d="M9 12h10" />
+  </svg>
+);
+
+/** 门 + 向外箭头 —— 退出（退出条件 / 退出动作） */
+export const IconDoorOut = (p: Props) => (
+  <svg {...base(p)}>
+    <path d="M11 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h5" />
+    <path d="m16 16 4-4-4-4" />
+    <path d="M20 12H9" />
+  </svg>
+);

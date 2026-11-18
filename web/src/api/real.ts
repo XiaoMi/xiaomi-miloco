@@ -45,6 +45,7 @@ import type {
   OmniModelsResult,
   UpgradeCheck,
   UpgradeStatus,
+  TaskAction,
   TaskRuleDirection,
   TaskRuleSourceType,
 } from "@/lib/types";
@@ -134,6 +135,13 @@ function fetchMiotHome(): Promise<Normal<MiotHome>> {
     }
   });
   return homeCache;
+}
+
+/** 测试用:清掉 /api/miot/home 的请求级缓存。5s TTL 会让相邻用例拿到上一个用例的
+ *  mock 数据,表现为「改了 mock 却不生效」——与本文件 usage 那边的 _resetUsageStatsCache 同款。 */
+export function _resetMiotHomeCache(): void {
+  homeCache = null;
+  homeCacheTs = 0;
 }
 
 // PUT 后写穿 cache:把 cache 直接换成新一轮的 fetch promise,不等下次 caller
@@ -971,12 +979,14 @@ export async function realListDevices(): Promise<Device[]> {
       .filter(([iid]) => iid.startsWith("prop."))
       .map(([iid, spec]) => mapProp(iid, spec, valueByIid.get(iid)));
     const statusKind = deviceStatusKind(d, mainSwitch?.current, valueByIid);
+    const meta = mapDeviceMeta(d);
 
     return {
-      did: d.did,
-      name: cleanDeviceName(d.name),
+      did: meta.did,
+      name: meta.name,
       category: cat,
-      room: cleanRoom(d.room),
+      // 设备页保留「未分配」分组：那是它自己的展示口径，与任务详情的括号无关
+      room: meta.room ?? cleanRoom(d.room),
       online: d.online,
       statusText: humanDeviceStatus(d, valueByIid, statusKind),
       statusKind,
@@ -998,6 +1008,32 @@ export async function realListDevices(): Promise<Device[]> {
  *  （英文模式天然就是原文）。导出给日志页复用：同一个属性在两个页面必须同名。 */
 export function specLabel(iid: string, spec: BackendPropSpec): string {
   return zhLabel(spec.prop_description || spec.description || iid);
+}
+
+/** 能力名：`prop.*` 与 `specLabel` 完全一致；`action.*` 在中文界面改取云端译名。
+ *
+ *  动作 spec 的 `prop_description` 是英文的人类可读名（``Play Text``），中文词表里
+ *  没有，`specLabel` 只能原样回退——中文界面会露出英文。云端译名在 `description`，
+ *  形如「服务名 动作名」，而设备名里通常已含服务名，剥掉前缀只留动作名；译名为空
+ *  （老 spec）才回落 `specLabel`。
+ *
+ *  `description` 是后端按 zh-Hans 固定译好的、不随界面语言变，所以只有中文界面能
+ *  用它——英文等其他界面仍走 `specLabel`（`prop_description` 本身就是英文）。
+ *
+ *  与 `specLabel` 一样导出给动作台账（活动流）复用：同一个能力在任务详情和活动流
+ *  必须同名，否则住户拿两页的串对不上。 */
+export function capabilityLabel(iid: string, spec: BackendPropSpec): string {
+  if (!iid.startsWith("action.") || langKey() !== "zh") {
+    return specLabel(iid, spec);
+  }
+  const full = spec.description?.trim();
+  if (!full) return specLabel(iid, spec);
+  const service = spec.service_description?.trim();
+  if (service && full.startsWith(`${service} `)) {
+    const rest = full.slice(service.length + 1).trim();
+    if (rest) return rest;
+  }
+  return full;
 }
 
 /** spec + 值 → 一句话。分支与 mapProp 同源（bool / value_list / unit 三种），
@@ -1193,6 +1229,50 @@ export async function realControlDeviceProp(
 export async function realListScenes(): Promise<Scene[]> {
   const r = await fetchMiotHome();
   return r.data.scenes.map((s) => ({ id: s.scene_id, name: s.scene_name }));
+}
+
+// ── 任务详情用：设备名 / 房间 / spec（不拉状态） ──────────────
+export interface TaskDeviceMeta {
+  did: string;
+  name: string;
+  /** 有房间时的房间名；未分配 / 脏值（纯数字 home_id）为 undefined。
+   *
+   *  任务详情据此决定要不要渲染括号。**不能复用 cleanRoom 的返回值**：它把
+   *  「未分配」这个**设备页分组文案**当房间名返回，而详情页的括号语义是
+   *  「这台设备在哪个房间」——没有真实房间时就不该出括号。 */
+  room?: string;
+  spec?: Record<string, BackendPropSpec>;
+}
+
+/** 一台设备的「展示元数据」取数口径：did / 名字 / 房间 / spec。
+ *  设备页与任务详情都从这里取，避免哪天清洗规则改了只改一边。
+ *  房间的**呈现**仍分两套：这里把未分配 / 脏值（纯数字 home_id）归成 undefined，
+ *  设备页再 `meta.room ?? cleanRoom(d.room)` 回落进「未分配」分组——那是设备页
+ *  的分组语义；详情页的括号只回答「这台设备在哪个房间」，没有就不画。 */
+function mapDeviceMeta(d: BackendDevice): TaskDeviceMeta {
+  const raw = d.room;
+  return {
+    did: d.did,
+    name: cleanDeviceName(d.name),
+    room: raw && !/^\d+$/.test(raw) ? raw : undefined,
+    spec: d.spec,
+  };
+}
+
+/** 任务详情把动作翻成人话要的全部目录：did → 名字/房间/spec + 场景表。
+ *
+ * 不复用 ``realListDevices``：那个会为**每台设备**打一次 /status（30+ 设备时几十个
+ * 请求，受 MiOT 云端限频），而详情页只做文案翻译，一个状态都用不到。
+ * 场景表直接复用 ``realListScenes``，两者共用 ``fetchMiotHome`` 的缓存 promise。 */
+export async function realListDeviceMeta(): Promise<{
+  devices: TaskDeviceMeta[];
+  scenes: Scene[];
+}> {
+  const [r, scenes] = await Promise.all([fetchMiotHome(), realListScenes()]);
+  return {
+    devices: r.data.devices.map(mapDeviceMeta),
+    scenes,
+  };
 }
 
 export async function realTriggerScene(id: string): Promise<void> {
@@ -2320,6 +2400,17 @@ async function fetchUsageStats(
 // TaskSummaryView 继承 TaskFullView，除基础字段 + record 外，本就带驱动规则
 // （rule_briefs）/ paused_at；一并映射，详情抽屉直接复用列表数据，
 // 不再单独拉 GET /api/tasks/{id}。
+interface BackendAction {
+  did: string;
+  iid: string;
+  value?: unknown;
+  // 形态没有保证：task 边界槽在后端是 list[dict]，内层 params 可以是任意 JSON。
+  // 与 TaskAction.params 保持同一口径，别在这里给调用方「一定是数组」的错觉。
+  params?: unknown;
+  idempotent?: boolean;
+  cooldown_minutes?: number | null;
+}
+
 interface BackendTaskSummary {
   task_id: string;
   description: string;
@@ -2329,17 +2420,19 @@ interface BackendTaskSummary {
   runtime_state?: "off" | "on";
   rule_briefs?: {
     rule_id: string;
+    name?: string;
+    enabled?: boolean;
     query: string;
     direction?: TaskRuleDirection;
     source_type?: TaskRuleSourceType;
     actions_desc?: string[];
   }[];
   actions?: {
-    on_enter_actions?: unknown[];
+    on_enter_actions?: BackendAction[];
     on_enter_desc?: string | null;
-    on_exit_actions?: unknown[];
+    on_exit_actions?: BackendAction[];
     on_exit_desc?: string | null;
-    on_target_actions?: unknown[];
+    on_target_actions?: BackendAction[];
     on_target_desc?: string | null;
   } | null;
   record: {
@@ -2349,6 +2442,17 @@ interface BackendTaskSummary {
     window_remaining: { seconds: number; display: string } | null;
     derived: Record<string, unknown>;
   } | null;
+}
+
+function mapTaskAction(a: BackendAction): TaskAction {
+  return {
+    did: a.did,
+    iid: a.iid,
+    value: a.value,
+    params: a.params ?? null,
+    idempotent: a.idempotent,
+    cooldownMinutes: a.cooldown_minutes ?? null,
+  };
 }
 
 export async function realListTasks(): Promise<Task[]> {
@@ -2364,6 +2468,8 @@ export async function realListTasks(): Promise<Task[]> {
     runtimeState: t.runtime_state ?? "off",
     ruleBriefs: (t.rule_briefs ?? []).map((b) => ({
       ruleId: b.rule_id,
+      name: b.name ?? "",
+      enabled: b.enabled ?? true,
       query: b.query,
       direction: b.direction ?? "enter",
       sourceType: b.source_type ?? "omni",
@@ -2375,9 +2481,9 @@ export async function realListTasks(): Promise<Task[]> {
       onEnterDesc: t.actions?.on_enter_desc ?? null,
       onExitDesc: t.actions?.on_exit_desc ?? null,
       onTargetDesc: t.actions?.on_target_desc ?? null,
-      onEnterActionCount: (t.actions?.on_enter_actions ?? []).length,
-      onExitActionCount: (t.actions?.on_exit_actions ?? []).length,
-      onTargetActionCount: (t.actions?.on_target_actions ?? []).length,
+      onEnterActions: (t.actions?.on_enter_actions ?? []).map(mapTaskAction),
+      onExitActions: (t.actions?.on_exit_actions ?? []).map(mapTaskAction),
+      onTargetActions: (t.actions?.on_target_actions ?? []).map(mapTaskAction),
     },
     record: t.record
       ? {

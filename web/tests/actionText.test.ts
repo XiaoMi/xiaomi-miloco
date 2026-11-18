@@ -12,6 +12,7 @@
 import { describe, it, expect } from "vitest";
 import i18n from "@/i18n";
 import { describeAction } from "@/lib/actionText";
+import { describeTaskAction, type ActionCatalog } from "@/lib/taskAction";
 import type { BackendPropSpec } from "@/api/real";
 
 const t = i18n.t.bind(i18n);
@@ -39,6 +40,20 @@ const spec: Record<string, BackendPropSpec> = {
     in_params: [
       { name: "percent", format: "uint8" },
       { name: "speed", format: "uint8" },
+    ],
+  },
+  "action.7.1": {
+    description: "音箱 播放文本",
+    prop_description: "Play Text",
+    service_description: "音箱",
+    in_params: [{ name: "text", format: "string" }],
+  },
+  "action.9.1": {
+    description: "三入参动作",
+    in_params: [
+      { name: "mode", format: "string" },
+      { name: "text", format: "string" },
+      { name: "volume", format: "uint8" },
     ],
   },
 };
@@ -138,6 +153,111 @@ describe("describeAction · 调用方法（call_action）", () => {
         t,
       ),
     ).toBe("窗帘 开到百分比 percent 50、speed 3");
+  });
+
+  it("动作能力名取云端译名并剥掉服务名前缀，与任务详情同一个名字", () => {
+    // spec 里 prop_description 是英文 Play Text；任务详情对同一份 spec 也渲染「播放文本」
+    expect(
+      describeAction(
+        { action_type: "call_action", iid: "action.7.1", value_json: '["关灯"]' },
+        spec,
+        t,
+      ),
+    ).toBe("播放文本 「关灯」");
+  });
+
+  it("英文界面下动作能力名不露中文译名", async () => {
+    // backend 的 description 恒为 zh-Hans，不随界面语言变；非中文界面必须回落
+    // 到英文 prop_description，否则英文界面里会混进中文动作名
+    await i18n.changeLanguage("en");
+    try {
+      expect(
+        describeAction(
+          { action_type: "call_action", iid: "action.7.1", value_json: '["关灯"]' },
+          spec,
+          i18n.t.bind(i18n),
+        ),
+      ).toContain("Play Text");
+    } finally {
+      await i18n.changeLanguage("zh");
+    }
+  });
+
+  it("空参数被滤掉，参数名不因此前移", () => {
+    // 台账的 value_json 就是 json.dumps(action.params)，与任务详情拿到的是同一个数组
+    expect(
+      describeAction(
+        {
+          action_type: "call_action",
+          iid: "action.9.1",
+          value_json: '["", "关灯", 30]',
+        },
+        spec,
+        t,
+      ),
+    ).toBe("三入参动作 text 关灯、volume 30");
+  });
+
+  it("与任务详情共用同一份入参文案", () => {
+    const params = ["", "关灯", 30];
+    const feed = describeAction(
+      {
+        action_type: "call_action",
+        iid: "action.9.1",
+        value_json: JSON.stringify(params),
+      },
+      spec,
+      t,
+    );
+    const d = describeTaskAction(
+      { did: "d1", iid: "action.9.1", params },
+      {
+        devices: new Map([["d1", { did: "d1", name: "测试设备", spec }]]),
+        scenes: new Map(),
+        ready: true,
+        t: (k, o) => String(i18n.t(k, o as never)),
+      } satisfies ActionCatalog,
+    );
+    // 活动流是「能力名 入参」一句话，任务详情把两者拆成两个字段；拼起来必须一致
+    expect(feed).toBe(`${d.capability} ${d.detail}`);
+  });
+
+  it("占位符不原样露出，与任务详情同一档", () => {
+    expect(
+      describeAction(
+        {
+          action_type: "call_action",
+          iid: "action.9.1",
+          value_json: '["", "{{result}}", 30]',
+        },
+        spec,
+        t,
+      ),
+    ).toBe("三入参动作 文案由画面生成");
+  });
+
+  it("占位符在两页换成同一句说明", () => {
+    const params = ["{{result}}"];
+    const feed = describeAction(
+      {
+        action_type: "call_action",
+        iid: "action.9.1",
+        value_json: JSON.stringify(params),
+      },
+      spec,
+      t,
+    );
+    const d = describeTaskAction(
+      { did: "d1", iid: "action.9.1", params },
+      {
+        devices: new Map([["d1", { did: "d1", name: "测试设备", spec }]]),
+        scenes: new Map(),
+        ready: true,
+        t: (k, o) => String(i18n.t(k, o as never)),
+      } satisfies ActionCatalog,
+    );
+    expect(feed).toBe(`${d.capability} ${d.detail}`);
+    expect(d.detail).toBe("文案由画面生成");
   });
 });
 

@@ -16,6 +16,8 @@ import { ApiError } from "@/api/client";
 import {
   realListActivity,
   realListDevices,
+  realListDeviceMeta,
+  _resetMiotHomeCache,
   realGetUsageStats,
   realGetOmniConfig,
   realUpdateOmniConfig,
@@ -41,6 +43,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   i18n.changeLanguage("zh");
   _resetUsageStatsCache(); // 清掉用量请求级缓存，保证用例间隔离
+  _resetMiotHomeCache(); // 同一个 5s TTL 缓存：不清的话改 mock 也不生效
 });
 
 /**
@@ -956,7 +959,12 @@ describe("realListTasks — summary 契约", () => {
         created_at: "2026-09-01T10:00:00+08:00",
         runtime_state: "on",
         rule_briefs: [
-          { rule_id: "r-in", query: "比出 V 手势", direction: "enter" },
+          {
+            rule_id: "r-in",
+            query: "比出 V 手势",
+            direction: "enter",
+            enabled: false,
+          },
           { rule_id: "r-out", query: "挥手", direction: "exit" },
         ],
         actions: {
@@ -977,11 +985,14 @@ describe("realListTasks — summary 契约", () => {
 
     expect(task.runtimeState).toBe("on");
     expect(task.ruleBriefs.map((r) => r.direction)).toEqual(["enter", "exit"]);
+    // 停用标记要跨层带出来：界面据此不画不再生效的规则（缺省视为启用）
+    expect(task.ruleBriefs.map((r) => r.enabled)).toEqual([false, true]);
     expect(task.actions?.onEnterDesc).toBe("推一条消息");
     expect(task.actions?.onExitDesc).toBe("推一条下线");
-    // *_actions 只留条数：住户界面不渲染设备指令的原始结构
-    expect(task.actions?.onTargetActionCount).toBe(1);
-    expect(task.actions?.onEnterActionCount).toBe(0);
+    // *_actions 原样带出：抽屉要把 did/iid 翻成「哪个设备的哪个动作」
+    expect(task.actions?.onTargetActions).toHaveLength(1);
+    expect(task.actions?.onTargetActions[0]?.did).toBe("d1");
+    expect(task.actions?.onEnterActions).toHaveLength(0);
   });
 
   it("旧 backend 不返这三样时给缺省值，不崩", async () => {
@@ -1005,14 +1016,54 @@ describe("realListTasks — summary 契约", () => {
 
     expect(task.runtimeState).toBe("off");
     expect(task.ruleBriefs[0].direction).toBe("enter");
+    // 旧 backend 不带 enabled：按启用处理，否则老任务会被整片隐藏
+    expect(task.ruleBriefs[0].enabled).toBe(true);
     // 归一成"六个槽全空"而不是 null —— 调用方据此隐藏整个动作分区
     expect(task.actions).toEqual({
       onEnterDesc: null,
       onExitDesc: null,
       onTargetDesc: null,
-      onEnterActionCount: 0,
-      onExitActionCount: 0,
-      onTargetActionCount: 0,
+      onEnterActions: [],
+      onExitActions: [],
+      onTargetActions: [],
     });
+  });
+});
+
+describe("realListDeviceMeta — 任务详情的设备元数据", () => {
+  const home = (devices: unknown[]) => ({
+    code: 0,
+    message: "ok",
+    data: { devices, areas: [], scenes: [], persons: [] },
+  });
+
+  it("未分配 / 脏房间名不带给任务详情，避免渲染「（未分配）」", async () => {
+    mockFetchByUrl({
+      "/api/miot/home": home([
+        { did: "d1", name: "台灯", online: true, model: "m", room: "", spec: {} },
+        { did: "d2", name: "音箱", online: true, model: "m", room: "123456", spec: {} },
+        { did: "d3", name: "空调", online: true, model: "m", room: "客厅", spec: {} },
+      ]),
+    });
+
+    const meta = await realListDeviceMeta();
+    const roomOf = (did: string) =>
+      meta.devices.find((d) => d.did === did)?.room;
+
+    // 空房间与纯数字 home_id 都是「没有房间」，交给调用方决定不渲染括号
+    expect(roomOf("d1")).toBeUndefined();
+    expect(roomOf("d2")).toBeUndefined();
+    expect(roomOf("d3")).toBe("客厅");
+  });
+
+  it("设备页仍把未分配归到「未分配」分组（口径不受任务详情影响）", async () => {
+    mockFetchByUrl({
+      "/api/miot/home": home([
+        { did: "d1", name: "台灯", online: true, model: "m", room: "", spec: {} },
+      ]),
+    });
+
+    const devices = await realListDevices();
+    expect(devices[0]?.room).toBe(i18n.t("miot.unassigned"));
   });
 });

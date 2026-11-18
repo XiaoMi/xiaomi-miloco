@@ -1038,6 +1038,12 @@ export type TaskRuleSourceType = "omni" | "iot" | "record";
 
 export interface TaskRuleBrief {
   ruleId: string;
+  // 规则名，形如「[task_id] 短名」。感知 prompt 的「# 待判断规则」段用的就是它，
+  // 规则日志也按它落库 —— 详情页把它当标识符展示，住户查日志时要照着找。
+  name: string;
+  // 停用的规则不进运行期拓扑、也不进感知 prompt。详情页只画生效中的规则，
+  // 否则会对着一条不再拦人的闸门写「未满足时不进入」。
+  enabled: boolean;
   // 规则的自然语言条件（"孩子在书桌前学习" 之类）
   query: string;
   direction: TaskRuleDirection;
@@ -1048,14 +1054,27 @@ export interface TaskRuleBrief {
   actionsDesc: string[];
 }
 
+// task 边界槽里的一条设备动作，字段就是后端落库的原始动作对象。
+export interface TaskAction {
+  did: string;
+  iid: string;
+  value?: unknown;
+  // 正常是位置参数数组，但 task 边界槽在后端是 list[dict]，params 的形状没有校验
+  // （CLI 接受任意 JSON）。渲染侧先收敛成数组，别把「可能不是数组」当数组去 map。
+  params?: unknown;
+  idempotent?: boolean;
+  cooldownMinutes?: number | null;
+}
+
 // task 的三个动作槽。*_actions 是设备直控，*_desc 交给 Agent。
+// 原始动作必须原样带出来：抽屉要回答「哪个设备的哪个动作」，只有数量没法渲染。
 export interface TaskBoundaryActions {
   onEnterDesc: string | null;
   onExitDesc: string | null;
   onTargetDesc: string | null;
-  onEnterActionCount: number;
-  onExitActionCount: number;
-  onTargetActionCount: number;
+  onEnterActions: TaskAction[];
+  onExitActions: TaskAction[];
+  onTargetActions: TaskAction[];
 }
 
 // 任务视图 = 基础字段 + record 进度摘要 + 驱动规则，一次 summary 请求全拿到。

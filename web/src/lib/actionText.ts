@@ -4,7 +4,8 @@
  *
  * 三类取数，各自有各自的来源与回落：
  * - **名字**：`iid` → spec 的 `prop_description || description`，过 zhLabel 词表
- *   （与设备控制页同一个 `specLabel`，同一个属性两页同名）。
+ *   （与设备控制页同一个 `specLabel`，同一个属性两页同名）；`action.*` 改走
+ *   `capabilityLabel` 取云端译名，与任务详情同一个口径。
  * - **值**：`value_json` 按 `action_type` 分派，再按 spec 的 format / value_list /
  *   unit / in_params 读成人话。
  * - **回落**：spec 取不到（设备不在 home 里 / 规格缓存没热起来）、值 JSON 读不出来、
@@ -14,7 +15,12 @@
  * 中文拼接（顿号、书名号内的引号）走 i18next，不写死标点——英文语境下「、」是错的。
  */
 
-import { propValueText, specLabel, type BackendPropSpec } from "@/api/real";
+import {
+  capabilityLabel,
+  propValueText,
+  specLabel,
+  type BackendPropSpec,
+} from "@/api/real";
 
 /** 本模块只读台账行的这三个字段；用结构类型而不是 import BackendActionRow，
  *  免得 lib 层反向依赖 components 层（后者带 React 与 i18n 初始化）。 */
@@ -51,23 +57,41 @@ function propPhrase(
   return text === null ? null : `${specLabel(iid, spec)} ${text}`;
 }
 
-/** 动作入参 → 「名字 值」。一个参数时省掉参数名改加引号：TTS 这类动作的实际
- *  参数名（text / content）住户看不懂，引号已经说明了「这是原文」。 */
-function paramsPhrase(
-  spec: BackendPropSpec,
+/** 生成式动作 params 里的回填占位符。**后端尚未产出**（预留给「执行前按画面生成
+ *  文案」的能力）；接入后由服务端替换，展示层任何时候都不该把模板原样露给住户。
+ *  任务详情据此换成「文案由画面生成」。 */
+export const RESULT_PLACEHOLDER = /\{\{\s*result\s*\}\}/;
+
+const paramText = (v: unknown): string =>
+  typeof v === "string" ? v : JSON.stringify(v ?? null);
+
+/** params 里是否含回填占位符。 */
+export function containsResultPlaceholder(params: unknown[]): boolean {
+  return params.some((v) => RESULT_PLACEHOLDER.test(paramText(v)));
+}
+
+/** 动作入参 → 「名字 值」。单参加引号、不贴参数名（text / content 这类实际参数名
+ *  住户看不懂，引号已经说明「这是原文」）；多参按 `in_params` 的**原始下标**绑名，
+ *  空值先滤掉但名字不因此前移。空参数 / 全是空值时返回 null。
+ *
+ *  任务详情与活动流共用这一个实现 —— 同一条动作在两页必须长得一样，
+ *  否则住户拿详情页去活动流核对时会以为是两件事。 */
+export function paramsPhrase(
+  spec: BackendPropSpec | undefined,
   params: unknown[],
   t: Translate,
 ): string | null {
-  const text = (v: unknown): string =>
-    typeof v === "string" ? v : JSON.stringify(v ?? null);
-  if (params.length === 0) return null;
-  if (params.length === 1) return t("actions.quoted", { v: text(params[0]) });
-  const names = spec.in_params ?? [];
-  return params
-    .map((v, i) => {
-      const name = names[i]?.name;
-      return name ? `${name} ${text(v)}` : text(v);
-    })
+  const names = spec?.in_params ?? [];
+  const kept = params
+    .map((v, i) => ({ v, name: names[i]?.name }))
+    .filter(({ v }) => v !== null && v !== undefined && v !== "");
+  if (kept.length === 0) return null;
+  // 原始只有一个参数才算「单参」：多入参动作只是空位被滤掉时，剩下的仍要带名
+  if (params.length === 1) {
+    return t("actions.quoted", { v: paramText(kept[0].v) });
+  }
+  return kept
+    .map(({ v, name }) => (name ? `${name} ${paramText(v)}` : paramText(v)))
     .join(t("actions.listSep"));
 }
 
@@ -125,7 +149,14 @@ export function describeAction(
   if (row.action_type === "call_action") {
     const s = spec[iid];
     if (!s || !Array.isArray(value)) return null;
-    const label = specLabel(iid, s);
+    // 能力名走与任务详情同一个口径：动作的英文原名在中文界面读不出来，
+    // 两页必须同名，否则住户拿任务详情去活动流核对时会以为是两件事。
+    const label = capabilityLabel(iid, s);
+    // 与任务详情同一档：占位符是「执行时按画面生成」的模板，
+    // 原样露出等于把模板当成执行结果给住户看。
+    if (containsResultPlaceholder(value)) {
+      return `${label} ${t("actions.generatedByOmni")}`;
+    }
     const phrase = paramsPhrase(s, value, t);
     return phrase === null ? label : `${label} ${phrase}`;
   }

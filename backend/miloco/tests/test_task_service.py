@@ -129,6 +129,20 @@ def test_create_task_then_rule_auto_links(service):
     assert len(view.rule_briefs) == 1
     assert view.rule_briefs[0].rule_id == rule_id
     assert view.rule_briefs[0].query == "客厅有人"
+    # 规则名要跟着带上：prompt 的「# 待判断规则」段用的就是它，详情页要照它查日志
+    assert view.rule_briefs[0].name == "[t1] r"
+    assert view.rule_briefs[0].enabled is True
+
+
+def test_rule_brief_carries_enabled(service):
+    """停用的 rule 不进运行期拓扑、也不进感知 prompt，摘要要带上 enabled 供界面区分。"""
+    service.create_task(TaskCreateRequest(task_id="t1", description="d"))
+    rule = _make_rule_obj(task_id="t1", query="客厅有人")
+    rule.enabled = False
+    RuleRepo().create(rule)
+
+    view = service.get_full_view("t1")
+    assert view.rule_briefs[0].enabled is False
 
 
 def test_create_task_defaults_to_permanent(service):
@@ -840,8 +854,10 @@ def test_action_desc_keeps_prop_and_action_shape():
 
 
 def test_state_action_desc_keeps_payload_out():
-    """state 摘要只带形态。前端按「；」切分摘要串(TasksPage.splitActions),
-    TTS 文案里的分号会把一条动作切成几行残句。"""
+    """state 摘要只带形态、不带 payload —— 摘要只表达「有哪些动作」。
+
+    TTS 文案里的分号曾把按「；」切分的摘要串切成残句；摘要不再承载文案后，
+    具体文案由前端从 task 边界动作槽的原始动作对象渲染。"""
     from miloco.rule.schema import RuleAction
     from miloco.task.service import _action_desc_short
 

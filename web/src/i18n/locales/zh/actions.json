@@ -15,6 +15,7 @@
     "rawKeyTitle": "台账原始键：",
     "listSep": "、",
     "quoted": "「{{v}}」",
+    "generatedByOmni": "文案由画面生成",
     "foldToggle": "折叠动作",
     "foldToggleTitle": "把动作折进它的触发事件；关掉则每条动作各占一行",
     "foldStrengthAria": "折叠强度",
