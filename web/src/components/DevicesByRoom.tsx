@@ -52,6 +52,14 @@ interface Props {
   onChanged: () => void;
 }
 
+/** 未记录的房间一律收起；用户操作后按房间读取明确状态。 */
+export function isRoomOpen(
+  expanded: Record<string, boolean>,
+  room: string,
+): boolean {
+  return expanded[room] ?? false;
+}
+
 export function DevicesByRoom({ devices, scenes, onChanged }: Props) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -68,11 +76,6 @@ export function DevicesByRoom({ devices, scenes, onChanged }: Props) {
     }
     return [...m.entries()];
   }, [devices, unassigned]);
-
-  // 默认规则:≤3 个房间全展开;>3 个房间只展第一个
-  const defaultOpen = (idx: number) => groups.length <= 3 || idx === 0;
-  const isOpen = (room: string, idx: number) =>
-    expanded[room] ?? defaultOpen(idx);
 
   return (
     <section
@@ -108,7 +111,8 @@ export function DevicesByRoom({ devices, scenes, onChanged }: Props) {
               d.category !== "lock" &&
               d.mainSwitch?.current,
           ).length;
-          const open = isOpen(room, idx);
+          // 初始保持收起，避免多个房间同时占满页面；用户点击后仍逐房间记住状态。
+          const open = isRoomOpen(expanded, room);
           return (
             <div
               key={room}
