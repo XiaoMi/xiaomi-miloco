@@ -326,7 +326,7 @@ def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | No
         return None
     if key in mapping:
         return mapping[key]
-    # 模型偶尔回小写或带引号，代号只有 1–2 个字符，容错成本很低。
+    # 模型偶尔回小写，代号只有 1–2 个字符，容错成本很低。
     upper = key.upper()
     if len(upper) <= 2 and upper in mapping:
         return mapping[upper]
