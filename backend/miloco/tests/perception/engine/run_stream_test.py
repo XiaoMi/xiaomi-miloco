@@ -40,6 +40,7 @@ from miloco.perception.engine.identity.cropper import crop_targets
 from miloco.perception.engine.identity.frame_selector import select_frames
 from miloco.perception.engine.identity.motion_analyzer import analyze_motion
 from miloco.perception.engine.identity.tracking_service import create_tracking_service
+from miloco.perception.engine.omni.omni import _rule_id_to_name, _rule_name_to_id
 from miloco.perception.engine.omni.omni_client import call_omni
 from miloco.perception.engine.omni.prompt_builder import build_prompt
 from miloco.perception.engine.omni.response_parser import parse_omni_response
@@ -372,7 +373,11 @@ async def run_pipeline_with_timing(
         timer.omni_api_ms = (time.monotonic() - t0) * 1000
 
         t0 = time.monotonic()
-        omni_output = parse_omni_response(raw_resp)
+        omni_output = parse_omni_response(
+            raw_resp,
+            rule_name_to_id=_rule_name_to_id(context),
+            rule_id_to_name=_rule_id_to_name(context),
+        )
         timer.omni_parse_ms = (time.monotonic() - t0) * 1000
     else:
         t0 = time.monotonic()
@@ -381,7 +386,11 @@ async def run_pipeline_with_timing(
         result["omni_raw_response"] = raw_resp
 
         t0 = time.monotonic()
-        omni_output = parse_omni_response(raw_resp)
+        omni_output = parse_omni_response(
+            raw_resp,
+            rule_name_to_id=_rule_name_to_id(context),
+            rule_id_to_name=_rule_id_to_name(context),
+        )
         timer.omni_parse_ms = (time.monotonic() - t0) * 1000
 
     video_size = len(payload.get("video_base64", "") or "") * 3 // 4  # approx bytes
