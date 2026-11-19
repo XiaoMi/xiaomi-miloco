@@ -19,12 +19,14 @@ logger = logging.getLogger(__name__)
 def parse_omni_response(
     raw: dict[str, Any],
     rule_name_to_id: "dict[str, str] | None" = None,
+    rule_id_to_name: "dict[str, str] | None" = None,
 ) -> OmniOutput:
     """Parse raw omni model response into OmniOutput (RealtimePerceptionResult).
 
-    ``rule_name_to_id``：本窗规则的 ``rule_name → rule_id(UUID)`` 映射。模型在
-    matched_rules 里照抄 rule_name（``[task_id] 描述``），这里还原回 rule_id 供下游
-    去重/触发用。None 时退化为原样保留 name（best-effort）。
+    ``rule_name_to_id``：本窗规则的 ``代号 / 全名 → rule_id(UUID)`` 映射。模型在
+    matched_rules 里回的是代号（``A``、``B``…），这里还原回 rule_id 供下游去重/触发用。
+    ``rule_id_to_name`` 可选：给出时用 rule_id 反查可读全名回填 ``MatchedRule.rule_name``。
+    两张映射都只服务解析，不参与提示词构造。None 时退化为原样保留 name（best-effort）。
     """
     content = _extract_content(raw)
     if content is None:
@@ -39,7 +41,7 @@ def parse_omni_response(
     if not isinstance(parsed, dict):
         return _fallback("Response is not an object")
 
-    return _build_output(parsed, rule_name_to_id)
+    return _build_output(parsed, rule_name_to_id, rule_id_to_name)
 
 
 def parse_identity_assignments(
@@ -270,6 +272,7 @@ def _extract_content(raw: dict) -> str | None:
 def _build_output(
     parsed: dict,
     rule_name_to_id: "dict[str, str] | None" = None,
+    rule_id_to_name: "dict[str, str] | None" = None,
 ) -> OmniOutput:
     caption = _parse_caption(parsed.get("caption"))
     # pet_identities 是 prompt 侧的宠物称呼唯一真源（caption / suggestions / matched_rules 据其
@@ -285,7 +288,8 @@ def _build_output(
             sorted(_sanitize_for_log(n) for n in pet_high),
             sorted(_sanitize_for_log(n) for n in pet_mid),
         )
-    matched_rules = _parse_matched_rules(parsed.get("matched_rules"), rule_name_to_id)
+    matched_rules = _parse_matched_rules(
+        parsed.get("matched_rules"), rule_name_to_id, rule_id_to_name)
     speeches = _parse_speeches(parsed.get("speeches"))
     env_sounds = _parse_env_sounds(parsed.get("env_sounds"))
     suggestions = _parse_suggestions(parsed.get("suggestions"))
@@ -306,16 +310,36 @@ def _parse_caption(raw: Any) -> list[CaptionEntry]:
     return []
 
 
+_CODE_KEY = re.compile(r"^[A-Z]{1,2}$")
+
+
 def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | None":
     """rule_name → rule_id(UUID)。``mapping is None``（调用方未提供映射，仅测试 / streaming
     benchmark 走此路）时原样返回 name（best-effort）；有映射（含空 dict=本轮零规则）但匹配
     不上时返回 None（丢弃，防 bogus rule_id 入下游）。容错模型对名称的轻微改写。"""
     if mapping is None:
         return name or None
-    if name in mapping:
-        return mapping[name]
+    key = str(name).strip().strip("：:").strip()
+    # 空 key 不兜底：子串匹配里 `"" in 任意串` 恒真，会让「模型漏填 rule_name」的命中
+    # 静默绑到映射里第一条规则（按 rule_id 排序最小的那条）并真触发。没给标识就丢弃。
+    if not key:
+        return None
+    if key in mapping:
+        return mapping[key]
+    # 模型偶尔回小写，代号只有 1–2 个字符，容错成本很低。
+    upper = key.upper()
+    if len(upper) <= 2 and upper in mapping:
+        return mapping[upper]
+    # 模型回传自身就是代号形状（1–2 个大写字母），而上面两次精确查都没命中 →
+    # 这是列表外的幻觉代号，不能再走子串兜底：`"TV" in "[TV] 电视"` 会把规则静默配错。
+    if _CODE_KEY.fullmatch(upper):
+        return None
+    # 完整规则名的子串容错保留，但跳过代号键：单个字母太短，会把任意含该字母的规则名配错。
+    # 按形状（1–2 个大写字母）识别，不按长度——2–3 字的真实规则名仍需要这条兜底。
     for rn, rid in mapping.items():
-        if rn and (rn in name or name in rn):
+        if _CODE_KEY.fullmatch(rn):
+            continue
+        if rn in key or key in rn:
             return rid
     return None
 
@@ -348,6 +372,7 @@ def _parse_pet_identities(raw: Any) -> tuple[set[str], set[str]]:
 def _parse_matched_rules(
     raw: Any,
     rule_name_to_id: "dict[str, str] | None" = None,
+    rule_id_to_name: "dict[str, str] | None" = None,
 ) -> list[MatchedRule]:
     if not isinstance(raw, list):
         return []
@@ -360,8 +385,9 @@ def _parse_matched_rules(
         hit = item.get("hit", True)
         if hit is False or (isinstance(hit, str) and hit.strip().lower() in ("false", "0", "no")):
             continue
-        # rule_name（模型照抄的完整规则名）→ 还原 rule_id（下游稳定键）；rule_name 一并存供展示
-        name = str(item.get("rule_name", ""))
+        # rule_name（模型回传的代号，少数情况仍是完整名）→ 还原 rule_id（下游稳定键）；
+        # 展示用的 rule_name 用 rule_id 反查全名回填，代号不会漏到下游。
+        name = str(item.get("rule_name", "")).strip()
         rid = _resolve_rule_name(name, rule_name_to_id)
         if rid is None:
             logger.error(
@@ -372,7 +398,7 @@ def _parse_matched_rules(
         result.append(
             MatchedRule(
                 rule_id=rid,
-                rule_name=name,
+                rule_name=(rule_id_to_name or {}).get(rid) or name,
                 reason=str(item.get("reason", "")),
             )
         )
@@ -497,12 +523,13 @@ def try_extract_speeches(buffer: str) -> list[Speech] | None:
 def try_extract_matched_rules(
     buffer: str,
     rule_name_to_id: "dict[str, str] | None" = None,
+    rule_id_to_name: "dict[str, str] | None" = None,
 ) -> list[MatchedRule] | None:
     """Try to extract the matched_rules array from a partial streaming buffer."""
     raw = _try_extract_array(buffer, "matched_rules")
     if raw is None:
         return None
-    return _parse_matched_rules(raw, rule_name_to_id)
+    return _parse_matched_rules(raw, rule_name_to_id, rule_id_to_name)
 
 
 def try_extract_suggestions(buffer: str) -> list[Suggestion] | None:
@@ -516,6 +543,7 @@ def try_extract_suggestions(buffer: str) -> list[Suggestion] | None:
 def parse_omni_response_from_text(
     text: str,
     rule_name_to_id: "dict[str, str] | None" = None,
+    rule_id_to_name: "dict[str, str] | None" = None,
 ) -> OmniOutput:
     """Parse accumulated streaming text directly into OmniOutput.
 
@@ -531,7 +559,7 @@ def parse_omni_response_from_text(
     if not isinstance(parsed, dict):
         return _fallback("Response is not an object")
 
-    return _build_output(parsed, rule_name_to_id)
+    return _build_output(parsed, rule_name_to_id, rule_id_to_name)
 
 
 def parse_tier_c_verify_response(raw: dict[str, Any]) -> dict[str, Any]:
