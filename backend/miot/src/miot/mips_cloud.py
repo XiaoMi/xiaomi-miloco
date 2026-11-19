@@ -52,7 +52,7 @@ from .const import (
     MIHOME_MQTT_PORT,
     MIHOME_MQTT_RECONNECT_MAX_SEC,
     MIHOME_MQTT_RECONNECT_MIN_SEC,
-    MIHOME_MQTT_SUBSCRIBE_PER_SEC,
+    MIHOME_MQTT_SUBSCRIBE_LIMIT,
     MIHOME_MQTT_SUBSCRIBE_TIMEOUT,
     MIHOME_MQTT_SUBSCRIBE_WINDOW,
     SUBACK_SUCCESS_CODES,
@@ -219,7 +219,7 @@ class MIoTMipsCloud:
         self._port = port
         self._client_id = f"miloco:{uuid}"
         self._mqtt_operation_limiter = _MqttOperationRateLimiter(
-            MIHOME_MQTT_SUBSCRIBE_PER_SEC,
+            MIHOME_MQTT_SUBSCRIBE_LIMIT,
             MIHOME_MQTT_SUBSCRIBE_WINDOW,
         )
         self._dispatcher = _MqttOperationDispatcher(self._mqtt_operation_limiter)
@@ -605,7 +605,19 @@ class MIoTMipsCloud:
                     self._pending_subscribes[mid] = future
                 return mid
 
-            mid = await self._dispatcher.submit(send, future)
+            try:
+                mid = await self._dispatcher.submit(send, future)
+            except MipsConnectionError:
+                # 发包前失败(排队期间断连/epoch 变化,或 paho 本地拒绝):这条订阅
+                # 从未到达 broker。首订路径的调用方拿到异常不会记账、由上层对账
+                # 重试,占位必须撤掉,否则重连会按 _subs 静默重订、两层记账分叉。
+                # 重放路径没有调用方兜底,_subs 就是订阅意图本身,保留待下次重连。
+                # 身份判断避免误删排队期间被另一次调用替换的新订阅。
+                if replay_epoch is None:
+                    with self._subs_lock:
+                        if self._subs.get(topic) is sub:
+                            self._subs.pop(topic, None)
+                raise
 
             try:
                 reason_codes = await asyncio.wait_for(
@@ -613,8 +625,6 @@ class MIoTMipsCloud:
                 )
             except asyncio.TimeoutError:
                 # Transient: keep topic in _subs so reconnect retries.
-                with self._pending_lock:
-                    self._pending_subscribes.pop(mid, None)
                 raise MipsSubscribeTimeoutError(topic) from None
             finally:
                 with self._pending_lock:

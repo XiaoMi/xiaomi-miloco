@@ -1,3 +1,6 @@
+# -*- coding: utf-8 -*-
+# Copyright (C) 2025 Xiaomi Corporation
+# This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 """Internal FIFO scheduling and shared rate limiting for MQTT subscriptions."""
 
 from __future__ import annotations
@@ -5,18 +8,19 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
+from .const import MIHOME_MQTT_SUBSCRIBE_INFLIGHT_MAX
 from .types import MipsConnectionError
 
 
 class _MqttOperationRateLimiter:
     """Limit cloud MQTT subscribe and unsubscribe operations together."""
 
-    def __init__(self, per_sec: int, window: float) -> None:
-        if per_sec <= 0 or window <= 0:
+    def __init__(self, limit: int, window: float) -> None:
+        if limit <= 0 or window <= 0:
             raise ValueError("MQTT operation rate limit must be positive")
-        self._limit = per_sec
+        self._limit = limit
         self._window = window
         self._timestamps: deque[float] = deque()
 
@@ -33,14 +37,28 @@ class _MqttOperationRateLimiter:
 
 
 class _MqttOperationDispatcher:
-    def __init__(self, limiter: _MqttOperationRateLimiter) -> None:
+    def __init__(
+        self,
+        limiter: _MqttOperationRateLimiter,
+        inflight_max: int = MIHOME_MQTT_SUBSCRIBE_INFLIGHT_MAX,
+    ) -> None:
         self._limiter = limiter
-        self._slots = asyncio.Semaphore(32)
-        self._queue: deque = deque()
-        self._worker: Optional[asyncio.Task] = None
+        self._slots = asyncio.Semaphore(inflight_max)
+        self._queue: deque[
+            tuple[
+                Callable[[], Any],
+                Optional[asyncio.Future[Any]],
+                asyncio.Future[Any],
+            ]
+        ] = deque()
+        self._worker: Optional[asyncio.Task[None]] = None
 
-    async def submit(self, send: Callable, ack: Optional[asyncio.Future] = None):
-        sent = asyncio.get_running_loop().create_future()
+    async def submit(
+        self,
+        send: Callable[[], Any],
+        ack: Optional[asyncio.Future[Any]] = None,
+    ) -> Any:
+        sent: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._queue.append((send, ack, sent))
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run())
@@ -82,6 +100,13 @@ class _MqttOperationDispatcher:
             await asyncio.sleep(0)
 
     def reset(self) -> None:
+        """Cancel the worker and fail operations that have not been sent.
+
+        Sent subscriptions release their in-flight slots only when their ``ack``
+        futures complete. ``reset()`` does not touch those futures, so callers
+        must resolve, fail, or cancel every submitted ``ack`` after reset.
+        Leaving one pending keeps its slot occupied.
+        """
         if self._worker is not None:
             self._worker.cancel()
             self._worker = None
