@@ -53,6 +53,7 @@ async def scene():
     proxy = object.__new__(MiotProxy)
     proxy._refresh_devices_lock = asyncio.Lock()
     proxy._device_info_dict = {}
+    proxy._lan_callback_dids = set()
     proxy._kv_repo = _FakeKV([HOME])
     proxy._miot_client = SimpleNamespace(get_devices_async=AsyncMock(return_value={}))
     # 订阅对账已派后台任务(见 _spawn_subscription_sync)，与容器调和无关，置空

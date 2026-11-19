@@ -477,6 +477,11 @@ MUST_NOT_BE_GATED = {
     "_sync_meta_subscriptions": "同步设备元信息订阅",
     "_sync_device_state_subscriptions": "同步设备状态订阅",
     "_sync_props_subscriptions": "同步设备属性订阅",
+    "_sync_lan_callbacks": (
+        "同步相机 LAN 状态回调订阅——SDK 侧纯本地回调表写入，不发云端请求；"
+        "随 refresh_cameras / refresh_camera_online_status 恢复路径执行，"
+        "加闸门会把重启自愈死锁重新锁死"
+    ),
     "reconnect_camera": "单台相机重建原生会话——救僵尸连接的自愈路径，而感知侧在更上层已按「能不能用」判过",
     "_on_camera_status_changed": "相机状态回调：写回缓存并反向同步给局域网层，与其它推送回调同类",
     "_sync_scene_subscriptions": "同步场景订阅",
