@@ -153,6 +153,7 @@ knowledge/
   - [任务管理](03-features/task-management.md)
   - [家庭记忆](03-features/home-profile.md)
   - [Agent 集成](03-features/openclaw-integration.md)
+  - [Hermes Agent 集成](03-features/hermes-integration.md)
   - [实时摄像头观看](03-features/live-camera-view.md)
   - [设备欢迎](03-features/device-welcome.md)
   - [事件反馈打包](03-features/event-feedback.md)
@@ -163,6 +164,7 @@ knowledge/
   - [MiOT SDK](05-external-deps/sdk-miot.md)
   - [ONNX Runtime](05-external-deps/sdk-onnxruntime.md)
   - [OpenClaw SDK](05-external-deps/sdk-openclaw.md)
+  - [Hermes Agent 依赖](05-external-deps/sdk-hermes.md)
 - **06-dev-guide**
   - [开发指南](06-dev-guide/dev-guide.md)
   - [故障排查](06-dev-guide/troubleshooting.md)
