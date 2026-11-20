@@ -82,7 +82,7 @@ class LocalMediaInfo:
 
     video_width: int
     video_height: int
-    fps: int
+    fps: float  # 实际编码帧率; 时长未知时=配置帧率, 已知时=帧数/窗口时长(可非整数)
     frame_count: int
     has_audio: bool
     audio_sample_rate: int
