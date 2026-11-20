@@ -22,9 +22,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any, Callable
 
 import pytest
+from miot._mqtt_subscription_scheduler import (
+    _MqttOperationDispatcher,
+    _MqttOperationRateLimiter,
+)
 from miot.mips_cloud import MIoTMipsCloud
 from miot.types import (
     MIoTDeviceBindEvent,
@@ -40,6 +45,246 @@ _LOGGER = logging.getLogger(__name__)
 
 # 无真实网络/凭据/设备依赖 —— CI 的 `miot 单元测试` 步骤按 `-m unit` 选择。
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_fifo_and_shared_rate():
+    dispatcher = _MqttOperationDispatcher(_MqttOperationRateLimiter(2, 0.04))
+    loop = asyncio.get_running_loop()
+    sent = []
+    tasks = [
+        asyncio.create_task(
+            dispatcher.submit(lambda kind=kind: sent.append((kind, loop.time())))
+        )
+        for kind in ["sub", "unsub", "sub", "unsub", "sub"]
+    ]
+    await asyncio.gather(*tasks)
+    assert [kind for kind, _ in sent] == ["sub", "unsub", "sub", "unsub", "sub"]
+    for index in range(2, len(sent)):
+        assert sent[index][1] - sent[index - 2][1] >= 0.04
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_inflight_window_and_fifo_blocking():
+    dispatcher = _MqttOperationDispatcher(_MqttOperationRateLimiter(500, 1))
+    loop = asyncio.get_running_loop()
+    acknowledgements = [loop.create_future() for _ in range(33)]
+    sent = []
+    tasks = [
+        asyncio.create_task(
+            dispatcher.submit(lambda index=index: sent.append(index), ack)
+        )
+        for index, ack in enumerate(acknowledgements)
+    ]
+    tasks.append(asyncio.create_task(dispatcher.submit(lambda: sent.append("unsub"))))
+    await asyncio.wait_for(asyncio.gather(*tasks[:32]), 1)
+    await asyncio.sleep(0)
+    assert sent == list(range(32))
+    acknowledgements[7].set_result([2])
+    await asyncio.wait_for(asyncio.gather(*tasks), 1)
+    assert sent == [*range(33), "unsub"]
+    for ack in acknowledgements:
+        if not ack.done():
+            ack.set_result([2])
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_reset_cancels_rate_wait_and_preserves_budget():
+    dispatcher = _MqttOperationDispatcher(_MqttOperationRateLimiter(1, 0.05))
+    sent = []
+    loop = asyncio.get_running_loop()
+    await dispatcher.submit(lambda: sent.append(loop.time()))
+    stale = asyncio.create_task(dispatcher.submit(lambda: sent.append(-1)))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    dispatcher.reset()
+    with pytest.raises(MipsConnectionError):
+        await stale
+    await dispatcher.submit(lambda: sent.append(loop.time()))
+    assert len(sent) == 2
+    assert sent[1] - sent[0] >= 0.05
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_cancelled_operation_is_not_sent():
+    dispatcher = _MqttOperationDispatcher(_MqttOperationRateLimiter(1, 0.03))
+    sent = []
+    await dispatcher.submit(lambda: sent.append("first"))
+    cancelled = asyncio.create_task(dispatcher.submit(lambda: sent.append("cancelled")))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+    await dispatcher.submit(lambda: sent.append("last"))
+    assert sent == ["first", "last"]
+
+
+@pytest.mark.asyncio
+async def test_cloud_disconnect_fails_pending_and_queued_subscriptions():
+    mips, _ = _make_mips()
+    holder = {}
+
+    def factory(client_id):
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]
+
+    mips._client_factory = factory
+    fake = await _connect(mips, holder)
+    tasks = [
+        asyncio.create_task(mips.sub_device_state_async(str(index), lambda _: None))
+        for index in range(40)
+    ]
+    try:
+        for _ in range(200):
+            if len(fake.subscribed) == 32:
+                break
+            await asyncio.sleep(0.001)
+        assert len(fake.subscribed) == 32
+        fake.fire_disconnect(1)
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True), 1
+        )
+        assert all(isinstance(result, MipsConnectionError) for result in results)
+        assert not mips._pending_subscribes
+        assert len(fake.subscribed) == 32
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_cloud_suback_from_network_thread_during_send():
+    mips, _ = _make_mips()
+    holder = {}
+    workers = []
+
+    class ImmediateClient(_FakeMqttClient):
+        def subscribe(self, topic, qos):
+            result, mid = super().subscribe(topic, qos)
+            worker = threading.Thread(target=lambda: self.fire_suback(mid, [2]))
+            workers.append(worker)
+            worker.start()
+            return result, mid
+
+    def factory(client_id):
+        holder["c"] = ImmediateClient(client_id)
+        return holder["c"]
+
+    mips._client_factory = factory
+    await _connect(mips, holder)
+    try:
+        await asyncio.wait_for(mips.sub_device_state_async("fast", lambda _: None), 1)
+        assert not mips._pending_subscribes
+    finally:
+        for worker in workers:
+            worker.join()
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_cloud_disconnect_drops_unsent_first_subscriptions_only():
+    """首订排队中被断连打断:未发出的撤掉 _subs 占位(调用方不记账、由上层
+    对账重试),已发出等 SUBACK 的保留(与超时路径一致,重连后自动重试)。"""
+    mips, _ = _make_mips()
+    holder = {}
+
+    def factory(client_id):
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]
+
+    mips._client_factory = factory
+    fake = await _connect(mips, holder)
+    tasks = [
+        asyncio.create_task(mips.sub_device_state_async(str(index), lambda _: None))
+        for index in range(40)
+    ]
+    try:
+        for _ in range(200):
+            if len(fake.subscribed) == 32:
+                break
+            await asyncio.sleep(0.001)
+        assert len(fake.subscribed) == 32
+        fake.fire_disconnect(1)
+        results = await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True), 1
+        )
+        assert all(isinstance(result, MipsConnectionError) for result in results)
+        sent_topics = {topic for topic, _, _ in fake.subscribed}
+        assert len(sent_topics) == 32
+        assert set(mips._subs) == sent_topics
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_first_subscribe_local_failure_drops_placeholder():
+    """paho 本地拒绝首订:抛 MipsConnectionError 且 _subs 不残留占位。"""
+    mips, _ = _make_mips()
+    holder = {}
+
+    class RejectingClient(_FakeMqttClient):
+        def subscribe(self, topic, qos):
+            return MQTTErrorCode.MQTT_ERR_NO_CONN, None
+
+    def factory(client_id):
+        holder["c"] = RejectingClient(client_id)
+        return holder["c"]
+
+    mips._client_factory = factory
+    await _connect(mips, holder)
+    try:
+        with pytest.raises(MipsConnectionError):
+            await asyncio.wait_for(
+                mips.sub_user_bind_async("uid-local", handler=lambda _m: None), 1
+            )
+        assert "user/uid-local/g_op/bind" not in mips._subs
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_replay_send_failure_keeps_subscription():
+    """重连重放在发包前失败:走 error handler,但 _subs 保留订阅意图,
+    下次重连继续重放。"""
+    mips, _ = _make_mips()
+    holder = {}
+    topic = "user/uid-replay/g_op/bind"
+
+    class FlakyClient(_FakeMqttClient):
+        reject = False
+        rejected = 0
+
+        def subscribe(self, topic, qos):
+            if self.reject:
+                self.rejected += 1
+                return MQTTErrorCode.MQTT_ERR_NO_CONN, None
+            return super().subscribe(topic, qos)
+
+    def factory(client_id):
+        holder["c"] = FlakyClient(client_id)
+        return holder["c"]
+
+    mips._client_factory = factory
+    fake = await _connect(mips, holder)
+    try:
+        await asyncio.gather(
+            mips.sub_user_bind_async("uid-replay", handler=lambda _m: None),
+            _ack_subscribes(fake, 1),
+        )
+        errors = []
+        mips.register_subscribe_error_handler(errors.append)
+        fake.reject = True
+        fake.fire_disconnect(reason_code=1)
+        fake.fire_connect(reason_code=0)
+        for _ in range(100):
+            if errors:
+                break
+            await asyncio.sleep(0.005)
+        assert fake.rejected == 1
+        assert errors and errors[0][0] == topic
+        assert topic in mips._subs
+    finally:
+        await mips.deinit_async()
 
 
 class _FakeReasonCode:
@@ -1135,6 +1380,7 @@ async def test_a_second_handler_on_the_same_topic_is_reported(caplog):
             _ack_subscribes(fake, 1),
         )
         with caplog.at_level(logging.ERROR, logger="miot.mips_cloud"):
+            fake.subscribed.clear()
             await asyncio.gather(
                 mips.sub_device_props_async("dev-9", handler=lambda _msg: "other"),
                 _ack_subscribes(fake, 1),

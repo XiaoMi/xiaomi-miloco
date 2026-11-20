@@ -49,6 +49,14 @@ MIHOME_MQTT_BROKER_HOST_SUFFIX: str = "ha.mqtt.io.mi.com"
 MIHOME_MQTT_PORT: int = 8883
 MIHOME_MQTT_KEEPALIVE: int = 60
 MIHOME_MQTT_SUBSCRIBE_TIMEOUT: float = 10.0
+# SUBSCRIBE and UNSUBSCRIBE share one sliding window: at most LIMIT operations
+# per WINDOW seconds, so the effective rate is LIMIT / WINDOW. Changing WINDOW
+# alone also changes the rate.
+MIHOME_MQTT_SUBSCRIBE_LIMIT: int = 500
+MIHOME_MQTT_SUBSCRIBE_WINDOW: float = 1.0
+# Maximum subscriptions awaiting SUBACK at once. This caps in-flight
+# subscriptions below the reconnect/reconcile concurrency limits in callers.
+MIHOME_MQTT_SUBSCRIBE_INFLIGHT_MAX: int = 32
 MIHOME_MQTT_RECONNECT_MIN_SEC: float = 1.0
 MIHOME_MQTT_RECONNECT_MAX_SEC: float = 120.0
 
