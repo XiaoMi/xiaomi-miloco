@@ -38,6 +38,7 @@ import signal
 import subprocess
 import sys
 import tarfile
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NoReturn
@@ -1006,21 +1007,78 @@ class Installer:
             pass
         self._service_started = False
 
+    def _read_config_for_write(self, config_path: Path) -> dict | None:
+        """读 config.json 作为「合并写盘」的基底。
+
+        区分「没有可保留的内容」与「文件在但读不懂」：
+
+        - 文件不存在 / 空白 → 返回 ``{}``，按首启初始化照常写盘；
+        - IO 错误 / 非法 JSON / 顶层不是对象 → 警告并返回 ``None``，
+          调用方必须放弃写盘。把读失败当空基底会让深合并退化成整体
+          覆盖，一次保存就清掉 ``server.token`` / ``model.omni.api_key``
+          等其它段落（见 miloco issue #569）。
+        """
+        if not config_path.is_file():
+            return {}
+        try:
+            text = config_path.read_text(encoding="utf-8")
+        except OSError:
+            self.ui.warn(self.ui.i18n.t("install.config_unreadable"))
+            return None
+        if not text.strip():
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            self.ui.warn(self.ui.i18n.t("install.config_unparsable"))
+            return None
+        if not isinstance(parsed, dict):
+            self.ui.warn(self.ui.i18n.t("install.config_not_object"))
+            return None
+        return parsed
+
+    def _atomic_write_config(self, config_path: Path, config: dict) -> None:
+        """原子写 config.json：tmp + fsync 数据页 + rename + 尽力 fsync 目录项。
+
+        与 CLI ``atomic_write`` / backend ``_atomic_write_json`` 同款持久化
+        约定：掉电不会留下改了名却没落盘的空文件——空文件正是喂给
+        「读失败按空配置处理」类缺陷的损坏源。目录项 fsync 失败仅降级
+        掉电保险（数据已在 rename 前落盘），不影响调用方。
+        """
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=config_path.parent, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, config_path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        try:
+            dir_fd = os.open(str(config_path.parent), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                pass
+        finally:
+            os.close(dir_fd)
+
     def _fallback_write_config(self, py_path: str) -> None:
         config_path = self.miloco_home / "config.json"
-        config: dict = {}
-        if config_path.is_file():
-            try:
-                config = json.loads(config_path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                pass
+        config = self._read_config_for_write(config_path)
+        if config is None:
+            return
         server = config.setdefault("server", {})
         server["python_bin"] = py_path
-        tmp = config_path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        tmp.rename(config_path)
+        self._atomic_write_config(config_path, config)
 
     def _extract_models(self, src_dir: Path, models_dest: Path) -> int:
         """从 src_dir 内的 miloco-models-*.tar.gz 解压模型到 models_dest，返回**本次解压**的模型数。
@@ -1210,19 +1268,24 @@ class Installer:
             ),
         )
 
-        self._write_model_config(model_name, base_url, api_key)
-        self.ui.step_ok(self.ui.i18n.t("model.config_saved"))
+        if self._write_model_config(model_name, base_url, api_key):
+            self.ui.step_ok(self.ui.i18n.t("model.config_saved"))
+        else:
+            self.ui.step_skip(self.ui.i18n.t("model.config_not_saved"))
 
     def _quick_configure_mimo(self) -> None:
         self.ui.step(self.ui.i18n.t("model.mimo_quick"))
-        self._write_model_config(
+        if self._write_model_config(
             "mimo-v2.6-flash",
             "https://api.xiaomimimo.com/v1",
             self.omni_api_key or "",
-        )
-        self.ui.step_ok(self.ui.i18n.t("model.config_saved"))
+        ):
+            self.ui.step_ok(self.ui.i18n.t("model.config_saved"))
+        else:
+            self.ui.step_skip(self.ui.i18n.t("model.config_not_saved"))
 
-    def _write_model_config(self, model: str, base_url: str, api_key: str) -> None:
+    def _write_model_config(self, model: str, base_url: str, api_key: str) -> bool:
+        """写 model.omni.*；返回是否真正落盘（拒绝写盘时调用方不得打成功提示）。"""
         for field_name, value in [
             ("model", model),
             ("base_url", base_url),
@@ -1249,21 +1312,15 @@ class Installer:
             )
         except (subprocess.CalledProcessError, FileNotFoundError):
             config_path = self.miloco_home / "config.json"
-            config: dict = {}
-            if config_path.is_file():
-                try:
-                    config = json.loads(config_path.read_text(encoding="utf-8"))
-                except (json.JSONDecodeError, OSError):
-                    pass
+            config = self._read_config_for_write(config_path)
+            if config is None:
+                return False
             omni = config.setdefault("model", {}).setdefault("omni", {})
             omni["model"] = model
             omni["base_url"] = base_url
             omni["api_key"] = api_key
-            tmp = config_path.with_suffix(".tmp")
-            tmp.write_text(
-                json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
-            tmp.rename(config_path)
+            self._atomic_write_config(config_path, config)
+        return True
 
     def _get_current_config(self) -> tuple[str, str, str]:
         values: list[str] = []

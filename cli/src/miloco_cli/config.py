@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import sys
 import tempfile
 from copy import deepcopy
 from pathlib import Path
@@ -307,9 +308,19 @@ def atomic_write(path: Path, data: dict) -> None:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
-        dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        # 目录项 fsync 是掉电保险；Windows 打不开目录句柄，退化为跳过
+        # （文件内容已在上面 fsync，rename 本身原子）。fsync 本身失败
+        # （部分文件系统对目录 fd 返回 EINVAL）同样只是保险降级：rename
+        # 已成功、数据已落盘，不能反过来让调用方以为写失败。
         try:
-            os.fsync(dir_fd)
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            try:
+                os.fsync(dir_fd)
+            except OSError:
+                pass
         finally:
             os.close(dir_fd)
     except BaseException:
@@ -320,15 +331,48 @@ def atomic_write(path: Path, data: dict) -> None:
         raise
 
 
-def _read_raw() -> dict[str, Any]:
+def _read_raw(strict: bool = False) -> dict[str, Any]:
+    """读现有 config.json。
+
+    ``strict=False``（默认，读路径）：解析失败按 {} 返回，``config show`` 在
+    文件被写坏时仍可展示默认值；同时向 stderr 打一行 warning（stdout 是 JSON
+    输出协议，不能污染），避免用户把默认值误判成「配置真的丢了」。
+    ``strict=True``（写路径）：文件存在但读不懂时抛 ``ValueError``，调用方拒绝
+    写盘 —— 否则 ``_set_nested`` + ``atomic_write`` 会把「深合并」退化成
+    「只落本次设置的字段」，一次 ``config set`` 就清掉 server.token 等段落。
+    """
     path = config_file()
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        text = path.read_text(encoding="utf-8")
+    except OSError as e:
+        if strict:
+            raise ValueError(
+                f"config.json 无法读取，已拒绝写入以免清空其他配置: {e}"
+            ) from e
+        print(f"warning: config.json 无法读取，按默认值展示: {e}", file=sys.stderr)
+        return {}
+    if not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        if strict:
+            raise ValueError(
+                f"config.json 无法解析，已拒绝写入以免清空其他配置: {e}"
+            ) from e
+        print(f"warning: config.json 解析失败，按默认值展示: {e}", file=sys.stderr)
         return {}
     if not isinstance(data, dict):
+        if strict:
+            raise ValueError(
+                f"config.json 顶层不是 JSON 对象，已拒绝写入以免清空其他配置: {type(data).__name__}"
+            )
+        print(
+            f"warning: config.json 顶层不是 JSON 对象，按默认值展示: {type(data).__name__}",
+            file=sys.stderr,
+        )
         return {}
     _validate_structure(data)
     return data
@@ -608,7 +652,7 @@ def set_values(pairs: list[tuple[str, str]]) -> dict[str, Any]:
                 f"(known: {', '.join(sorted(_SCHEMA_PATHS))})"
             )
         resolved[path] = _coerce(path, raw)
-    raw_file = _read_raw()
+    raw_file = _read_raw(strict=True)
     for path, value in resolved.items():
         _set_nested(raw_file, path, value)
     atomic_write(config_file(), raw_file)

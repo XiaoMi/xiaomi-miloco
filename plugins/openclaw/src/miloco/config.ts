@@ -4,6 +4,7 @@ import { resolveGatewayAuth } from "openclaw/plugin-sdk/gateway-runtime";
 import { getPluginConfig, type MilocoPluginConfig } from "../config.js";
 import { resolveGatewayUrl } from "../utils/gateway.js";
 import { readTextFileSync, writeTextFileSync } from "../utils/io.js";
+import { logger } from "../utils/logger.js";
 import { createParser } from "../utils/schema.js";
 import { milocoConfigFile } from "./paths.js";
 
@@ -194,25 +195,42 @@ function sharedConfigPath(): string {
  * 把「当前 plugin 配置 + gateway 凭据」合并进磁盘上的
  * ``~/.openclaw/miloco/config.json``，仅写入「用户已有 + 本次必须落盘 + 兜底」
  * 的字段（不污染 schema 默认值），然后返回经 schema 补齐的完整配置。
+ *
+ * config.json 存在但读不懂时跳过落盘（避免空基底覆盖掉用户的 server.token
+ * 等段落），仍返回内存里的合并结果让网关先跑起来，等人工恢复文件。
  */
 export function loadSharedConfig(api: OpenClawPluginApi): MilocoSharedConfig {
   const plugin = getPluginConfig(api);
   const filePath = sharedConfigPath();
 
-  const existingText = readTextOrUndefined(filePath);
-  const existing = safeJsonParse(existingText);
-  const raw: Record<string, unknown> = isRecord(existing)
-    ? { ...existing }
-    : {};
+  let existingText: string | undefined;
+  let raw: Record<string, unknown>;
+  let mayWrite = true;
+  try {
+    ({ text: existingText, raw } = readMergeBase(filePath));
+  } catch (err) {
+    if (err instanceof ConfigFileUnreadableError) {
+      logger.error(
+        `跳过 config.json 归一化落盘以免清空其他段落（请恢复备份后重启）: ${err.message}`,
+      );
+      existingText = undefined;
+      raw = {};
+      mayWrite = false;
+    } else {
+      throw err;
+    }
+  }
 
   mergePluginIntoRaw(raw, plugin);
   ensureAgentEssentials(raw, api);
 
   // 仅在合并后的内容与磁盘不同才落盘，避免每次 load 都产生冗余 IO / mtime 抖动。
   // 首次启动（文件缺失）或人工手改过格式时会执行一次归一化写入，之后稳态零写入。
-  const serialized = `${JSON.stringify(raw, null, 2)}\n`;
-  if (serialized !== existingText) {
-    writeTextFileSync(filePath, serialized);
+  if (mayWrite) {
+    const serialized = `${JSON.stringify(raw, null, 2)}\n`;
+    if (serialized !== existingText) {
+      writeTextFileSync(filePath, serialized);
+    }
   }
   return parseSharedConfig(raw);
 }
@@ -271,17 +289,16 @@ type DeepPartial<T> = T extends object
 /**
  * 读取磁盘上的共享配置，将传入的 partial config 深度合并后写回，
  * 返回经 schema 补齐的完整配置。
+ *
+ * config.json 存在但读不懂时抛 {@link ConfigFileUnreadableError} 拒绝写盘，
+ * 避免把深合并退化成整体覆盖。
  */
 export function updateSharedConfig(
   partial: DeepPartial<MilocoSharedConfig>,
 ): MilocoSharedConfig {
   const filePath = sharedConfigPath();
 
-  const existingText = readTextOrUndefined(filePath);
-  const existing = safeJsonParse(existingText);
-  const raw: Record<string, unknown> = isRecord(existing)
-    ? { ...existing }
-    : {};
+  const { text: existingText, raw } = readMergeBase(filePath);
 
   deepMerge(raw, partial);
 
@@ -324,6 +341,43 @@ function safeJsonParse(text: string | undefined): unknown {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * 合并写盘前的基底读取。文件缺失（或为空）按 {} 初始化；文件存在但读不懂
+ * （读失败 / 非法 JSON / 顶层不是对象）抛 {@link ConfigFileUnreadableError}。
+ *
+ * 把读失败当空配置会让随后的合并写盘退化成「只落本次字段」的整体覆盖，
+ * 一次网关重启/保存就清掉 server.token、model.omni.api_key 等段落
+ * （issue #569 的「只剩 agent 段的 135 字节 config.json」）。
+ */
+class ConfigFileUnreadableError extends Error {}
+
+function readMergeBase(filePath: string): {
+  text: string | undefined;
+  raw: Record<string, unknown>;
+} {
+  let text: string;
+  try {
+    text = readTextFileSync(filePath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { text: undefined, raw: {} };
+    }
+    throw new ConfigFileUnreadableError(
+      `config.json 无法读取，已拒绝写入以免清空其他配置: ${filePath}: ${String(err)}`,
+    );
+  }
+  if (text.trim() === "") {
+    return { text, raw: {} };
+  }
+  const parsed = safeJsonParse(text);
+  if (!isRecord(parsed)) {
+    throw new ConfigFileUnreadableError(
+      `config.json 无法解析，已拒绝写入以免清空其他配置: ${filePath}`,
+    );
+  }
+  return { text, raw: { ...parsed } };
 }
 
 // ─── 环境变量覆盖（schema 驱动，对齐后端 pydantic-settings） ──────────────────
