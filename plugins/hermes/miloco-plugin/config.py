@@ -3,7 +3,8 @@
 移植自 openclaw TypeScript 插件 ``plugins/openclaw/src/miloco/config.ts`` 的
 **读取部分**（``loadSharedConfig`` 的纯读分支）——不做写回、不合并 gateway 凭据、
 不解析 plugin 自身配置。Hermes 插件侧只关心 ``server.token`` / ``server.url`` /
-``model.omni.*`` 这几个 miloco 后端运行时关键字段。
+``model.omni.*`` 这几个 miloco 后端运行时关键字段，以及 ``scheduler.enabled``
+（见 ``is_scheduler_auto_manage_enabled``）。
 
 返回值结构（所有字段缺失时给 schema 默认值）::
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -91,3 +93,32 @@ def load_shared_config() -> Dict[str, Any]:
     """
     raw = _safe_load_json(miloco_config_file())
     return _deep_merge(_DEFAULTS, raw)
+
+
+# pydantic v2 认可的布尔字符串（大小写不敏感），与 OpenClaw config.ts 的
+# ENV_TRUE_TOKENS / ENV_FALSE_TOKENS 一致。
+_ENV_TRUE_TOKENS = {"1", "true", "t", "yes", "y", "on"}
+_ENV_FALSE_TOKENS = {"0", "false", "f", "no", "n", "off"}
+_SCHEDULER_ENABLED_ENV = "miloco_scheduler__enabled"
+
+
+def is_scheduler_auto_manage_enabled() -> bool:
+    """「自动定时任务」开关 ``scheduler.enabled``，对齐 OpenClaw
+    ``config.ts::isSchedulerAutoManageEnabled``。
+
+    优先级：环境变量 ``MILOCO_SCHEDULER__ENABLED``（名称大小写不敏感，与后端
+    pydantic-settings 一致）> ``config.json`` 的 ``scheduler.enabled`` > 缺省 ``True``。
+    env 值无法解析时忽略，回落 config.json；字段缺失或类型不对时按开启处理。
+    """
+    for key, value in os.environ.items():
+        if key.lower() == _SCHEDULER_ENABLED_ENV:
+            token = value.strip().lower()
+            if token in _ENV_TRUE_TOKENS:
+                return True
+            if token in _ENV_FALSE_TOKENS:
+                return False
+            break
+    scheduler = _safe_load_json(miloco_config_file()).get("scheduler")
+    if isinstance(scheduler, dict) and isinstance(scheduler.get("enabled"), bool):
+        return scheduler["enabled"]
+    return True
