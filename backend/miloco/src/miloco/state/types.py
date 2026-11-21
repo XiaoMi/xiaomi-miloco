@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 Scalar: TypeAlias = str | int | float | bool | None
 
 # 容器内的存储形态。写入接受 list，存进来统一转 tuple——`Entry` 是 frozen 只保证字段
 # 不被重新赋值，挡不住调用方改 list 的内容。
 StateValue: TypeAlias = Scalar | tuple[Scalar, ...]
+ExpireAction: TypeAlias = Literal["delete", "retain"]
 
 
 class MissingType:
@@ -48,12 +49,17 @@ class Entry:
 
     `source` 记的是最后一次上报的来源，与 `last_reported` 同步——两个来源写同一路径同一个
     值时，`last_changed` 不动，`last_reported` 和 `source` 都更新成后写的那个。
+
+    `expired` 只在 `on_expire="retain"` 时置位；普通读取会隐藏过期值，带元数据读取仍能看到。
     """
 
     value: StateValue
     last_changed: int
     last_reported: int
     source: str
+    expires_at: int | None = None
+    expired: bool = False
+    on_expire: ExpireAction = "delete"
 
 
 @dataclass(frozen=True)
@@ -61,7 +67,7 @@ class Change:
     """一条叶子级变更。`old` 为 `MISSING` 表示新增，`new` 为 `MISSING` 表示删除。
 
     自带 `old` / `new` 的值是必需的：异步投递下回调拿到事件时容器可能已被后续写入改过，
-    回头读当前值判断变化会漏边沿。
+    回头读当前值判断变化会漏边沿。`reason="expire"` 表示由有效期触发。
     """
 
     path: str
@@ -69,6 +75,7 @@ class Change:
     new: StateValue | MissingType
     source: str
     at: int
+    reason: str = "update"
 
 
 Node: TypeAlias = "Entry | dict[str, Node]"

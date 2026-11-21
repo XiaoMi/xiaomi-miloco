@@ -4,7 +4,7 @@
 """分层 KV 状态容器：多来源写入、按路径模式订阅与快照。"""
 
 from miloco.state.store import StateStore
-from miloco.state.types import MISSING, Change, Entry
+from miloco.state.types import MISSING, Change, Entry, ExpireAction
 from miloco.state.utils import flatten
 
-__all__ = ["MISSING", "Change", "Entry", "StateStore", "flatten"]
+__all__ = ["MISSING", "Change", "Entry", "ExpireAction", "StateStore", "flatten"]
