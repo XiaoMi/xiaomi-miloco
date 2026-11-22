@@ -21,6 +21,7 @@ import {
   realGetUsageStats,
   realGetOmniConfig,
   realUpdateOmniConfig,
+  realUpdateOmniFallbacks,
   realActivateOmniConfig,
   realDeleteOmniConfig,
   realListOmniModels,
@@ -784,6 +785,7 @@ describe("omni 配置契约 — 多档案", () => {
         { label: "配置1", model: "m1", base_url: "https://p/v1", api_key_masked: "sk-…cdef", has_key: true, active: true },
         { label: "配置2", model: "m2", base_url: "https://p/v1", api_key_masked: "sk-…cdef", has_key: true, active: false },
       ],
+      fallback_labels: ["配置2"],
     },
   };
 
@@ -844,6 +846,14 @@ describe("omni 配置契约 — 多档案", () => {
       base_url: "https://p/v1",
       original_label: "配置2",
     });
+  });
+
+  it("fallbacks：PUT 有序 labels", async () => {
+    const cap = captureFetch();
+    const s = await realUpdateOmniFallbacks(["配置2", "配置1"]);
+    expect(cap.method).toBe("PUT");
+    expect(cap.body).toEqual({ labels: ["配置2", "配置1"] });
+    expect(s.fallback_labels).toEqual(["配置2"]);
   });
 
   it("activate：POST {label}", async () => {
