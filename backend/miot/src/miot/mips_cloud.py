@@ -12,8 +12,9 @@ endpoint.
 Cloud SUBSCRIBE and UNSUBSCRIBE share a FIFO sender and a 500-operation
 sliding one-second window. At most 32 subscriptions await SUBACK; completion
 of any subscription frees a slot without waiting for a batch. UNSUBSCRIBE
-does not wait for UNSUBACK. Disconnect invalidates queued sends and pending
-acknowledgements, but preserves rate history across reconnects.
+returns once queued and does not wait for the send or UNSUBACK. Disconnect
+invalidates queued sends and pending acknowledgements, but preserves rate
+history across reconnects.
 
 Connection params:
   host       = f"{cloud_server}-{MIHOME_MQTT_BROKER_HOST_SUFFIX}"
@@ -694,25 +695,25 @@ class MIoTMipsCloud:
             self._subs.pop(topic, None)
         if mqtt is None or not self._connected:
             return
-        try:
-            epoch = self._connection_epoch
+        epoch = self._connection_epoch
 
-            def send():
-                if (
-                    not self._connected
-                    or self._mqtt is not mqtt
-                    or epoch != self._connection_epoch
-                ):
-                    raise MipsConnectionError(
-                        "MQTT connection changed before unsubscribe"
-                    )
-                result, _ = mqtt.unsubscribe(topic)
-                if result != MQTTErrorCode.MQTT_ERR_SUCCESS:
-                    raise MipsConnectionError(f"unsubscribe({topic}) failed: {result}")
+        def send():
+            if (
+                not self._connected
+                or self._mqtt is not mqtt
+                or epoch != self._connection_epoch
+            ):
+                raise MipsConnectionError(
+                    f"MQTT connection changed before unsubscribe({topic})"
+                )
+            result, _ = mqtt.unsubscribe(topic)
+            if result != MQTTErrorCode.MQTT_ERR_SUCCESS:
+                raise MipsConnectionError(f"unsubscribe({topic}) failed: {result}")
 
-            await self._dispatcher.submit(send)
-        except Exception as e:
-            _LOGGER.warning("mips_cloud unsubscribe(%s) raised: %s", topic, e)
+        # 只入队不等发包:从 _subs.pop 到交给调度队列之间不让出事件循环。
+        # 上层 unbind 路径在锁外连续退订,依赖这里没有挂起点(见
+        # miloco/miot/client.py 的 unbind 分支)。失败由调度器记 warning。
+        self._dispatcher.submit_without_wait(send)
 
     # ----------------------------------------------------------- paho hooks
 

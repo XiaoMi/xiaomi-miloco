@@ -69,6 +69,7 @@ _DEVICE_REPLY_SHRINK_MIN_GAP_SEC = 30.0
 _DEVICE_REPLY_SHRINK_RATIO = 0.5
 # 重放并发上限。与上层对账的 _RECONCILE_CONCURRENCY 限制的是同一件事
 # (同时在飞的 SUBSCRIBE 条数,压力落在同一个 broker 连接上),调整时两处一起改。
+# SDK 发送层另有 MIHOME_MQTT_SUBSCRIBE_INFLIGHT_MAX 兜底,合计超出时多出的订阅在那里排队。
 _REPLAY_CONCURRENCY = 16
 
 

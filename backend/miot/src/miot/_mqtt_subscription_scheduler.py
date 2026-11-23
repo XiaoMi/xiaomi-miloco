@@ -6,12 +6,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import deque
 from typing import Any, Callable, Optional
 
 from .const import MIHOME_MQTT_SUBSCRIBE_INFLIGHT_MAX
 from .types import MipsConnectionError
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class _MqttOperationRateLimiter:
@@ -53,21 +56,48 @@ class _MqttOperationDispatcher:
         ] = deque()
         self._worker: Optional[asyncio.Task[None]] = None
 
+    def _enqueue(
+        self,
+        send: Callable[[], Any],
+        ack: Optional[asyncio.Future[Any]] = None,
+    ) -> asyncio.Future[Any]:
+        sent: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        self._queue.append((send, ack, sent))
+        if self._worker is None or self._worker.done():
+            self._worker = asyncio.create_task(self._run())
+        return sent
+
     async def submit(
         self,
         send: Callable[[], Any],
         ack: Optional[asyncio.Future[Any]] = None,
     ) -> Any:
-        sent: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
-        self._queue.append((send, ack, sent))
-        if self._worker is None or self._worker.done():
-            self._worker = asyncio.create_task(self._run())
+        """Queue an operation and wait until the worker has sent it."""
+        sent = self._enqueue(send, ack)
         try:
             return await sent
         except asyncio.CancelledError:
             if ack is not None:
                 ack.cancel()
             raise
+
+    def submit_without_wait(self, send: Callable[[], Any]) -> None:
+        """Queue an operation and return without yielding to the event loop.
+
+        FIFO order with ``submit`` is preserved. Send failures are logged.
+        Callers that update bookkeeping before submitting rely on there being
+        no suspension point between the update and the queue append.
+        """
+        sent = self._enqueue(send)
+
+        def log_failure(fut: asyncio.Future[Any]) -> None:
+            if fut.cancelled():
+                return
+            exc = fut.exception()
+            if exc is not None:
+                _LOGGER.warning("MQTT queued operation failed: %s", exc)
+
+        sent.add_done_callback(log_failure)
 
     async def _run(self) -> None:
         while self._queue:

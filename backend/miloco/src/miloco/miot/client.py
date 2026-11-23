@@ -82,7 +82,8 @@ STATE_REFRESH_SOURCE = "iot_refresh"
 
 # 三类对账(meta / device-state / scene)共享的总在飞订阅并发上限——压力落在
 # 同一条 broker 连接上,分闸会让上限变成 3×;SDK 重放侧 _REPLAY_CONCURRENCY
-# 与它限制的是同一件事,调值时两处一起改。
+# 与它限制的是同一件事,调值时两处一起改。SDK 发送层另有
+# MIHOME_MQTT_SUBSCRIBE_INFLIGHT_MAX 兜底,合计超出时多出的订阅在那里排队。
 _RECONCILE_CONCURRENCY = 16
 
 
@@ -1682,8 +1683,9 @@ class MiotProxy:
 
         if msg.event == "unbind":
             # 抹记账在锁内(纯内存,与对账差集/提交互斥)、网络退订放锁外。
-            # 锁外安全的前提:SDK 退订从 discard 到发包无任何 await,对账插不
-            # 进来——若将来给退订加 UNSUBACK 等待,必须把这两次 unsub 挪回锁内。
+            # 锁外安全的前提:SDK 退订从 discard 到交给 MQTT 调度队列无任何 await,
+            # 对账插不进来——若将来让退订等待发包或 UNSUBACK,必须把这两次 unsub
+            # 挪回锁内。
             # 代次递增让正在飞行中的对账提交自失效(见 _reconcile_subscriptions),
             # 由防抖到点后的 refresh_devices 派出的下一轮对账按新设备清单收敛。
             async with self._sub_intent_lock:

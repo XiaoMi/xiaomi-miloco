@@ -121,7 +121,28 @@ async def test_dispatcher_cancelled_operation_is_not_sent():
 
 
 @pytest.mark.asyncio
+async def test_dispatcher_submit_without_wait_keeps_fifo_and_logs_failure(caplog):
+    dispatcher = _MqttOperationDispatcher(_MqttOperationRateLimiter(500, 1))
+    sent = []
+
+    def failing_send():
+        sent.append("failing")
+        raise MipsConnectionError("boom")
+
+    dispatcher.submit_without_wait(lambda: sent.append("queued"))
+    dispatcher.submit_without_wait(failing_send)
+    # 同步返回:此时还没有任何操作被发出
+    assert sent == []
+    with caplog.at_level(logging.WARNING, logger="miot._mqtt_subscription_scheduler"):
+        await dispatcher.submit(lambda: sent.append("waited"))
+    assert sent == ["queued", "failing", "waited"]
+    assert "MQTT queued operation failed: boom" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_cloud_disconnect_fails_pending_and_queued_subscriptions():
+    """断连让在途与排队的首订全部失败。未发出的撤掉 _subs 占位(调用方不记账、
+    由上层对账重试),已发出等 SUBACK 的保留(与超时路径一致,重连后自动重试)。"""
     mips, _ = _make_mips()
     holder = {}
 
@@ -147,7 +168,9 @@ async def test_cloud_disconnect_fails_pending_and_queued_subscriptions():
         )
         assert all(isinstance(result, MipsConnectionError) for result in results)
         assert not mips._pending_subscribes
-        assert len(fake.subscribed) == 32
+        sent_topics = {topic for topic, _, _ in fake.subscribed}
+        assert len(sent_topics) == 32
+        assert set(mips._subs) == sent_topics
     finally:
         await mips.deinit_async()
 
@@ -178,41 +201,6 @@ async def test_cloud_suback_from_network_thread_during_send():
     finally:
         for worker in workers:
             worker.join()
-        await mips.deinit_async()
-
-
-@pytest.mark.asyncio
-async def test_cloud_disconnect_drops_unsent_first_subscriptions_only():
-    """首订排队中被断连打断:未发出的撤掉 _subs 占位(调用方不记账、由上层
-    对账重试),已发出等 SUBACK 的保留(与超时路径一致,重连后自动重试)。"""
-    mips, _ = _make_mips()
-    holder = {}
-
-    def factory(client_id):
-        holder["c"] = _FakeMqttClient(client_id)
-        return holder["c"]
-
-    mips._client_factory = factory
-    fake = await _connect(mips, holder)
-    tasks = [
-        asyncio.create_task(mips.sub_device_state_async(str(index), lambda _: None))
-        for index in range(40)
-    ]
-    try:
-        for _ in range(200):
-            if len(fake.subscribed) == 32:
-                break
-            await asyncio.sleep(0.001)
-        assert len(fake.subscribed) == 32
-        fake.fire_disconnect(1)
-        results = await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True), 1
-        )
-        assert all(isinstance(result, MipsConnectionError) for result in results)
-        sent_topics = {topic for topic, _, _ in fake.subscribed}
-        assert len(sent_topics) == 32
-        assert set(mips._subs) == sent_topics
-    finally:
         await mips.deinit_async()
 
 
@@ -283,6 +271,61 @@ async def test_reconnect_replay_send_failure_keeps_subscription():
         assert fake.rejected == 1
         assert errors and errors[0][0] == topic
         assert topic in mips._subs
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_does_not_suspend_when_queue_is_blocked():
+    """32 个在途名额占满、队列被堵时,退订仍不挂起、立即返回(上层 unbind 锁外
+    连续退订依赖这一点);UNSUBSCRIBE 排在已入队的订阅之后,名额释放后按 FIFO 发出。"""
+    mips, _ = _make_mips()
+    holder = {}
+
+    class OrderedClient(_FakeMqttClient):
+        def __init__(self, client_id):
+            super().__init__(client_id)
+            self.ops = []
+
+        def subscribe(self, topic, qos):
+            self.ops.append(("sub", topic))
+            return super().subscribe(topic, qos)
+
+        def unsubscribe(self, topic):
+            self.ops.append(("unsub", topic))
+            return super().unsubscribe(topic)
+
+    def factory(client_id):
+        holder["c"] = OrderedClient(client_id)
+        return holder["c"]
+
+    mips._client_factory = factory
+    fake = await _connect(mips, holder)
+    tasks = [
+        asyncio.create_task(mips.sub_device_state_async(str(index), lambda _: None))
+        for index in range(33)
+    ]
+    try:
+        for _ in range(200):
+            if len(fake.subscribed) == 32:
+                break
+            await asyncio.sleep(0.001)
+        assert len(fake.subscribed) == 32
+
+        # 协程首次 send 即结束 = 整条退订路径上没有挂起点
+        coro = mips.unsub_device_state_async("dev-u")
+        with pytest.raises(StopIteration):
+            coro.send(None)
+        await asyncio.sleep(0.02)
+        assert fake.unsubscribed == []  # 被第 33 条订阅挡在队列里
+
+        await _ack_subscribes(fake, 33)
+        await asyncio.wait_for(asyncio.gather(*tasks), 1)
+        await _drain_dispatcher(mips)
+        assert fake.ops[-2:] == [
+            ("sub", "device/32/state/#"),
+            ("unsub", "device/dev-u/state/#"),
+        ]
     finally:
         await mips.deinit_async()
 
@@ -451,6 +494,18 @@ async def _connect(
     driver_task = asyncio.create_task(drive_connack())
     await asyncio.gather(init_task, driver_task)
     return fake_holder["c"]
+
+
+async def _drain_dispatcher(mips: MIoTMipsCloud, *, timeout: float = 1.0) -> None:
+    """Wait until queued operations (e.g. submit_without_wait unsubscribes)
+    have been handed to the fake client."""
+    dispatcher = mips._dispatcher  # type: ignore[attr-defined]
+    deadline = asyncio.get_running_loop().time() + timeout
+    while dispatcher._queue or (
+        dispatcher._worker is not None and not dispatcher._worker.done()
+    ):
+        assert asyncio.get_running_loop().time() < deadline, "dispatcher not drained"
+        await asyncio.sleep(0.001)
 
 
 async def _ack_subscribes(
@@ -1102,6 +1157,7 @@ async def test_device_state_unsubscribes_wildcard():
             _ack_subscribes(fake, 1),
         )
         await mips.unsub_device_state_async("dev-7")
+        await _drain_dispatcher(mips)
         unsubbed = set(fake.unsubscribed)
         assert "device/dev-7/state/#" in unsubbed
     finally:
@@ -1351,6 +1407,7 @@ async def test_props_unsubscribes_the_same_wildcard_it_subscribed():
             _ack_subscribes(fake, 1),
         )
         await mips.unsub_device_props_async("dev-9")
+        await _drain_dispatcher(mips)
 
         # 判据是「退的和订的是同一个」，不是「退了某个 topic」：只断言后者时，
         # 订阅端改成 leaf 也能绿

@@ -54,8 +54,10 @@ MIHOME_MQTT_SUBSCRIBE_TIMEOUT: float = 10.0
 # alone also changes the rate.
 MIHOME_MQTT_SUBSCRIBE_LIMIT: int = 500
 MIHOME_MQTT_SUBSCRIBE_WINDOW: float = 1.0
-# Maximum subscriptions awaiting SUBACK at once. This caps in-flight
-# subscriptions below the reconnect/reconcile concurrency limits in callers.
+# Maximum subscriptions awaiting SUBACK at once on the connection. This is the
+# SDK-level cap under every caller, including reconnect replays that no caller
+# semaphore bounds (_RECONCILE_CONCURRENCY / _REPLAY_CONCURRENCY). When callers
+# together have more subscriptions in flight, the extra ones queue here.
 MIHOME_MQTT_SUBSCRIBE_INFLIGHT_MAX: int = 32
 MIHOME_MQTT_RECONNECT_MIN_SEC: float = 1.0
 MIHOME_MQTT_RECONNECT_MAX_SEC: float = 120.0
