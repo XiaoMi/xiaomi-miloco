@@ -11,6 +11,7 @@ from miloco.observability.context import (
 from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.omni import omni
 from miloco.perception.engine.omni.response_parser import (
+    ParsedRuleHits,
     parse_omni_response,
     parse_shadow_rule_hits,
 )
@@ -18,10 +19,15 @@ from miloco.perception.engine.types import OmniContext, RuleCondition
 from miloco.perception.rule_shadow_capture import (
     RuleResponseSample,
     RuleShadowCapture,
-    replay_shadow_batches,
     shadow_batch_payload,
 )
-from miloco.perception.rule_window_replay import RuleWindowPlan, SourceOutcome
+from miloco.perception.rule_window_replay import (
+    RecordedObservation,
+    RuleWindowKey,
+    RuleWindowPlan,
+    SourceOutcome,
+    replay_rule_window,
+)
 from miloco.perception.snapshot_context import OmniEventArtifacts, event_artifacts_scope
 
 RULES = [
@@ -59,7 +65,7 @@ def test_invalid_shadow_rule_array_is_not_an_empty_hit_set(content):
 def test_shadow_evidence_accepts_unique_rule_name_without_prefix_or_reason():
     raw = _response('{"matched_rules": [{"rule_name": "Known rule", "hit": true}]}')
     rule_names = {"[task-a] Known rule": "rule-a", "[task-b] Another rule": "rule-b"}
-    assert parse_shadow_rule_hits(raw, rule_names) == frozenset({"rule-a"})
+    assert parse_shadow_rule_hits(raw, rule_names) == ParsedRuleHits(frozenset({"rule-a"}), complete=True)
     assert [match.rule_id for match in parse_omni_response(raw, rule_names).matched_rules] == ["rule-a"]
 
 
@@ -85,7 +91,7 @@ def test_legacy_parser_stays_permissive_but_shadow_evidence_requires_explicit_bo
     assert parse_shadow_rule_hits(raw, rule_names) is None
     assert (
         parse_shadow_rule_hits(_response('{"matched_rules": []}'), rule_names)
-        == frozenset()
+        == ParsedRuleHits(frozenset(), complete=True)
     )
     assert (
         parse_shadow_rule_hits(
@@ -94,6 +100,24 @@ def test_legacy_parser_stays_permissive_but_shadow_evidence_requires_explicit_bo
         )
         is None
     )
+
+
+def test_partial_evidence_keeps_unrelated_hits_and_drops_conflicting_aliases():
+    names = {
+        "Fall detected": "fall",
+        "[a] Person present": "guard-a",
+        "[b] Person present": "guard-b",
+        "Movement detected": "movement",
+    }
+    raw = _response(json.dumps({"matched_rules": [
+        {"rule_name": "Fall detected", "hit": True, "reason": None},
+        {"rule_name": "Unknown output", "hit": False},
+        {"rule_name": "[a] Person present", "hit": True},
+        {"rule_name": "Person present", "hit": False},
+        {"rule_name": "Movement detected", "hit": True},
+        {"rule_name": "Movement detected", "hit": False},
+    ]}))
+    assert parse_shadow_rule_hits(raw, names) == ParsedRuleHits(frozenset({"fall"}), complete=False)
 
 
 def _capture(
@@ -128,8 +152,15 @@ def test_same_window_evidence_can_be_replayed_across_batches():
     serialized = json.dumps([shadow_batch_payload(first), shadow_batch_payload(second)])
     assert "not for telemetry" not in serialized
     payloads = json.loads(serialized)
-    assert replay_shadow_batches(plan, payloads, as_of_ms=32_499) is None
-    decision = replay_shadow_batches(plan, payloads, as_of_ms=32_500)
+    assert all(payload["version"] == 1 for payload in payloads)
+    observations = [
+        RecordedObservation(
+            RuleWindowKey(**row["key"]), row["source_id"], SourceOutcome(row["outcome"]), row["received_at_ms"],
+        )
+        for payload in payloads for row in payload["observations"]
+    ]
+    assert replay_rule_window(plan, observations, as_of_ms=32_499) is None
+    decision = replay_rule_window(plan, observations, as_of_ms=32_500)
     assert decision is not None
     assert decision.observed_by_source == (("camera-a", False), ("camera-b", True))
     assert decision.matched is True
@@ -156,6 +187,32 @@ def test_new_rule_revision_does_not_inherit_previous_response():
     (latest,) = _batch_observations(capture)
     assert latest.key.rule_revision != previous.key.rule_revision
     assert latest.outcome is SourceOutcome.UNOBSERVED
+
+
+async def test_partial_model_response_does_not_write_unresolved_rules_as_misses(monkeypatch):
+    raw = _response(
+        '{"matched_rules":[{"rule_name":"Known rule","hit":true},{"rule_name":"Unknown output","hit":false}]}'
+    )
+    monkeypatch.setattr(omni, "call_omni", AsyncMock(return_value=raw))
+    monkeypatch.setattr(omni, "build_batch_prompt", lambda *_args, **_kwargs: {"has_visual_rule_input": True})
+    context = OmniContext(rule_conditions=[
+        RuleCondition("rule-a", "Known rule", "query"),
+        RuleCondition("rule-b", "Another rule", "query"),
+    ])
+    capture = RuleShadowCapture()
+    capture.prepare({"camera-a": ["rule-a", "rule-b"]}, [*RULES, {"id": "rule-b", "name": "Another rule"}])
+    token = set_device_context(DeviceContext("device-trace", "camera-a", "room"))
+    try:
+        with event_artifacts_scope(OmniEventArtifacts(rule_shadow=capture, scheduled_camera=True)):
+            output = await omni.run_omni_batch([], context, OmniConfig())
+    finally:
+        reset_device_context(token)
+
+    assert [match.rule_id for match in output.matched_rules] == ["rule-a"]
+    assert {item.key.rule_id: item.outcome for item in _batch_observations(capture)} == {
+        "rule-a": SourceOutcome.MATCHED,
+        "rule-b": SourceOutcome.UNOBSERVED,
+    }
 
 
 @pytest.mark.parametrize("visual", [True, False])

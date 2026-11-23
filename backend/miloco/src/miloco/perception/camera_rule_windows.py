@@ -37,6 +37,14 @@ class CameraRuleContext:
 
 
 @dataclass(frozen=True, slots=True)
+class CameraGuardEvidence:
+    matching_contexts: tuple[CameraRuleContext, ...]
+
+    def is_current(self) -> bool:
+        return any(context.connection_current() for context in self.matching_contexts)
+
+
+@dataclass(frozen=True, slots=True)
 class CameraRuleDecision:
     plan: RuleWindowPlan
     rule: dict
@@ -44,7 +52,7 @@ class CameraRuleDecision:
     evidence: RuleWindowEvidence
     contexts: Mapping[str, CameraRuleContext]
     partial_enter_sources: tuple[str, ...] = ()
-    guard_contexts: tuple[CameraRuleContext, ...] = ()
+    guard_evidence: tuple[CameraGuardEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +60,7 @@ class _LateEnter:
     evidence: RuleWindowEvidence
     candidate_sources: frozenset[str]
     deadline_ms: int
-    guard_contexts: tuple[CameraRuleContext, ...]
+    guard_evidence: tuple[CameraGuardEvidence, ...]
 
 
 @dataclass(slots=True)
@@ -255,24 +263,22 @@ class CameraRuleWindows:
                 if task_id not in window.unavailable_guard_tasks and all(
                     evidence is not None and evidence.matched is True for evidence in guard_results
                 ):
-                    guard_contexts = tuple(
-                        pending.contexts.get(did)
+                    guard_evidence = tuple(
+                        CameraGuardEvidence(tuple(
+                            pending.contexts[did] for did, hit in evidence.observed_by_source
+                            if hit and did in pending.contexts
+                        ))
                         for pending, evidence in guards if evidence is not None
-                        for did, _ in evidence.observed_by_source
                     )
-                    confirmed_guards = tuple(context for context in guard_contexts if context is not None)
                     for rule, (evidence, _) in zip(rules, results, strict=True):
                         if not _allows_partial_enter(rule) or evidence is None or not evidence.unobserved_sources:
                             continue
                         rule_id = rule["id"]
                         pending = window.pending[rule_id]
                         if sources := _partial_enter_sources(evidence, pending.contexts):
-                            if now_ms < pending.plan.deadline_ms:
-                                waits.append(False)
-                            else:
-                                partial_entries[rule_id] = sources
-                        elif len(confirmed_guards) == len(guard_contexts):
-                            late = self._start_late_enter(pending.plan, window, evidence, confirmed_guards, now_ms)
+                            partial_entries[rule_id] = sources
+                        elif all(guard.is_current() for guard in guard_evidence):
+                            late = self._start_late_enter(pending.plan, window, evidence, guard_evidence, now_ms)
                             if late is not None:
                                 late_entries[rule_id] = late
                     matching_rules.update(partial_entries)
@@ -339,7 +345,7 @@ class CameraRuleWindows:
 
     def _start_late_enter(
         self, plan: RuleWindowPlan, window: _Window, evidence: RuleWindowEvidence,
-        guard_contexts: tuple[CameraRuleContext, ...], now_ms: int,
+        guard_evidence: tuple[CameraGuardEvidence, ...], now_ms: int,
     ) -> _LateEnter | None:
         deadline_ms = plan.window_end_ms + self._inference_budget_ms
         if plan.structural_single_source or not plan.deadline_ms <= now_ms < deadline_ms:
@@ -348,7 +354,7 @@ class CameraRuleWindows:
             did for did in evidence.unobserved_sources
             if window.started_sources.get(did, plan.deadline_ms) < plan.deadline_ms
         )
-        return _LateEnter(evidence, sources, deadline_ms, guard_contexts) if sources else None
+        return _LateEnter(evidence, sources, deadline_ms, guard_evidence) if sources else None
 
     def _take_late_enters(
         self, ordered_windows: list[tuple[CameraBounds, _Window]], now_ms: int,
@@ -366,7 +372,7 @@ class CameraRuleWindows:
                     now_ms >= late.deadline_ms
                     or end < self._rule_decided_through.get(rule_id, -1)
                     or end < self._task_blocks_enter_through.get(task_id, -1)
-                    or any(not context.connection_current() for context in late.guard_contexts)
+                    or not all(guard.is_current() for guard in late.guard_evidence)
                 ):
                     self._close_rule(window, rule_id, end)
                     continue
@@ -375,7 +381,8 @@ class CameraRuleWindows:
                     did for did in sorted(late.candidate_sources)
                     if (observation := pending.observations.get(did)) is not None
                     and observation.outcome is SourceOutcome.MATCHED
-                    and plan.deadline_ms <= observation.received_at_ms <= now_ms
+                    # A sample can be stamped before the cutoff and delivered in the next tick.
+                    and observation.received_at_ms <= now_ms
                     and (context := pending.contexts.get(did)) is not None
                     and context.match is not None and context.connection_current()
                 )
@@ -384,7 +391,7 @@ class CameraRuleWindows:
                     self._close_rule(window, rule_id, end)
                     decision = CameraRuleDecision(
                         plan, rule, start, late.evidence, pending.contexts,
-                        partial_enter_sources=hits, guard_contexts=late.guard_contexts,
+                        partial_enter_sources=hits, guard_evidence=late.guard_evidence,
                     )
                     self._record_usable_decision(decision)
                     decisions.append(decision)

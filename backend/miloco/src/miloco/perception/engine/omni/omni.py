@@ -121,16 +121,20 @@ def _record_rule_response(
     rule_shadow = get_rule_shadow_capture()
     if rule_shadow is None or (device := get_device_context()) is None:
         return
-    hits = None
+    evidence = None
     if (
         not output.skipped
         and payload.get("has_visual_rule_input") is True
         and len(rule_name_to_id) == len(context.rule_conditions)
     ):
-        hits = parse_shadow_rule_hits(raw_response, rule_name_to_id)
-        if hits is None and rule_name_to_id:
-            logger.debug("Rule evidence skipped: model did not return a complete and unambiguous matched_rules array")
-    rule_shadow.record(device.device_id, RuleResponseSample(time.monotonic_ns() // 1_000_000, hits))
+        evidence = parse_shadow_rule_hits(raw_response, rule_name_to_id)
+        if (evidence is None or not evidence.complete) and rule_name_to_id:
+            logger.debug("Rule evidence incomplete: unresolved rules are unobserved")
+    rule_shadow.record(device.device_id, RuleResponseSample(
+        time.monotonic_ns() // 1_000_000,
+        evidence.matched_rule_ids if evidence is not None else None,
+        complete=evidence is not None and evidence.complete,
+    ))
 
 
 async def run_omni_batch(

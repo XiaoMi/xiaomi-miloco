@@ -323,7 +323,7 @@ async def test_partial_entry_requires_an_instant_enter_rule_and_current_hit_befo
 @pytest.mark.parametrize(
     "scenario",
     [
-        "on_time", "late", "coalesced", "late_start", "expired", "at_cap", "delayed_drain",
+        "on_time", "late", "coalesced", "delayed_delivery", "late_start", "expired", "at_cap", "delayed_drain",
         "failed", "negative", "stale", "exit_rule", "guard_rule", "duration_rule",
     ],
 )
@@ -346,8 +346,9 @@ async def test_instant_entry_accepts_only_started_inference_hits_within_grace(mo
     match = MatchedRule(rule_id=rule["id"], reason="fixture", source_device_ids=["camera-a"])
     context = CameraRuleContext(None, "", match, lambda: scenario != "stale")
 
-    def record(outcome=SourceOutcome.MATCHED):
-        coordinator.observe(bounds, [RecordedObservation(key, "camera-a", outcome, now_ms)], {"entry": context})
+    def record(outcome=SourceOutcome.MATCHED, received_at_ms=None):
+        received_at_ms = now_ms if received_at_ms is None else received_at_ms
+        coordinator.observe(bounds, [RecordedObservation(key, "camera-a", outcome, received_at_ms)], {"entry": context})
         coordinator.finish(bounds, "camera-a")
 
     try:
@@ -380,10 +381,12 @@ async def test_instant_entry_accepts_only_started_inference_hits_within_grace(mo
         now_ms = 36_000 if scenario in ("expired", "at_cap", "delayed_drain") else 34_000
         if scenario == "failed":
             coordinator.finish(bounds, "camera-a")
+        elif scenario == "delayed_delivery":
+            record(received_at_ms=32_999)
         elif scenario not in ("expired", "delayed_drain"):
             record(SourceOutcome.NO_MATCH if scenario == "negative" else SourceOutcome.MATCHED)
         decisions = coordinator.take_decisions()
-        if scenario in ("late", "coalesced"):
+        if scenario in ("late", "coalesced", "delayed_delivery"):
             decision, = decisions
             assert decision.partial_enter_sources == ("camera-a",)
             assert decision.evidence.matched is None

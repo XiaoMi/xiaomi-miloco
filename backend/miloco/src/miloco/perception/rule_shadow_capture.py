@@ -8,11 +8,8 @@ from typing import Any
 
 from miloco.perception.rule_window_replay import (
     RecordedObservation,
-    RuleWindowEvidence,
     RuleWindowKey,
-    RuleWindowPlan,
     SourceOutcome,
-    replay_rule_window,
 )
 
 RULE_SHADOW_EVENT = "perception_rule_shadow_batch"
@@ -27,6 +24,7 @@ class RuleResponseSample:
     received_at_ms: int
     matched_rule_ids: frozenset[str] | None
     gate_skipped: bool = False
+    complete: bool = True
 
 
 @dataclass(slots=True)
@@ -84,12 +82,11 @@ class RuleShadowCapture:
                 outcome = SourceOutcome.UNOBSERVED
                 if sample is not None and sample.gate_skipped:
                     outcome = SourceOutcome.GATE_SKIPPED
-                elif hits is not None:
-                    outcome = (
-                        SourceOutcome.MATCHED
-                        if rule_id in hits
-                        else SourceOutcome.NO_MATCH
-                    )
+                elif sample is not None and hits is not None:
+                    if rule_id in hits:
+                        outcome = SourceOutcome.MATCHED
+                    elif sample.complete:
+                        outcome = SourceOutcome.NO_MATCH
                 yield RecordedObservation(
                     key=RuleWindowKey(
                         rule_id,
@@ -108,27 +105,3 @@ def shadow_batch_payload(observations: Iterable[RecordedObservation]) -> dict[st
         "version": 1,
         "observations": [asdict(observation) for observation in observations],
     }
-
-
-def replay_shadow_batches(
-    plan: RuleWindowPlan, payloads: Iterable[dict], *, as_of_ms: int
-) -> RuleWindowEvidence | None:
-    """Replay persisted event payloads against an independently supplied plan.
-
-    A batch only includes sources that were prepared in that batch. Its rows
-    cannot determine the full candidate set of a logical window on their own.
-    """
-
-    def observations() -> Iterable[RecordedObservation]:
-        for payload in payloads:
-            if payload["version"] != 1:
-                raise ValueError("unsupported rule-shadow payload version")
-            for row in payload["observations"]:
-                yield RecordedObservation(
-                    key=RuleWindowKey(**row["key"]),
-                    source_id=row["source_id"],
-                    outcome=SourceOutcome(row["outcome"]),
-                    received_at_ms=row["received_at_ms"],
-                )
-
-    return replay_rule_window(plan, observations(), as_of_ms=as_of_ms)
