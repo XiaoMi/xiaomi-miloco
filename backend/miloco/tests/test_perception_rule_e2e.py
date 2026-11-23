@@ -15,11 +15,13 @@ from __future__ import annotations
 import asyncio
 import time
 from threading import Event
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
 import pytest
 from miloco.config import get_settings
+from miloco.perception.camera_rule_windows import CameraRuleContext, CameraRuleWindows
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.collect.camera_adapter import CameraDeviceAdapter
 from miloco.perception.collect.collector import MultimodalCollector
@@ -34,7 +36,12 @@ from miloco.perception.engine.types import (
 )
 from miloco.perception.inference_admission import InferenceDrainDeferred
 from miloco.perception.processor import PipelineProcessor
-from miloco.perception.rule_shadow_capture import RuleResponseSample
+from miloco.perception.rule_shadow_capture import RuleResponseSample, rule_revision
+from miloco.perception.rule_window_replay import (
+    RecordedObservation,
+    RuleWindowKey,
+    SourceOutcome,
+)
 from miloco.perception.runner import PerceptionRunner
 from miloco.perception.schema import DecodedVideoFrame
 from miloco.perception.service import PerceptionService
@@ -53,10 +60,12 @@ from miloco.rule.schema import (
     Rule,
     RuleAction,
     RuleCondition,
+    RuleDirection,
     RuleLifecycle,
     RuleMode,
     TriggerOutcome,
 )
+from miloco.task.state_machine import TaskStateMachine, derive_directions
 
 TASK_ID = "e2e-task"
 
@@ -208,9 +217,10 @@ async def test_camera_mode_progresses_and_commits_rules_once_then_returns_to_bat
         )
 
     def put_window(did, start):
-        buffer = adapter._devices[did].sync_buffer
+        state = adapter._devices[did]
         for stamp in (start, start + 20):
-            buffer.put("decoded_video", frame, stamp, stamp)
+            state.last_video_frame_ms = stamp
+            state.sync_buffer.put("decoded_video", frame, stamp, stamp)
 
     calls = asyncio.Queue()
     loop = asyncio.get_running_loop()
@@ -295,6 +305,102 @@ async def test_camera_mode_progresses_and_commits_rules_once_then_returns_to_bat
         finally:
             release.set()
             await service.stop_engine()
+
+
+@pytest.mark.parametrize("peer_ready_on_same_drain", [False, True])
+async def test_new_camera_hit_passes_static_exit_wait_with_guard_and_one_action(
+    proxy_with_runner, mock_miot_proxy, mock_log_repo, monkeypatch, peer_ready_on_same_drain,
+):
+    proxy, runner, _ = proxy_with_runner
+    session = _make_state_rule("a-session", ["cam_A"])
+    guard = Rule(
+        id="z-guard", name="guard", task_id=session.task_id, mode=RuleMode.EVENT,
+        lifecycle=RuleLifecycle.PERMANENT, direction=RuleDirection.GUARD,
+        condition=RuleCondition(perceive_device_ids=["cam_C"], query="前提满足"),
+    )
+    task_machine = TaskStateMachine(is_condition_satisfied=runner.is_condition_satisfied, dispatch_action=MagicMock())
+    runner.attach_state_machine(task_machine)
+    for rule in (session, guard):
+        runner.add_rule(rule)
+    runner.set_task_actions(session.task_id, {
+        "on_enter_actions": [action.model_dump() for action in session.on_enter_actions],
+        "on_exit_actions": [action.model_dump() for action in session.on_exit_actions],
+    })
+    task_machine.register_task(
+        session.task_id,
+        derive_directions((rule.id, rule.resolved_direction.value) for rule in (session, guard)),
+    )
+    proxy._apply_camera_window = AsyncMock(wraps=runner.apply_camera_window)
+    processor = PipelineProcessor(MagicMock(), proxy, mock_log_repo)
+    now_ms = 31_000
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    windows = processor._camera_rules = CameraRuleWindows(lambda: None, gate_peer_budget_ms=20_000)
+    load_rules = AsyncMock(return_value=([session.model_dump(), guard.model_dump()], []))
+    sources = frozenset({"cam_A", "cam_B", "cam_C"})
+    old = (27_000, 30_000)
+    new = (30_000, 33_000)
+    following = (33_000, 36_000)
+
+    def observe(bounds, rule, did, outcome):
+        key = RuleWindowKey(rule.id, rule_revision(rule.model_dump()), f"{windows.grid_generation}:3000", bounds[0] // 3000)
+        match = None
+        if outcome is SourceOutcome.MATCHED:
+            match = MatchedRule(rule_id=rule.id, reason="fixture", source_device_ids=[did])
+        windows.observe(
+            bounds, [RecordedObservation(key, did, outcome, now_ms)],
+            {rule.id: CameraRuleContext(None, "", match, lambda: True)},
+        )
+        windows.finish(bounds, did)
+
+    try:
+        for did in sources:
+            await windows.rules_for(old, did, sources, load_rules)
+        observe(old, session, "cam_A", SourceOutcome.GATE_SKIPPED)
+        observe(old, guard, "cam_C", SourceOutcome.GATE_SKIPPED)
+        await processor.commit_camera_rules()
+        proxy._apply_camera_window.assert_not_awaited()
+
+        now_ms = 34_000
+        await windows.rules_for(new, "cam_A", sources, load_rules)
+        observe(new, session, "cam_A", SourceOutcome.MATCHED)
+        await processor.commit_camera_rules()
+        proxy._apply_camera_window.assert_not_awaited()
+        mock_miot_proxy.set_device_properties.assert_not_awaited()
+
+        now_ms = 35_000
+        await windows.rules_for(new, "cam_C", sources, load_rules)
+        observe(new, guard, "cam_C", SourceOutcome.MATCHED)
+        if peer_ready_on_same_drain:
+            windows.report_processed(old, "cam_B", lambda: True)
+            windows.finish(old, "cam_B")
+        await processor.commit_camera_rules()
+        await runner.drain()
+        assert [call.args[0] for call in proxy._apply_camera_window.await_args_list] == [guard.id, session.id]
+        mock_miot_proxy.set_device_properties.assert_awaited_once()
+        action, = mock_miot_proxy.set_device_properties.await_args.args[0]
+        assert action.did == f"enter-{session.id}"
+
+        if not peer_ready_on_same_drain:
+            windows.report_processed(old, "cam_B", lambda: True)
+            windows.finish(old, "cam_B")
+        assert await windows.rules_for(old, "cam_A", sources, load_rules) == []
+        observe(new, session, "cam_A", SourceOutcome.MATCHED)
+        await processor.commit_camera_rules()
+        assert proxy._apply_camera_window.await_count == 2
+
+        now_ms = 36_000
+        for rule, did in ((session, "cam_A"), (guard, "cam_C")):
+            await windows.rules_for(following, did, sources, load_rules)
+            observe(following, rule, did, SourceOutcome.MATCHED)
+        await processor.commit_camera_rules()
+        await runner.drain()
+        assert proxy._apply_camera_window.await_count == 4
+        assert mock_miot_proxy.set_device_properties.await_count == 1
+    finally:
+        windows.discard()
 
 
 async def test_camera_window_aggregates_source_swaps_and_rejects_old_rule_revision(

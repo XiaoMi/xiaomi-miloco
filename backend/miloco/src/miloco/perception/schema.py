@@ -39,6 +39,10 @@ class CameraWindowSource(Protocol):
     """A camera adapter that can supply windows for individual connections."""
 
     @abstractmethod
+    def rule_source_ids(self) -> frozenset[str]:
+        """List current connections that have received at least one video frame."""
+
+    @abstractmethod
     def ready_connections(self) -> list[CameraConnection]:
         """List connections with a window ready for inference."""
 

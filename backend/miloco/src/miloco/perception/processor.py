@@ -418,7 +418,12 @@ class PipelineProcessor:
 
         settings = get_settings().perception
         schedule = settings.schedule
-        rule_windows = CameraRuleWindows(wake, wait_ms=schedule.rule_window_wait_ms)
+        omni_timeout_s = (settings.engine.get("omni") or {}).get("timeout") or OmniConfig.timeout
+        # Allow a window's worth of preprocessing before the model request.
+        timeout_s = max(15.0, float(omni_timeout_s) + settings.collect.window_size)
+        rule_windows = CameraRuleWindows(
+            wake, wait_ms=schedule.rule_window_wait_ms, gate_peer_budget_ms=int(timeout_s * 1000),
+        )
         self._camera_rules = rule_windows
 
         async def infer(
@@ -438,15 +443,13 @@ class PipelineProcessor:
 
             async with get_monitor().track_async(NodeName.PROCESSOR, "realtime") as handle:
                 await self._process_realtime_inner(
-                    handle, can_publish=may_publish, camera_window=window, source_current=source_current
+                    handle, can_publish=may_publish, camera_window=window, source_current=source_current,
+                    camera_sources=adapter.rule_source_ids(),
                 )
 
         def receive(outcome: CameraWindowOutcome[None]) -> None:
             rule_windows.finish((outcome.window_start_ms, outcome.window_end_ms), outcome.connection.did)
 
-        omni_timeout_s = (settings.engine.get("omni") or {}).get("timeout") or OmniConfig.timeout
-        # Allow a window's worth of preprocessing before the model request.
-        timeout_s = max(15.0, float(omni_timeout_s) + settings.collect.window_size)
         return PerCameraScheduler(
             adapter, self._inference_admission, infer, receive,
             capacity=schedule.max_concurrent_cameras,
@@ -606,6 +609,7 @@ class PipelineProcessor:
         self, _proc_h=None, *, can_publish: Callable[[], bool] | None = None,
         camera_window: DeviceData | None = None,
         source_current: Callable[[], bool] | None = None,
+        camera_sources: frozenset[str] = frozenset(),
     ) -> RealtimePerceptionResult | None | bool:
         if can_publish is not None and not can_publish():
             return None
@@ -677,7 +681,7 @@ class PipelineProcessor:
                 schedule_args["window_rules"] = await camera_rules.rules_for(
                     (camera_window.window_start_ms, camera_window.window_end_ms),
                     camera_window.meta.did,
-                    frozenset(self._collector.get_all_active_sources()),
+                    camera_sources,
                     self._perception_engine_proxy.get_realtime_rules,
                 )
             try:

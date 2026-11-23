@@ -204,8 +204,9 @@ async def test_fused_entry_records_shadow_evidence_without_changing_legacy_resul
         ("stop", False, SourceOutcome.UNOBSERVED),
     ],
 )
-async def test_scheduled_stream_only_uses_complete_visual_rule_results(
-    monkeypatch, finish, visual, expected,
+@pytest.mark.parametrize("scheduled", [False, True])
+async def test_stream_capture_only_uses_complete_visual_rule_results(
+    monkeypatch, finish, visual, expected, scheduled,
 ):
     async def stream(_payload, _config, *, usage_out, status_out):
         yield '{"matched_rules":[]}'
@@ -220,7 +221,7 @@ async def test_scheduled_stream_only_uses_complete_visual_rule_results(
     capture.prepare({"camera-a": ["rule-a"]}, RULES)
     token = set_device_context(DeviceContext("device-trace", "camera-a", "room"))
     try:
-        artifacts = OmniEventArtifacts(rule_shadow=capture, scheduled_camera=True)
+        artifacts = OmniEventArtifacts(rule_shadow=capture, scheduled_camera=scheduled)
         with event_artifacts_scope(artifacts):
             await omni.run_omni_batch_stream([], context, OmniConfig())
     finally:
@@ -231,15 +232,16 @@ async def test_scheduled_stream_only_uses_complete_visual_rule_results(
 
 
 @pytest.mark.parametrize(
-    ("scheduled", "visual", "expected"),
+    ("scheduled", "capture_enabled", "visual", "expected"),
     [
-        (True, True, SourceOutcome.MATCHED),
-        (True, False, SourceOutcome.UNOBSERVED),
-        (False, True, SourceOutcome.UNOBSERVED),
+        (True, True, True, SourceOutcome.MATCHED),
+        (True, True, False, SourceOutcome.UNOBSERVED),
+        (False, True, True, SourceOutcome.MATCHED),
+        (False, False, True, SourceOutcome.UNOBSERVED),
     ],
 )
-async def test_nonstream_camera_window_records_rule_evidence(
-    monkeypatch, scheduled, visual, expected,
+async def test_nonstream_records_rule_evidence_when_capture_is_enabled(
+    monkeypatch, scheduled, capture_enabled, visual, expected,
 ):
     raw = _response(
         '{"matched_rules":[{"rule_name":"Known rule","reason":"seen","hit":true}]}'
@@ -253,7 +255,9 @@ async def test_nonstream_camera_window_records_rule_evidence(
     capture.prepare({"camera-a": ["rule-a"]}, RULES)
     token = set_device_context(DeviceContext("device-trace", "camera-a", "room"))
     try:
-        artifacts = OmniEventArtifacts(rule_shadow=capture, scheduled_camera=scheduled)
+        artifacts = OmniEventArtifacts(
+            rule_shadow=capture if capture_enabled else None, scheduled_camera=scheduled,
+        )
         with event_artifacts_scope(artifacts):
             output = await omni.run_omni_batch([], context, OmniConfig())
     finally:

@@ -143,8 +143,7 @@ async def run_omni_batch(
     rule_name_to_id = _rule_name_to_id(context)
     output = parse_omni_response(raw_response, rule_name_to_id)
     output.usage = extract_usage(raw_response)
-    if (artifacts := get_event_artifacts()) is not None and artifacts.scheduled_camera:
-        _record_rule_response(payload, context, rule_name_to_id, raw_response, output)
+    _record_rule_response(payload, context, rule_name_to_id, raw_response, output)
     return output
 
 
@@ -569,8 +568,7 @@ async def _stream_and_parse(
     suggestions_done = False
     usage_out: dict = {}
     stream_status: dict = {}
-    artifacts = get_event_artifacts()
-    collect_evidence = rule_context is not None and artifacts is not None and artifacts.scheduled_camera
+    collect_evidence = rule_context is not None and get_rule_shadow_capture() is not None
     stream_options = {"status_out": stream_status} if collect_evidence else {}
 
     async for delta in call_omni_stream(payload, config, usage_out=usage_out, **stream_options):

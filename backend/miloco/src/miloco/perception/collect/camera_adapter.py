@@ -544,6 +544,9 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         state.sync_buffer.clear()
 
+    def rule_source_ids(self) -> frozenset[str]:
+        return frozenset(did for did, state in self._devices.items() if state.last_video_frame_ms != 0)
+
     def ready_connections(self) -> list[CameraConnection]:
         return [
             CameraConnection(did, state.generation)

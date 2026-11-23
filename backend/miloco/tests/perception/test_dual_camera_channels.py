@@ -208,18 +208,25 @@ def test_each_channel_produces_distinct_meta_did():
     adapter = CameraDeviceAdapter(miot_proxy=proxy)  # type: ignore[arg-type]
     asyncio.run(adapter.connect_device("dual:ch0", source=object()))  # type: ignore[arg-type]
     asyncio.run(adapter.connect_device("dual:ch1", source=object()))  # type: ignore[arg-type]
+    assert adapter.rule_source_ids() == frozenset()
 
-    for syn_did in ("dual:ch0", "dual:ch1"):
+    for index, syn_did in enumerate(("dual:ch0", "dual:ch1")):
         cb = adapter._make_decoded_video_callback(syn_did, adapter._devices[syn_did])
         asyncio.run(
             cb(syn_did, np.zeros((2, 2, 3), dtype=np.uint8), 1_000, 0, 0, 0)
         )
+        assert len(adapter.rule_source_ids()) == index + 1
 
     d0 = adapter.collect("dual:ch0", drain=False)
     d1 = adapter.collect("dual:ch1", drain=False)
     assert d0 is not None and d1 is not None
     assert d0.meta.did == "dual:ch0"
     assert d1.meta.did == "dual:ch1"
+    adapter.clear_buffers()
+    assert adapter.rule_source_ids() == {"dual:ch0", "dual:ch1"}
+    asyncio.run(adapter.disconnect_device("dual:ch0"))
+    asyncio.run(adapter.connect_device("dual:ch0", source=object()))  # type: ignore[arg-type]
+    assert adapter.rule_source_ids() == {"dual:ch1"}
 
 
 async def test_ready_window_belongs_to_the_current_connection_and_channel():

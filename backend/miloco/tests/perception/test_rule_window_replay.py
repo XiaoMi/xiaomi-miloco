@@ -224,8 +224,8 @@ async def test_configured_window_wait_accepts_delayed_peer_without_delaying_sing
         coordinator.discard()
 
 
-@pytest.mark.parametrize("peer_connected", [False, True])
-async def test_only_connected_rule_sources_are_waited_for(monkeypatch, peer_connected):
+@pytest.mark.parametrize("peer_has_video", [False, True])
+async def test_only_sources_with_prior_video_are_waited_for(monkeypatch, peer_has_video):
     now_ms = 31_000
     monkeypatch.setattr(
         "miloco.perception.camera_rule_windows.time",
@@ -233,15 +233,19 @@ async def test_only_connected_rule_sources_are_waited_for(monkeypatch, peer_conn
     )
     coordinator = CameraRuleWindows(lambda: None)
     bounds = (27_000, 30_000)
-    sources = frozenset({"camera-a", "camera-b"} if peer_connected else {"camera-b"})
+    sources = frozenset({"camera-a", "camera-b"} if peer_has_video else {"camera-b"})
     rule = {"id": "rule", "task_id": "task", "condition": {"perceive_device_ids": ["camera-a", "camera-b"]}}
+    load_rules = AsyncMock(return_value=([rule], []))
     key = RuleWindowKey("rule", rule_revision(rule), f"{coordinator.grid_generation}:3000", 9)
 
     try:
-        assert await coordinator.rules_for(bounds, "camera-b", sources, AsyncMock(return_value=([rule], []))) == [rule]
+        assert await coordinator.rules_for(bounds, "camera-b", sources, load_rules) == [rule]
+        if not peer_has_video:
+            both = sources | {"camera-a"}
+            assert await coordinator.rules_for(bounds, "camera-a", both, load_rules) == []
         coordinator.observe(bounds, [RecordedObservation(key, "camera-b", SourceOutcome.MATCHED, now_ms)], {})
         decisions = coordinator.take_decisions()
-        if peer_connected:
+        if peer_has_video:
             assert decisions == []
             now_ms = 33_000
             decision, = coordinator.take_decisions()
@@ -251,6 +255,8 @@ async def test_only_connected_rule_sources_are_waited_for(monkeypatch, peer_conn
             decision, = decisions
             assert decision.evidence.matched is True
             assert not decision.evidence.unobserved_sources
+            now_ms = 34_000
+            assert await coordinator.rules_for((30_000, 33_000), "camera-a", both, load_rules) == [rule]
         assert decision.evidence.observed_by_source == (("camera-b", True),)
     finally:
         coordinator.discard()
@@ -293,6 +299,47 @@ async def test_single_source_gate_skip_needs_current_peer_in_same_window(monkeyp
             assert not decision.evidence.observed_by_source
             assert decision.evidence.matched is None
         assert coordinator.take_decisions() == []
+    finally:
+        coordinator.discard()
+
+
+@pytest.mark.parametrize("peer_status", ["completed", "failed", "not_started", "stale", "at_cap"])
+async def test_gate_exit_only_extends_for_an_inflight_peer(monkeypatch, peer_status):
+    now_ms = 31_000
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    coordinator = CameraRuleWindows(lambda: None, gate_peer_budget_ms=20_000)
+    bounds = (27_000, 30_000)
+    sources = frozenset({"camera-a", "camera-b"})
+    rule = {"id": "rule", "task_id": "task", "condition": {"perceive_device_ids": ["camera-a"]}}
+    load_rules = AsyncMock(return_value=([rule], []))
+    key = RuleWindowKey("rule", rule_revision(rule), f"{coordinator.grid_generation}:3000", 9)
+
+    try:
+        await coordinator.rules_for(bounds, "camera-a", sources, load_rules)
+        if peer_status != "not_started":
+            await coordinator.rules_for(bounds, "camera-b", sources, load_rules)
+        coordinator.observe(bounds, [RecordedObservation(key, "camera-a", SourceOutcome.GATE_SKIPPED, now_ms)], {})
+        coordinator.finish(bounds, "camera-a")
+        assert not coordinator.take_decisions()
+
+        now_ms = 33_000
+        if peer_status == "not_started":
+            await coordinator.rules_for(bounds, "camera-b", sources, load_rules)
+            coordinator.report_processed(bounds, "camera-b", lambda: True)
+        else:
+            assert not coordinator.take_decisions()
+            now_ms = 53_000 if peer_status == "at_cap" else 35_000
+            if peer_status != "failed":
+                coordinator.report_processed(bounds, "camera-b", lambda: peer_status != "stale")
+            if peer_status != "at_cap":
+                coordinator.finish(bounds, "camera-b")
+
+        decision, = coordinator.take_decisions()
+        assert decision.evidence.matched is (False if peer_status == "completed" else None)
+        assert not coordinator.take_decisions()
     finally:
         coordinator.discard()
 

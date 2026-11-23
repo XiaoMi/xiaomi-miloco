@@ -56,18 +56,23 @@ class _Window:
     rules: list[dict]
     pending: dict[str, _PendingRule]
     sources: frozenset[str]
-    started_sources: set[str] = field(default_factory=set)
+    started_sources: dict[str, int] = field(default_factory=dict)
+    finished_sources: set[str] = field(default_factory=set)
     processed_sources: dict[str, tuple[int, Callable[[], bool]]] = field(default_factory=dict)
 
 
 class CameraRuleWindows:
     """Freeze rules and sources once per window and emit each decision once."""
 
-    def __init__(self, wake: Callable[[], None], *, wait_ms: int = DEFAULT_RULE_WINDOW_WAIT_MS) -> None:
+    def __init__(
+        self, wake: Callable[[], None], *, wait_ms: int = DEFAULT_RULE_WINDOW_WAIT_MS,
+        gate_peer_budget_ms: int = 0,
+    ) -> None:
         self.grid_generation = uuid.uuid4().hex
         self._wall_offset_ms = (time.time_ns() - time.monotonic_ns()) // 1_000_000
         self._wake = wake
         self._wait_ms = wait_ms
+        self._gate_peer_budget_ms = gate_peer_budget_ms
         self._timer: asyncio.TimerHandle | None = None
         self._windows: dict[CameraBounds, _Window] = {}
         self._closed_through: dict[str, int] = {}
@@ -83,6 +88,7 @@ class CameraRuleWindows:
         size = end - start
         if size <= 0 or start % size != 0:
             return []
+        started_at_ms = time.monotonic_ns() // 1_000_000
         window = self._windows.get(bounds)
         if window is None:
             rules, _ = await load_rules()
@@ -96,8 +102,7 @@ class CameraRuleWindows:
                     if end <= self._closed_through.get(rule_id, -1):
                         continue
                     selectors = rule.get("condition", {}).get("perceive_device_ids") or []
-                    # Freeze connected sources. A connected but silent source
-                    # remains missing evidence until the window closes.
+                    # A camera that has produced frames still counts if this window is silent.
                     candidates = frozenset(source for source in sources if rule_selects_device(selectors, source))
                     if not candidates:
                         continue
@@ -111,7 +116,7 @@ class CameraRuleWindows:
                     pending[rule_id] = _PendingRule(plan)
                     applicable_rules.append(rule)
                 window = self._windows[bounds] = _Window(applicable_rules, pending, sources)
-        window.started_sources.add(did)
+        window.started_sources.setdefault(did, started_at_ms)
         self._reschedule(time.monotonic_ns() // 1_000_000)
         return [
             rule for rule in window.rules
@@ -153,6 +158,7 @@ class CameraRuleWindows:
         window = self._windows.get(bounds)
         if window is None:
             return
+        window.finished_sources.add(did)
         now_ms = time.monotonic_ns() // 1_000_000
         for pending in window.pending.values():
             if did in pending.plan.candidate_sources:
@@ -165,6 +171,9 @@ class CameraRuleWindows:
         now_ms = time.monotonic_ns() // 1_000_000
         decisions: list[CameraRuleDecision] = []
         waiting_tasks: set[str] = set()
+        gate_waits: dict[str, list[tuple[int, _Window, list[dict]]]] = {}
+        gate_exit_decisions: dict[str, list[int]] = {}
+        superseded: set[int] = set()
         for bounds, window in sorted(self._windows.items()):
             _, end = bounds
             by_task: dict[str, list[dict]] = {}
@@ -174,37 +183,62 @@ class CameraRuleWindows:
             for task_id, rules in by_task.items():
                 if task_id in waiting_tasks:
                     continue
-                evidence_by_rule = {
-                    rule["id"]: self._evidence(window, window.pending[rule["id"]], now_ms)
-                    for rule in rules
-                }
-                if any(evidence is None for evidence in evidence_by_rule.values()):
-                    waiting_tasks.add(task_id)
+                rules.sort(key=lambda rule: (rule.get("direction") != "guard", rule["id"]))
+                results = [self._evidence(window, window.pending[rule["id"]], now_ms) for rule in rules]
+                has_match = any(
+                    rule.get("direction") != "guard" and evidence is not None and evidence.matched is True
+                    for rule, (evidence, _) in zip(rules, results, strict=True)
+                )
+                waits = [gate_dependent for evidence, gate_dependent in results if evidence is None]
+                if waits:
+                    if all(waits) and not has_match:
+                        gate_waits.setdefault(task_id, []).append((end, window, rules))
+                    else:
+                        waiting_tasks.add(task_id)
                     continue
                 guards_observed = all(
                     evidence is not None and evidence.matched is not None
-                    for rule in rules
+                    for rule, (evidence, _) in zip(rules, results, strict=True)
                     if rule.get("direction") == "guard"
-                    for evidence in (evidence_by_rule[rule["id"]],)
                 )
-                for rule in sorted(rules, key=lambda item: (item.get("direction") != "guard", item["id"])):
+                if has_match and guards_observed:
+                    # Also supersede an exit confirmed in this drain, before it reaches the rule runner.
+                    superseded.update(gate_exit_decisions.pop(task_id, ()))
+                    for older_end, older_window, older_rules in gate_waits.pop(task_id, ()):
+                        for rule in older_rules:
+                            self._close_rule(older_window, rule["id"], older_end)
+                elif task_id in gate_waits:
+                    waiting_tasks.add(task_id)
+                    continue
+
+                first_decision = len(decisions)
+                for rule, (evidence, _) in zip(rules, results, strict=True):
                     rule_id = rule["id"]
-                    pending = window.pending.pop(rule_id)
-                    if end <= self._closed_through.get(rule_id, -1):
-                        continue
-                    self._closed_through[rule_id] = end
-                    evidence = evidence_by_rule[rule_id]
-                    if guards_observed and evidence is not None:
+                    pending = self._close_rule(window, rule_id, end)
+                    if pending is not None and guards_observed and evidence is not None:
                         decisions.append(CameraRuleDecision(
                             pending.plan, rule, bounds[0], evidence, pending.contexts
                         ))
+                if not has_match and any(gate_dependent for _, gate_dependent in results):
+                    gate_exit_decisions.setdefault(task_id, []).extend(range(first_decision, len(decisions)))
+                else:
+                    gate_exit_decisions.pop(task_id, None)
             if not window.pending and now_ms >= end + self._wait_ms:
                 del self._windows[bounds]
         self._reschedule(now_ms)
-        return decisions
+        return [decision for index, decision in enumerate(decisions) if index not in superseded]
 
-    @staticmethod
-    def _evidence(window: _Window, pending: _PendingRule, now_ms: int) -> RuleWindowEvidence | None:
+    def _close_rule(self, window: _Window, rule_id: str, end: int) -> _PendingRule | None:
+        pending = window.pending.pop(rule_id)
+        if end <= self._closed_through.get(rule_id, -1):
+            return None
+        self._closed_through[rule_id] = end
+        return pending
+
+    def _evidence(
+        self, window: _Window, pending: _PendingRule, now_ms: int,
+    ) -> tuple[RuleWindowEvidence | None, bool]:
+        """Return evidence and whether a gate-only exit depends on a peer."""
         plan = pending.plan
         observations = []
         for did, observation in pending.observations.items():
@@ -218,20 +252,32 @@ class CameraRuleWindows:
             did = next(iter(plan.candidate_sources))
             if did not in window.started_sources:
                 observations.append(RecordedObservation(plan.key, did, SourceOutcome.UNOBSERVED, now_ms))
+        evidence = replay_rule_window(plan, observations, as_of_ms=now_ms)
+        if (
+            evidence is None or evidence.matched is not None or evidence.unobserved_sources
+            or not any(item.outcome is SourceOutcome.GATE_SKIPPED for item in observations)
+        ):
+            return evidence, False
+
+        peers = window.sources.difference(plan.candidate_sources)
+        started_peers = {
+            did for did in peers if window.started_sources.get(did, plan.deadline_ms) < plan.deadline_ms
+        }
+        peer_deadline_ms = plan.deadline_ms + self._gate_peer_budget_ms
         peer_processed = any(
-            did not in plan.candidate_sources and received_at_ms < plan.deadline_ms and is_current()
+            did in peers and received_at_ms < peer_deadline_ms and is_current()
+            and (received_at_ms < plan.deadline_ms or did in started_peers)
             for did, (received_at_ms, is_current) in window.processed_sources.items()
         )
-        evidence = replay_rule_window(plan, observations, as_of_ms=now_ms, peer_processed=peer_processed)
+        if peer_processed:
+            return replay_rule_window(plan, observations, as_of_ms=now_ms, peer_processed=True), True
         if (
-            evidence is not None and evidence.matched is None and not evidence.unobserved_sources
-            and not peer_processed and now_ms < plan.deadline_ms
-            and window.sources.difference(plan.candidate_sources)
-            and any(item.outcome is SourceOutcome.GATE_SKIPPED for item in observations)
+            (now_ms < plan.deadline_ms and peers.difference(window.finished_sources))
+            or (now_ms < peer_deadline_ms and started_peers.difference(window.finished_sources))
         ):
             # Only a gate-skipped rule may need the batch-equivalent peer signal.
-            return None
-        return evidence
+            return None, True
+        return evidence, False
 
     def _reschedule(self, now_ms: int) -> None:
         if self._timer is not None:
@@ -240,7 +286,7 @@ class CameraRuleWindows:
         deadlines = [
             deadline
             for _, end in self._windows
-            for deadline in (end, end + self._wait_ms)
+            for deadline in (end, end + self._wait_ms, end + self._wait_ms + self._gate_peer_budget_ms)
             if deadline > now_ms
         ]
         if deadlines:
