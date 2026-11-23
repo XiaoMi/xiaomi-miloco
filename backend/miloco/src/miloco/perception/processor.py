@@ -422,7 +422,7 @@ class PipelineProcessor:
         # Allow a window's worth of preprocessing before the model request.
         timeout_s = max(15.0, float(omni_timeout_s) + settings.collect.window_size)
         rule_windows = CameraRuleWindows(
-            wake, wait_ms=schedule.rule_window_wait_ms, gate_peer_budget_ms=int(timeout_s * 1000),
+            wake, wait_ms=schedule.rule_window_wait_ms, inference_budget_ms=int(timeout_s * 1000),
         )
         self._camera_rules = rule_windows
 
@@ -479,6 +479,7 @@ class PipelineProcessor:
                     logger.exception("Camera rule window commit failed")
                 if not applied and decision.rule.get("direction") == "guard":
                     blocked_tasks.add(task_window)
+                    windows.reject_late_enters((decision.window_start_ms, decision.plan.window_end_ms), task_window[0])
 
         try:
             await self._inference_admission.run(commit)

@@ -320,6 +320,174 @@ async def test_partial_entry_requires_an_instant_enter_rule_and_current_hit_befo
         coordinator.discard()
 
 
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "on_time", "late", "coalesced", "late_start", "expired", "at_cap", "delayed_drain",
+        "failed", "negative", "stale", "exit_rule", "guard_rule", "duration_rule",
+    ],
+)
+async def test_instant_entry_accepts_only_started_inference_hits_within_grace(monkeypatch, scenario):
+    now_ms = 31_000
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    coordinator = CameraRuleWindows(lambda: None, inference_budget_ms=6_000)
+    bounds = (27_000, 30_000)
+    sources = frozenset({"camera-a", "camera-b"})
+    rule = {"id": "entry", "task_id": "task", "direction": "enter"}
+    if scenario in ("exit_rule", "guard_rule"):
+        rule["direction"] = scenario.removesuffix("_rule")
+    if scenario == "duration_rule":
+        rule["duration_seconds"] = 10
+    load_rules = AsyncMock(return_value=([rule], []))
+    key = RuleWindowKey(rule["id"], rule_revision(rule), f"{coordinator.grid_generation}:3000", 9)
+    match = MatchedRule(rule_id=rule["id"], reason="fixture", source_device_ids=["camera-a"])
+    context = CameraRuleContext(None, "", match, lambda: scenario != "stale")
+
+    def record(outcome=SourceOutcome.MATCHED):
+        coordinator.observe(bounds, [RecordedObservation(key, "camera-a", outcome, now_ms)], {"entry": context})
+        coordinator.finish(bounds, "camera-a")
+
+    try:
+        if scenario in ("on_time", "late", "coalesced"):
+            await coordinator.rules_for(bounds, "camera-b", sources, load_rules)
+        if scenario != "late_start":
+            await coordinator.rules_for(bounds, "camera-a", sources, load_rules)
+        if scenario == "on_time":
+            now_ms = 32_999
+            record()
+        now_ms = 33_000
+        if scenario == "late_start":
+            await coordinator.rules_for(bounds, "camera-a", sources, load_rules)
+        if scenario != "coalesced":
+            at_cutoff = coordinator.take_decisions()
+            if scenario == "on_time":
+                assert [decision.partial_enter_sources for decision in at_cutoff] == [("camera-a",)]
+                record()
+                assert not coordinator.take_decisions()
+                return
+            if scenario in ("late_start", "exit_rule", "duration_rule"):
+                decision, = at_cutoff
+                assert not decision.partial_enter_sources
+            else:
+                assert not at_cutoff
+
+        if scenario == "delayed_drain":
+            now_ms = 35_999
+            record()
+        now_ms = 36_000 if scenario in ("expired", "at_cap", "delayed_drain") else 34_000
+        if scenario == "failed":
+            coordinator.finish(bounds, "camera-a")
+        elif scenario not in ("expired", "delayed_drain"):
+            record(SourceOutcome.NO_MATCH if scenario == "negative" else SourceOutcome.MATCHED)
+        decisions = coordinator.take_decisions()
+        if scenario in ("late", "coalesced"):
+            decision, = decisions
+            assert decision.partial_enter_sources == ("camera-a",)
+            assert decision.evidence.matched is None
+        else:
+            assert not decisions
+
+        assert await coordinator.rules_for(bounds, "camera-b", sources, load_rules) == []
+        assert not coordinator.take_decisions()
+    finally:
+        coordinator.discard()
+
+
+@pytest.mark.parametrize(
+    ("old_hit_in_same_drain", "new_outcome"),
+    [
+        (False, "enter"), (True, "enter"), (True, "unknown"), (True, "exit_not_matched"),
+        (True, "exit_matched"), (True, "guard_not_matched"),
+    ],
+)
+async def test_only_a_usable_new_window_supersedes_older_grace(
+    monkeypatch, old_hit_in_same_drain, new_outcome,
+):
+    now_ms = 31_000
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    coordinator = CameraRuleWindows(lambda: None, inference_budget_ms=20_000)
+    old, new = (27_000, 30_000), (30_000, 33_000)
+    sources = frozenset({"camera-a", "camera-b", "camera-c"})
+    entering = {
+        "id": "entering", "task_id": "task", "direction": "enter",
+        "condition": {"perceive_device_ids": ["camera-a", "camera-b"]},
+    }
+    exiting = {
+        "id": "exiting", "task_id": "task", "direction": "exit",
+        "condition": {"perceive_device_ids": ["camera-c"]},
+    }
+    guard = {
+        "id": "guard", "task_id": "task", "direction": "guard",
+        "condition": {"perceive_device_ids": ["camera-g"]},
+    }
+    rules = [entering, exiting]
+    if new_outcome == "guard_not_matched":
+        sources |= {"camera-g"}
+        rules.append(guard)
+    load_rules = AsyncMock(return_value=(rules, []))
+
+    def observe(bounds, rule, did, outcome):
+        key = RuleWindowKey(
+            rule["id"], rule_revision(rule), f"{coordinator.grid_generation}:3000", bounds[0] // 3000,
+        )
+        match = MatchedRule(rule_id=rule["id"], reason="fixture", source_device_ids=[did])
+        coordinator.observe(
+            bounds, [RecordedObservation(key, did, outcome, now_ms)],
+            {rule["id"]: CameraRuleContext(None, "", match, lambda: True)},
+        )
+        coordinator.finish(bounds, did)
+
+    try:
+        for did in sorted(sources):
+            await coordinator.rules_for(old, did, sources, load_rules)
+        observe(old, entering, "camera-b", SourceOutcome.NO_MATCH)
+        observe(old, exiting, "camera-c", SourceOutcome.MATCHED)
+        if guard in rules:
+            observe(old, guard, "camera-g", SourceOutcome.MATCHED)
+        now_ms = 33_000
+        exit_decision, = [decision for decision in coordinator.take_decisions() if decision.rule == exiting]
+        assert exit_decision.evidence.matched is True
+
+        now_ms = 34_000
+        await coordinator.rules_for(new, "camera-b", sources, load_rules)
+        if new_outcome == "enter":
+            observe(new, entering, "camera-b", SourceOutcome.MATCHED)
+        else:
+            coordinator.finish(new, "camera-b")
+        if new_outcome in ("exit_matched", "exit_not_matched"):
+            await coordinator.rules_for(new, "camera-c", sources, load_rules)
+            exit_outcome = SourceOutcome.MATCHED if new_outcome == "exit_matched" else SourceOutcome.NO_MATCH
+            observe(new, exiting, "camera-c", exit_outcome)
+        if new_outcome == "guard_not_matched":
+            await coordinator.rules_for(new, "camera-g", sources, load_rules)
+            observe(new, guard, "camera-g", SourceOutcome.NO_MATCH)
+        now_ms = 36_000
+        if old_hit_in_same_drain:
+            observe(old, entering, "camera-a", SourceOutcome.MATCHED)
+        decisions = coordinator.take_decisions()
+        entries = [decision for decision in decisions if decision.partial_enter_sources]
+        if new_outcome in ("exit_matched", "guard_not_matched"):
+            assert not entries
+        else:
+            entry, = entries
+            assert entry.rule == entering
+            assert entry.plan.window_end_ms == (new[1] if new_outcome == "enter" else old[1])
+            assert entry.partial_enter_sources == (("camera-b",) if new_outcome == "enter" else ("camera-a",))
+
+        if not old_hit_in_same_drain:
+            now_ms = 37_000
+            observe(old, entering, "camera-a", SourceOutcome.MATCHED)
+        assert not coordinator.take_decisions()
+    finally:
+        coordinator.discard()
+
+
 @pytest.mark.parametrize("peer_status", ["processed", "stale", "late", "missing"])
 async def test_single_source_gate_skip_needs_current_peer_in_same_window(monkeypatch, peer_status):
     now_ms = 31_000
@@ -368,7 +536,7 @@ async def test_gate_exit_only_extends_for_an_inflight_peer(monkeypatch, peer_sta
         "miloco.perception.camera_rule_windows.time",
         SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
     )
-    coordinator = CameraRuleWindows(lambda: None, gate_peer_budget_ms=20_000)
+    coordinator = CameraRuleWindows(lambda: None, inference_budget_ms=20_000)
     bounds = (27_000, 30_000)
     sources = frozenset({"camera-a", "camera-b"})
     rule = {"id": "rule", "task_id": "task", "condition": {"perceive_device_ids": ["camera-a"]}}
@@ -409,7 +577,7 @@ async def test_new_hit_only_replaces_the_same_rules_confirmed_gate_exit(monkeypa
         "miloco.perception.camera_rule_windows.time",
         SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
     )
-    coordinator = CameraRuleWindows(lambda: None, gate_peer_budget_ms=20_000)
+    coordinator = CameraRuleWindows(lambda: None, inference_budget_ms=20_000)
     old, new = (27_000, 30_000), (30_000, 33_000)
     sources = frozenset({"camera-a", "camera-b", "camera-c"})
     entering = {"id": "entering", "task_id": "task", "condition": {"perceive_device_ids": ["camera-a"]}}

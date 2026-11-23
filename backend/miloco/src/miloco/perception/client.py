@@ -1215,6 +1215,8 @@ class PerceptionEngineProxy:
     async def apply_camera_rule(
         self, decision: CameraRuleDecision, *, window_end_unix_ms: int
     ) -> bool:
+        if any(not context.connection_current() for context in decision.guard_contexts):
+            return False
         if decision.partial_enter_sources:
             # Advancing only hits keeps a partial window from feeding an exit edge.
             states = {

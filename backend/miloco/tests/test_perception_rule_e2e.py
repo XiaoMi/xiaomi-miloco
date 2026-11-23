@@ -337,7 +337,7 @@ async def test_new_camera_hit_passes_static_exit_wait_with_guard_and_one_action(
         "miloco.perception.camera_rule_windows.time",
         SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
     )
-    windows = processor._camera_rules = CameraRuleWindows(lambda: None, gate_peer_budget_ms=20_000)
+    windows = processor._camera_rules = CameraRuleWindows(lambda: None, inference_budget_ms=20_000)
     load_rules = AsyncMock(return_value=([session.model_dump(), guard.model_dump()], []))
     sources = frozenset({"cam_A", "cam_B", "cam_C"})
     old = (27_000, 30_000)
@@ -403,9 +403,16 @@ async def test_new_camera_hit_passes_static_exit_wait_with_guard_and_one_action(
         windows.discard()
 
 
-@pytest.mark.parametrize("guard_status", ["matched", "negative", "missing", "no_source"])
+@pytest.mark.parametrize(
+    ("late_hit", "guard_status"),
+    [
+        (False, "matched"), (False, "negative"), (False, "missing"), (False, "no_source"),
+        (True, "matched"), (True, "negative"), (True, "missing"), (True, "no_source"),
+        (True, "stale_after_cutoff"), (True, "stale_before_apply"), (True, "apply_failed"),
+    ],
+)
 async def test_partial_camera_enter_requires_a_current_guard_and_only_applies_hits(
-    proxy_with_runner, mock_miot_proxy, mock_log_repo, monkeypatch, guard_status,
+    proxy_with_runner, mock_miot_proxy, mock_log_repo, monkeypatch, late_hit, guard_status,
 ):
     proxy, runner, _ = proxy_with_runner
     session = _make_state_rule("a-partial-session", ["cam_A", "cam_B", "cam_C"])
@@ -426,18 +433,33 @@ async def test_partial_camera_enter_requires_a_current_guard_and_only_applies_hi
     )
     # A previously true guard must not stand in for a false or missing camera observation.
     await runner.update_state(guard.id, "cam_G", True, "prior guard")
-    proxy._apply_camera_window = AsyncMock(wraps=runner.apply_camera_window)
+    async def apply_window(rule_id, *args, **kwargs):
+        if rule_id == guard.id and guard_status == "apply_failed":
+            return None
+        return await runner.apply_camera_window(rule_id, *args, **kwargs)
+
+    proxy._apply_camera_window = AsyncMock(wraps=apply_window)
     processor = PipelineProcessor(MagicMock(), proxy, mock_log_repo)
     now_ms = 31_000
     monkeypatch.setattr(
         "miloco.perception.camera_rule_windows.time",
         SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
     )
-    windows = processor._camera_rules = CameraRuleWindows(lambda: None)
+    windows = processor._camera_rules = CameraRuleWindows(lambda: None, inference_budget_ms=10_000)
     load_rules = AsyncMock(return_value=([session.model_dump(), guard.model_dump()], []))
     sources = frozenset({"cam_A", "cam_B", "cam_C"})
     if guard_status != "no_source":
         sources |= {"cam_G"}
+    guard_current = True
+    apply_decision = proxy.apply_camera_rule
+
+    async def apply_with_connection_change(decision, **kwargs):
+        nonlocal guard_current
+        if guard_status == "stale_before_apply" and decision.rule["id"] == session.id:
+            guard_current = False
+        return await apply_decision(decision, **kwargs)
+
+    monkeypatch.setattr(proxy, "apply_camera_rule", AsyncMock(wraps=apply_with_connection_change))
 
     def observe(bounds, rule, did, outcome):
         key = RuleWindowKey(rule.id, rule_revision(rule.model_dump()), f"{windows.grid_generation}:3000", bounds[0] // 3000)
@@ -446,34 +468,43 @@ async def test_partial_camera_enter_requires_a_current_guard_and_only_applies_hi
             match = MatchedRule(rule_id=rule.id, reason="fixture", source_device_ids=[did])
         windows.observe(
             bounds, [RecordedObservation(key, did, outcome, now_ms)],
-            {rule.id: CameraRuleContext(None, "", match, lambda: True)},
+            {rule.id: CameraRuleContext(None, "", match, lambda: rule is not guard or guard_current)},
         )
         windows.finish(bounds, did)
 
     async def prepare_window(bounds, main_outcome):
         for did in sorted(sources):
             await windows.rules_for(bounds, did, sources, load_rules)
-        observe(bounds, session, "cam_A", main_outcome)
+        if main_outcome is not None:
+            observe(bounds, session, "cam_A", main_outcome)
         observe(bounds, session, "cam_C", SourceOutcome.NO_MATCH)
         windows.finish(bounds, "cam_B")
-        if guard_status in ("matched", "negative"):
-            guard_outcome = SourceOutcome.MATCHED if guard_status == "matched" else SourceOutcome.NO_MATCH
+        if guard_status != "no_source" and guard_status != "missing":
+            guard_outcome = SourceOutcome.NO_MATCH if guard_status == "negative" else SourceOutcome.MATCHED
             observe(bounds, guard, "cam_G", guard_outcome)
         elif guard_status == "missing":
             windows.finish(bounds, "cam_G")
 
     try:
         first = (27_000, 30_000)
-        await prepare_window(first, SourceOutcome.MATCHED)
+        await prepare_window(first, None if late_hit else SourceOutcome.MATCHED)
         now_ms = 32_999
         await processor.commit_camera_rules()
         mock_miot_proxy.set_device_properties.assert_not_awaited()
         now_ms = 33_000
         await processor.commit_camera_rules()
+        if late_hit:
+            mock_miot_proxy.set_device_properties.assert_not_awaited()
+            guard_current = guard_status != "stale_after_cutoff"
+            now_ms = 34_000
+            observe(first, session, "cam_A", SourceOutcome.MATCHED)
+            await processor.commit_camera_rules()
         await runner.drain()
         if guard_status != "matched":
             mock_miot_proxy.set_device_properties.assert_not_awaited()
             assert all(call.args[0] != session.id for call in proxy._apply_camera_window.await_args_list)
+            if guard_status == "stale_after_cutoff":
+                assert all(call.args[0].rule["id"] != session.id for call in proxy.apply_camera_rule.await_args_list)
             return
 
         guard_call, enter_call = proxy._apply_camera_window.await_args_list
