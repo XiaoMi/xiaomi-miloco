@@ -83,32 +83,33 @@ class CameraRuleWindows:
         window = self._windows.get(bounds)
         if window is None:
             rules, _ = await load_rules()
+            # Another camera may have opened this window while rules loaded.
             window = self._windows.get(bounds)
-        if window is None:
-            pending: dict[str, _PendingRule] = {}
-            applicable_rules = []
-            for rule in rules:
-                rule_id = rule["id"]
-                if end <= self._closed_through.get(rule_id, -1):
-                    continue
-                selectors = rule.get("condition", {}).get("perceive_device_ids") or []
-                candidates = {source for source in sources if rule_selects_device(selectors, source)}
-                unmatched = {
-                    selector for selector in selectors
-                    if not any(rule_selects_device([selector], source) for source in candidates)
-                }
-                expected = frozenset(candidates | unmatched)
-                if not candidates:
-                    continue
-                plan = RuleWindowPlan(
-                    RuleWindowKey(rule_id, rule_revision(rule), f"{self.grid_generation}:{size}", start // size),
-                    end,
-                    expected,
-                    structural_single_source=len(selectors) == len(expected) == 1,
-                )
-                pending[rule_id] = _PendingRule(plan)
-                applicable_rules.append(rule)
-            window = self._windows[bounds] = _Window(applicable_rules, pending)
+            if window is None:
+                pending: dict[str, _PendingRule] = {}
+                applicable_rules = []
+                for rule in rules:
+                    rule_id = rule["id"]
+                    if end <= self._closed_through.get(rule_id, -1):
+                        continue
+                    selectors = rule.get("condition", {}).get("perceive_device_ids") or []
+                    candidates = {source for source in sources if rule_selects_device(selectors, source)}
+                    unmatched = {
+                        selector for selector in selectors
+                        if not any(rule_selects_device([selector], source) for source in candidates)
+                    }
+                    expected = frozenset(candidates | unmatched)
+                    if not candidates:
+                        continue
+                    plan = RuleWindowPlan(
+                        RuleWindowKey(rule_id, rule_revision(rule), f"{self.grid_generation}:{size}", start // size),
+                        end,
+                        expected,
+                        structural_single_source=len(selectors) == len(expected) == 1,
+                    )
+                    pending[rule_id] = _PendingRule(plan)
+                    applicable_rules.append(rule)
+                window = self._windows[bounds] = _Window(applicable_rules, pending)
         window.started_sources.add(did)
         self._reschedule(time.monotonic_ns() // 1_000_000)
         return [

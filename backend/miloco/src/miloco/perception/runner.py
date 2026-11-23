@@ -19,12 +19,15 @@ from miloco.config import get_settings
 from miloco.config.settings import PerceptionScheduleMode
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.perception import omni_probe_registry
-from miloco.perception.collect.camera_adapter import CameraDeviceAdapter
 from miloco.perception.collect.collector import MultimodalCollector
 from miloco.perception.inference_worker import InferenceWorker
 from miloco.perception.per_camera_scheduler import PerCameraScheduler
 from miloco.perception.processor import PipelineProcessor
-from miloco.perception.schema import EngineState, PerceptionEngineStatus
+from miloco.perception.schema import (
+    CameraWindowSource,
+    EngineState,
+    PerceptionEngineStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +68,7 @@ class PerceptionRunner:
 
     @property
     def schedule_available(self) -> bool:
-        return isinstance(self._collector.get_adapter("camera"), CameraDeviceAdapter)
+        return isinstance(self._collector.get_adapter("camera"), CameraWindowSource)
 
     @property
     def schedule_mode(self) -> PerceptionScheduleMode:
@@ -75,7 +78,7 @@ class PerceptionRunner:
         adapter = None
         if mode == "per_camera":
             adapter = self._collector.get_adapter("camera")
-            if not isinstance(adapter, CameraDeviceAdapter):
+            if not isinstance(adapter, CameraWindowSource):
                 raise ValueError("camera scheduling requires a camera adapter")
         if self._camera_scheduler is not None:
             self._camera_scheduler.retire_results()
@@ -258,6 +261,7 @@ class PerceptionRunner:
                 timeout=self._collect_interval,
             )
         except TimeoutError:
+            # With or without a signal, the next tick checks for ready windows.
             pass
         finally:
             self._window_ready.clear()

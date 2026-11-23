@@ -1,3 +1,5 @@
+import asyncio
+import time
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -164,6 +166,34 @@ def test_repeat_does_not_replace_first_terminal_observation():
     assert before_repeat is not None
     assert before_repeat.matched is False
     assert after_repeat == before_repeat
+
+
+async def test_concurrent_rule_load_keeps_first_window_snapshot():
+    coordinator = CameraRuleWindows(lambda: None)
+    end = (time.monotonic_ns() // 1_000_000 // 3000) * 3000
+    bounds = (end - 3000, end)
+    sources = frozenset({"camera-a", "camera-b"})
+    first_load_started = asyncio.Event()
+    finish_first_load = asyncio.Event()
+    current_rule = {"id": "current", "task_id": "task"}
+    stale_rule = {"id": "stale", "task_id": "task"}
+
+    async def load_stale_rules():
+        first_load_started.set()
+        await finish_first_load.wait()
+        return [stale_rule], []
+
+    try:
+        async with asyncio.timeout(2), asyncio.TaskGroup() as tasks:
+            first = tasks.create_task(coordinator.rules_for(bounds, "camera-a", sources, load_stale_rules))
+            await first_load_started.wait()
+            second = await coordinator.rules_for(
+                bounds, "camera-b", sources, AsyncMock(return_value=([current_rule], [])),
+            )
+            finish_first_load.set()
+        assert first.result() == second == [current_rule]
+    finally:
+        coordinator.discard()
 
 
 @pytest.mark.parametrize("second_source_current", [True, False, None])

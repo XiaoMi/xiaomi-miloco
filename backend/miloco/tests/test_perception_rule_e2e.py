@@ -169,7 +169,15 @@ async def test_camera_mode_progresses_and_commits_rules_once_then_returns_to_bat
     monkeypatch.setattr(get_settings().perception.schedule, "mode", "batch")
     monkeypatch.setattr(PerceptionEngineProxy, "_init_engine", lambda _: None)
     monkeypatch.setattr("miloco.perception.engine.omni.dedup_embedder.EventEmbedder", MagicMock)
-    proxy = PerceptionEngineProxy()
+    svc = MagicMock(
+        get_effectively_enabled_rules=AsyncMock(return_value=[rule]),
+        apply_camera_window=AsyncMock(wraps=rule_runner.apply_camera_window),
+        update_state=AsyncMock(wraps=rule_runner.update_state),
+    )
+    proxy = PerceptionEngineProxy(
+        load_enabled_rules=svc.get_effectively_enabled_rules,
+        apply_camera_window=svc.apply_camera_window,
+    )
     proxy.perception_engine = PerceptionEngine(
         PerceptionConfig(identity_engine=IdentityEngineConfig(enabled=False))
     )
@@ -238,10 +246,7 @@ async def test_camera_mode_progresses_and_commits_rules_once_then_returns_to_bat
         await rule_runner.drain()
 
     with manager_context() as manager:
-        svc = manager.return_value.rule_service
-        svc.get_effectively_enabled_rules = AsyncMock(return_value=[rule])
-        svc.apply_camera_window = AsyncMock(wraps=rule_runner.apply_camera_window)
-        svc.update_state = AsyncMock(wraps=rule_runner.update_state)
+        manager.return_value.rule_service = svc
         save = MagicMock()
         assert service.schedule_available
         assert service.schedule_mode == "batch"

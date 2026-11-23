@@ -103,7 +103,7 @@ async def test_boot_gate_skips_start_when_paused():
     from miloco.perception import init_perception_module
 
     with _patched_init_deps() as runner_cls:
-        await init_perception_module(MagicMock(), _FakeKV(json.dumps(False)))
+        await init_perception_module(MagicMock(), _FakeKV(json.dumps(False)), MagicMock())
 
     runner_cls.return_value.start.assert_not_awaited()
 
@@ -113,7 +113,7 @@ async def test_boot_gate_starts_when_enabled():
     from miloco.perception import init_perception_module
 
     with _patched_init_deps() as runner_cls:
-        await init_perception_module(MagicMock(), _FakeKV(json.dumps(True)))
+        await init_perception_module(MagicMock(), _FakeKV(json.dumps(True)), MagicMock())
 
     runner_cls.return_value.start.assert_awaited_once()
 
@@ -123,7 +123,7 @@ async def test_boot_gate_starts_by_default_when_unset():
     from miloco.perception import init_perception_module
 
     with _patched_init_deps() as runner_cls:
-        await init_perception_module(MagicMock(), _FakeKV(None))
+        await init_perception_module(MagicMock(), _FakeKV(None), MagicMock())
 
     runner_cls.return_value.start.assert_awaited_once()
 

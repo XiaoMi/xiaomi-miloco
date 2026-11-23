@@ -36,6 +36,7 @@ from miloco.perception.collect.stream_buffer import (
     StreamFragment,
 )
 from miloco.perception.schema import (
+    CameraConnection,
     DecodedAudioFrame,
     DecodedVideoFrame,
     DeviceData,
@@ -97,12 +98,6 @@ def split_channel_did(did: str) -> tuple[str, int]:
         physical, ch = did.rsplit(_CHANNEL_SEP, 1)
         return physical, int(ch)
     return did, DEFAULT_VIDEO_CHANNEL
-
-
-@dataclass(frozen=True)
-class CameraConnection:
-    did: str
-    generation: int
 
 
 @dataclass

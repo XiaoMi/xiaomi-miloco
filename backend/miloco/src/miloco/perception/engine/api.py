@@ -564,6 +564,7 @@ class PerceptionEngine(BasePerceptionEngine):
                 else:
                     await admission.run(lambda: self._tierc_clear_tick(cfg))
             except InferenceAdmissionClosed:
+                # The engine is draining. Retry at the next periodic tick.
                 pass
             except Exception:  # noqa: BLE001
                 logger.warning("[tierc-clear] tick 异常", exc_info=True)

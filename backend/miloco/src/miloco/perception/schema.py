@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -25,6 +25,23 @@ logger = logging.getLogger(__name__)
 VisualArtifactKind = Literal["video", "images", "audio", "none"]
 
 # ---- Internal pipeline data models (dataclass) ----
+
+
+@dataclass(frozen=True)
+class CameraConnection:
+    did: str
+    generation: int
+
+
+@runtime_checkable
+class CameraWindowSource(Protocol):
+    """A camera adapter that can supply windows for individual connections."""
+
+    def ready_connections(self) -> list[CameraConnection]: ...
+
+    def is_current_connection(self, connection: CameraConnection) -> bool: ...
+
+    def take_ready_window(self, connection: CameraConnection) -> DeviceData | None: ...
 
 
 @dataclass

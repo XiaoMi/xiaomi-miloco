@@ -17,6 +17,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING
 
@@ -126,7 +127,7 @@ if TYPE_CHECKING:
     from miloco.perception.camera_rule_windows import CameraRuleDecision
     from miloco.perception.inference_admission import InferenceAdmission
     from miloco.perception.types import BatchedSnapshot
-    from miloco.rule.schema import TriggerOutcome
+    from miloco.rule.schema import Rule, TriggerOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -333,8 +334,15 @@ class PerceptionEngineProxy:
     scene descriptions.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        load_enabled_rules: Callable[[], Awaitable[list[Rule]]],
+        apply_camera_window: Callable[..., Awaitable[TriggerOutcome | None]],
+    ):
         # 基础状态初始化
+        self._load_enabled_rules = load_enabled_rules
+        self._apply_camera_window = apply_camera_window
         self.perception_engine: PerceptionEngine | None = None
         self._status: str = "not_initialized"
         self._status_message: str = ""
@@ -910,12 +918,10 @@ class PerceptionEngineProxy:
                 collect_flow_diagnostics,
             )
 
-    @staticmethod
-    async def get_realtime_rules() -> tuple[list[dict], list[str]]:
-        from miloco.manager import get_manager
+    async def get_realtime_rules(self) -> tuple[list[dict], list[str]]:
         from miloco.rule.schema import OMNI_SOURCE_TYPE, RuleDirection
 
-        all_rules = await get_manager().rule_service.get_effectively_enabled_rules()
+        all_rules = await self._load_enabled_rules()
         guard_needed_task_ids = {
             rule.task_id
             for rule in all_rules
@@ -1208,8 +1214,6 @@ class PerceptionEngineProxy:
     async def apply_camera_rule(
         self, decision: CameraRuleDecision, *, window_end_unix_ms: int
     ) -> bool:
-        from miloco.manager import get_manager
-
         states = dict(decision.evidence.observed_by_source)
         if decision.evidence.matched is None or not all(
             did in decision.contexts and decision.contexts[did].connection_current()
@@ -1223,7 +1227,7 @@ class PerceptionEngineProxy:
             return False
         rule_id = decision.plan.key.rule_id
         window_seconds = (decision.plan.window_end_ms - decision.window_start_ms) / 1000
-        outcome = await get_manager().rule_service.apply_camera_window(
+        outcome = await self._apply_camera_window(
             rule_id, decision.rule, states,
             source_did=did, context=match.reason if match else "",
             room_name=match.room_name if match else "", caption=source.caption,

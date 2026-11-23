@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING, Generic, Literal, TypeVar
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from miloco.perception.collect.camera_adapter import (
-        CameraConnection,
-        CameraDeviceAdapter,
-    )
     from miloco.perception.inference_admission import InferenceAdmission
-    from miloco.perception.schema import DeviceData
+    from miloco.perception.schema import (
+        CameraConnection,
+        CameraWindowSource,
+        DeviceData,
+    )
 
 logger = logging.getLogger(__name__)
 ResultT = TypeVar("ResultT")
@@ -52,7 +52,7 @@ class PerCameraScheduler(Generic[ResultT]):
 
     def __init__(
         self,
-        adapter: CameraDeviceAdapter,
+        adapter: CameraWindowSource,
         admission: InferenceAdmission,
         infer: Callable[[DeviceData, Callable[[], bool], Callable[[], bool]], Awaitable[ResultT]],
         receive: Callable[[CameraWindowOutcome[ResultT]], None],

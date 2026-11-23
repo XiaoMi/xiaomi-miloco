@@ -43,7 +43,6 @@ from miloco.observability.types import (
 from miloco.perception import omni_probe_registry
 from miloco.perception.camera_rule_windows import CameraRuleContext, CameraRuleWindows
 from miloco.perception.client import PerceptionEngineProxy
-from miloco.perception.collect.camera_adapter import CameraDeviceAdapter
 from miloco.perception.collect.collector import MultimodalCollector
 from miloco.perception.engine.types import RealtimePerceptionResult
 from miloco.perception.event_text_builder import caption_for_dids
@@ -63,6 +62,7 @@ from miloco.perception.rule_shadow_capture import (
     shadow_batch_payload,
 )
 from miloco.perception.schema import (
+    CameraWindowSource,
     DeviceData,
     PerceptionBatch,
     PerceptionLatency,
@@ -405,7 +405,7 @@ class PipelineProcessor:
             self._camera_rules.discard()
 
     def set_camera_scheduler(
-        self, adapter: CameraDeviceAdapter | None, wake: Callable[[], None]
+        self, adapter: CameraWindowSource | None, wake: Callable[[], None]
     ) -> PerCameraScheduler[None] | None:
         self.retire_results()
         self._schedule_cutover_ms = time.monotonic_ns() // 1_000_000
