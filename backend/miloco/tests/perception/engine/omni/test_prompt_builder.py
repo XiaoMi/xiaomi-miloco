@@ -951,11 +951,12 @@ class TestFusedAudioRoute:
         ep = _audio_only_packet()
         fused = build_fused_payload(
             packets=[ep],
-            context=OmniContext(),
+            context=OmniContext(rule_conditions=[RuleCondition("rule", "Test rule", "query")]),
             candidates=[],
             gallery_snapshot={},
         )
         assert fused["candidate_track_ids"] == []
+        assert fused["has_visual_rule_input"] is False
 
         user_blocks = _multimodal_user_content(fused["messages"])
         types = [b["type"] for b in user_blocks]
@@ -970,13 +971,14 @@ class TestFusedAudioRoute:
         ep = _video_route_packet()
         fused = build_fused_payload(
             packets=[ep],
-            context=OmniContext(),
+            context=OmniContext(rule_conditions=[RuleCondition("rule", "Test rule", "query")]),
             candidates=[],
             gallery_snapshot={},
         )
         user_blocks = _multimodal_user_content(fused["messages"])
         types = [b["type"] for b in user_blocks]
         assert "video_url" in types
+        assert fused["has_visual_rule_input"] is True
         assert "input_audio" not in types
 
     def test_fused_image_route_emits_image_blocks(self):
@@ -1403,7 +1405,10 @@ class TestFusedVideoBlockSkipped:
         with flow_diagnostics_scope(diagnostics), caplog.at_level("WARNING"):
             fused = build_fused_payload(
                 packets=[_video_route_packet()],
-                context=OmniContext(room_name="厨房"),
+                context=OmniContext(
+                    room_name="厨房",
+                    rule_conditions=[RuleCondition("rule", "Test rule", "query")],
+                ),
                 candidates=[],
                 gallery_snapshot={},
             )
@@ -1412,6 +1417,7 @@ class TestFusedVideoBlockSkipped:
         assert diagnostics.omni_request_status.value == "skipped"
         types = [b["type"] for b in _multimodal_user_content(fused["messages"])]
         assert "video_url" not in types
+        assert fused["has_visual_rule_input"] is False
         assert any(
             "fused_video_b64_too_short" in r.getMessage() for r in caplog.records
         )

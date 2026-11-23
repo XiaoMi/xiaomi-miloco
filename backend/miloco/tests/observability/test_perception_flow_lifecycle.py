@@ -41,7 +41,9 @@ async def test_tick_removes_final_device_snapshot_without_another_cycle():
 async def test_repeated_stop_still_clears_runtime_flow_snapshots():
     runner = PerceptionRunner.__new__(PerceptionRunner)
     runner._is_running = False
+    runner._camera_scheduler = None
     runner._pipeline = MagicMock()
+    runner._pipeline.drain_inference.return_value = AsyncMock()
 
     await runner.stop()
 

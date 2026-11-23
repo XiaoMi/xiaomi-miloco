@@ -176,6 +176,21 @@ async def test_reauth_gate_starts_when_enabled():
     ps.start_engine.assert_awaited_once()
 
 
+async def test_reauth_leaves_running_engine_alone_when_stop_is_deferred():
+    from miloco.perception.inference_admission import InferenceDrainDeferred
+
+    svc = _make_service(json.dumps(True))
+    ps = _mock_perception_service()
+    ps.stop_engine.side_effect = InferenceDrainDeferred("busy")
+    fake_manager = MagicMock(perception_service=ps)
+
+    with patch("miloco.manager.get_manager", return_value=fake_manager):
+        await svc._restart_perception_engine()
+
+    ps.stop_engine.assert_awaited_once()
+    ps.start_engine.assert_not_awaited()
+
+
 # ─── 4. 写路径（HTTP 端点确实落盘意图）──────────────────────────────────────
 #
 # 上面三组只测「读」侧（助手往返 + 两处门控喂入 _FakeKV）。写侧——即唯一真正落盘意图的
@@ -203,6 +218,23 @@ async def test_stop_endpoint_persists_paused_intent(real_db):
         await perception_router.stop_engine()
 
     fm.perception_service.stop_engine.assert_awaited_once()
+    assert is_perception_enabled(KVRepo()) is False
+
+
+async def test_stop_endpoint_reports_deferred_after_saving_pause_intent(real_db):
+    from miloco.database.kv_repo import KVRepo
+    from miloco.middleware.exceptions import HTTPException
+    from miloco.perception import router as perception_router
+    from miloco.perception.engine_state import is_perception_enabled
+    from miloco.perception.inference_admission import InferenceDrainDeferred
+
+    fm = _patched_router_manager(KVRepo())
+    fm.perception_service.stop_engine.side_effect = InferenceDrainDeferred("busy")
+    with patch.object(perception_router, "manager", fm):
+        with pytest.raises(HTTPException, match="stop_deferred") as exc:
+            await perception_router.stop_engine()
+
+    assert exc.value.http_status == 409
     assert is_perception_enabled(KVRepo()) is False
 
 

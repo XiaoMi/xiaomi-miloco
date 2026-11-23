@@ -1885,6 +1885,28 @@ class RuleService:
             trigger_event_id=trigger_event_id,
         )
 
+    async def apply_camera_window(
+        self,
+        rule_id: str,
+        expected_rule: dict,
+        source_states: dict[str, bool],
+        *,
+        source_did: str,
+        context: str,
+        room_name: str,
+        caption: str,
+        device_name: str,
+        event_id: str | None,
+        window_end_unix_ms: int,
+        window_seconds: float,
+    ) -> TriggerOutcome | None:
+        return await self._runner.apply_camera_window(
+            rule_id, expected_rule, source_states,
+            source_did=source_did, context=context, room_name=room_name,
+            caption=caption, device_name=device_name, event_id=event_id,
+            window_end_unix_ms=window_end_unix_ms, window_seconds=window_seconds,
+        )
+
     # ---- Logs ----
 
     async def get_logs(

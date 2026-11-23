@@ -1555,7 +1555,8 @@ async def test_wrap_suggestions_cb_none_cb_returns_none():
 
 
 @pytest.mark.asyncio
-async def test_fused_per_omni_early_send_assigns_id_and_meta():
+@pytest.mark.parametrize("has_rule_match", [True, False])
+async def test_fused_per_omni_early_send_assigns_id_and_meta(has_rule_match):
     """fused per-omni:本相机 omni 一好就经 on_early_* 早送 suggestion/speech;
     suggestion 经事件链闸门打 id 并把 omni_output.suggestions 裁成只剩新链(供 _merge_results
     保留进 result.suggestions、防重发交 client 侧 early_sent_sugg_ids),
@@ -1591,8 +1592,10 @@ async def test_fused_per_omni_early_send_assigns_id_and_meta():
     fused_out = OmniOutput(
         speeches=[Speech(needs_response=True, speaker="用户", content="关灯", status="complete")],
         suggestions=[Suggestion(event="老人摔倒", action="查看", urgency="high")],
+        matched_rules=[MatchedRule(rule_id="test-rule", reason="命中")] if has_rule_match else [],
     )
     ipacket = SimpleNamespace(all_frames=[])
+    on_early_matched_rules = AsyncMock()
 
     with patch("miloco.perception.engine.pipeline.run_omni_fused",
                new_callable=AsyncMock, return_value=fused_out), \
@@ -1604,7 +1607,9 @@ async def test_fused_per_omni_early_send_assigns_id_and_meta():
             get_identity_engine=lambda did, room: MagicMock(),
             on_early_speeches=on_early_speeches,
             on_early_suggestions=on_early_suggestions,
+            on_early_matched_rules=on_early_matched_rules,
             assign_suggestion_link=eng.assign_id_and_update_link,
+            trace_id="test-trace",
         )
 
     # per-omni 早送:本相机 suggestion/speech 经回调送出
@@ -1613,6 +1618,14 @@ async def test_fused_per_omni_early_send_assigns_id_and_meta():
     # 闸门打了事件链 id;omni_output.suggestions 裁成只剩这条新链(供 merge 保留进 result)
     assert sent_sg[0].id == 1
     out = result.rooms["客厅"].device_results["cam-1"].omni_output
+    timing = result.rooms["客厅"].timing
+    start = timing["_device_pipeline_start_monotonic_ms_cam-1"]
+    assert isinstance(start, int)
+    if has_rule_match:
+        assert timing["_fused_match_monotonic_ms_cam-1"] >= start
+    else:
+        assert "_fused_match_monotonic_ms_cam-1" not in timing
+    on_early_matched_rules.assert_not_awaited()
     assert len(out.suggestions) == 1
     assert out.suggestions[0].id == 1
     # Part2 meta 注入到位

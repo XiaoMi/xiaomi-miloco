@@ -42,6 +42,56 @@ def parse_omni_response(
     return _build_output(parsed, rule_name_to_id)
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate JSON keys")
+    return result
+
+
+def parse_shadow_rule_hits(
+    raw: dict[str, Any], rule_name_to_id: dict[str, str]
+) -> frozenset[str] | None:
+    """Accept only a complete rule array; never turn repaired output into negatives."""
+    choices = raw.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    choice = choices[0]
+    if choice.get("finish_reason") in ("length", "content_filter"):
+        return None
+    message = choice.get("message")
+    if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+        return None
+
+    text = re.sub(r"<think>[\s\S]*?</think>", "", message["content"]).strip()
+    fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.IGNORECASE | re.DOTALL)
+    try:
+        parsed = json.loads(fence.group(1) if fence else text, object_pairs_hook=_unique_json_object)
+    except (ValueError, RecursionError):
+        return None
+    rules = parsed.get("matched_rules") if isinstance(parsed, dict) else None
+    if not isinstance(rules, list):
+        return None
+
+    seen: set[str] = set()
+    hits: set[str] = set()
+    for rule in rules:
+        if (
+            not isinstance(rule, dict)
+            or not isinstance(rule.get("rule_name"), str)
+            or not isinstance(rule.get("hit"), bool)
+            or not isinstance(rule.get("reason"), str)
+        ):
+            return None
+        rule_id = rule_name_to_id.get(rule["rule_name"])
+        if rule_id is None or rule_id in seen:
+            return None
+        seen.add(rule_id)
+        if rule["hit"]:
+            hits.add(rule_id)
+    return frozenset(hits)
+
+
 def parse_identity_assignments(
     raw: "dict[str, Any] | str",
     name_to_pid: "dict[str, str] | None" = None,

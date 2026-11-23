@@ -16,6 +16,7 @@ from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.middleware.exceptions import HTTPException
 from miloco.perception.engine_state import set_perception_enabled
+from miloco.perception.inference_admission import InferenceDrainDeferred
 from miloco.perception.schema import OnDemandPerceptionRequest
 from miloco.schema.common_schema import NormalResponse
 
@@ -77,7 +78,13 @@ async def stop_engine():
             message="failed to persist perception pause intent",
             status_code=500,
         )
-    await manager.perception_service.stop_engine()
+    try:
+        await manager.perception_service.stop_engine()
+    except InferenceDrainDeferred as exc:
+        raise HTTPException(
+            message="stop_deferred: pause intent saved, perception is still running. Retry the stop operation.",
+            status_code=409,
+        ) from exc
     return NormalResponse(code=0, message="Perception engine stopped")
 
 

@@ -85,6 +85,8 @@ perception:
     max_windows: 3           # 最大待处理窗口数
     settle_ms: 500           # 等待慢轨道的宽限期（毫秒）
     full_action: "clear"     # 窗口满载处理策略：drop | clear | keep
+  schedule:
+    mode: batch
   engine:
     input:
       # 帧率旋钮集中在此一处(对应 InputConfig):

@@ -23,12 +23,15 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+from miloco.perception.inference_admission import InferenceDrainDeferred
 from miloco.perception.omni_probe_registry import _OMNI_PROBE_TASKS
+from miloco.perception.processor import PipelineProcessor
 from miloco.perception.runner import PerceptionRunner
 from miloco.perception.service import PerceptionService
+from miloco.perception.types import RealtimePerceptionResult
 
 
 def _make_service(*, is_running: bool) -> PerceptionService:
@@ -80,7 +83,7 @@ async def test_apply_config_restart_stop_failure_returns_false():
     前端提示「已保存但需手动重启」而非「保存失败」。
     """
     svc = _make_service(is_running=True)
-    svc._engine.stop = AsyncMock(side_effect=RuntimeError("stop failed"))
+    svc._engine.stop = AsyncMock(side_effect=InferenceDrainDeferred("busy"))
 
     assert await svc.apply_config_restart() is False
 
@@ -160,6 +163,188 @@ async def test_lifecycle_lock_serializes_restart_and_stop():
     assert svc._engine.stop.call_count == 2
 
 
+async def test_lifecycle_writer_retains_lock_when_request_is_cancelled():
+    svc = _make_service(is_running=True)
+    closing = asyncio.Event()
+    release = asyncio.Event()
+    trying_to_start = asyncio.Event()
+
+    async def close():
+        closing.set()
+        await release.wait()
+
+    async def start():
+        trying_to_start.set()
+        await svc.start_engine()
+
+    svc._engine.stop.side_effect = close
+    stop_request = asyncio.create_task(svc.stop_engine())
+    start_request = None
+    try:
+        await asyncio.wait_for(closing.wait(), 1)
+        stop_request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop_request
+
+        start_request = asyncio.create_task(start())
+        await asyncio.wait_for(trying_to_start.wait(), 1)
+        assert svc._lifecycle_lock.locked()
+        svc._engine.start.assert_not_awaited()
+    finally:
+        release.set()
+        if start_request is not None:
+            await asyncio.wait_for(start_request, 1)
+
+    svc._engine.start.assert_awaited_once()
+
+
+@pytest.mark.parametrize("entry", ["realtime", "on_demand"])
+async def test_runner_defers_teardown_until_cancelled_inference_waiter_has_finished(
+    monkeypatch, entry
+):
+    collector = MagicMock()
+    proxy = MagicMock()
+    pipeline = PipelineProcessor(collector, proxy, MagicMock())
+    runner = PerceptionRunner(collector, pipeline, MagicMock())
+    runner._is_running = True
+    order = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    batch = MagicMock(empty=False, devices={}, start_timestamp=0, end_timestamp=0)
+    collector.collect_batch.return_value = batch
+
+    async def infer(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        order.append("inference")
+
+    if entry == "realtime":
+        proxy.realtime_perceive = AsyncMock(
+            return_value=(RealtimePerceptionResult(skipped=True), set(), {}, set(), None)
+        )
+        # Use the full processor path and hold its post-inference work.
+        proxy.handle_realtime_perception_result = AsyncMock(side_effect=infer)
+        pipeline._perf_enabled = False
+        pipeline._rule_shadow_enabled = False
+        pipeline._flow_store = None
+        operation = pipeline.process_realtime()
+    else:
+        proxy.on_demand_perceive = AsyncMock(side_effect=infer)
+        operation = pipeline.process_on_demand(["camera"], "query")
+
+    async def close():
+        order.append("engine")
+
+    async def disconnect():
+        order.append("collector")
+
+    proxy.close = AsyncMock(side_effect=close)
+    runner._inference_worker.shutdown = Mock(side_effect=lambda **_: order.append("worker"))
+    collector.shutdown = AsyncMock(side_effect=disconnect)
+    request = asyncio.create_task(operation)
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        with monkeypatch.context() as settings:
+            settings.setattr("miloco.perception.processor._INFERENCE_DRAIN_TIMEOUT_S", 0)
+            with pytest.raises(InferenceDrainDeferred, match="stop_deferred"):
+                await runner.stop()
+
+        assert runner.is_running
+        assert pipeline.accepting_inference
+        assert order == []
+        proxy.close.assert_not_awaited()
+        runner._inference_worker.shutdown.assert_not_called()
+        collector.shutdown.assert_not_awaited()
+
+        collection_count = collector.collect_batch.call_count
+        async with pipeline._inference_admission.drain(0) as drained:
+            assert drained is False
+            assert await pipeline.process_realtime() is None
+            assert await pipeline.process_on_demand(["camera"], "query") is None
+        assert collector.collect_batch.call_count == collection_count
+    finally:
+        release.set()
+        await asyncio.wait_for(runner.stop(), 2)
+
+    assert not runner.is_running
+    assert order == ["inference", "engine", "worker", "collector"]
+
+
+async def test_deferred_stop_retires_old_realtime_output_and_allows_a_fresh_window(monkeypatch):
+    collector = MagicMock()
+    proxy = MagicMock()
+    repo = MagicMock()
+    pipeline = PipelineProcessor(collector, proxy, repo)
+    runner = PerceptionRunner(collector, pipeline, repo)
+    runner._is_running = True
+    pipeline._perf_enabled = False
+    pipeline._rule_shadow_enabled = False
+    pipeline._flow_store = None
+    collector.collect_batch.return_value = MagicMock(
+        empty=False, devices={}, start_timestamp=0, end_timestamp=0, captured_at=0
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    result = RealtimePerceptionResult()
+
+    async def infer(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return result, set(), {}, set(), None
+
+    proxy.realtime_perceive = AsyncMock(side_effect=infer)
+    proxy.handle_realtime_perception_result = AsyncMock()
+    in_flight = asyncio.create_task(pipeline.process_realtime())
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        monkeypatch.setattr("miloco.perception.processor._INFERENCE_DRAIN_TIMEOUT_S", 0)
+        with pytest.raises(InferenceDrainDeferred):
+            await runner.stop()
+    finally:
+        release.set()
+
+    assert await asyncio.wait_for(in_flight, 1) is None
+    proxy.handle_realtime_perception_result.assert_not_awaited()
+    repo.append.assert_not_called()
+
+    assert await pipeline.process_realtime() is result
+    proxy.handle_realtime_perception_result.assert_awaited_once()
+    repo.append.assert_called_once()
+
+
+async def test_on_demand_answer_from_retired_generation_is_discarded():
+    collector = MagicMock()
+    collector.collect_batch.return_value = MagicMock(
+        empty=False, start_timestamp=0, end_timestamp=0,
+    )
+    proxy = MagicMock()
+    pipeline = PipelineProcessor(collector, proxy, MagicMock())
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    answer = MagicMock()
+
+    async def infer(*_args, **_kwargs):
+        entered.set()
+        await release.wait()
+        return answer
+
+    proxy.on_demand_perceive = AsyncMock(side_effect=infer)
+    old_query = asyncio.create_task(pipeline.process_on_demand(["camera"], "query"))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        pipeline.retire_results()
+    finally:
+        release.set()
+
+    assert await asyncio.wait_for(old_query, 1) is None
+    fresh_query = await pipeline.process_on_demand(["camera"], "query")
+    assert fresh_query is not None
+    assert fresh_query[0] is answer
+
+
 # ─── runner.stop 清理 in-flight omni probe task (review #4 回归防护) ─────────
 
 
@@ -175,10 +360,12 @@ async def test_runner_stop_cancels_inflight_omni_probe_tasks():
     runner._collector.shutdown = AsyncMock()
     runner._pipeline = MagicMock()
     runner._pipeline.close = AsyncMock()
+    runner._pipeline.drain_inference.return_value = AsyncMock()
     runner._log_repo = MagicMock()
     runner._is_running = True
     runner._perception_task = None
     runner._sync_devices_task = None
+    runner._camera_scheduler = None
     runner._inference_worker = MagicMock()
 
     # 起一个真的 fire-and-forget task,注册进 _OMNI_PROBE_TASKS (与 processor 同款)

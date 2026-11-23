@@ -116,6 +116,8 @@ class DeviceData:
     last_drain_observed_at: int | None = None
     last_drain_ready_depth_before: int | None = None
     last_drain_ready_depth_after: int | None = None
+    ready_at_monotonic_ms: int | None = None
+    drained_at_monotonic_ms: int | None = None
 
     @property
     def has_data(self) -> bool:
