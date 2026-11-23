@@ -276,6 +276,52 @@ async def test_reconnect_replay_send_failure_keeps_subscription():
 
 
 @pytest.mark.asyncio
+async def test_reconnect_replay_superseded_while_queued_is_silent():
+    """重放排队期间 topic 被退订:不发 SUBSCRIBE、不触发错误回调,UNSUBSCRIBE 照常发出。"""
+    mips, _ = _make_mips()
+    holder = {}
+    topic = "user/uid-sup/g_op/bind"
+
+    def factory(client_id):
+        holder["c"] = _FakeMqttClient(client_id)
+        return holder["c"]
+
+    mips._client_factory = factory
+    fake = await _connect(mips, holder)
+    try:
+        await asyncio.gather(
+            mips.sub_user_bind_async("uid-sup", handler=lambda _m: None),
+            _ack_subscribes(fake, 1),
+        )
+        errors = []
+        mips.register_subscribe_error_handler(errors.append)
+
+        # 换成每窗口 1 次的限流器并先用掉额度,让重放停在队列里
+        mips._dispatcher = _MqttOperationDispatcher(_MqttOperationRateLimiter(1, 0.15))
+        await mips._dispatcher.submit(lambda: None)
+
+        before = len(fake.subscribed)
+        fake.fire_disconnect(reason_code=1)
+        fake.fire_connect(reason_code=0)
+        for _ in range(50):
+            if mips._dispatcher._queue:
+                break
+            await asyncio.sleep(0)
+        assert mips._dispatcher._queue, "replay was not queued"
+
+        await mips.unsub_user_bind_async("uid-sup")
+        await _drain_dispatcher(mips)
+        await asyncio.sleep(0.01)
+
+        assert len(fake.subscribed) == before
+        assert errors == []
+        assert topic not in mips._subs
+        assert topic in fake.unsubscribed
+    finally:
+        await mips.deinit_async()
+
+
+@pytest.mark.asyncio
 async def test_unsubscribe_does_not_suspend_when_queue_is_blocked():
     """32 个在途名额占满、队列被堵时,退订仍不挂起、立即返回(上层 unbind 锁外
     连续退订依赖这一点);UNSUBSCRIBE 排在已入队的订阅之后,名额释放后按 FIFO 发出。"""

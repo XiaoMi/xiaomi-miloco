@@ -89,6 +89,11 @@ _PERMANENT_SUBACK_FAILURES = frozenset(
     }
 )
 
+
+class _ReplaySuperseded(MipsConnectionError):
+    """Replay dropped because its topic was unsubscribed or replaced while queued."""
+
+
 # Account-level g_op bind/unbind: `user/{uid}/g_op/{bind,unbind}`.
 _TOPIC_USER_OP = re.compile(r"^user/([^/]+)/g_op/(bind|unbind)$")
 
@@ -596,7 +601,7 @@ class MIoTMipsCloud:
                 if replay_epoch is not None:
                     with self._subs_lock:
                         if self._subs.get(topic) is not sub:
-                            raise MipsConnectionError("MQTT replay superseded")
+                            raise _ReplaySuperseded("MQTT replay superseded")
                 with self._pending_lock:
                     result, mid = mqtt.subscribe(topic, qos=qos)
                     if result != MQTTErrorCode.MQTT_ERR_SUCCESS or mid is None:
@@ -655,6 +660,11 @@ class MIoTMipsCloud:
                         reason_string=_describe_reason_code(code),
                     )
 
+        except _ReplaySuperseded:
+            # 重放排队期间 topic 被退订或顶替:订阅意图已撤销,与入口处的复核
+            # 一样静默放弃,不按失败记 ERROR、不触发错误回调。
+            _LOGGER.debug("mips_cloud replay superseded topic=%s", topic)
+            return
         except Exception as exc:
             if not unattended:
                 raise
