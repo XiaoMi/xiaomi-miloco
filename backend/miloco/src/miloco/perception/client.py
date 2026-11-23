@@ -1046,7 +1046,8 @@ class PerceptionEngineProxy:
         # rule 记进 incomplete，展示层显式渲染「未知」而非撒谎报一个确定值。异常详情已由 pipeline
         # 整窗保护写进 backend log（带 room/device + exc_info），住户日志只需诚实标注未知。
         outcomes_by_rule: dict[str, list[TriggerOutcome]] = {}
-        incomplete_rule_ids: set[str] = set()
+        # Camera-window decisions can arrive after the source event is saved.
+        incomplete_rule_ids = {r.rule_id for r in result.matched_rules} if scheduled_camera else set()
         for (_rid, _did), _o in (early_sent_rule_ids or {}).items():
             if _o is None:
                 incomplete_rule_ids.add(_rid)

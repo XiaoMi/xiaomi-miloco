@@ -27,6 +27,7 @@
     "wakeFail": "唤醒失败，稍后再试",
     "restartFailEngineRunning": "重启失败，引擎仍在跑：{{msg}}",
     "restartFailEngineRunningNoMsg": "重启失败，引擎仍在跑",
+    "restartDeferredRetry": "当前推理还没结束，请稍后再重启引擎",
     "engineRestarted": "引擎已重启",
     "engineStoppedWakeManually": "引擎已停下，请手动唤醒：{{msg}}",
     "engineStoppedWakeManuallyNoMsg": "引擎已停下，请手动唤醒",

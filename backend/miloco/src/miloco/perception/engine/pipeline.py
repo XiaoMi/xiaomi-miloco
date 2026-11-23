@@ -37,6 +37,7 @@ from miloco.perception.engine.omni.omni_client import (
     OmniError,
     resolve_live_omni_config,
 )
+from miloco.perception.snapshot_context import get_rule_shadow_capture
 
 if TYPE_CHECKING:
     import numpy as np
@@ -741,6 +742,8 @@ async def run_batch_pipeline(
         room_timing[f"gate_video_cross_score_{did}"] = gate_timing.video_cross_score
 
         if gate_packet is None:
+            if rule_shadow := get_rule_shadow_capture():
+                rule_shadow.record_gate_skip(did, time.monotonic_ns() // 1_000_000)
             if diagnostics is not None:
                 diagnostics.status = GraphStatus.SKIPPED
                 diagnostics.identity_status = GraphStatus.SKIPPED

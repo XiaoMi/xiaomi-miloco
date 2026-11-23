@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from abc import abstractmethod
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
@@ -37,11 +38,17 @@ class CameraConnection:
 class CameraWindowSource(Protocol):
     """A camera adapter that can supply windows for individual connections."""
 
-    def ready_connections(self) -> list[CameraConnection]: ...
+    @abstractmethod
+    def ready_connections(self) -> list[CameraConnection]:
+        """List connections with a window ready for inference."""
 
-    def is_current_connection(self, connection: CameraConnection) -> bool: ...
+    @abstractmethod
+    def is_current_connection(self, connection: CameraConnection) -> bool:
+        """Check whether the connection is still active after a reconnect."""
 
-    def take_ready_window(self, connection: CameraConnection) -> DeviceData | None: ...
+    @abstractmethod
+    def take_ready_window(self, connection: CameraConnection) -> DeviceData | None:
+        """Take the latest ready window for the requested connection."""
 
 
 @dataclass

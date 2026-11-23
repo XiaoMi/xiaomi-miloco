@@ -86,7 +86,7 @@ async def test_blocked_camera_does_not_delay_new_windows_on_another_camera():
     assert started[-2:] == [("fast", 3000), ("slow", 6000)]
 
 
-async def test_timeout_suppresses_late_value_and_preserves_capacity_until_completion():
+async def test_timeout_suppresses_late_value_and_preserves_capacity_until_completion(caplog):
     cameras = _ReadyCameras()
     admission = InferenceAdmission()
     outcomes = asyncio.Queue()
@@ -123,6 +123,8 @@ async def test_timeout_suppresses_late_value_and_preserves_capacity_until_comple
     assert resumed.value == "next"
     assert started == ["slow", "next"]
     assert outcomes.empty()
+    messages = [record.getMessage() for record in caplog.records if "Camera window timed out" in record.getMessage()]
+    assert len(messages) == 1 and "did=slow" in messages[0]
 
 
 async def test_new_connection_waits_for_old_inference_and_drops_its_result():

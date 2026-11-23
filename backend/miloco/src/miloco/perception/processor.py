@@ -44,6 +44,7 @@ from miloco.perception import omni_probe_registry
 from miloco.perception.camera_rule_windows import CameraRuleContext, CameraRuleWindows
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.collect.collector import MultimodalCollector
+from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.types import RealtimePerceptionResult
 from miloco.perception.event_text_builder import caption_for_dids
 from miloco.perception.inference_admission import (
@@ -61,6 +62,7 @@ from miloco.perception.rule_shadow_capture import (
     RuleShadowCapture,
     shadow_batch_payload,
 )
+from miloco.perception.rule_window_replay import SourceOutcome
 from miloco.perception.schema import (
     CameraWindowSource,
     DeviceData,
@@ -414,7 +416,9 @@ class PipelineProcessor:
             self._camera_rules = None
             return None
 
-        rule_windows = CameraRuleWindows(wake)
+        settings = get_settings().perception
+        schedule = settings.schedule
+        rule_windows = CameraRuleWindows(wake, wait_ms=schedule.rule_window_wait_ms)
         self._camera_rules = rule_windows
 
         async def infer(
@@ -440,9 +444,13 @@ class PipelineProcessor:
         def receive(outcome: CameraWindowOutcome[None]) -> None:
             rule_windows.finish((outcome.window_start_ms, outcome.window_end_ms), outcome.connection.did)
 
+        omni_timeout_s = (settings.engine.get("omni") or {}).get("timeout") or OmniConfig.timeout
+        # Allow a window's worth of preprocessing before the model request.
+        timeout_s = max(15.0, float(omni_timeout_s) + settings.collect.window_size)
         return PerCameraScheduler(
             adapter, self._inference_admission, infer, receive,
-            capacity=get_settings().perception.schedule.max_concurrent_cameras,
+            capacity=schedule.max_concurrent_cameras,
+            timeout_s=timeout_s,
         )
 
     async def commit_camera_rules(self) -> None:
@@ -720,15 +728,18 @@ class PipelineProcessor:
 
             if (
                 camera_rules is not None and camera_window is not None and rule_shadow is not None
-                and source_current is not None and not result.skipped
+                and source_current is not None
             ):
                 did = camera_window.meta.did
                 bounds = (camera_window.window_start_ms, camera_window.window_end_ms)
-                observations = tuple(rule_shadow.observations(
-                    grid_generation=camera_rules.grid_generation,
-                    bounds_by_source={did: bounds},
-                    batch_returned_at_ms=time.monotonic_ns() // 1_000_000,
-                ))
+                observations = tuple(
+                    observation for observation in rule_shadow.observations(
+                        grid_generation=camera_rules.grid_generation,
+                        bounds_by_source={did: bounds},
+                        batch_returned_at_ms=time.monotonic_ns() // 1_000_000,
+                    )
+                    if not result.skipped or observation.outcome is SourceOutcome.GATE_SKIPPED
+                )
                 matches = {match.rule_id: match for match in result.matched_rules}
                 camera_rules.observe(bounds, observations, {
                     observation.key.rule_id: CameraRuleContext(
@@ -930,7 +941,12 @@ class PipelineProcessor:
         if metrics is None:
             return
         windows = {
-            did: {"start_ms": window.window_start_ms, "end_unix_ms": window.window_end_unix_ms}
+            did: {
+                "start_monotonic_ms": window.window_start_ms,
+                "end_monotonic_ms": window.window_end_ms,
+                "start_unix_ms": window.window_start_unix_ms,
+                "end_unix_ms": window.window_end_unix_ms,
+            }
             for did, window in batch.devices.items()
             if window.window_end_unix_ms > 0
         }

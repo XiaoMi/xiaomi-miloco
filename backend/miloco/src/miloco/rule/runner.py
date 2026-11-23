@@ -1294,7 +1294,7 @@ class RuleRunner:
 
         if last_round_id is not None:
             gap = round_id - last_round_id - 1
-            if gap >= maxlen or (gap > 0 and window_seconds is not None):
+            if gap >= maxlen:
                 win.clear()
                 logger.info(
                     "rule %s (task=%s) duration window cleared due to long sample gap: "

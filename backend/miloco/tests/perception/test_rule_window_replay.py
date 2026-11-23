@@ -168,6 +168,62 @@ def test_repeat_does_not_replace_first_terminal_observation():
     assert after_repeat == before_repeat
 
 
+@pytest.mark.parametrize(
+    "peer_outcome, expected",
+    [
+        (SourceOutcome.MATCHED, True),
+        (SourceOutcome.NO_MATCH, False),
+        (SourceOutcome.UNOBSERVED, None),
+        (SourceOutcome.GATE_SKIPPED, None),
+    ],
+)
+def test_gate_skip_contributes_only_if_a_peer_returns_usable_results(peer_outcome, expected):
+    observations = [
+        _record("camera-a", SourceOutcome.GATE_SKIPPED, 31_000),
+        _record("camera-b", peer_outcome, 32_000),
+    ]
+    assert replay_rule_window(PLAN, observations, as_of_ms=31_000) is None
+    evidence = replay_rule_window(PLAN, observations, as_of_ms=32_000)
+    assert evidence is not None
+    assert evidence.matched is expected
+    if expected is not None:
+        assert evidence.observed_by_source == (("camera-a", False), ("camera-b", expected))
+    else:
+        assert not evidence.observed_by_source
+
+
+async def test_configured_window_wait_accepts_delayed_peer_without_delaying_single_source(monkeypatch):
+    now_ms = 30_500
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    coordinator = CameraRuleWindows(lambda: None, wait_ms=6_000)
+    bounds = (27_000, 30_000)
+    sources = frozenset({"camera-a", "camera-b"})
+    single = {"id": "single", "task_id": "single-task", "condition": {"perceive_device_ids": ["camera-a"]}}
+    multi = {"id": "multi", "task_id": "multi-task"}
+    load_rules = AsyncMock(return_value=([single, multi], []))
+
+    def observe(rule, source_id, outcome):
+        key = RuleWindowKey(rule["id"], rule_revision(rule), f"{coordinator.grid_generation}:3000", 9)
+        coordinator.observe(bounds, [RecordedObservation(key, source_id, outcome, now_ms)], {})
+
+    try:
+        assert await coordinator.rules_for(bounds, "camera-a", sources, load_rules) == [single, multi]
+        assert await coordinator.rules_for(bounds, "camera-b", sources, load_rules) == [multi]
+        observe(single, "camera-a", SourceOutcome.MATCHED)
+        observe(multi, "camera-a", SourceOutcome.NO_MATCH)
+        assert [decision.rule for decision in coordinator.take_decisions()] == [single]
+        now_ms = 34_000
+        assert coordinator.take_decisions() == []
+        observe(multi, "camera-b", SourceOutcome.MATCHED)
+        decision, = coordinator.take_decisions()
+        assert decision.rule == multi and decision.evidence.matched is True
+    finally:
+        coordinator.discard()
+
+
 async def test_concurrent_rule_load_keeps_first_window_snapshot():
     coordinator = CameraRuleWindows(lambda: None)
     end = (time.monotonic_ns() // 1_000_000 // 3000) * 3000

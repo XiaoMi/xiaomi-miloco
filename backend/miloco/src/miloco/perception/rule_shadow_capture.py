@@ -26,6 +26,7 @@ def rule_revision(rule: dict) -> str:
 class RuleResponseSample:
     received_at_ms: int
     matched_rule_ids: frozenset[str] | None
+    gate_skipped: bool = False
 
 
 @dataclass(slots=True)
@@ -55,6 +56,9 @@ class RuleShadowCapture:
         if source_id in self._prepared:
             self._responses.setdefault(source_id, sample)
 
+    def record_gate_skip(self, source_id: str, received_at_ms: int) -> None:
+        self.record(source_id, RuleResponseSample(received_at_ms, None, gate_skipped=True))
+
     def observations(
         self,
         *,
@@ -78,7 +82,9 @@ class RuleShadowCapture:
             )
             for rule_id, revision in rule_revisions.items():
                 outcome = SourceOutcome.UNOBSERVED
-                if hits is not None:
+                if sample is not None and sample.gate_skipped:
+                    outcome = SourceOutcome.GATE_SKIPPED
+                elif hits is not None:
                     outcome = (
                         SourceOutcome.MATCHED
                         if rule_id in hits

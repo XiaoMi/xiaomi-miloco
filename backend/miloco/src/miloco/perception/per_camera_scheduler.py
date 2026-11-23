@@ -7,6 +7,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar
 
+from miloco.utils.common import safe_log
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
@@ -160,6 +162,11 @@ class PerCameraScheduler(Generic[ResultT]):
         job.reported = True
         if not self._adapter.is_current_connection(job.connection):
             status, value = "stale_connection", None
+        if status == "timed_out":
+            logger.warning(
+                "Camera window timed out | did=%s window_monotonic_ms=[%d,%d) budget_s=%.1f",
+                safe_log(job.connection.did), job.window_start_ms, job.window_end_ms, self._timeout_s,
+            )
         try:
             self._receive(
                 CameraWindowOutcome(

@@ -4,12 +4,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 
-MULTI_SOURCE_WAIT_MS = 3_000
+from miloco.config.settings import DEFAULT_RULE_WINDOW_WAIT_MS
 
 
 class SourceOutcome(StrEnum):
     MATCHED = "matched"
     NO_MATCH = "no_match"
+    GATE_SKIPPED = "gate_skipped"
     UNOBSERVED = "unobserved"
     OUT_OF_SCOPE = "out_of_scope"
 
@@ -28,12 +29,17 @@ class RuleWindowPlan:
     window_end_ms: int
     candidate_sources: frozenset[str]
     structural_single_source: bool = False
+    wait_ms: int = DEFAULT_RULE_WINDOW_WAIT_MS
 
     def __post_init__(self) -> None:
         if self.structural_single_source and len(self.candidate_sources) != 1:
             raise ValueError(
                 "a structural single-source rule requires exactly one candidate"
             )
+
+    @property
+    def deadline_ms(self) -> int:
+        return self.window_end_ms + self.wait_ms
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +85,7 @@ def replay_rule_window(
 
     deadline_ms = None
     if not plan.structural_single_source:
-        deadline_ms = plan.window_end_ms + MULTI_SOURCE_WAIT_MS
+        deadline_ms = plan.deadline_ms
     terminal_by_source: dict[str, SourceOutcome] = {}
     for observation in sorted(
         observations, key=lambda observation: observation.received_at_ms
@@ -104,11 +110,19 @@ def replay_rule_window(
         for source_id, outcome in terminal_by_source.items()
         if outcome is SourceOutcome.UNOBSERVED
     )
+    # A wholly gated batch never advances rules. If a peer returned usable
+    # evidence, a source skipped by the gate contributes the legacy false state.
+    model_observed = (SourceOutcome.MATCHED, SourceOutcome.NO_MATCH)
+    observed_outcomes = (
+        (*model_observed, SourceOutcome.GATE_SKIPPED)
+        if any(outcome in model_observed for outcome in terminal_by_source.values())
+        else model_observed
+    )
     return RuleWindowEvidence(
         observed_by_source=tuple(
             (source_id, outcome is SourceOutcome.MATCHED)
             for source_id, outcome in sorted(terminal_by_source.items())
-            if outcome in (SourceOutcome.MATCHED, SourceOutcome.NO_MATCH)
+            if outcome in observed_outcomes
         ),
         unobserved_sources=unobserved_sources,
         out_of_scope_sources=frozenset(

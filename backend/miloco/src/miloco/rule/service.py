@@ -34,6 +34,7 @@ from miloco.middleware.exceptions import (
 )
 from miloco.miot.client import MiotProxy, is_subscribable_did
 from miloco.miot.filter import allowed_home_ids, filter_by_home
+from miloco.node_monitor import NodeName, get_monitor
 from miloco.rule.condition import (
     condition_to_dnf,
     dnf_structure_error,
@@ -1900,12 +1901,17 @@ class RuleService:
         window_end_unix_ms: int,
         window_seconds: float,
     ) -> TriggerOutcome | None:
-        return await self._runner.apply_camera_window(
-            rule_id, expected_rule, source_states,
-            source_did=source_did, context=context, room_name=room_name,
-            caption=caption, device_name=device_name, event_id=event_id,
-            window_end_unix_ms=window_end_unix_ms, window_seconds=window_seconds,
-        )
+        async with get_monitor().track_async(NodeName.RULE, "update") as handle:
+            handle.add_input(1)
+            outcome = await self._runner.apply_camera_window(
+                rule_id, expected_rule, source_states,
+                source_did=source_did, context=context, room_name=room_name,
+                caption=caption, device_name=device_name, event_id=event_id,
+                window_end_unix_ms=window_end_unix_ms, window_seconds=window_seconds,
+            )
+            if outcome is not None:
+                handle.add_output(1)
+            return outcome
 
     # ---- Logs ----
 

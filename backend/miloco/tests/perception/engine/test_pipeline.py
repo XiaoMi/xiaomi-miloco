@@ -41,6 +41,9 @@ from miloco.perception.engine.types import (
     RuleCondition,
     SelectedFrame,
 )
+from miloco.perception.rule_shadow_capture import RuleShadowCapture
+from miloco.perception.rule_window_replay import SourceOutcome
+from miloco.perception.snapshot_context import OmniEventArtifacts, event_artifacts_scope
 from miloco.perception.types import (
     AudioFrame,
     AudioStream,
@@ -304,13 +307,23 @@ async def test_batch_all_skipped():
     base = _preprocess(frame)
     gate_prev_frames = {"cam-1": base, "cam-2": base}
 
-    result = await run_batch_pipeline(batch, contexts, config, gate_prev_frames=gate_prev_frames)
+    capture = RuleShadowCapture()
+    capture.prepare({"cam-1": ["rule"], "cam-2": ["rule"]}, [{"id": "rule"}])
+    with event_artifacts_scope(OmniEventArtifacts(rule_shadow=capture)):
+        result = await run_batch_pipeline(batch, contexts, config, gate_prev_frames=gate_prev_frames)
 
     assert len(result.rooms) == 2
     assert result.rooms["study-room"].skipped is True
     assert result.rooms["kitchen"].skipped is True
     assert result.rooms["study-room"].omni_outputs == {}
     assert result.rooms["kitchen"].omni_outputs == {}
+    observations = capture.observations(
+        grid_generation="grid", bounds_by_source={"cam-1": (0, 3000), "cam-2": (0, 3000)},
+        batch_returned_at_ms=time.monotonic_ns() // 1_000_000,
+    )
+    assert {item.source_id: item.outcome for item in observations} == {
+        "cam-1": SourceOutcome.GATE_SKIPPED, "cam-2": SourceOutcome.GATE_SKIPPED,
+    }
 
 
 @pytest.mark.asyncio

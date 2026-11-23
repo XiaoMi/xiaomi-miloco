@@ -9,10 +9,10 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from miloco.config.settings import DEFAULT_RULE_WINDOW_WAIT_MS
 from miloco.perception.engine.api import rule_selects_device
 from miloco.perception.rule_shadow_capture import rule_revision
 from miloco.perception.rule_window_replay import (
-    MULTI_SOURCE_WAIT_MS,
     RecordedObservation,
     RuleWindowEvidence,
     RuleWindowKey,
@@ -61,10 +61,11 @@ class _Window:
 class CameraRuleWindows:
     """Freeze rules and sources once per window and emit each decision once."""
 
-    def __init__(self, wake: Callable[[], None]) -> None:
+    def __init__(self, wake: Callable[[], None], *, wait_ms: int = DEFAULT_RULE_WINDOW_WAIT_MS) -> None:
         self.grid_generation = uuid.uuid4().hex
         self._wall_offset_ms = (time.time_ns() - time.monotonic_ns()) // 1_000_000
         self._wake = wake
+        self._wait_ms = wait_ms
         self._timer: asyncio.TimerHandle | None = None
         self._windows: dict[CameraBounds, _Window] = {}
         self._closed_through: dict[str, int] = {}
@@ -106,6 +107,7 @@ class CameraRuleWindows:
                         end,
                         expected,
                         structural_single_source=len(selectors) == len(expected) == 1,
+                        wait_ms=self._wait_ms,
                     )
                     pending[rule_id] = _PendingRule(plan)
                     applicable_rules.append(rule)
@@ -187,7 +189,7 @@ class CameraRuleWindows:
                         decisions.append(CameraRuleDecision(
                             pending.plan, rule, bounds[0], evidence, pending.contexts
                         ))
-            if not window.pending and now_ms >= end + MULTI_SOURCE_WAIT_MS:
+            if not window.pending and now_ms >= end + self._wait_ms:
                 del self._windows[bounds]
         self._reschedule(now_ms)
         return decisions
@@ -203,7 +205,7 @@ class CameraRuleWindows:
                     plan.key, did, SourceOutcome.UNOBSERVED, observation.received_at_ms,
                 )
             observations.append(observation)
-        if plan.structural_single_source and now_ms >= plan.window_end_ms + MULTI_SOURCE_WAIT_MS:
+        if plan.structural_single_source and now_ms >= plan.deadline_ms:
             did = next(iter(plan.candidate_sources))
             if did not in window.started_sources:
                 observations.append(RecordedObservation(plan.key, did, SourceOutcome.UNOBSERVED, now_ms))
@@ -216,7 +218,7 @@ class CameraRuleWindows:
         deadlines = [
             deadline
             for _, end in self._windows
-            for deadline in (end, end + MULTI_SOURCE_WAIT_MS)
+            for deadline in (end, end + self._wait_ms)
             if deadline > now_ms
         ]
         if deadlines:

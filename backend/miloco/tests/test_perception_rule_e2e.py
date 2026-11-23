@@ -55,6 +55,7 @@ from miloco.rule.schema import (
     RuleCondition,
     RuleLifecycle,
     RuleMode,
+    TriggerOutcome,
 )
 
 TASK_ID = "e2e-task"
@@ -167,6 +168,7 @@ async def test_camera_mode_progresses_and_commits_rules_once_then_returns_to_bat
     )
 
     monkeypatch.setattr(get_settings().perception.schedule, "mode", "batch")
+    monkeypatch.setitem(get_settings().perception.engine["omni"], "timeout", 42.0)
     monkeypatch.setattr(PerceptionEngineProxy, "_init_engine", lambda _: None)
     monkeypatch.setattr("miloco.perception.engine.omni.dedup_embedder.EventEmbedder", MagicMock)
     svc = MagicMock(
@@ -254,6 +256,7 @@ async def test_camera_mode_progresses_and_commits_rules_once_then_returns_to_bat
         try:
             await service.apply_schedule_config("per_camera", save, restart_window=False, omni_fps=None)
             assert service.schedule_mode == "per_camera"
+            assert runner._camera_scheduler._timeout_s == 42.0 + get_settings().perception.collect.window_size
             start = (time.monotonic_ns() // 1_000_000 // 20 + 1) * 20
             for did in ("cam_A", "cam_B"):
                 adapter._devices[did].sync_buffer.put("decoded_video", frame, start - 20, start - 20)
@@ -327,6 +330,27 @@ async def test_camera_window_aggregates_source_swaps_and_rejects_old_rule_revisi
     assert runner._state[rule.id].sources["cam_B"].last_bool is True
 
 
+async def test_camera_duration_counts_observations_across_one_missing_window(proxy_with_runner, mock_miot_proxy):
+    _, runner, _ = proxy_with_runner
+    rule = _make_state_rule("camera-duration-gap", ["cam_A"]).model_copy(
+        update={"duration_seconds": 12, "duration_ratio": 2 / 3},
+    )
+    runner.add_rule(rule)
+    runner.set_task_actions(rule.task_id, {"on_enter_actions": [a.model_dump() for a in rule.on_enter_actions]})
+
+    async def apply(window_end_ms):
+        return await runner.apply_camera_window(
+            rule.id, rule.model_dump(), {"cam_A": True},
+            source_did="cam_A", context="fixture", room_name="hall", caption="",
+            device_name="", event_id=None, window_end_unix_ms=window_end_ms, window_seconds=4,
+        )
+
+    assert await apply(4_000) is TriggerOutcome.COUNTING
+    assert await apply(12_000) is TriggerOutcome.FIRED
+    await runner.drain()
+    mock_miot_proxy.set_device_properties.assert_awaited_once()
+
+
 # ============================================================
 # E2E case
 # ============================================================
@@ -371,7 +395,8 @@ async def test_e2e_single_cam_unchanged(proxy_with_runner, mock_miot_proxy):
 
 
 @pytest.mark.asyncio
-async def test_e2e_rule_statuses_snapshot_to_persist(proxy_with_runner, monkeypatch):
+@pytest.mark.parametrize("scheduled_camera", [False, True])
+async def test_e2e_rule_statuses_snapshot_to_persist(proxy_with_runner, monkeypatch, scheduled_camera):
     """胶水层集成:命中 → update_state 返回结论 → client 循环里就地累积并聚合 → rule_statuses
     透传给 persist。patch _persist_meaningful_event 只截获 rule_statuses,不拉起 DB/落盘。"""
     proxy, runner, mgr_ctx = proxy_with_runner
@@ -385,6 +410,7 @@ async def test_e2e_rule_statuses_snapshot_to_persist(proxy_with_runner, monkeypa
         incomplete_rule_ids=None, event_id=None,
     ):
         captured["rule_statuses"] = rule_statuses
+        captured["incomplete_rule_ids"] = incomplete_rule_ids
         captured["event_id"] = event_id
 
     monkeypatch.setattr(
@@ -395,15 +421,17 @@ async def test_e2e_rule_statuses_snapshot_to_persist(proxy_with_runner, monkeypa
         await proxy.handle_realtime_perception_result(
             _result(matched=[("rule_X", ["cam_A"], "人来")],
                     device_rule_map={"cam_A": ["rule_X"]}),
-            artifacts=OmniEventArtifacts(),
+            artifacts=OmniEventArtifacts(scheduled_camera=scheduled_camera),
         )
         await asyncio.sleep(0.05)  # 让后台 persist task 跑起来
 
     await runner.drain()
-    # ENTER fire → 该 rule 本周期结论 FIRED（client 快照现传中性枚举，中文标签由展示层映射）
-    from miloco.rule.schema import TriggerOutcome
-
-    assert captured.get("rule_statuses") == {"rule_X": TriggerOutcome.FIRED}
+    if scheduled_camera:
+        assert captured["rule_statuses"] == {}
+        assert captured["incomplete_rule_ids"] == {"rule_X"}
+    else:
+        assert captured["rule_statuses"] == {"rule_X": TriggerOutcome.FIRED}
+        assert captured["incomplete_rule_ids"] == set()
 
 
 @pytest.mark.asyncio
