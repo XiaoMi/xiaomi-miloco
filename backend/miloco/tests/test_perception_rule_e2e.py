@@ -654,9 +654,11 @@ async def test_camera_duration_uses_same_candidate_sources_for_samples_and_sessi
     # A batch update restores the established carry-forward policy.
     await runner.update_state(rule.id, "cam_A", False, "batch")
     await runner.update_state(rule.id, "cam_A", False, "batch")
+    await runner.drain()
     assert runner.is_condition_satisfied(rule.id) is True
     assert runner._sources_currently_true(rule.id) == ["cam_B"]
-    mock_miot_proxy.set_device_properties.await_count == 3
+    assert state.exit_debounce_task is None
+    assert mock_miot_proxy.set_device_properties.await_count == 3
 
 
 @pytest.mark.parametrize("start_in_camera_mode", [False, True])
