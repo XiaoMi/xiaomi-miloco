@@ -1215,11 +1215,19 @@ class PerceptionEngineProxy:
     async def apply_camera_rule(
         self, decision: CameraRuleDecision, *, window_end_unix_ms: int
     ) -> bool:
-        states = dict(decision.evidence.observed_by_source)
-        if decision.evidence.matched is None or not all(
-            did in decision.contexts and decision.contexts[did].connection_current()
-            for did in states
-        ):
+        if decision.partial_enter_sources:
+            # Advancing only hits keeps a partial window from feeding an exit edge.
+            states = {
+                did: True for did in decision.partial_enter_sources
+                if decision.contexts[did].connection_current()
+            }
+        elif decision.evidence.matched is not None:
+            states = dict(decision.evidence.observed_by_source)
+            if not all(did in decision.contexts and decision.contexts[did].connection_current() for did in states):
+                return False
+        else:
+            return False
+        if not states:
             return False
         did = next((did for did, hit in states.items() if hit), next(iter(states)))
         source = decision.contexts[did]

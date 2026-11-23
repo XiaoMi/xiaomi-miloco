@@ -1272,12 +1272,12 @@ class RuleRunner:
         state = self._ensure_state(rule.id)
         if rule.resolved_direction is RuleDirection.SESSION and state.state_duration_fired:
             return TriggerOutcome.STILL_IN
-        if state.duration_window_seconds != window_seconds:
+        interval = self._sample_interval if window_seconds is None else window_seconds
+        if state.duration_window_seconds != interval:
             state.duration_window = None
             state.last_duration_round = None
-            state.duration_window_seconds = window_seconds
+            state.duration_window_seconds = interval
 
-        interval = self._sample_interval if window_seconds is None else window_seconds
         sampled_at = time.time() if window_end_unix_ms is None else (window_end_unix_ms - 1) / 1000
         round_id = int(sampled_at / interval)
         last_round_id = state.last_duration_round

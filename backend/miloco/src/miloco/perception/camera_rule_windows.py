@@ -20,6 +20,7 @@ from miloco.perception.rule_window_replay import (
     SourceOutcome,
     replay_rule_window,
 )
+from miloco.rule.schema import RuleDirection, RuleMode
 
 if TYPE_CHECKING:
     from miloco.perception.types import MatchedRule
@@ -42,6 +43,7 @@ class CameraRuleDecision:
     window_start_ms: int
     evidence: RuleWindowEvidence
     contexts: Mapping[str, CameraRuleContext]
+    partial_enter_sources: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -56,9 +58,28 @@ class _Window:
     rules: list[dict]
     pending: dict[str, _PendingRule]
     sources: frozenset[str]
+    unavailable_guard_tasks: set[str]
     started_sources: dict[str, int] = field(default_factory=dict)
     finished_sources: set[str] = field(default_factory=set)
     processed_sources: dict[str, tuple[int, Callable[[], bool]]] = field(default_factory=dict)
+
+
+def _partial_enter_sources(
+    rule: dict, evidence: RuleWindowEvidence | None, contexts: Mapping[str, CameraRuleContext],
+) -> tuple[str, ...]:
+    if evidence is None or not evidence.unobserved_sources or rule.get("duration_seconds"):
+        return ()
+    direction = rule.get("direction")
+    if direction is None:
+        # Legacy event and state rules both have an entering edge.
+        if rule.get("mode", RuleMode.EVENT) not in (RuleMode.EVENT, RuleMode.STATE):
+            return ()
+    elif direction not in (RuleDirection.ENTER, RuleDirection.SESSION):
+        return ()
+    return tuple(
+        did for did, hit in evidence.observed_by_source
+        if hit and did in contexts and contexts[did].match is not None
+    )
 
 
 class CameraRuleWindows:
@@ -97,14 +118,15 @@ class CameraRuleWindows:
             if window is None:
                 pending: dict[str, _PendingRule] = {}
                 applicable_rules = []
+                unavailable_guard_tasks = set()
                 for rule in rules:
                     rule_id = rule["id"]
-                    if end <= self._closed_through.get(rule_id, -1):
-                        continue
                     selectors = rule.get("condition", {}).get("perceive_device_ids") or []
                     # A camera that has produced frames still counts if this window is silent.
                     candidates = frozenset(source for source in sources if rule_selects_device(selectors, source))
-                    if not candidates:
+                    if not candidates or end <= self._closed_through.get(rule_id, -1):
+                        if rule.get("direction") == RuleDirection.GUARD:
+                            unavailable_guard_tasks.add(rule["task_id"])
                         continue
                     plan = RuleWindowPlan(
                         RuleWindowKey(rule_id, rule_revision(rule), f"{self.grid_generation}:{size}", start // size),
@@ -115,7 +137,7 @@ class CameraRuleWindows:
                     )
                     pending[rule_id] = _PendingRule(plan)
                     applicable_rules.append(rule)
-                window = self._windows[bounds] = _Window(applicable_rules, pending, sources)
+                window = self._windows[bounds] = _Window(applicable_rules, pending, sources, unavailable_guard_tasks)
         window.started_sources.setdefault(did, started_at_ms)
         self._reschedule(time.monotonic_ns() // 1_000_000)
         return [
@@ -183,27 +205,47 @@ class CameraRuleWindows:
             for task_id, rules in by_task.items():
                 if task_id in waiting_tasks:
                     continue
-                rules.sort(key=lambda rule: (rule.get("direction") != "guard", rule["id"]))
+                rules.sort(key=lambda rule: (rule.get("direction") != RuleDirection.GUARD, rule["id"]))
                 results = [self._evidence(window, window.pending[rule["id"]], now_ms) for rule in rules]
-                has_match = any(
-                    rule.get("direction") != "guard" and evidence is not None and evidence.matched is True
-                    for rule, (evidence, _) in zip(rules, results, strict=True)
-                )
+                guard_results = [
+                    evidence for rule, (evidence, _) in zip(rules, results, strict=True)
+                    if rule.get("direction") == RuleDirection.GUARD
+                ]
+                guards_observed = all(evidence is not None and evidence.matched is not None for evidence in guard_results)
+                matching_rules = {
+                    rule["id"] for rule, (evidence, _) in zip(rules, results, strict=True)
+                    if evidence is not None and evidence.matched is True
+                }
                 waits = [gate_dependent for evidence, gate_dependent in results if evidence is None]
+                partial_entries = {}
+                if task_id not in window.unavailable_guard_tasks and all(
+                    evidence is not None and evidence.matched is True for evidence in guard_results
+                ):
+                    for rule, (evidence, _) in zip(rules, results, strict=True):
+                        rule_id = rule["id"]
+                        pending = window.pending[rule_id]
+                        if sources := _partial_enter_sources(rule, evidence, pending.contexts):
+                            if now_ms < pending.plan.deadline_ms:
+                                waits.append(False)
+                            else:
+                                partial_entries[rule_id] = sources
+                    matching_rules.update(partial_entries)
+                has_match = any(
+                    rule["id"] in matching_rules and rule.get("direction") != RuleDirection.GUARD
+                    for rule in rules
+                )
                 if waits:
                     if all(waits) and not has_match:
                         gate_waits.setdefault(task_id, []).append((end, window, rules))
                     else:
                         waiting_tasks.add(task_id)
                     continue
-                guards_observed = all(
-                    evidence is not None and evidence.matched is not None
-                    for rule, (evidence, _) in zip(rules, results, strict=True)
-                    if rule.get("direction") == "guard"
-                )
                 if has_match and guards_observed:
-                    # Also supersede an exit confirmed in this drain, before it reaches the rule runner.
-                    superseded.update(gate_exit_decisions.pop(task_id, ()))
+                    # Only a new hit for the same rule replaces a confirmed gate exit.
+                    superseded.update(
+                        index for index in gate_exit_decisions.pop(task_id, ())
+                        if decisions[index].rule["id"] in matching_rules
+                    )
                     for older_end, older_window, older_rules in gate_waits.pop(task_id, ()):
                         for rule in older_rules:
                             self._close_rule(older_window, rule["id"], older_end)
@@ -211,17 +253,17 @@ class CameraRuleWindows:
                     waiting_tasks.add(task_id)
                     continue
 
-                first_decision = len(decisions)
-                for rule, (evidence, _) in zip(rules, results, strict=True):
+                for rule, (evidence, gate_dependent) in zip(rules, results, strict=True):
                     rule_id = rule["id"]
                     pending = self._close_rule(window, rule_id, end)
                     if pending is not None and guards_observed and evidence is not None:
+                        if not has_match and gate_dependent:
+                            gate_exit_decisions.setdefault(task_id, []).append(len(decisions))
                         decisions.append(CameraRuleDecision(
-                            pending.plan, rule, bounds[0], evidence, pending.contexts
+                            pending.plan, rule, bounds[0], evidence, pending.contexts,
+                            partial_enter_sources=partial_entries.get(rule_id, ()),
                         ))
-                if not has_match and any(gate_dependent for _, gate_dependent in results):
-                    gate_exit_decisions.setdefault(task_id, []).extend(range(first_decision, len(decisions)))
-                else:
+                if has_match or not any(gate_dependent for _, gate_dependent in results):
                     gate_exit_decisions.pop(task_id, None)
             if not window.pending and now_ms >= end + self._wait_ms:
                 del self._windows[bounds]

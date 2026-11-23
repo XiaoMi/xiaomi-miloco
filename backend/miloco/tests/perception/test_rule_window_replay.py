@@ -14,6 +14,7 @@ from miloco.perception.rule_window_replay import (
     SourceOutcome,
     replay_rule_window,
 )
+from miloco.perception.types import MatchedRule
 
 WINDOW_KEY = RuleWindowKey("rule", "revision-1", "grid", 9)
 PLAN = RuleWindowPlan(WINDOW_KEY, 30_000, frozenset({"camera-a", "camera-b"}))
@@ -243,7 +244,11 @@ async def test_only_sources_with_prior_video_are_waited_for(monkeypatch, peer_ha
         if not peer_has_video:
             both = sources | {"camera-a"}
             assert await coordinator.rules_for(bounds, "camera-a", both, load_rules) == []
-        coordinator.observe(bounds, [RecordedObservation(key, "camera-b", SourceOutcome.MATCHED, now_ms)], {})
+        hit = MatchedRule(rule_id="rule", reason="fixture", source_device_ids=["camera-b"])
+        coordinator.observe(
+            bounds, [RecordedObservation(key, "camera-b", SourceOutcome.MATCHED, now_ms)],
+            {"rule": CameraRuleContext(None, "", hit, lambda: True)},
+        )
         decisions = coordinator.take_decisions()
         if peer_has_video:
             assert decisions == []
@@ -251,13 +256,66 @@ async def test_only_sources_with_prior_video_are_waited_for(monkeypatch, peer_ha
             decision, = coordinator.take_decisions()
             assert decision.evidence.matched is None
             assert decision.evidence.unobserved_sources == {"camera-a"}
+            assert decision.partial_enter_sources == ("camera-b",)
         else:
             decision, = decisions
             assert decision.evidence.matched is True
             assert not decision.evidence.unobserved_sources
+            assert not decision.partial_enter_sources
             now_ms = 34_000
             assert await coordinator.rules_for((30_000, 33_000), "camera-a", both, load_rules) == [rule]
         assert decision.evidence.observed_by_source == (("camera-b", True),)
+    finally:
+        coordinator.discard()
+
+
+@pytest.mark.parametrize(
+    ("overrides", "hit_time_ms", "connection_current", "allowed"),
+    [
+        ({"mode": "event"}, 32_999, True, True),
+        ({"mode": "state"}, 32_999, True, True),
+        ({"direction": "enter"}, 32_999, True, True),
+        ({"direction": "session"}, 32_999, True, True),
+        ({"direction": "exit"}, 32_999, True, False),
+        ({"direction": "guard"}, 32_999, True, False),
+        ({"direction": "milestone"}, 32_999, True, False),
+        ({"direction": "enter", "duration_seconds": 12}, 32_999, True, False),
+        ({"direction": "enter"}, 33_000, True, False),
+        ({"direction": "enter"}, 32_999, False, False),
+    ],
+)
+async def test_partial_entry_requires_an_instant_enter_rule_and_current_hit_before_deadline(
+    monkeypatch, overrides, hit_time_ms, connection_current, allowed,
+):
+    now_ms = 31_000
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    coordinator = CameraRuleWindows(lambda: None)
+    bounds = (27_000, 30_000)
+    sources = frozenset({"camera-a", "camera-b"})
+    rule = {"id": "rule", "task_id": "task", **overrides}
+    load_rules = AsyncMock(return_value=([rule], []))
+    key = RuleWindowKey("rule", rule_revision(rule), f"{coordinator.grid_generation}:3000", 9)
+    match = MatchedRule(rule_id="rule", reason="fixture", source_device_ids=["camera-a"])
+
+    try:
+        await coordinator.rules_for(bounds, "camera-a", sources, load_rules)
+        now_ms = hit_time_ms
+        coordinator.observe(
+            bounds, [RecordedObservation(key, "camera-a", SourceOutcome.MATCHED, now_ms)],
+            {"rule": CameraRuleContext(None, "", match, lambda: connection_current)},
+        )
+        now_ms = 33_000
+        decisions = coordinator.take_decisions()
+        if rule.get("direction") == "guard":
+            assert not decisions
+        else:
+            decision, = decisions
+            assert decision.evidence.matched is None
+            assert decision.partial_enter_sources == (("camera-a",) if allowed else ())
+        assert not coordinator.take_decisions()
     finally:
         coordinator.discard()
 
@@ -339,6 +397,60 @@ async def test_gate_exit_only_extends_for_an_inflight_peer(monkeypatch, peer_sta
 
         decision, = coordinator.take_decisions()
         assert decision.evidence.matched is (False if peer_status == "completed" else None)
+        assert not coordinator.take_decisions()
+    finally:
+        coordinator.discard()
+
+
+@pytest.mark.parametrize("other_outcome", [None, SourceOutcome.NO_MATCH, SourceOutcome.MATCHED])
+async def test_new_hit_only_replaces_the_same_rules_confirmed_gate_exit(monkeypatch, other_outcome):
+    now_ms = 31_000
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    coordinator = CameraRuleWindows(lambda: None, gate_peer_budget_ms=20_000)
+    old, new = (27_000, 30_000), (30_000, 33_000)
+    sources = frozenset({"camera-a", "camera-b", "camera-c"})
+    entering = {"id": "entering", "task_id": "task", "condition": {"perceive_device_ids": ["camera-a"]}}
+    other = {"id": "other", "task_id": "task", "condition": {"perceive_device_ids": ["camera-c"]}}
+    load_rules = AsyncMock(return_value=([entering, other], []))
+
+    def observe(bounds, rule, did, outcome):
+        key = RuleWindowKey(
+            rule["id"], rule_revision(rule), f"{coordinator.grid_generation}:3000", bounds[0] // 3000,
+        )
+        coordinator.observe(bounds, [RecordedObservation(key, did, outcome, now_ms)], {})
+        coordinator.finish(bounds, did)
+
+    try:
+        for did in sources:
+            await coordinator.rules_for(old, did, sources, load_rules)
+        observe(old, entering, "camera-a", SourceOutcome.GATE_SKIPPED)
+        observe(old, other, "camera-c", SourceOutcome.GATE_SKIPPED)
+        assert not coordinator.take_decisions()
+
+        now_ms = 34_000
+        await coordinator.rules_for(new, "camera-a", sources, load_rules)
+        observe(new, entering, "camera-a", SourceOutcome.MATCHED)
+        if other_outcome is not None:
+            await coordinator.rules_for(new, "camera-c", sources, load_rules)
+            observe(new, other, "camera-c", other_outcome)
+
+        now_ms = 36_000
+        coordinator.report_processed(old, "camera-b", lambda: True)
+        coordinator.finish(old, "camera-b")
+        observed = [
+            (decision.rule["id"], decision.plan.window_end_ms, decision.evidence.matched)
+            for decision in coordinator.take_decisions()
+            if decision.evidence.matched is not None
+        ]
+        expected = [("entering", new[1], True)]
+        if other_outcome is not SourceOutcome.MATCHED:
+            expected.insert(0, ("other", old[1], False))
+        if other_outcome is not None:
+            expected.append(("other", new[1], other_outcome is SourceOutcome.MATCHED))
+        assert observed == expected
         assert not coordinator.take_decisions()
     finally:
         coordinator.discard()

@@ -403,6 +403,104 @@ async def test_new_camera_hit_passes_static_exit_wait_with_guard_and_one_action(
         windows.discard()
 
 
+@pytest.mark.parametrize("guard_status", ["matched", "negative", "missing", "no_source"])
+async def test_partial_camera_enter_requires_a_current_guard_and_only_applies_hits(
+    proxy_with_runner, mock_miot_proxy, mock_log_repo, monkeypatch, guard_status,
+):
+    proxy, runner, _ = proxy_with_runner
+    session = _make_state_rule("a-partial-session", ["cam_A", "cam_B", "cam_C"])
+    guard = Rule(
+        id="z-guard", name="guard", task_id=session.task_id, mode=RuleMode.EVENT,
+        direction=RuleDirection.GUARD, condition=RuleCondition(perceive_device_ids=["cam_G"], query="前提满足"),
+    )
+    task_machine = TaskStateMachine(is_condition_satisfied=runner.is_condition_satisfied, dispatch_action=MagicMock())
+    runner.attach_state_machine(task_machine)
+    for rule in (session, guard):
+        runner.add_rule(rule)
+    runner.set_task_actions(session.task_id, {
+        "on_enter_actions": [action.model_dump() for action in session.on_enter_actions],
+        "on_exit_actions": [action.model_dump() for action in session.on_exit_actions],
+    })
+    task_machine.register_task(
+        session.task_id, derive_directions((rule.id, rule.resolved_direction.value) for rule in (session, guard)),
+    )
+    # A previously true guard must not stand in for a false or missing camera observation.
+    await runner.update_state(guard.id, "cam_G", True, "prior guard")
+    proxy._apply_camera_window = AsyncMock(wraps=runner.apply_camera_window)
+    processor = PipelineProcessor(MagicMock(), proxy, mock_log_repo)
+    now_ms = 31_000
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    windows = processor._camera_rules = CameraRuleWindows(lambda: None)
+    load_rules = AsyncMock(return_value=([session.model_dump(), guard.model_dump()], []))
+    sources = frozenset({"cam_A", "cam_B", "cam_C"})
+    if guard_status != "no_source":
+        sources |= {"cam_G"}
+
+    def observe(bounds, rule, did, outcome):
+        key = RuleWindowKey(rule.id, rule_revision(rule.model_dump()), f"{windows.grid_generation}:3000", bounds[0] // 3000)
+        match = None
+        if outcome is SourceOutcome.MATCHED:
+            match = MatchedRule(rule_id=rule.id, reason="fixture", source_device_ids=[did])
+        windows.observe(
+            bounds, [RecordedObservation(key, did, outcome, now_ms)],
+            {rule.id: CameraRuleContext(None, "", match, lambda: True)},
+        )
+        windows.finish(bounds, did)
+
+    async def prepare_window(bounds, main_outcome):
+        for did in sorted(sources):
+            await windows.rules_for(bounds, did, sources, load_rules)
+        observe(bounds, session, "cam_A", main_outcome)
+        observe(bounds, session, "cam_C", SourceOutcome.NO_MATCH)
+        windows.finish(bounds, "cam_B")
+        if guard_status in ("matched", "negative"):
+            guard_outcome = SourceOutcome.MATCHED if guard_status == "matched" else SourceOutcome.NO_MATCH
+            observe(bounds, guard, "cam_G", guard_outcome)
+        elif guard_status == "missing":
+            windows.finish(bounds, "cam_G")
+
+    try:
+        first = (27_000, 30_000)
+        await prepare_window(first, SourceOutcome.MATCHED)
+        now_ms = 32_999
+        await processor.commit_camera_rules()
+        mock_miot_proxy.set_device_properties.assert_not_awaited()
+        now_ms = 33_000
+        await processor.commit_camera_rules()
+        await runner.drain()
+        if guard_status != "matched":
+            mock_miot_proxy.set_device_properties.assert_not_awaited()
+            assert all(call.args[0] != session.id for call in proxy._apply_camera_window.await_args_list)
+            return
+
+        guard_call, enter_call = proxy._apply_camera_window.await_args_list
+        assert guard_call.args[0] == guard.id
+        assert enter_call.args[:3] == (session.id, session.model_dump(), {"cam_A": True})
+        mock_miot_proxy.set_device_properties.assert_awaited_once()
+
+        observe(first, session, "cam_B", SourceOutcome.MATCHED)
+        await processor.commit_camera_rules()
+        assert proxy._apply_camera_window.await_count == 2
+
+        for end, outcome in (
+            (33_000, SourceOutcome.MATCHED),
+            (36_000, SourceOutcome.NO_MATCH),
+            (39_000, SourceOutcome.NO_MATCH),
+        ):
+            now_ms = end + 1_000
+            await prepare_window((end - 3_000, end), outcome)
+            now_ms = end + 3_000
+            await processor.commit_camera_rules()
+        await runner.drain()
+        assert runner.is_condition_satisfied(session.id) is True
+        mock_miot_proxy.set_device_properties.assert_awaited_once()
+    finally:
+        windows.discard()
+
+
 async def test_camera_window_aggregates_source_swaps_and_rejects_old_rule_revision(
     proxy_with_runner, mock_miot_proxy,
 ):
@@ -453,6 +551,42 @@ async def test_camera_duration_counts_observations_across_one_missing_window(pro
 
     assert await apply(4_000) is TriggerOutcome.COUNTING
     assert await apply(12_000) is TriggerOutcome.FIRED
+    await runner.drain()
+    mock_miot_proxy.set_device_properties.assert_awaited_once()
+
+
+@pytest.mark.parametrize("start_in_camera_mode", [False, True])
+async def test_duration_keeps_samples_across_mode_switch_at_same_interval(
+    proxy_with_runner, mock_miot_proxy, monkeypatch, start_in_camera_mode,
+):
+    _, runner, _ = proxy_with_runner
+    interval = 4.0
+    monkeypatch.setattr(runner, "_sample_interval", interval)
+    rule = _make_state_rule("camera-duration-switch", ["cam_A"]).model_copy(
+        update={"duration_seconds": 12, "duration_ratio": 1.0},
+    )
+    runner.add_rule(rule)
+    runner.set_task_actions(rule.task_id, {"on_enter_actions": [action.model_dump() for action in rule.on_enter_actions]})
+
+    async def apply(round_id, camera_mode):
+        if camera_mode:
+            return await runner.apply_camera_window(
+                rule.id, rule.model_dump(), {"cam_A": True},
+                source_did="cam_A", context="fixture", room_name="hall", caption="",
+                device_name="", event_id=None,
+                window_end_unix_ms=int((round_id + 1) * interval * 1000), window_seconds=interval,
+            )
+        return await runner.update_state(rule.id, "cam_A", True, "fixture")
+
+    for round_id in (100, 101, 102):
+        with monkeypatch.context() as clock:
+            clock.setattr("miloco.rule.runner.time", SimpleNamespace(
+                time=lambda: round_id * interval, monotonic=time.monotonic,
+            ))
+            mode = start_in_camera_mode if round_id < 102 else not start_in_camera_mode
+            outcome = await apply(round_id, mode)
+        assert outcome is (TriggerOutcome.COUNTING if round_id < 102 else TriggerOutcome.FIRED)
+
     await runner.drain()
     mock_miot_proxy.set_device_properties.assert_awaited_once()
 
