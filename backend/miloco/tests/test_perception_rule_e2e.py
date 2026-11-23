@@ -608,6 +608,57 @@ async def test_camera_duration_counts_observations_across_one_missing_window(pro
     mock_miot_proxy.set_device_properties.assert_awaited_once()
 
 
+async def test_camera_duration_uses_same_candidate_sources_for_samples_and_session_edges(
+    proxy_with_runner, mock_miot_proxy, monkeypatch,
+):
+    _, runner, _ = proxy_with_runner
+    rule = _make_state_rule("camera-duration-sources", ["cam_A", "cam_B"]).model_copy(
+        update={"duration_seconds": 8, "duration_ratio": 1.0},
+    )
+    runner.add_rule(rule)
+    runner.set_task_actions(rule.task_id, {
+        "on_enter_actions": [action.model_dump() for action in rule.on_enter_actions],
+        "on_exit_actions": [action.model_dump() for action in rule.on_exit_actions],
+    })
+    monkeypatch.setattr(runner, "_sample_interval", 4.0)
+
+    async def apply(window_end_ms, states, source_did):
+        return await runner.apply_camera_window(
+            rule.id, rule.model_dump(), states,
+            source_did=source_did, context="fixture", room_name="hall", caption="",
+            device_name="", event_id=None, window_end_unix_ms=window_end_ms, window_seconds=4,
+        )
+
+    assert await apply(4_000, {"cam_A": False, "cam_B": True}, "cam_B") is TriggerOutcome.COUNTING
+    assert await apply(8_000, {"cam_A": False, "cam_B": True}, "cam_B") is TriggerOutcome.FIRED
+    await runner.drain()
+    mock_miot_proxy.set_device_properties.assert_awaited_once()
+
+    # B has disconnected and is no longer a candidate. A still supplies a complete window.
+    assert await apply(12_000, {"cam_A": False}, "cam_A") is TriggerOutcome.NOT_FIRED
+    assert runner.is_condition_satisfied(rule.id) is False
+    state = runner._state[rule.id]
+    assert state.exit_debounce_task is not None
+    await state.exit_debounce_task
+    await runner.drain()
+    assert mock_miot_proxy.set_device_properties.await_count == 2
+    assert state.sources["cam_B"].last_bool is True
+
+    assert await apply(16_000, {"cam_A": False}, "cam_A") is TriggerOutcome.COUNTING
+    assert await apply(20_000, {"cam_A": True}, "cam_A") is TriggerOutcome.COUNTING
+    assert await apply(24_000, {"cam_A": True}, "cam_A") is TriggerOutcome.FIRED
+    await runner.drain()
+    assert mock_miot_proxy.set_device_properties.await_count == 3
+    assert runner._sources_currently_true(rule.id) == ["cam_A"]
+
+    # A batch update restores the established carry-forward policy.
+    await runner.update_state(rule.id, "cam_A", False, "batch")
+    await runner.update_state(rule.id, "cam_A", False, "batch")
+    assert runner.is_condition_satisfied(rule.id) is True
+    assert runner._sources_currently_true(rule.id) == ["cam_B"]
+    mock_miot_proxy.set_device_properties.await_count == 3
+
+
 @pytest.mark.parametrize("start_in_camera_mode", [False, True])
 async def test_duration_keeps_samples_across_mode_switch_at_same_interval(
     proxy_with_runner, mock_miot_proxy, monkeypatch, start_in_camera_mode,

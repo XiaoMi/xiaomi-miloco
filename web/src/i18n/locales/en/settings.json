@@ -18,7 +18,6 @@
       "per_camera": "Per camera",
       "effective": "Active mode: {{mode}}",
       "unavailable": "Per-camera scheduling is not available on this server yet.",
-      "retry": "Inference is still running. Perception scheduling settings were not changed. Try again shortly.",
       "pending": "The scheduling mode was saved but is not active yet. Try applying the settings again shortly."
     },
     "windowSize": "Perception Window",
@@ -29,6 +28,7 @@
     "saveFailed": "Save failed",
     "partialSaveFailed": "Scheduler toggle saved, but perception settings failed to save. Please retry.",
     "restartFailed": "Settings saved, but engine restart failed. Please restart manually.",
+    "perceptionApplyDeferred": "Inference is still running. Perception settings could not be applied. Try again shortly.",
     "windowApplyPending": "The window length was saved but is not active yet. Try applying the settings again shortly.",
     "loadFailed": "Failed to load settings",
     "resetDefaults": "Restore Defaults",

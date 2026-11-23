@@ -18,7 +18,6 @@
       "per_camera": "按相机处理",
       "effective": "当前生效：{{mode}}",
       "unavailable": "服务端暂未开放按相机调度。",
-      "retry": "当前推理还没结束，感知调度设置未修改。请稍后再试。",
       "pending": "调度模式已保存，尚未生效。请稍后再次应用设置。"
     },
     "windowSize": "感知窗口",
@@ -29,6 +28,7 @@
     "saveFailed": "保存失败",
     "partialSaveFailed": "调度开关已保存，但感知设置保存失败，请重试",
     "restartFailed": "设置已保存，但引擎重启失败，请手动重启",
+    "perceptionApplyDeferred": "推理还没结束，本次感知设置未应用。请稍后重试。",
     "windowApplyPending": "窗长已保存，尚未生效。请稍后再次应用设置。",
     "loadFailed": "加载设置失败",
     "resetDefaults": "恢复默认设置",

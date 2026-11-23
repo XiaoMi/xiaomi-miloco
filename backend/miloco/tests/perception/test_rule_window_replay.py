@@ -323,8 +323,9 @@ async def test_partial_entry_requires_an_instant_enter_rule_and_current_hit_befo
 @pytest.mark.parametrize(
     "scenario",
     [
-        "on_time", "late", "coalesced", "delayed_delivery", "late_start", "expired", "at_cap", "delayed_drain",
-        "failed", "negative", "stale", "exit_rule", "guard_rule", "duration_rule",
+        "on_time", "late", "coalesced", "delayed_delivery", "late_admission",
+        "late_start", "expired", "at_cap", "delayed_drain", "failed", "negative",
+        "stale", "exit_rule", "guard_rule", "duration_rule",
     ],
 )
 async def test_instant_entry_accepts_only_started_inference_hits_within_grace(monkeypatch, scenario):
@@ -354,6 +355,8 @@ async def test_instant_entry_accepts_only_started_inference_hits_within_grace(mo
     try:
         if scenario in ("on_time", "late", "coalesced"):
             await coordinator.rules_for(bounds, "camera-b", sources, load_rules)
+        if scenario in ("late_admission", "expired", "at_cap", "delayed_drain"):
+            now_ms = 32_999
         if scenario != "late_start":
             await coordinator.rules_for(bounds, "camera-a", sources, load_rules)
         if scenario == "on_time":
@@ -376,9 +379,14 @@ async def test_instant_entry_accepts_only_started_inference_hits_within_grace(mo
                 assert not at_cutoff
 
         if scenario == "delayed_drain":
-            now_ms = 35_999
+            now_ms = 38_998
             record()
-        now_ms = 36_000 if scenario in ("expired", "at_cap", "delayed_drain") else 34_000
+        if scenario in ("expired", "at_cap", "delayed_drain"):
+            now_ms = 39_000
+        elif scenario == "late_admission":
+            now_ms = 38_998
+        else:
+            now_ms = 34_000
         if scenario == "failed":
             coordinator.finish(bounds, "camera-a")
         elif scenario == "delayed_delivery":
@@ -386,7 +394,7 @@ async def test_instant_entry_accepts_only_started_inference_hits_within_grace(mo
         elif scenario not in ("expired", "delayed_drain"):
             record(SourceOutcome.NO_MATCH if scenario == "negative" else SourceOutcome.MATCHED)
         decisions = coordinator.take_decisions()
-        if scenario in ("late", "coalesced", "delayed_delivery"):
+        if scenario in ("late", "coalesced", "delayed_delivery", "late_admission"):
             decision, = decisions
             assert decision.partial_enter_sources == ("camera-a",)
             assert decision.evidence.matched is None

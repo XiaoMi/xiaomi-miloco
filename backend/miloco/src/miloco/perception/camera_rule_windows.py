@@ -347,7 +347,8 @@ class CameraRuleWindows:
         self, plan: RuleWindowPlan, window: _Window, evidence: RuleWindowEvidence,
         guard_evidence: tuple[CameraGuardEvidence, ...], now_ms: int,
     ) -> _LateEnter | None:
-        deadline_ms = plan.window_end_ms + self._inference_budget_ms
+        # A candidate admitted just before the cutoff still has its own inference budget.
+        deadline_ms = plan.deadline_ms + self._inference_budget_ms
         if plan.structural_single_source or not plan.deadline_ms <= now_ms < deadline_ms:
             return None
         sources = frozenset(
@@ -457,10 +458,7 @@ class CameraRuleWindows:
         deadlines = [
             deadline
             for _, end in self._windows
-            for deadline in (
-                end, end + self._wait_ms, end + self._inference_budget_ms,
-                end + self._wait_ms + self._inference_budget_ms,
-            )
+            for deadline in (end, end + self._wait_ms, end + self._wait_ms + self._inference_budget_ms)
             if deadline > now_ms
         ]
         if deadlines:

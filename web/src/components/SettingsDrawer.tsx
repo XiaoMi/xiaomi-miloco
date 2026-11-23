@@ -210,7 +210,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
       if (!perceptionPending) onClose();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && error.message === "schedule_stop_deferred") {
-        toast(t("settings.perceptionSchedule.retry"), "warn");
+        toast(t("settings.perceptionApplyDeferred"), "warn");
         return;
       }
       // 部分成功(开关已存、感知失败)与全败区分:前者 schedulerDirty 已随

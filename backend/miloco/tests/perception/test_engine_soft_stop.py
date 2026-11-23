@@ -19,11 +19,14 @@ import asyncio
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.engine.resource_validator import (
     EngineReadiness,
     ValidationResult,
 )
+from miloco.perception.processor import PipelineProcessor
+from miloco.perception.service import PerceptionService
 
 
 def _make_proxy(engine=None) -> PerceptionEngineProxy:
@@ -125,3 +128,56 @@ async def test_soft_stop_waits_for_inflight_perceive():
     assert order.index("perceive_end") < order.index("stop_done")
     assert proxy.perception_engine is None
     engine.close.assert_awaited_once()
+
+
+async def test_soft_stop_finishes_transition_after_request_cancellation():
+    closing = asyncio.Event()
+    release = asyncio.Event()
+    start_requested = asyncio.Event()
+    order = []
+
+    async def close():
+        closing.set()
+        await release.wait()
+        order.append("closed")
+
+    def start():
+        order.append("started")
+
+    engine = MagicMock()
+    engine.close = AsyncMock(side_effect=close)
+    proxy = _make_proxy(engine=engine)
+    collector = MagicMock()
+    processor = PipelineProcessor(collector, proxy, MagicMock())
+    runner = MagicMock(start=AsyncMock(side_effect=start))
+    service = PerceptionService(collector, processor, runner, MagicMock(), MagicMock())
+
+    async def request_start():
+        start_requested.set()
+        await service.start_engine()
+
+    with _patched_unconfigured():
+        stop_request = asyncio.create_task(service.stop_to_unconfigured())
+        try:
+            await asyncio.wait_for(closing.wait(), 1)
+            stop_request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await stop_request
+
+            start_request = asyncio.create_task(request_start())
+            try:
+                await asyncio.wait_for(start_requested.wait(), 1)
+                assert not processor.accepting_inference
+                runner.start.assert_not_awaited()
+            finally:
+                release.set()
+                await asyncio.wait_for(start_request, 1)
+        finally:
+            release.set()
+            await asyncio.gather(stop_request, return_exceptions=True)
+
+    assert order == ["closed", "started"]
+    engine.close.assert_awaited_once()
+    assert not proxy.ready
+    assert proxy.perception_engine is None
+    assert processor.accepting_inference

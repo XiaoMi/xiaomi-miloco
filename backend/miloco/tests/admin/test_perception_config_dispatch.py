@@ -165,6 +165,19 @@ def test_available_camera_mode_applies_and_reverts_after_deferred_drain(client, 
     )
     assert svc.apply_schedule_config.await_args.kwargs == {"restart_window": True, "omni_fps": 2}
 
+    busy = True
+    saved = config_path.read_bytes()
+    window_request = {"window_size": 13}
+    response = c.put("/api/admin/perception-config", json=window_request)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "schedule_stop_deferred"
+    assert config_path.read_bytes() == saved
+
+    busy = False
+    applied = c.put("/api/admin/perception-config", json=window_request).json()["data"]
+    assert (applied["window_size"], applied["schedule_effective"], applied["restart_ok"]) == (13, "per_camera", True)
+    assert svc.apply_schedule_config.await_args.kwargs == {"restart_window": True, "omni_fps": None}
+
     disabled = c.put("/api/admin/perception-config", json={"schedule_mode": "batch"}).json()["data"]
     assert (disabled["schedule_mode"], disabled["schedule_effective"], disabled["restart_ok"]) == (
         "batch", "batch", True,

@@ -92,9 +92,11 @@ class PerceptionService:
 
     async def stop_to_unconfigured(self) -> None:
         """Close the engine after current work finishes, keeping the runner active."""
-        async with self._lifecycle_lock:
+        async def soft_stop() -> None:
             async with self._pipeline.drain_inference(bounded=False):
                 await self._pipeline.stop_to_unconfigured()
+
+        await self._run_lifecycle(soft_stop)
 
     @property
     def window_size_effective(self) -> int | None:
