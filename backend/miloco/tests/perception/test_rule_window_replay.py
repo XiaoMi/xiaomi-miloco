@@ -224,6 +224,79 @@ async def test_configured_window_wait_accepts_delayed_peer_without_delaying_sing
         coordinator.discard()
 
 
+@pytest.mark.parametrize("peer_connected", [False, True])
+async def test_only_connected_rule_sources_are_waited_for(monkeypatch, peer_connected):
+    now_ms = 31_000
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    coordinator = CameraRuleWindows(lambda: None)
+    bounds = (27_000, 30_000)
+    sources = frozenset({"camera-a", "camera-b"} if peer_connected else {"camera-b"})
+    rule = {"id": "rule", "task_id": "task", "condition": {"perceive_device_ids": ["camera-a", "camera-b"]}}
+    key = RuleWindowKey("rule", rule_revision(rule), f"{coordinator.grid_generation}:3000", 9)
+
+    try:
+        assert await coordinator.rules_for(bounds, "camera-b", sources, AsyncMock(return_value=([rule], []))) == [rule]
+        coordinator.observe(bounds, [RecordedObservation(key, "camera-b", SourceOutcome.MATCHED, now_ms)], {})
+        decisions = coordinator.take_decisions()
+        if peer_connected:
+            assert decisions == []
+            now_ms = 33_000
+            decision, = coordinator.take_decisions()
+            assert decision.evidence.matched is None
+            assert decision.evidence.unobserved_sources == {"camera-a"}
+        else:
+            decision, = decisions
+            assert decision.evidence.matched is True
+            assert not decision.evidence.unobserved_sources
+        assert decision.evidence.observed_by_source == (("camera-b", True),)
+    finally:
+        coordinator.discard()
+
+
+@pytest.mark.parametrize("peer_status", ["processed", "stale", "late", "missing"])
+async def test_single_source_gate_skip_needs_current_peer_in_same_window(monkeypatch, peer_status):
+    now_ms = 31_000
+    monkeypatch.setattr(
+        "miloco.perception.camera_rule_windows.time",
+        SimpleNamespace(time_ns=lambda: 1_700_000_000_000_000_000, monotonic_ns=lambda: now_ms * 1_000_000),
+    )
+    coordinator = CameraRuleWindows(lambda: None)
+    bounds = (27_000, 30_000)
+    sources = frozenset({"camera-a", "camera-b"})
+    rule = {"id": "rule", "task_id": "task", "condition": {"perceive_device_ids": ["camera-a"]}}
+    load_rules = AsyncMock(return_value=([rule], []))
+    key = RuleWindowKey("rule", rule_revision(rule), f"{coordinator.grid_generation}:3000", 9)
+
+    try:
+        assert await coordinator.rules_for(bounds, "camera-a", sources, load_rules) == [rule]
+        assert await coordinator.rules_for(bounds, "camera-b", sources, load_rules) == []
+        coordinator.observe(bounds, [RecordedObservation(key, "camera-a", SourceOutcome.GATE_SKIPPED, now_ms)], {})
+        assert coordinator.take_decisions() == []
+
+        now_ms = 33_001 if peer_status == "late" else 32_000
+        if peer_status != "missing":
+            coordinator.report_processed(bounds, "camera-b", lambda: peer_status != "stale")
+        decisions = coordinator.take_decisions()
+        if peer_status == "processed":
+            decision, = decisions
+            assert decision.evidence.observed_by_source == (("camera-a", False),)
+            assert decision.evidence.matched is False
+        else:
+            if peer_status != "late":
+                assert decisions == []
+                now_ms = 33_000
+                decisions = coordinator.take_decisions()
+            decision, = decisions
+            assert not decision.evidence.observed_by_source
+            assert decision.evidence.matched is None
+        assert coordinator.take_decisions() == []
+    finally:
+        coordinator.discard()
+
+
 async def test_concurrent_rule_load_keeps_first_window_snapshot():
     coordinator = CameraRuleWindows(lambda: None)
     end = (time.monotonic_ns() // 1_000_000 // 3000) * 3000

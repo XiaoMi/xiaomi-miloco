@@ -44,7 +44,8 @@ def _response(content: str, *, finish_reason: str = "stop") -> dict:
         '{"matched_rules": [false]}',
         '{"matched_rules": [{"rule_name": "Known rule", "reason": "seen"}]}',
         '{"matched_rules": [{"rule_name": "Known rule", "reason": "none", "hit": "false"}]}',
-        '{"matched_rules": [{"rule_name": "Known rule", "hit": false}]}',
+        '{"matched_rules": [{"rule_name": "Known rule", "hit": false, "reason": 42}]}',
+        '{"matched_rules": [{"rule_name": "  ", "hit": true}]}',
         '{"matched_rules": [{"rule_name": "Unknown", "reason": "unknown", "hit": false}]}',
         '{"matched_rules": [{"rule_name": "Known rule", "reason": "seen", "hit": true}',
         '{"matched_rules": [{"rule_name": "Known rule", "reason": "seen", "hit": true},'
@@ -53,6 +54,24 @@ def _response(content: str, *, finish_reason: str = "stop") -> dict:
 )
 def test_invalid_shadow_rule_array_is_not_an_empty_hit_set(content):
     assert parse_shadow_rule_hits(_response(content), {"Known rule": "rule-a"}) is None
+
+
+def test_shadow_evidence_accepts_unique_rule_name_without_prefix_or_reason():
+    raw = _response('{"matched_rules": [{"rule_name": "Known rule", "hit": true}]}')
+    rule_names = {"[task-a] Known rule": "rule-a", "[task-b] Another rule": "rule-b"}
+    assert parse_shadow_rule_hits(raw, rule_names) == frozenset({"rule-a"})
+    assert [match.rule_id for match in parse_omni_response(raw, rule_names).matched_rules] == ["rule-a"]
+
+
+def test_shadow_evidence_rejects_ambiguous_aliases_and_duplicate_rule_ids():
+    raw = _response('{"matched_rules": [{"rule_name": "Known rule", "hit": true}]}')
+    ambiguous_names = {"[task-a] Known rule": "rule-a", "[task-b] Known rule": "rule-b"}
+    assert parse_shadow_rule_hits(raw, ambiguous_names) is None
+    duplicate = _response(
+        '{"matched_rules": [{"rule_name": "[task-a] Known rule", "hit": true},'
+        ' {"rule_name": "Known rule", "hit": false}]}'
+    )
+    assert parse_shadow_rule_hits(duplicate, {"[task-a] Known rule": "rule-a"}) is None
 
 
 def test_legacy_parser_stays_permissive_but_shadow_evidence_requires_explicit_boolean():

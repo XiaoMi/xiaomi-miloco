@@ -128,6 +128,8 @@ def _record_rule_response(
         and len(rule_name_to_id) == len(context.rule_conditions)
     ):
         hits = parse_shadow_rule_hits(raw_response, rule_name_to_id)
+        if hits is None and rule_name_to_id:
+            logger.debug("Rule evidence skipped: model did not return a complete and unambiguous matched_rules array")
     rule_shadow.record(device.device_id, RuleResponseSample(time.monotonic_ns() // 1_000_000, hits))
 
 

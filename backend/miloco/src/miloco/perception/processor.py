@@ -732,6 +732,8 @@ class PipelineProcessor:
             ):
                 did = camera_window.meta.did
                 bounds = (camera_window.window_start_ms, camera_window.window_end_ms)
+                if not result.skipped:
+                    camera_rules.report_processed(bounds, did, source_current)
                 observations = tuple(
                     observation for observation in rule_shadow.observations(
                         grid_generation=camera_rules.grid_generation,

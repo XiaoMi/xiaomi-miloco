@@ -138,7 +138,7 @@ class PerCameraScheduler(Generic[ResultT]):
                 status = "completed"
             except Exception:
                 logger.exception(
-                    "Camera window inference failed for %s", job.connection.did
+                    "Camera window inference failed for %s", safe_log(job.connection.did)
                 )
                 status = "failed"
         if loop.time() >= job.deadline:
@@ -178,4 +178,4 @@ class PerCameraScheduler(Generic[ResultT]):
                 )
             )
         except Exception:
-            logger.exception("Camera window receiver failed for %s", job.connection.did)
+            logger.exception("Camera window receiver failed for %s", safe_log(job.connection.did))

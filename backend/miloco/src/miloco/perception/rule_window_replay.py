@@ -69,6 +69,7 @@ def replay_rule_window(
     observations: Iterable[RecordedObservation],
     *,
     as_of_ms: int,
+    peer_processed: bool = False,
 ) -> RuleWindowEvidence | None:
     """Return closed evidence, or None while still waiting.
 
@@ -110,12 +111,12 @@ def replay_rule_window(
         for source_id, outcome in terminal_by_source.items()
         if outcome is SourceOutcome.UNOBSERVED
     )
-    # A wholly gated batch never advances rules. If a peer returned usable
-    # evidence, a source skipped by the gate contributes the legacy false state.
+    # A wholly gated batch never advances rules. If a peer completed inference,
+    # a source skipped by the gate contributes the legacy false state.
     model_observed = (SourceOutcome.MATCHED, SourceOutcome.NO_MATCH)
     observed_outcomes = (
         (*model_observed, SourceOutcome.GATE_SKIPPED)
-        if any(outcome in model_observed for outcome in terminal_by_source.values())
+        if peer_processed or any(outcome in model_observed for outcome in terminal_by_source.values())
         else model_observed
     )
     return RuleWindowEvidence(

@@ -55,7 +55,9 @@ class _PendingRule:
 class _Window:
     rules: list[dict]
     pending: dict[str, _PendingRule]
+    sources: frozenset[str]
     started_sources: set[str] = field(default_factory=set)
+    processed_sources: dict[str, tuple[int, Callable[[], bool]]] = field(default_factory=dict)
 
 
 class CameraRuleWindows:
@@ -94,24 +96,21 @@ class CameraRuleWindows:
                     if end <= self._closed_through.get(rule_id, -1):
                         continue
                     selectors = rule.get("condition", {}).get("perceive_device_ids") or []
-                    candidates = {source for source in sources if rule_selects_device(selectors, source)}
-                    unmatched = {
-                        selector for selector in selectors
-                        if not any(rule_selects_device([selector], source) for source in candidates)
-                    }
-                    expected = frozenset(candidates | unmatched)
+                    # Freeze connected sources. A connected but silent source
+                    # remains missing evidence until the window closes.
+                    candidates = frozenset(source for source in sources if rule_selects_device(selectors, source))
                     if not candidates:
                         continue
                     plan = RuleWindowPlan(
                         RuleWindowKey(rule_id, rule_revision(rule), f"{self.grid_generation}:{size}", start // size),
                         end,
-                        expected,
-                        structural_single_source=len(selectors) == len(expected) == 1,
+                        candidates,
+                        structural_single_source=len(selectors) == len(candidates) == 1,
                         wait_ms=self._wait_ms,
                     )
                     pending[rule_id] = _PendingRule(plan)
                     applicable_rules.append(rule)
-                window = self._windows[bounds] = _Window(applicable_rules, pending)
+                window = self._windows[bounds] = _Window(applicable_rules, pending, sources)
         window.started_sources.add(did)
         self._reschedule(time.monotonic_ns() // 1_000_000)
         return [
@@ -138,6 +137,16 @@ class CameraRuleWindows:
             pending.observations[observation.source_id] = observation
             if context := contexts.get(rule_id):
                 pending.contexts[observation.source_id] = context
+        self._wake()
+
+    def report_processed(
+        self, bounds: CameraBounds, did: str, connection_current: Callable[[], bool],
+    ) -> None:
+        window = self._windows.get(bounds)
+        if window is None or did not in window.sources:
+            return
+        received_at_ms = time.monotonic_ns() // 1_000_000
+        window.processed_sources.setdefault(did, (received_at_ms, connection_current))
         self._wake()
 
     def finish(self, bounds: CameraBounds, did: str) -> None:
@@ -209,7 +218,20 @@ class CameraRuleWindows:
             did = next(iter(plan.candidate_sources))
             if did not in window.started_sources:
                 observations.append(RecordedObservation(plan.key, did, SourceOutcome.UNOBSERVED, now_ms))
-        return replay_rule_window(plan, observations, as_of_ms=now_ms)
+        peer_processed = any(
+            did not in plan.candidate_sources and received_at_ms < plan.deadline_ms and is_current()
+            for did, (received_at_ms, is_current) in window.processed_sources.items()
+        )
+        evidence = replay_rule_window(plan, observations, as_of_ms=now_ms, peer_processed=peer_processed)
+        if (
+            evidence is not None and evidence.matched is None and not evidence.unobserved_sources
+            and not peer_processed and now_ms < plan.deadline_ms
+            and window.sources.difference(plan.candidate_sources)
+            and any(item.outcome is SourceOutcome.GATE_SKIPPED for item in observations)
+        ):
+            # Only a gate-skipped rule may need the batch-equivalent peer signal.
+            return None
+        return evidence
 
     def _reschedule(self, now_ms: int) -> None:
         if self._timer is not None:

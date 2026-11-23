@@ -80,10 +80,13 @@ def parse_shadow_rule_hits(
             not isinstance(rule, dict)
             or not isinstance(rule.get("rule_name"), str)
             or not isinstance(rule.get("hit"), bool)
-            or not isinstance(rule.get("reason"), str)
+            or not isinstance(rule.get("reason", ""), str)
         ):
             return None
-        rule_id = rule_name_to_id.get(rule["rule_name"])
+        name = rule["rule_name"]
+        if not name.strip():
+            return None
+        rule_id = _resolve_rule_name(name, rule_name_to_id, require_unique=True)
         if rule_id is None or rule_id in seen:
             return None
         seen.add(rule_id)
@@ -356,7 +359,9 @@ def _parse_caption(raw: Any) -> list[CaptionEntry]:
     return []
 
 
-def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | None":
+def _resolve_rule_name(
+    name: str, mapping: "dict[str, str] | None", *, require_unique: bool = False,
+) -> "str | None":
     """rule_name → rule_id(UUID)。``mapping is None``（调用方未提供映射，仅测试 / streaming
     benchmark 走此路）时原样返回 name（best-effort）；有映射（含空 dict=本轮零规则）但匹配
     不上时返回 None（丢弃，防 bogus rule_id 入下游）。容错模型对名称的轻微改写。"""
@@ -364,10 +369,11 @@ def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | No
         return name or None
     if name in mapping:
         return mapping[name]
-    for rn, rid in mapping.items():
-        if rn and (rn in name or name in rn):
-            return rid
-    return None
+    matches = (rid for rn, rid in mapping.items() if rn and (rn in name or name in rn))
+    first = next(matches, None)
+    if require_unique and next(matches, None) is not None:
+        return None
+    return first
 
 
 def _sanitize_for_log(s: str) -> str:
