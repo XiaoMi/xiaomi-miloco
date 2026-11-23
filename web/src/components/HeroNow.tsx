@@ -129,9 +129,8 @@ export function HeroNow({
       return a.channel - b.channel;
     };
     const sorted = [...scopeCameras].sort(byDidChannel);
-    // 不再前端截断:connected 集天然受后端 MAX_ENABLED_CAMERAS 约束(感知接入层按流路数
-    // 截断、只连前 N 路；主动 enable 超限也被 toggle_camera 挡下)，展示集即真实投喂集。
-    const streaming = sorted.filter((c) => c.connected);
+    // Keep selected streams mounted while the decoder subscription reconnects.
+    const streaming = sorted.filter((c) => c.inUse);
     const sset = new Set(streaming.map(key));
     const bench = sorted.filter((c) => !sset.has(key(c)));
     return { streamingCams: streaming, benchCams: bench };
