@@ -13,14 +13,21 @@ The perception loop reacts to two triggers:
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from miloco.config import get_settings
+from miloco.config.settings import PerceptionScheduleMode
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.perception import omni_probe_registry
 from miloco.perception.collect.collector import MultimodalCollector
 from miloco.perception.inference_worker import InferenceWorker
+from miloco.perception.per_camera_scheduler import PerCameraScheduler
 from miloco.perception.processor import PipelineProcessor
-from miloco.perception.schema import EngineState, PerceptionEngineStatus
+from miloco.perception.schema import (
+    CameraWindowSource,
+    EngineState,
+    PerceptionEngineStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,20 +50,64 @@ class PerceptionRunner:
         self._is_running = False
         self._perception_task: asyncio.Task | None = None
         self._sync_devices_task: asyncio.Task | None = None
-        self._window_ready = window_ready_event
+        self._window_ready = window_ready_event if window_ready_event is not None else asyncio.Event()
+        self._camera_scheduler: PerCameraScheduler | None = None
+        self._schedule_mode: PerceptionScheduleMode = "batch"
+        if get_settings().perception.schedule.mode == "per_camera" and self.schedule_available:
+            self._set_schedule_mode("per_camera")
 
-        # Persistent worker thread with a durable event loop for inference.
-        # Replaces the old ThreadPoolExecutor + asyncio.run() pattern that
-        # leaked threads via repeated default executor creation. Safe to
-        # stop() then start() again on this same instance — see its
-        # docstring for how it isolates each restart's thread/loop so a
-        # still-draining previous generation never blocks or races the new
-        # one.
         self._inference_worker = InferenceWorker(thread_name="perception-infer")
 
     @property
     def is_running(self) -> bool:
         return self._is_running
+
+    @property
+    def window_size_effective(self) -> int | None:
+        return self._collect_interval if self._is_running else None
+
+    @property
+    def schedule_available(self) -> bool:
+        return isinstance(self._collector.get_adapter("camera"), CameraWindowSource)
+
+    @property
+    def schedule_mode(self) -> PerceptionScheduleMode:
+        return self._schedule_mode
+
+    def _set_schedule_mode(self, mode: PerceptionScheduleMode) -> None:
+        adapter = None
+        if mode == "per_camera":
+            adapter = self._collector.get_adapter("camera")
+            if not isinstance(adapter, CameraWindowSource):
+                raise ValueError("camera scheduling requires a camera adapter")
+        if self._camera_scheduler is not None:
+            self._camera_scheduler.retire_results()
+        self._camera_scheduler = self._pipeline.set_camera_scheduler(adapter, self._window_ready.set)
+        self._schedule_mode = mode
+        self._window_ready.set()
+
+    async def apply_schedule_config(
+        self,
+        mode: PerceptionScheduleMode,
+        save: Callable[[], None],
+        *,
+        restart_window: bool,
+        omni_fps: int | None,
+    ) -> None:
+        async with self._pipeline.drain_inference():
+            save()
+            if restart_window and self._is_running:
+                self._pipeline.retire_results()
+                if self._camera_scheduler is not None:
+                    self._camera_scheduler.retire_results()
+                await self._finish_stop()
+                await self._finish_start()
+            if omni_fps is not None:
+                await self._pipeline.apply_omni_fps(omni_fps)
+            if mode != self._schedule_mode or (
+                mode == "per_camera" and (restart_window or omni_fps is not None)
+            ):
+                self._set_schedule_mode(mode)
 
     def status(self) -> PerceptionEngineStatus:
         sources = self._collector.get_all_active_sources()
@@ -88,6 +139,10 @@ class PerceptionRunner:
             logger.warning("[engine] 引擎已在运行，忽略重复启动")
             return
 
+        async with self._pipeline.drain_inference():
+            await self._finish_start()
+
+    async def _finish_start(self) -> None:
         self._pipeline.clear_flow_snapshots()
         self._is_running = True
 
@@ -95,11 +150,6 @@ class PerceptionRunner:
         # 不重读会导致「应用设置」改了 window_size 后引擎仍按旧值跑。
         self._collect_interval = get_settings().perception.collect.window_size
 
-        # Restart worker if it was stopped by a previous stop(). Safe even
-        # if that previous generation's thread hasn't exited yet (it may
-        # still be draining a non-preemptible ONNX call) — start() spins up
-        # a new generation on this same instance without waiting on the old
-        # one; see InferenceWorker's docstring.
         if not self._inference_worker.is_running:
             self._inference_worker.start()
 
@@ -121,7 +171,14 @@ class PerceptionRunner:
         logger.info("Perception engine started")
 
     async def stop(self) -> None:
-        """Stop the realtime perception loop and shutdown collector."""
+        """Stop the runner once accepted inference has finished."""
+        self._pipeline.retire_results()
+        if self._camera_scheduler is not None:
+            self._camera_scheduler.retire_results()
+        async with self._pipeline.drain_inference(allow_sealed=True):
+            await self._finish_stop()
+
+    async def _finish_stop(self) -> None:
         if not self._is_running:
             self._pipeline.clear_flow_snapshots()
             logger.warning("[engine] 引擎未运行，忽略重复停止")
@@ -147,14 +204,13 @@ class PerceptionRunner:
         # 自愈通道永久卡死。registry 是独立 module,不进 runner↔processor 循环链。
         await omni_probe_registry.cancel_inflight()
 
-        self._inference_worker.shutdown(wait=False)
-
         # 关闭 perception engine（含 IdentityEngine dispatcher worker 等）
         try:
             await self._pipeline.close()
         except Exception as e:  # noqa: BLE001
             logger.error("[engine] 关闭引擎失败 | %s", e)
         finally:
+            self._inference_worker.shutdown(wait=False)
             self._pipeline.clear_flow_snapshots()
 
         await self._collector.shutdown()
@@ -162,6 +218,8 @@ class PerceptionRunner:
 
     async def _tick(self) -> None:
         """Drain all ready windows and infer sequentially."""
+        if not self._pipeline.accepting_inference:
+            return
         # 每 tick 驱动一次 omni 熔断器自动探测:OPEN_RECOVERABLE(backoff 到期)或
         # OPEN_CONFIG(慢周期到期,防分类误判黑洞)时 spawn 一次后台 probe。无外部驱动时
         # probe_due 归零后状态永远不动,provider 恢复后感知也不会自愈,只能靠用户手动点
@@ -182,9 +240,14 @@ class PerceptionRunner:
         # (见 try_reinit);配合 STARTING 后移,未满足前置条件时零开销、零 event_log 噪声。
         self._pipeline.try_reinit_engine()
 
+        if (scheduler := self._camera_scheduler) is not None:
+            rules = await self._pipeline.get_realtime_rules()
+            if self._camera_scheduler is scheduler:
+                scheduler.schedule_ready(rules)
+            return
         result = await self._pipeline.process_realtime()
         # 缓冲区里可能积压了多个 ready 窗口，此处循环处理直到缓冲区清空
-        while result is not None and self._is_running:
+        while result is not None and self._is_running and self._camera_scheduler is None:
             result = await self._pipeline.process_realtime()
 
     async def _wait_for_trigger(self) -> None:
@@ -193,18 +256,16 @@ class PerceptionRunner:
         If a window_ready_event is provided, we race it against the timer.
         The event is cleared after waking so the next cycle can wait again.
         """
-        if self._window_ready is not None:
-            try:
-                await asyncio.wait_for(
-                    self._window_ready.wait(),
-                    timeout=self._collect_interval,
-                )
-            except TimeoutError:
-                pass
-            finally:
-                self._window_ready.clear()
-        else:
-            await asyncio.sleep(self._collect_interval)
+        try:
+            await asyncio.wait_for(
+                self._window_ready.wait(),
+                timeout=self._collect_interval,
+            )
+        except TimeoutError:
+            # With or without a signal, the next tick checks for ready windows.
+            pass
+        finally:
+            self._window_ready.clear()
 
     async def _perception_loop(self) -> None:
         """Perception loop — wakes on window-ready or timeout.

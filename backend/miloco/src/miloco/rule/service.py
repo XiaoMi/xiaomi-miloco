@@ -24,6 +24,7 @@ from miloco.database.rule_repo import RuleLogRepo, RuleRepo
 from miloco.database.task_repo import TaskRepo
 
 if TYPE_CHECKING:
+    from miloco.perception.schema import CameraExitWaitFactory
     from miloco.task_record.service import TaskRecordService
 from miloco.middleware.exceptions import (
     BusinessException,
@@ -1869,6 +1870,7 @@ class RuleService:
         device_name: str = "",
         cycle_source_states: dict[str, bool] | None = None,
         trigger_event_id: str | None = None,
+        camera_exit_wait: CameraExitWaitFactory | None = None,
     ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
@@ -1883,6 +1885,7 @@ class RuleService:
             caption=caption, device_name=device_name,
             cycle_source_states=cycle_source_states,
             trigger_event_id=trigger_event_id,
+            camera_exit_wait=camera_exit_wait,
         )
 
     # ---- Logs ----

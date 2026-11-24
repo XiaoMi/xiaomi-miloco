@@ -27,6 +27,7 @@
     "wakeFail": "Couldn't wake it up, try again later",
     "restartFailEngineRunning": "Couldn't restart, engine still running: {{msg}}",
     "restartFailEngineRunningNoMsg": "Couldn't restart, engine still running",
+    "restartDeferredRetry": "Inference is still running. Please try restarting again shortly.",
     "engineRestarted": "Engine restarted",
     "engineStoppedWakeManually": "Engine stopped, wake it manually: {{msg}}",
     "engineStoppedWakeManuallyNoMsg": "Engine stopped, wake it manually",

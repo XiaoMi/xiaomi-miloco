@@ -42,6 +42,7 @@ async def test_repeated_stop_still_clears_runtime_flow_snapshots():
     runner = PerceptionRunner.__new__(PerceptionRunner)
     runner._is_running = False
     runner._pipeline = MagicMock()
+    runner._camera_scheduler = None
 
     await runner.stop()
 

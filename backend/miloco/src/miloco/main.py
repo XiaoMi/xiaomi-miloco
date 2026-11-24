@@ -58,6 +58,7 @@ from miloco.observability.metrics_db import connect as obs_connect
 from miloco.observability.metrics_db import init_schema as obs_init_schema
 from miloco.observability.router import router as observability_router
 from miloco.perception.events_router import router as events_router
+from miloco.perception.inference_admission import InferenceDrainDeferred
 from miloco.perception.router import router as perception_router
 from miloco.person.router import router as person_router
 from miloco.pet.router import router as pet_router
@@ -489,23 +490,16 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     get_manager().deinit_iot_push()
     get_manager().state_store.stop()
 
-    # 关闭顺序遵循"生产者先于消费者":
-    #   perception engine (traces/events 主要生产者)
-    #   → agent_meta_poller (消费 enqueue,同时是 metrics_client 的生产者:record_agent_run)
-    #   → metrics_client (drain queue + close conn)
-    # 顺序反了会让 stop_engine 期间的 in-flight cycle 命中 client=None 静默丢 trace,
-    # 而这窗口恰好是排查"关机/重启卡住"最想看的最后几秒。
-    # wait_for 防 PPCS SDK C 扩展卡住 → 让后面 cleanup 来不及跑。uvicorn graceful
-    # 默认 30s 后强 kill 整个进程,这里 10s 给 perception 自己 stop 的窗口。
+    # Stop perception while the dispatcher and metrics consumer are still available.
     try:
         await asyncio.wait_for(
-            get_manager().perception_service.stop_engine(),
+            get_manager().perception_service.shutdown_engine(),
             timeout=10.0,
         )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "perception engine stop_engine timeout(10s),继续 cleanup 其它资源"
-        )
+    except TimeoutError:
+        logger.warning("Perception shutdown exceeded 10s; continuing process cleanup")
+    except InferenceDrainDeferred as exc:
+        logger.warning("Perception shutdown deferred; continuing process cleanup | %s", exc)
     except Exception as e:
         logger.error("Failed to stop perception engine: %s", e)
 

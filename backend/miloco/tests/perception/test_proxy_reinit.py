@@ -42,6 +42,7 @@ def _make_proxy(status: str, *, engine=None, message: str = "stale") -> Percepti
     p._last_captions = {}
     p._inference_worker = None
     p._engine_lock = asyncio.Lock()
+    p._camera_scheduling = False
     return p
 
 

@@ -175,6 +175,7 @@ async def test_runner_stop_cancels_inflight_omni_probe_tasks():
     runner._collector.shutdown = AsyncMock()
     runner._pipeline = MagicMock()
     runner._pipeline.close = AsyncMock()
+    runner._camera_scheduler = None
     runner._log_repo = MagicMock()
     runner._is_running = True
     runner._perception_task = None

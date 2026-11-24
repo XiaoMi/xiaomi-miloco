@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import logging
 import time
+from abc import abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -23,8 +25,33 @@ from miloco.perception.utils import snapshot_from_arrays
 logger = logging.getLogger(__name__)
 
 VisualArtifactKind = Literal["video", "images", "audio", "none"]
+CameraExitWait = Callable[[], Awaitable[bool]]
+CameraExitWaitFactory = Callable[[str], CameraExitWait | None]
 
 # ---- Internal pipeline data models (dataclass) ----
+
+
+@dataclass(frozen=True)
+class CameraConnection:
+    did: str
+    generation: int
+
+
+@runtime_checkable
+class CameraWindowSource(Protocol):
+    """A camera adapter that can supply windows for individual connections."""
+
+    @abstractmethod
+    def ready_connections(self) -> list[CameraConnection]:
+        """List connections with a window ready for inference."""
+
+    @abstractmethod
+    def is_current_connection(self, connection: CameraConnection) -> bool:
+        """Check whether the connection is still active after a reconnect."""
+
+    @abstractmethod
+    def take_ready_window(self, connection: CameraConnection) -> DeviceData | None:
+        """Take the latest ready window for the requested connection."""
 
 
 @dataclass

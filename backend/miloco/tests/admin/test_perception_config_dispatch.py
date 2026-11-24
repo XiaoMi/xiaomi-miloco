@@ -46,6 +46,9 @@ def client(tmp_path, monkeypatch):
     # mock service 层：两条入口都返 True（成功）。perception_service 是 Manager 上的
     # property（无 setter），故整体替换模块级 manager 全局，而非在实例上 setattr。
     svc = MagicMock()
+    svc.schedule_available = False
+    svc.schedule_mode = "batch"
+    svc.window_size_effective = None
     svc.apply_omni_fps_live = AsyncMock(return_value=True)
     svc.apply_config_restart = AsyncMock(return_value=True)
     fake_manager = MagicMock()
@@ -57,6 +60,34 @@ def client(tmp_path, monkeypatch):
     app.dependency_overrides[verify_token] = lambda: "test-user"
     yield TestClient(app), svc
     reset_settings()
+
+
+def test_schedule_can_be_enabled_and_disabled(client):
+    c, svc = client
+    svc.schedule_available = True
+
+    async def apply(mode, save, *, restart_window, omni_fps):
+        save()
+        svc.schedule_mode = mode
+
+    svc.apply_schedule_config = AsyncMock(side_effect=apply)
+    initial = c.get("/api/admin/perception-config").json()["data"]
+    assert initial["schedule_mode"] == "batch"
+
+    enabled = c.put("/api/admin/perception-config", json={"schedule_mode": "per_camera"})
+    assert enabled.status_code == 200
+    data = enabled.json()["data"]
+    assert (data["schedule_mode"], data["schedule_effective"]) == (
+        "per_camera", "per_camera",
+    )
+
+    disabled = c.put("/api/admin/perception-config", json={"schedule_mode": "batch"})
+    assert disabled.status_code == 200
+    data = disabled.json()["data"]
+    assert (data["schedule_mode"], data["schedule_effective"]) == (
+        "batch", "batch",
+    )
+    assert [call.args[0] for call in svc.apply_schedule_config.await_args_list] == ["per_camera", "batch"]
 
 
 def test_omni_fps_change_hot_reloads_not_restart(client):

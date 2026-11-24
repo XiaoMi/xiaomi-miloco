@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, Mapping
 
 if TYPE_CHECKING:
+    from miloco.perception.schema import CameraExitWait, CameraExitWaitFactory
     from miloco.task_record.service import TaskRecordService
 
 from miot.types import MIoTActionParam, MIoTGetPropertyParam, MIoTSetPropertyParam
@@ -270,6 +271,7 @@ class RuleRuntimeState:
     sources: dict[str, PerSourceState] = field(default_factory=dict)
     last_rule_state: bool = False
     exit_debounce_task: "asyncio.Task | None" = None
+    camera_exit_task: asyncio.Task[None] | None = None
     exit_debounce_at: float | None = None
     duration_window: "deque[int] | None" = None
     last_duration_round: int | None = None
@@ -278,6 +280,11 @@ class RuleRuntimeState:
     # 正常退出的那个感知周期不写事件, 父指针不能在退出那一刻现找, 只能这时存着。
     round_trigger_event_id: str | None = None
     action_cooldown: dict[tuple[str, str], float] = field(default_factory=dict)
+
+    def cancel_camera_exit(self) -> None:
+        if self.camera_exit_task is not None:
+            self.camera_exit_task.cancel()
+            self.camera_exit_task = None
 
 
 @dataclass
@@ -590,7 +597,10 @@ class RuleRunner:
         state = self._state.get(rule_id)
         if state is None or not state.sources:
             return None
-        return or3(src.last_bool for src in state.sources.values())
+        matched = or3(src.last_bool for src in state.sources.values())
+        if state.camera_exit_task is not None and matched is False:
+            return None
+        return matched
 
     def mark_source_unknown(self, rule_id: str, source_did: str) -> None:
         """把一个 source 置成未就绪。源层在设备离线 / 叶子被删 / 求值失败时调。
@@ -605,6 +615,7 @@ class RuleRunner:
         src.last_bool = None
         src.pending_exit = False
         state = self._state[rule_id]
+        state.cancel_camera_exit()
         pending = state.exit_debounce_task
         if pending is not None:
             if not pending.done():
@@ -846,6 +857,7 @@ class RuleRunner:
         state = self._state.pop(rule_id, None)
         if state is None:
             return
+        state.cancel_camera_exit()
         if state.exit_debounce_task is not None and not state.exit_debounce_task.done():
             state.exit_debounce_task.cancel()
 
@@ -928,6 +940,7 @@ class RuleRunner:
         skip_flicker: bool = False,
         extra_metadata: dict | None = None,
         trigger_event_id: str | None = None,
+        camera_exit_wait: CameraExitWaitFactory | None = None,
     ) -> TriggerOutcome:
         """Per-frame, per-source state report from the perception engine.
 
@@ -1052,6 +1065,20 @@ class RuleRunner:
                 return out(TriggerOutcome.NOT_FIRED)
             new_rule_state = aggregated
             old_rule_state = rule_state.last_rule_state
+            if rule_state.camera_exit_task is not None:
+                if not new_rule_state and camera_exit_wait is not None:
+                    return out(TriggerOutcome.NOT_FIRED)
+                rule_state.cancel_camera_exit()
+            if (
+                old_rule_state and not new_rule_state and camera_exit_wait is not None
+                and rule.resolved_direction is not RuleDirection.GUARD
+                and (wait := camera_exit_wait(rule_id)) is not None
+            ):
+                # Keep the prior edge while peers finish, without keeping the source's inference slot.
+                rule_state.camera_exit_task = asyncio.create_task(
+                    self._finish_camera_exit(rule, rule_state, source_did, context, wait)
+                )
+                return out(TriggerOutcome.NOT_FIRED)
             rule_state.last_rule_state = new_rule_state
 
             if old_rule_state == new_rule_state:
@@ -1088,6 +1115,27 @@ class RuleRunner:
                     return dur_outcome
                 return dispatch_outcome
             return out(dispatch_outcome)
+
+    async def _finish_camera_exit(
+        self, rule: Rule, state: RuleRuntimeState, source_did: str, context: str,
+        wait: CameraExitWait,
+    ) -> None:
+        try:
+            current = await wait()
+            if state.camera_exit_task is not asyncio.current_task():
+                return
+            state.camera_exit_task = None
+            if (
+                current and self._rules.get(rule.id) is rule and self._state.get(rule.id) is state
+                and self._is_effectively_enabled(rule) and self.is_condition_satisfied(rule.id) is False
+            ):
+                state.last_rule_state = False
+                await self._dispatch_event(rule, RuleEvent.EXITED, source_did, context)
+        except Exception:
+            logger.exception("Deferred camera exit failed | rule=%s", safe_log(rule.id))
+        finally:
+            if state.camera_exit_task is asyncio.current_task():
+                state.camera_exit_task = None
 
     # ---- Debug / manual trigger ----
 
@@ -1133,6 +1181,7 @@ class RuleRunner:
         src = self._ensure_source(rule_id, source_did)
         src.last_bool = True
         state = self._state[rule_id]
+        state.cancel_camera_exit()
         state.last_rule_state = True
 
         # Cancel any pending exit debounce (same as ENTERED in _dispatch_event)

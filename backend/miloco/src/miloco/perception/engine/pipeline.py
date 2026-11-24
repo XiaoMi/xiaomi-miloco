@@ -1044,6 +1044,7 @@ async def run_query_pipeline(
     last_captions: dict[str, str] | None = None,
     frame_index_offset: int = 0,
     label_lookup: dict[str, str] | None = None,
+    frame_indices: dict[str, int] | None = None,
 ) -> dict[str, QueryOutput]:
     """Active query pipeline: skip Gate, run Identity, Omni with query prompt.
 
@@ -1104,7 +1105,7 @@ async def run_query_pipeline(
             identity_packet = await run_identity(
                 gate_packet, config.identity, tracking_service,
                 identity_engine=identity_engine,
-                frame_index_offset=frame_index_offset,
+                frame_index_offset=frame_index_offset if frame_indices is None else frame_indices[did],
                 )
             # query 路径的 packet 只喂 build_query_prompt→omni, 同主路径口径下采到
             # omni_fps(否则 fps 提频后 on-demand 查询送 omni 的帧数翻倍、延迟上升)

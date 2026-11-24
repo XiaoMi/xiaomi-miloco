@@ -17,6 +17,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING
 
 from miloco.config import get_settings
@@ -42,6 +43,7 @@ from miloco.perception.snapshot_context import (
     ClipKind,
     OmniEventArtifacts,
     event_artifacts_scope,
+    get_event_artifacts,
 )
 from miloco.perception.types import (
     URGENCY_RANK,
@@ -69,6 +71,10 @@ def _publish_perception_event(event_type: str, source: str, payload: dict) -> No
     if client is None:
         return
     client.publish_event(event_type=event_type, source=source, payload=payload)
+
+
+def _can_publish(artifacts: OmniEventArtifacts | None) -> bool:
+    return artifacts is None or artifacts.can_publish()
 
 
 def _filter_suggestions_by_min_urgency(
@@ -117,6 +123,7 @@ def _log_dropped_suggestions(
 
 
 if TYPE_CHECKING:
+    from miloco.perception.inference_admission import InferenceAdmission
     from miloco.perception.types import BatchedSnapshot
     from miloco.rule.schema import TriggerOutcome
 
@@ -326,15 +333,17 @@ class PerceptionEngineProxy:
     """
 
     def __init__(self):
-        # 基础状态初始化
         self.perception_engine: PerceptionEngine | None = None
         self._status: str = "not_initialized"
         self._status_message: str = ""
         self._last_captions: dict[str, str] = {}
         self._inference_worker: InferenceWorker | None = None
+        self._inference_admission: InferenceAdmission | None = None
         # 软停(stop_to_unconfigured)与在飞 perceive 互斥:teardown 必等当前推理完成,
         # 持锁期间进来的 perceive 在 if not ready 守卫处安全跳过 → 杜绝 use-after-close。
         self._engine_lock = asyncio.Lock()
+        self._camera_locks: dict[str, asyncio.Lock] = {}
+        self._camera_scheduling = False
 
         self._init_engine()
 
@@ -386,6 +395,8 @@ class PerceptionEngineProxy:
             self.perception_engine = self._create_engine(
                 engine_cfg, omni_kwargs, identity_kwargs, models_dir
             )
+            if self._camera_scheduling:
+                self.perception_engine.set_camera_scheduling(True)
             self._status = "ready"
             self._status_message = ""  # reinit 成功时清掉上一轮的 "未配置" 残留消息
             mon.set_lifecycle(NodeName.ENGINE, Lifecycle.READY)
@@ -483,6 +494,21 @@ class PerceptionEngineProxy:
         if state and state.lifecycle == Lifecycle.STOPPED and self.perception_engine is not None:
             mon.set_lifecycle(NodeName.ENGINE, Lifecycle.READY)
 
+    def bind_inference_admission(self, admission: InferenceAdmission) -> None:
+        self._inference_admission = admission
+
+    def set_camera_scheduling(self, enabled: bool) -> None:
+        """Change resource locking only while the caller holds an inference drain."""
+        self._camera_scheduling = enabled
+        self._camera_locks.clear()
+        if self.perception_engine is not None:
+            self.perception_engine.set_camera_scheduling(enabled)
+
+    def _camera_lock(self, did: str) -> asyncio.Lock:
+        if did not in self._camera_locks:
+            self._camera_locks[did] = asyncio.Lock()
+        return self._camera_locks[did]
+
     def set_tierc_frame_provider(self, provider) -> None:
         """透传"按 did 取最近一帧"回调给底层引擎(tier_c 定期清 live 检测用)。"""
         if self.perception_engine is not None:
@@ -494,7 +520,11 @@ class PerceptionEngineProxy:
             return  # PREREQ_MISSING / FAILED — nothing to stop, preserve lifecycle
         get_monitor().set_lifecycle(NodeName.ENGINE, Lifecycle.STOPPED)
         try:
-            await self.perception_engine.close()
+            if self._inference_worker is not None and self._inference_worker.is_running:
+                await self.perception_engine.stop_tierc_clear()
+                await self._inference_worker.submit(self.perception_engine.close())
+            else:
+                await self.perception_engine.close()
         except AttributeError:
             pass
         except Exception as e:  # noqa: BLE001
@@ -583,14 +613,19 @@ class PerceptionEngineProxy:
         # asyncio.create_task(...) 都会挂在 worker loop 上，把 callback 派发回
         # 主 loop 后，副作用（如 RuleRunner._spawn_fire）创建的 task 才有稳定
         # 的执行环境。
+        artifacts = get_event_artifacts()
+
         def _on_main_loop(coro_fn):
             async def wrapped(*args, **kwargs):
+                async def deliver():
+                    if _can_publish(artifacts):
+                        await coro_fn(*args, **kwargs)
+
                 if asyncio.get_running_loop() is main_loop:
-                    return await coro_fn(*args, **kwargs)
-                fut = asyncio.run_coroutine_threadsafe(
-                    coro_fn(*args, **kwargs), main_loop
-                )
-                return await asyncio.wrap_future(fut)
+                    await deliver()
+                else:
+                    fut = asyncio.run_coroutine_threadsafe(deliver(), main_loop)
+                    await asyncio.wrap_future(fut)
 
             return wrapped
 
@@ -618,6 +653,8 @@ class PerceptionEngineProxy:
 
             svc = get_manager().rule_service
             for r in rules:
+                if not _can_publish(artifacts):
+                    return
                 # source_did 取真 did(pipeline 的 _run_device 注入,单元素列表);异常态空列表
                 # 兜底 "perception",保留 fallback 行为不抛 IndexError。
                 did = r.source_device_ids[0] if r.source_device_ids else "perception"
@@ -763,6 +800,8 @@ class PerceptionEngineProxy:
         trace_id: str | None = None,
         device_trace_ids: dict[str, str] | None = None,
         collect_flow_diagnostics: bool = False,
+        *,
+        window_rules: tuple[list[dict], list[str]] | None = None,
     ) -> tuple[
         RealtimePerceptionResult | None,
         set[str],
@@ -780,29 +819,21 @@ class PerceptionEngineProxy:
         artifacts.trace.调用方负责创建 OmniEventArtifacts() 传入(ContextVar 不跨
         executor 线程,只能显式透传 reference).
         """
-        # _engine_lock:与 stop_to_unconfigured 互斥,持锁期间引擎不会被 teardown 拔掉。
-        async with get_monitor().track_async(NodeName.ENGINE, "perceive") as _eng_h, self._engine_lock:
-            if not self.ready:
+        scheduled_camera = artifacts is not None and artifacts.scheduled_camera
+        lock = self._engine_lock
+        if scheduled_camera:
+            if not self._camera_scheduling or len(batch.devices) != 1 or window_rules is None:
+                raise ValueError("a scheduled window requires a single camera and its rule snapshot")
+            lock = self._camera_lock(next(iter(batch.devices)))
+        async with get_monitor().track_async(NodeName.ENGINE, "perceive") as _eng_h, lock:
+            if not self.ready or not _can_publish(artifacts):
                 _eng_h.skip_rolling()
                 return None, set(), {}, set(), None
 
-            from miloco.manager import get_manager
-
-            all_rules = await get_manager().rule_service.get_effectively_enabled_rules()
-            from miloco.rule.schema import OMNI_SOURCE_TYPE, RuleDirection
-
-            guard_needed_task_ids = {
-                rule.task_id
-                for rule in all_rules
-                if rule.task_id
-                and rule.resolved_direction
-                in (RuleDirection.ENTER, RuleDirection.SESSION)
-                and rule.resolved_source_type != OMNI_SOURCE_TYPE
-            }
-            rules = [rule.model_dump() for rule in omni_rules_only(all_rules)]
-            rules, skipped_task_ids = _filter_completed_event_rules(
-                rules, guard_needed_task_ids
-            )
+            if window_rules is None:
+                rules, skipped_task_ids = await self.get_realtime_rules()
+            else:
+                rules, skipped_task_ids = window_rules
 
             device_count = sum(1 for d in batch.devices.values() if d.has_data)
 
@@ -825,7 +856,7 @@ class PerceptionEngineProxy:
             # run_coroutine_threadsafe 调度(脱离下方 worker loop, 否则写库协程会在 worker
             # shutdown 时被 cancel, 候选永远写不进)。
             if self.perception_engine is not None:
-                self.perception_engine.set_main_loop(main_loop)
+                self.perception_engine.set_main_loop(main_loop, admission=self._inference_admission)
             # 协程在主线程创建（closure 捕获主线程 trace_id / artifacts 值），通过
             # InferenceWorker.submit() 调度到 worker 线程的持久 loop 上执行。
             # 持久 loop 只创建一次 default executor，消除反复建/拆线程的开销和泄漏。
@@ -876,6 +907,21 @@ class PerceptionEngineProxy:
                 collect_flow_diagnostics,
             )
 
+    async def get_realtime_rules(self) -> tuple[list[dict], list[str]]:
+        from miloco.manager import get_manager
+        from miloco.rule.schema import OMNI_SOURCE_TYPE, RuleDirection
+
+        all_rules = await get_manager().rule_service.get_effectively_enabled_rules()
+        guard_needed_task_ids = {
+            rule.task_id
+            for rule in all_rules
+            if rule.task_id
+            and rule.resolved_direction in (RuleDirection.ENTER, RuleDirection.SESSION)
+            and rule.resolved_source_type != OMNI_SOURCE_TYPE
+        }
+        rules = [rule.model_dump() for rule in omni_rules_only(all_rules)]
+        return _filter_completed_event_rules(rules, guard_needed_task_ids)
+
     async def on_demand_perceive(
         self, batch: PerceptionBatch, query: str,
         artifacts: OmniEventArtifacts,
@@ -885,7 +931,14 @@ class PerceptionEngineProxy:
         artifacts: omni 内部产出的 clip 字节和 trace 会写入
         artifacts.clips / artifacts.trace（同 realtime_perceive 语义）。
         """
-        async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h, self._engine_lock:
+        async with (
+            get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h,
+            self._engine_lock,
+            AsyncExitStack() as camera_locks,
+        ):
+            if self._camera_scheduling:
+                for did in sorted(batch.devices):
+                    await camera_locks.enter_async_context(self._camera_lock(did))
             if not self.ready:
                 _eng_h.skip_rolling()
                 return None
@@ -939,7 +992,7 @@ class PerceptionEngineProxy:
         时（直接调用本方法的单元测试 / 老调用方）行为与引入前一致：台账无链路、落库
         自己 mint id。
         """
-        if result.skipped:
+        if result.skipped or not _can_publish(artifacts):
             return
 
         from miloco.manager import get_manager
@@ -1002,6 +1055,8 @@ class PerceptionEngineProxy:
         # spawn 后异常照常上抛，与「persist 领先循环」时的传播语义一致。
         try:
             for matched_rule in result.matched_rules:
+                if not _can_publish(artifacts):
+                    return
                 did = matched_rule.source_device_ids[0] if matched_rule.source_device_ids else "perception"
                 if early_sent_rule_ids and (matched_rule.rule_id, did) in early_sent_rule_ids:
                     continue
@@ -1039,8 +1094,15 @@ class PerceptionEngineProxy:
                 matched_pairs |= early_sent_rule_ids.keys()
 
             enabled_set = set(svc.get_enabled_rule_ids())
+            camera_exit_args = (
+                {"camera_exit_wait": artifacts.camera_exit_wait}
+                if artifacts is not None and artifacts.camera_exit_wait is not None
+                else {}
+            )
             for did, rule_ids in result.device_rule_map.items():
                 for rule_id in rule_ids:
+                    if not _can_publish(artifacts):
+                        return
                     if (rule_id, did) in matched_pairs:
                         continue
                     # 防 race:下发后 rule 在 cycle 内被 disable
@@ -1056,6 +1118,7 @@ class PerceptionEngineProxy:
                         # 可以正好落在确认离开的周期（见 _dispatch_event EXITED 处的说明），
                         # 那次真派发同样要把本轮的事件 id 记进 rule state。
                         trigger_event_id=cycle_event_id,
+                        **camera_exit_args,
                     )
         finally:
             # 主循环里判定未完成的 rule 并入证据残缺（与早送 value=None 同归「未知」）。
@@ -1094,6 +1157,8 @@ class PerceptionEngineProxy:
         # result.suggestions 含本窗全部「新链」（dump/上下文已完整）。per-omni 下这些新链
         # 已在 _on_early_suggestions 逐相机早送过（id 记入 early_sent_sugg_ids）——此处据此
         # 跳过、避免对 Agent 重发；batch 模式无早送（集合为空）→ 全量上报。
+        if not _can_publish(artifacts):
+            return
         pending_suggestions = [
             s for s in result.suggestions
             if not (early_sent_sugg_ids and s.id in early_sent_sugg_ids)
@@ -1119,6 +1184,8 @@ class PerceptionEngineProxy:
                 )
 
         # handle speeches (skip those already sent via streaming early callback)
+        if not _can_publish(artifacts):
+            return
         speeches: list[Speech] = []
         for interaction in result.speeches:
             if interaction.needs_response and interaction.is_complete:
@@ -1136,7 +1203,6 @@ class PerceptionEngineProxy:
                 )
             # B2 单源真值:文本构造延迟到 drainer(builder 二次过滤对已过滤列表 idempotent)
             await dispatch_event("interaction", speeches, build_speeches_text)
-
 
 # ─── meaningful_events 后台持久化(异步,不阻塞 webhook 主路径)───────────
 

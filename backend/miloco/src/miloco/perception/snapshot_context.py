@@ -60,7 +60,9 @@ from typing import TYPE_CHECKING, Any, Literal
 from miloco.observability.context import get_device_context
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
+
+    from miloco.perception.schema import CameraExitWaitFactory
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +95,21 @@ class OmniEventArtifacts:
     gallery: dict[str, dict[str, bytes]] = field(default_factory=dict)
     ref_frames: dict[str, bytes] = field(default_factory=dict)
     crop_meta: dict[str, dict[str, Any]] = field(default_factory=dict)
+    publication_guard: Callable[[], bool] | None = None
+    scheduled_camera: bool = False
+    camera_exit_wait: CameraExitWaitFactory | None = None
+
+    def can_publish(self) -> bool:
+        return self.publication_guard is None or self.publication_guard()
 
 
 _artifacts: ContextVar[OmniEventArtifacts | None] = ContextVar(
     "artifacts", default=None
 )
+
+
+def get_event_artifacts() -> OmniEventArtifacts | None:
+    return _artifacts.get()
 
 
 @contextmanager
