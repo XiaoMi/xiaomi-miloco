@@ -97,8 +97,9 @@ class PerceptionService:
         )
 
     async def shutdown_engine(self) -> None:
-        self._pipeline.seal_inference()
-        await self.stop_engine()
+        # 关机接手排空，长时重启先让出生命周期锁。
+        self._engine.seal_inference()
+        await self._run_lifecycle(lambda: self._engine.stop(allow_sealed=True))
 
     async def stop_to_unconfigured(self) -> None:
         """等待在途推理结束后关闭引擎实例，回到「未配模型」态。

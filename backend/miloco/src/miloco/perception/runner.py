@@ -172,11 +172,17 @@ class PerceptionRunner:
 
         logger.info("Perception engine started")
 
-    async def stop(self) -> None:
+    async def stop(self, *, allow_sealed: bool = False) -> None:
         """Stop the runner once accepted inference has finished."""
-        self._retire_results()
-        async with self._pipeline.drain_inference(allow_sealed=True):
+        async with self._pipeline.drain_inference(allow_sealed=allow_sealed):
+            # 排空可能延期。拿到关闭资格后再清理结果和队列。
+            self._retire_results()
             await self._finish_stop()
+
+    def seal_inference(self) -> None:
+        self._pipeline.seal_inference()
+        if self._camera_scheduler is not None:
+            self._camera_scheduler.retire_results()
 
     async def restart(
         self, should_start: Callable[[], bool], *,

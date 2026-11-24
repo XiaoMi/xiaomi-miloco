@@ -26,12 +26,13 @@ class InferenceAdmission:
 
     def __init__(self) -> None:
         self._operations: set[asyncio.Task[Any]] = set()
-        self._draining = False
+        self._drain_ready: asyncio.Event | None = None
+        self._drain_allows_sealed = False
         self._sealed = False
 
     @property
     def accepting(self) -> bool:
-        return not (self._draining or self._sealed)
+        return self._drain_ready is None and not self._sealed
 
     @property
     def idle(self) -> bool:
@@ -44,6 +45,8 @@ class InferenceAdmission:
     def seal(self) -> None:
         """Keep admission closed for the rest of process shutdown."""
         self._sealed = True
+        if self._drain_ready is not None and not self._drain_allows_sealed:
+            self._drain_ready.set()
 
     def start(
         self, operation: Callable[[], Coroutine[Any, Any, OperationResult]]
@@ -67,17 +70,30 @@ class InferenceAdmission:
         self._operations.discard(owner)
         if not owner.cancelled():
             owner.exception()
+        if not self._operations and self._drain_ready is not None:
+            self._drain_ready.set()
 
     @asynccontextmanager
-    async def drain(self, timeout_s: float | None) -> AsyncIterator[bool]:
+    async def drain(
+        self, timeout_s: float | None, *, allow_sealed: bool = False,
+    ) -> AsyncIterator[bool]:
         """Close admission through the writer's body; True permits teardown."""
-        if self._draining:
+        if self._sealed and not allow_sealed:
+            raise InferenceAdmissionClosed("perception is shutting down")
+        if self._drain_ready is not None:
             raise InferenceAdmissionClosed("a drain is already in progress")
-        self._draining = True
+
+        ready = self._drain_ready = asyncio.Event()
+        self._drain_allows_sealed = allow_sealed
         try:
-            pending = self._operations.copy()
-            if pending:
-                _, pending = await asyncio.wait(pending, timeout=timeout_s)
-            yield not pending
+            if self._operations:
+                try:
+                    async with asyncio.timeout(timeout_s):
+                        await ready.wait()
+                except TimeoutError:
+                    pass
+            if self._sealed and not allow_sealed:
+                raise InferenceAdmissionClosed("perception is shutting down")
+            yield not self._operations
         finally:
-            self._draining = False
+            self._drain_ready = None

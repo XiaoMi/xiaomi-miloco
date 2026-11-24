@@ -590,6 +590,8 @@ function MainApp() {
               try {
                 if (await restartPerception()) {
                   toast(t("app.engineRestarted"), "ok");
+                } else {
+                  toast(t("app.engineStoppedWakeManually"), "warn");
                 }
               } catch (e) {
                 if (e instanceof ApiError && e.status === 409 && e.message.startsWith("restart_deferred:")) {

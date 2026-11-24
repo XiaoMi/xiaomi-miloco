@@ -29,6 +29,7 @@
     "restartFail": "Couldn't restart the engine",
     "restartDeferredRetry": "Inference is still running. Please try restarting again shortly.",
     "engineRestarted": "Engine restarted",
+    "engineStoppedWakeManually": "The engine has stopped. Select “Wake it up” to resume.",
     "stopFail": "Couldn't stop, try again later",
     "miotBound": "Xiaomi Home connected",
     "miotBoundScopeKept": "Xiaomi Home reconnected — your existing homes and cameras were kept",

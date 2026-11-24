@@ -851,7 +851,10 @@ class MiotService:
         try:
             from miloco.manager import get_manager
             from miloco.perception.engine_state import is_perception_enabled
-            from miloco.perception.inference_admission import InferenceDrainDeferred
+            from miloco.perception.inference_admission import (
+                InferenceAdmissionClosed,
+                InferenceDrainDeferred,
+            )
 
             perception_service = get_manager().perception_service
             # 尊重用户「休息」意图：被手动暂停时重新授权不自动拉起引擎，
@@ -868,6 +871,8 @@ class MiotService:
                     )
                 except InferenceDrainDeferred:
                     logger.warning("授权后感知排空超时，引擎未重启")
+                except InferenceAdmissionClosed:
+                    logger.info("感知正在关机，结束授权后的重启等待")
                 except Exception:
                     logger.exception("授权后感知引擎重启失败")
 

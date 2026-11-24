@@ -233,6 +233,59 @@ async def test_restart_cannot_start_after_process_shutdown_begins(perception_lif
     runner._finish_start.assert_not_awaited()
 
 
+async def test_shutdown_takes_over_background_auth_drain(perception_lifecycle, monkeypatch):
+    from miloco.miot.service import _background_tasks
+
+    service, runner, processor = perception_lifecycle
+    runner._camera_scheduler = MagicMock()
+    miot_service = _make_service(json.dumps(True))
+    manager = MagicMock(perception_service=service)
+    releases = [asyncio.Event(), asyncio.Event()]
+    owners = [processor._inference_admission.start(release.wait) for release in releases]
+    previous_tasks = set(_background_tasks)
+    shutdown_waiting = asyncio.Event()
+    stop = runner.stop
+    shutdown = None
+
+    async def stop_for_shutdown(*, allow_sealed):
+        shutdown_waiting.set()
+        await stop(allow_sealed=allow_sealed)
+
+    monkeypatch.setattr(runner, "stop", stop_for_shutdown)
+    monkeypatch.setattr("miloco.miot.service._AUTH_RESTART_SYNC_WAIT_S", 0)
+
+    try:
+        with patch("miloco.manager.get_manager", return_value=manager):
+            await miot_service._restart_perception_engine()
+        (restart,) = _background_tasks - previous_tasks
+        assert not processor.accepting_inference
+        runner._camera_scheduler.retire_results.reset_mock()
+
+        shutdown = asyncio.create_task(service.shutdown_engine())
+        await asyncio.wait_for(shutdown_waiting.wait(), timeout=1)
+        await asyncio.wait_for(restart, timeout=1)
+        runner._camera_scheduler.retire_results.assert_called_once()
+        runner._finish_start.assert_not_awaited()
+        runner._finish_stop.assert_not_awaited()
+        assert all(not owner.done() for owner in owners)
+
+        runner.seal_inference()
+        releases[0].set()
+        await owners[0]
+        await asyncio.sleep(0)
+        runner._finish_stop.assert_not_awaited()
+        releases[1].set()
+        await asyncio.wait_for(shutdown, timeout=1)
+        runner._finish_stop.assert_awaited_once()
+        assert not processor.accepting_inference
+    finally:
+        for release in releases:
+            release.set()
+        await asyncio.gather(*owners)
+        if shutdown is not None:
+            await shutdown
+
+
 async def test_reauth_drain_timeout_keeps_running_engine(perception_lifecycle, monkeypatch, caplog):
     service, runner, processor = perception_lifecycle
     miot_service = _make_service(json.dumps(True))
@@ -281,6 +334,42 @@ async def test_stop_endpoint_persists_paused_intent(real_db):
 
     fm.perception_service.stop_engine.assert_awaited_once()
     assert is_perception_enabled(KVRepo()) is False
+
+
+async def test_pause_deferred_preserves_inflight_results(real_db, perception_lifecycle, monkeypatch):
+    from miloco.database.kv_repo import KVRepo
+    from miloco.middleware.exceptions import HTTPException
+    from miloco.perception import router as perception_router
+    from miloco.perception.engine_state import is_perception_enabled
+
+    service, runner, processor = perception_lifecycle
+    runner._camera_scheduler = MagicMock()
+    manager = MagicMock(kv_repo=KVRepo(), perception_service=service)
+    release = asyncio.Event()
+    owner = processor._inference_admission.start(release.wait)
+    can_publish = processor._publication_guard()
+    monkeypatch.setattr("miloco.perception.processor._INFERENCE_DRAIN_TIMEOUT_S", 0)
+
+    try:
+        with patch.object(perception_router, "manager", manager):
+            with pytest.raises(HTTPException) as exc:
+                await perception_router.stop_engine()
+            assert exc.value.http_status == 409
+            assert is_perception_enabled(KVRepo()) is False
+            assert can_publish()
+            assert processor.accepting_inference
+            runner._camera_scheduler.retire_results.assert_not_called()
+            runner._finish_stop.assert_not_awaited()
+
+            release.set()
+            await owner
+            await perception_router.stop_engine()
+        runner._camera_scheduler.retire_results.assert_called_once()
+        runner._finish_stop.assert_awaited_once()
+        assert not can_publish()
+    finally:
+        release.set()
+        await owner
 
 
 async def test_start_endpoint_persists_enabled_intent(real_db):

@@ -29,6 +29,7 @@
     "restartFail": "重启引擎失败",
     "restartDeferredRetry": "当前推理还没结束，请稍后再重启引擎",
     "engineRestarted": "引擎已重启",
+    "engineStoppedWakeManually": "引擎已停止，如需恢复，请点「唤醒它」",
     "stopFail": "停止失败，稍后再试",
     "miotBound": "米家已绑定",
     "miotBoundScopeKept": "米家已重新绑定，原有家庭与摄像头设置已保留",

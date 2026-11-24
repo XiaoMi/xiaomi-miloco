@@ -446,14 +446,10 @@ class PipelineProcessor:
     async def drain_inference(
         self, *, allow_sealed: bool = False, bounded: bool = True, wait_seconds: float | None = None
     ) -> AsyncIterator[None]:
-        if self.inference_sealed and not allow_sealed:
-            raise InferenceAdmissionClosed("perception is shutting down")
         timeout_s = wait_seconds if wait_seconds is not None else _INFERENCE_DRAIN_TIMEOUT_S
         if not bounded:
             timeout_s = None
-        async with self._inference_admission.drain(timeout_s) as drained:
-            if self.inference_sealed and not allow_sealed:
-                raise InferenceAdmissionClosed("perception is shutting down")
+        async with self._inference_admission.drain(timeout_s, allow_sealed=allow_sealed) as drained:
             if not drained:
                 raise InferenceDrainDeferred("stop_deferred: perception inference is still running")
             yield
