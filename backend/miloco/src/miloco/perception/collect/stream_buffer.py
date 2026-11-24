@@ -32,6 +32,8 @@ class ReadyWindow:
     last_drain_observed_at: int
     last_drain_ready_depth_before: int
     last_drain_ready_depth_after: int
+    ready_at_monotonic_ms: int | None = None
+    drained_at_monotonic_ms: int | None = None
 
 
 @dataclass
@@ -51,6 +53,7 @@ class _TimeWindow:
     window_end_ms: int  # exclusive, ms
     tracks: dict[str, list[StreamFragment]] = field(default_factory=dict)
     tracks_seen: set[str] = field(default_factory=set)
+    ready_at_monotonic_ms: int | None = None
 
 
 class MultiTrackSyncBuffer:
@@ -138,6 +141,7 @@ class MultiTrackSyncBuffer:
     def _mark_ready(self, key: int) -> None:
         """Move a window to the ready queue (caller holds lock)."""
         if key not in self._ready_keys:
+            self._windows[key].ready_at_monotonic_ms = time.monotonic_ns() // 1_000_000
             self._ready_keys.add(key)
             self._ready_queue.append(key)
 
@@ -282,6 +286,7 @@ class MultiTrackSyncBuffer:
                 return None
 
             drain_observed_at = int(time.time() * 1000)
+            drained_at_monotonic_ms = time.monotonic_ns() // 1_000_000
             ready_depth_before = len(self._ready_queue)
             ordered_keys = sorted(self._ready_queue)
             newest_key = ordered_keys[-1]
@@ -334,6 +339,8 @@ class MultiTrackSyncBuffer:
                 last_drain_observed_at=drain_observed_at,
                 last_drain_ready_depth_before=ready_depth_before,
                 last_drain_ready_depth_after=len(self._ready_queue),
+                ready_at_monotonic_ms=newest_win.ready_at_monotonic_ms,
+                drained_at_monotonic_ms=drained_at_monotonic_ms,
             )
 
     # ---- Peek (non-consuming) ----

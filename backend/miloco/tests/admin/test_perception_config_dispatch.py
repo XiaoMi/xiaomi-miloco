@@ -46,6 +46,9 @@ def client(tmp_path, monkeypatch):
     # mock service 层：两条入口都返 True（成功）。perception_service 是 Manager 上的
     # property（无 setter），故整体替换模块级 manager 全局，而非在实例上 setattr。
     svc = MagicMock()
+    svc.window_size_effective = None
+    svc.schedule_available = False
+    svc.schedule_mode = "batch"
     svc.apply_omni_fps_live = AsyncMock(return_value=True)
     svc.apply_config_restart = AsyncMock(return_value=True)
     fake_manager = MagicMock()
@@ -75,6 +78,28 @@ def test_window_size_change_restarts_not_hot_reload(client):
     svc.apply_omni_fps_live.assert_not_awaited()
 
 
+def test_saved_window_size_can_be_retried_after_deferred_restart(client):
+    c, svc = client
+    svc.window_size_effective = 8
+
+    async def restart():
+        if svc.apply_config_restart.await_count == 1:
+            return False
+        svc.window_size_effective = 12
+        return True
+
+    svc.apply_config_restart.side_effect = restart
+    request = {"window_size": 12}
+    first = c.put("/api/admin/perception-config", json=request).json()["data"]
+    assert (first["window_size"], first["window_size_effective"], first["restart_ok"]) == (12, 8, False)
+    saved = c.get("/api/admin/perception-config").json()["data"]
+    assert (saved["window_size"], saved["window_size_effective"]) == (12, 8)
+    retry = c.put("/api/admin/perception-config", json=request).json()["data"]
+    assert (retry["window_size"], retry["window_size_effective"], retry["restart_ok"]) == (12, 12, True)
+    c.put("/api/admin/perception-config", json=request).raise_for_status()
+    assert svc.apply_config_restart.await_count == 2
+
+
 def test_both_change_triggers_both_paths(client):
     c, svc = client
     resp = c.put("/api/admin/perception-config", json={"omni_fps": 2, "window_size": 12})
@@ -96,6 +121,108 @@ def test_unchanged_omni_fps_is_noop(client):
     c, svc = client
     resp = c.put("/api/admin/perception-config", json={"omni_fps": 1})
     assert resp.status_code == 200
+    svc.apply_omni_fps_live.assert_not_awaited()
+    svc.apply_config_restart.assert_not_awaited()
+
+
+def test_perception_schedule_defaults_to_batch_and_is_unavailable(client):
+    http_client, _svc = client
+    response = http_client.get("/api/admin/perception-config")
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["schedule_mode"] == "batch"
+    assert data["schedule_effective"] == "batch"
+    assert data["schedule_available"] is False
+
+
+def test_available_camera_mode_applies_and_reverts_after_deferred_drain(client, tmp_path):
+    from miloco.perception.inference_admission import InferenceDrainDeferred
+
+    c, svc = client
+    svc.schedule_available = True
+    busy = True
+
+    async def apply(mode, save, *, restart_window, omni_fps):
+        if busy:
+            raise InferenceDrainDeferred("still running")
+        save()
+        svc.schedule_mode = mode
+
+    svc.apply_schedule_config = AsyncMock(side_effect=apply)
+    config_path = tmp_path / "config.json"
+    original = config_path.read_bytes()
+    request = {"schedule_mode": "per_camera", "window_size": 12, "omni_fps": 2}
+    response = c.put("/api/admin/perception-config", json=request)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "schedule_stop_deferred"
+    assert config_path.read_bytes() == original
+    assert c.get("/api/admin/perception-config").json()["data"]["schedule_effective"] == "batch"
+
+    busy = False
+    enabled = c.put("/api/admin/perception-config", json=request).json()["data"]
+    assert (enabled["schedule_mode"], enabled["schedule_effective"], enabled["restart_ok"]) == (
+        "per_camera", "per_camera", True,
+    )
+    assert svc.apply_schedule_config.await_args.kwargs == {"restart_window": True, "omni_fps": 2}
+
+    busy = True
+    saved = config_path.read_bytes()
+    window_request = {"window_size": 13}
+    response = c.put("/api/admin/perception-config", json=window_request)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "schedule_stop_deferred"
+    assert config_path.read_bytes() == saved
+
+    busy = False
+    applied = c.put("/api/admin/perception-config", json=window_request).json()["data"]
+    assert (applied["window_size"], applied["schedule_effective"], applied["restart_ok"]) == (13, "per_camera", True)
+    assert svc.apply_schedule_config.await_args.kwargs == {"restart_window": True, "omni_fps": None}
+
+    disabled = c.put("/api/admin/perception-config", json={"schedule_mode": "batch"}).json()["data"]
+    assert (disabled["schedule_mode"], disabled["schedule_effective"], disabled["restart_ok"]) == (
+        "batch", "batch", True,
+    )
+    assert svc.apply_schedule_config.await_args.kwargs == {"restart_window": False, "omni_fps": None}
+    svc.apply_config_restart.assert_not_awaited()
+    svc.apply_omni_fps_live.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("mode", "status"), [("per_camera", 409), ("unknown", 422)])
+def test_unavailable_or_invalid_schedule_rejects_entire_update(client, tmp_path, mode, status):
+    http_client, svc = client
+    config_path = tmp_path / "config.json"
+    original = config_path.read_bytes()
+    response = http_client.put(
+        "/api/admin/perception-config",
+        json={"schedule_mode": mode, "window_size": 12, "omni_fps": 2},
+    )
+    assert response.status_code == status
+    if status == 409:
+        assert response.json()["detail"] == "schedule_not_available"
+    assert config_path.read_bytes() == original
+    svc.apply_omni_fps_live.assert_not_awaited()
+    svc.apply_config_restart.assert_not_awaited()
+
+
+def test_preconfigured_per_camera_reports_batch_and_can_be_cleared(client, tmp_path):
+    from miloco.config.settings import reset_settings
+
+    http_client, svc = client
+    config_path = tmp_path / "config.json"
+    config = _json.loads(config_path.read_text(encoding="utf-8"))
+    config["perception"]["schedule"] = {"mode": "per_camera"}
+    config_path.write_text(_json.dumps(config), encoding="utf-8")
+    reset_settings()
+
+    data = http_client.get("/api/admin/perception-config").json()["data"]
+    assert data["schedule_mode"] == "per_camera"
+    assert data["schedule_effective"] == "batch"
+    assert data["schedule_available"] is False
+
+    response = http_client.put("/api/admin/perception-config", json={"schedule_mode": "batch"})
+    assert response.status_code == 200
+    assert response.json()["data"]["schedule_mode"] == "batch"
+    assert _json.loads(config_path.read_bytes())["perception"]["schedule"]["mode"] == "batch"
     svc.apply_omni_fps_live.assert_not_awaited()
     svc.apply_config_restart.assert_not_awaited()
 

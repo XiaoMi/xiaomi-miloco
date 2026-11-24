@@ -462,6 +462,8 @@ async def call_omni_stream(
     config: OmniConfig,
     usage_out: dict | None = None,
     type: str = "realtime",
+    *,
+    status_out: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming call to omni model via MiMo API platform, yields content delta tokens.
 
@@ -518,6 +520,12 @@ async def call_omni_stream(
                     )
                     resp.raise_for_status()
                 async for chunk in _iter_sse_chunks(resp):
+                    if status_out is not None:
+                        choices = chunk.get("choices") or chunk.get("candidates")
+                        if choices and isinstance(choices[0], dict):
+                            finish = choices[0].get("finish_reason") or choices[0].get("finishReason")
+                            if isinstance(finish, str):
+                                status_out["finish_reason"] = finish.lower()
                     delta, chunk_usage = adapter.parse_stream_chunk(chunk)
                     if chunk_usage is not None:
                         raw_usage_seen = chunk_usage
@@ -527,6 +535,8 @@ async def call_omni_stream(
                         response_chunks.append(delta)
                         yield delta
         await cb.record_success()
+        if status_out is not None:
+            status_out["completed"] = True
     except CircuitOpenError as ce:
         short_circuited = True
         error = {"code": ce.code, "msg": ce.message[:512]}

@@ -37,6 +37,7 @@ from miloco.perception.engine.omni.omni_client import (
     OmniError,
     resolve_live_omni_config,
 )
+from miloco.perception.snapshot_context import get_rule_shadow_capture
 
 if TYPE_CHECKING:
     import numpy as np
@@ -547,6 +548,8 @@ async def run_batch_pipeline(
         下已非必需(副本随 Task 丢弃)，但成对保留无害。
         """
         did = snapshot.device.did
+        if trace_id is not None:
+            room_timing[f"_device_pipeline_start_monotonic_ms_{did}"] = time.monotonic_ns() // 1_000_000
         source_frames = snapshot.frames
         source_height, source_width = (
             source_frames[0].shape[:2] if source_frames else (None, None)
@@ -739,6 +742,8 @@ async def run_batch_pipeline(
         room_timing[f"gate_video_cross_score_{did}"] = gate_timing.video_cross_score
 
         if gate_packet is None:
+            if rule_shadow := get_rule_shadow_capture():
+                rule_shadow.record_gate_skip(did, time.monotonic_ns() // 1_000_000)
             if diagnostics is not None:
                 diagnostics.status = GraphStatus.SKIPPED
                 diagnostics.identity_status = GraphStatus.SKIPPED
@@ -909,6 +914,8 @@ async def run_batch_pipeline(
 
                 reset_flow_diagnostics(flow_token)
             reset_device_context(device_ctx_token)
+        if trace_id is not None and use_fused and not omni_output.skipped and omni_output.matched_rules:
+            room_timing[f"_fused_match_monotonic_ms_{did}"] = time.monotonic_ns() // 1_000_000
         _inject_source_meta(omni_output, room_name, [did], device_name, time_window)
 
         # per-omni 早送(仅 fused):本相机 omni 一好就送 suggestion/speech,不等其它相机 gather。
@@ -1044,6 +1051,7 @@ async def run_query_pipeline(
     last_captions: dict[str, str] | None = None,
     frame_index_offset: int = 0,
     label_lookup: dict[str, str] | None = None,
+    frame_indices: dict[str, int] | None = None,
 ) -> dict[str, QueryOutput]:
     """Active query pipeline: skip Gate, run Identity, Omni with query prompt.
 
@@ -1104,7 +1112,7 @@ async def run_query_pipeline(
             identity_packet = await run_identity(
                 gate_packet, config.identity, tracking_service,
                 identity_engine=identity_engine,
-                frame_index_offset=frame_index_offset,
+                frame_index_offset=frame_index_offset if frame_indices is None else frame_indices[did],
                 )
             # query 路径的 packet 只喂 build_query_prompt→omni, 同主路径口径下采到
             # omni_fps(否则 fps 提频后 on-demand 查询送 omni 的帧数翻倍、延迟上升)

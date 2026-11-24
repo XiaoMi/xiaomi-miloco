@@ -28,7 +28,9 @@ from miloco.perception.collect.camera_adapter import (
     CameraDeviceAdapter,
     split_channel_did,
 )
+from miloco.perception.collect.stream_buffer import MultiTrackSyncBuffer
 from miloco.perception.engine.api import _physical_did
+from miloco.perception.schema import DecodedVideoFrame
 
 
 class _FakeKV:
@@ -206,18 +208,55 @@ def test_each_channel_produces_distinct_meta_did():
     adapter = CameraDeviceAdapter(miot_proxy=proxy)  # type: ignore[arg-type]
     asyncio.run(adapter.connect_device("dual:ch0", source=object()))  # type: ignore[arg-type]
     asyncio.run(adapter.connect_device("dual:ch1", source=object()))  # type: ignore[arg-type]
+    assert adapter.rule_source_ids() == frozenset()
 
-    for syn_did in ("dual:ch0", "dual:ch1"):
+    for index, syn_did in enumerate(("dual:ch0", "dual:ch1")):
         cb = adapter._make_decoded_video_callback(syn_did, adapter._devices[syn_did])
         asyncio.run(
             cb(syn_did, np.zeros((2, 2, 3), dtype=np.uint8), 1_000, 0, 0, 0)
         )
+        assert len(adapter.rule_source_ids()) == index + 1
 
     d0 = adapter.collect("dual:ch0", drain=False)
     d1 = adapter.collect("dual:ch1", drain=False)
     assert d0 is not None and d1 is not None
     assert d0.meta.did == "dual:ch0"
     assert d1.meta.did == "dual:ch1"
+    adapter.clear_buffers()
+    assert adapter.rule_source_ids() == {"dual:ch0", "dual:ch1"}
+    asyncio.run(adapter.disconnect_device("dual:ch0"))
+    asyncio.run(adapter.connect_device("dual:ch0", source=object()))  # type: ignore[arg-type]
+    assert adapter.rule_source_ids() == {"dual:ch1"}
+
+
+async def test_ready_window_belongs_to_the_current_connection_and_channel():
+    adapter = CameraDeviceAdapter(miot_proxy=_RecordingProxy())  # type: ignore[arg-type]
+
+    async def connect_ready(did: str):
+        await adapter.connect_device(did, source=object())  # type: ignore[arg-type]
+        buffer = MultiTrackSyncBuffer(["decoded_video"], window_ms=1000)
+        adapter._devices[did].sync_buffer = buffer
+        frame = DecodedVideoFrame(frame=np.zeros((2, 2, 3), dtype=np.uint8), stream_ts=0)
+        for wall_ms in (1000, 2000, 3000):
+            buffer.put("decoded_video", frame, wall_ms, wall_ms)
+
+    await connect_ready("dual:ch0")
+    await connect_ready("dual:ch1")
+    old_ready = {source.did: source for source in adapter.ready_connections()}
+    assert set(old_ready) == {"dual:ch0", "dual:ch1"}
+
+    await adapter.disconnect_device("dual:ch0")
+    await connect_ready("dual:ch0")
+    current = {source.did: source for source in adapter.ready_connections()}
+    assert current["dual:ch0"] != old_ready["dual:ch0"]
+    assert current["dual:ch1"] == old_ready["dual:ch1"]
+    assert adapter.take_ready_window(old_ready["dual:ch0"]) is None
+
+    taken = adapter.take_ready_window(current["dual:ch0"])
+    assert taken is not None
+    assert taken.meta.did == "dual:ch0"
+    assert taken.window_start_ms == 2000
+    assert adapter.ready_connections() == [current["dual:ch1"]]
 
 
 def test_disconnect_channel_routes_physical_did_and_channel():

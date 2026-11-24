@@ -27,6 +27,7 @@ import {
   toggleScopeCameraVoice,
   switchScopeHome,
 } from "./api";
+import { ApiError } from "./api/client";
 import { useAsync } from "./hooks/useAsync";
 import { miotTone } from "@/lib/miotTone";
 import type { Pet, Person } from "./lib/types";
@@ -586,19 +587,23 @@ function MainApp() {
             }}
             onJumpDevices={() => setActiveTab("devices")}
             onRestartEngine={async () => {
-              // 拆两段 try：pause 失败 → 引擎仍跑（无副作用）；resume 失败 →
+              // 拆两段 try：pause 未完成 → 引擎仍跑；resume 失败 →
               // 引擎已停下需要住户手动唤醒。两种 toast 文案不同避免割裂——
               // 否则 pause 成功 + resume 失败时住户看到笼统"重启失败"，但 reload 后
               // StatusRibbon 跳到蓝色"休息中"，跟"重启失败"的语义错位。
               try {
                 await pausePerception();
               } catch (e) {
-                toast(
-                  e instanceof Error
-                    ? t("app.restartFailEngineRunning", { msg: e.message })
-                    : t("app.restartFailEngineRunningNoMsg"),
-                  "warn",
-                );
+                if (e instanceof ApiError && e.status === 409 && e.message.startsWith("stop_deferred:")) {
+                  toast(t("app.restartDeferredRetry"), "warn");
+                } else {
+                  toast(
+                    e instanceof Error
+                      ? t("app.restartFailEngineRunning", { msg: e.message })
+                      : t("app.restartFailEngineRunningNoMsg"),
+                    "warn",
+                  );
+                }
                 status.reload();
                 return;
               }

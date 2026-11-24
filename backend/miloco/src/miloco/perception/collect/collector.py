@@ -8,6 +8,7 @@ Both realtime and active perception use collect_batch() as the unified entry poi
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 
 from miloco.node_monitor import Lifecycle, NodeName, get_monitor
 from miloco.perception.collect.adapter_base import BaseDeviceAdapter
@@ -154,6 +155,12 @@ class MultimodalCollector:
         for adapter in self._adapters.values():
             result.update(adapter.get_connected_devices())
         return result
+
+    @staticmethod
+    def batch_from_windows(windows: Iterable[DeviceData]) -> PerceptionBatch:
+        batch = PerceptionBatch(devices={window.meta.did: window for window in windows})
+        _pack_batch_latency_aggregates(batch)
+        return batch
 
     def clear_all_buffers(self) -> None:
         """Clear all stream buffers across all adapters.

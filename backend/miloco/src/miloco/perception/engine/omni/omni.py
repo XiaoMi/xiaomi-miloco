@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from miloco.database.token_usage_repo import fire_record
+from miloco.observability.context import get_device_context
 from miloco.perception.engine.config import OmniConfig, VisualInputMode
 from miloco.perception.engine.identity.names import (
     build_name_lookup,
@@ -50,12 +51,18 @@ from miloco.perception.engine.omni.response_parser import (
     parse_identity_assignments,
     parse_omni_response,
     parse_omni_response_from_text,
+    parse_shadow_rule_hits,
     try_extract_matched_rules,
     try_extract_speeches,
     try_extract_suggestions,
 )
 from miloco.perception.engine.types import IdentityPacket, OmniContext, OmniOutput
-from miloco.perception.snapshot_context import push_omni_trace
+from miloco.perception.rule_shadow_capture import RuleResponseSample
+from miloco.perception.snapshot_context import (
+    get_event_artifacts,
+    get_rule_shadow_capture,
+    push_omni_trace,
+)
 from miloco.perception.types import MatchedRule, Speech, Suggestion
 
 if TYPE_CHECKING:
@@ -104,6 +111,32 @@ async def run_omni(
     return output
 
 
+def _record_rule_response(
+    payload: dict,
+    context: OmniContext,
+    rule_name_to_id: dict[str, str],
+    raw_response: dict,
+    output: OmniOutput,
+) -> None:
+    rule_shadow = get_rule_shadow_capture()
+    if rule_shadow is None or (device := get_device_context()) is None:
+        return
+    evidence = None
+    if (
+        not output.skipped
+        and payload.get("has_visual_rule_input") is True
+        and len(rule_name_to_id) == len(context.rule_conditions)
+    ):
+        evidence = parse_shadow_rule_hits(raw_response, rule_name_to_id)
+        if (evidence is None or not evidence.complete) and rule_name_to_id:
+            logger.debug("Rule evidence incomplete: unresolved rules are unobserved")
+    rule_shadow.record(device.device_id, RuleResponseSample(
+        time.monotonic_ns() // 1_000_000,
+        evidence.matched_rule_ids if evidence is not None else None,
+        complete=evidence is not None and evidence.complete,
+    ))
+
+
 async def run_omni_batch(
     edge_packets: list[IdentityPacket], context: OmniContext, config: OmniConfig,
     visual_input_mode: VisualInputMode = "video",
@@ -111,8 +144,10 @@ async def run_omni_batch(
     """Run Omni layer for multiple devices in the same room."""
     payload = build_batch_prompt(edge_packets, context, visual_input_mode=visual_input_mode)
     raw_response = await call_omni(payload, config)
-    output = parse_omni_response(raw_response, _rule_name_to_id(context))
+    rule_name_to_id = _rule_name_to_id(context)
+    output = parse_omni_response(raw_response, rule_name_to_id)
     output.usage = extract_usage(raw_response)
+    _record_rule_response(payload, context, rule_name_to_id, raw_response, output)
     return output
 
 
@@ -216,9 +251,13 @@ async def run_omni_fused(
     # 中途抛异常 → mark_dispatched 已置 inflight=True 的 track 漏清(永不 GC、永不重派,直到进程重启)。
     delivered = False
     try:
-        omni_output = parse_omni_response(raw_response, _rule_name_to_id(context))
+        rule_name_to_id = _rule_name_to_id(context)
+        omni_output = parse_omni_response(raw_response, rule_name_to_id)
         omni_output.usage = extract_usage(raw_response)
-
+        artifacts = get_event_artifacts()
+        if artifacts is not None and artifacts.scheduled_camera and not artifacts.can_publish():
+            return omni_output
+        _record_rule_response(payload, context, rule_name_to_id, raw_response, omni_output)
         # 抽 identity_assignments 并写回 state（仅当有 candidate 才有意义）
         if candidates:
             # name_to_pid 来源 1（library 全量）已在上面构造好。这里补来源 2：gallery_snapshot
@@ -490,6 +529,7 @@ async def run_omni_stream(
         on_early_matched_rules,
         on_early_suggestions,
         rule_name_to_id=_rule_name_to_id(context),
+        rule_context=context,
     )
 
 
@@ -512,6 +552,7 @@ async def run_omni_batch_stream(
         on_early_matched_rules,
         on_early_suggestions,
         rule_name_to_id=_rule_name_to_id(context),
+        rule_context=context,
     )
 
 
@@ -522,6 +563,7 @@ async def _stream_and_parse(
     on_early_matched_rules: Callable[[list[MatchedRule]], Awaitable[None]] | None,
     on_early_suggestions: Callable[[list[Suggestion]], Awaitable[None]] | None,
     rule_name_to_id: "dict[str, str] | None" = None,
+    rule_context: OmniContext | None = None,
 ) -> OmniOutput:
     """Stream omni response, extract actionable fields early, then parse full output."""
     buffer = ""
@@ -529,8 +571,11 @@ async def _stream_and_parse(
     matched_rules_done = False
     suggestions_done = False
     usage_out: dict = {}
+    stream_status: dict = {}
+    collect_evidence = rule_context is not None and get_rule_shadow_capture() is not None
+    stream_options = {"status_out": stream_status} if collect_evidence else {}
 
-    async for delta in call_omni_stream(payload, config, usage_out=usage_out):
+    async for delta in call_omni_stream(payload, config, usage_out=usage_out, **stream_options):
         buffer += delta
 
         # 端侧 ngram 复读熔断：模型陷入末位 token 复读时立即 abort，避免继续
@@ -586,4 +631,13 @@ async def _stream_and_parse(
     output = parse_omni_response_from_text(buffer, rule_name_to_id)
     if usage_out:
         output.usage = dict(usage_out)
+    if (
+        collect_evidence and stream_status.get("completed")
+        and stream_status.get("finish_reason") == "stop" and rule_name_to_id is not None
+    ):
+        raw = {"choices": [{
+            "message": {"content": buffer},
+            "finish_reason": stream_status.get("finish_reason"),
+        }]}
+        _record_rule_response(payload, rule_context, rule_name_to_id, raw, output)
     return output

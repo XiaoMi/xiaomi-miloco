@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from itertools import count
 from typing import TYPE_CHECKING, Callable
 
 from miot.types import MIoTCameraInfo
@@ -35,6 +36,7 @@ from miloco.perception.collect.stream_buffer import (
     StreamFragment,
 )
 from miloco.perception.schema import (
+    CameraConnection,
     DecodedAudioFrame,
     DecodedVideoFrame,
     DeviceData,
@@ -84,6 +86,7 @@ DEFAULT_AUDIO_CHANNEL = 0
 
 # 合成 did 的通道后缀分隔符：``{physical_did}:ch{n}``。
 _CHANNEL_SEP = ":ch"
+_CONNECTION_GENERATIONS = count(1)
 
 
 def split_channel_did(did: str) -> tuple[str, int]:
@@ -122,6 +125,7 @@ class _CameraDeviceState:
     # 订阅完成时刻的 monotonic wall_ms。首帧未到（last_video_frame_ms == 0）时
     # 替代它参与静默判定，给「等首帧」一个上界，见 _FIRST_FRAME_THRESHOLD_MS。
     connected_at_ms: int = 0
+    generation: int = field(default_factory=lambda: next(_CONNECTION_GENERATIONS), init=False)
 
 
 class CameraDeviceAdapter(BaseDeviceAdapter):
@@ -540,12 +544,31 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
         state.sync_buffer.clear()
 
+    def rule_source_ids(self) -> frozenset[str]:
+        return frozenset(did for did, state in self._devices.items() if state.last_video_frame_ms != 0)
+
+    def ready_connections(self) -> list[CameraConnection]:
+        return [
+            CameraConnection(did, state.generation)
+            for did, state in self._devices.items()
+            if state.sync_buffer.ready_count
+        ]
+
+    def is_current_connection(self, connection: CameraConnection) -> bool:
+        state = self._devices.get(connection.did)
+        return state is not None and state.generation == connection.generation
+
+    def take_ready_window(self, connection: CameraConnection) -> DeviceData | None:
+        if not self.is_current_connection(connection):
+            return None
+        return self.collect(connection.did)
+
     def collect(self, did: str, *, drain: bool = True) -> DeviceData | None:
         """Collect multimodal data from the device's sync buffer.
 
         Args:
             did: Device ID to collect from.
-            drain: If True (realtime), pop the oldest ready window.
+            drain: If True (realtime), pop the newest ready window.
                    If False (active query), peek all buffered data.
         """
         state = self._devices.get(did)
@@ -572,6 +595,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                 last_drain_observed_at=ready.last_drain_observed_at,
                 last_drain_ready_depth_before=ready.last_drain_ready_depth_before,
                 last_drain_ready_depth_after=ready.last_drain_ready_depth_after,
+                ready_at_monotonic_ms=ready.ready_at_monotonic_ms,
+                drained_at_monotonic_ms=ready.drained_at_monotonic_ms,
             )
         else:
             collect_ms = get_settings().perception.collect.window_size * 1000
@@ -645,6 +670,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         last_drain_observed_at: int | None = None,
         last_drain_ready_depth_before: int | None = None,
         last_drain_ready_depth_after: int | None = None,
+        ready_at_monotonic_ms: int | None = None,
+        drained_at_monotonic_ms: int | None = None,
     ) -> DeviceData | None:
         """Build DeviceData from decoded frame track fragments.
 
@@ -694,6 +721,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             last_drain_observed_at=last_drain_observed_at,
             last_drain_ready_depth_before=last_drain_ready_depth_before,
             last_drain_ready_depth_after=last_drain_ready_depth_after,
+            ready_at_monotonic_ms=ready_at_monotonic_ms,
+            drained_at_monotonic_ms=drained_at_monotonic_ms,
         )
 
     def get_connected_devices(self) -> dict[str, PerceptionDevice]:

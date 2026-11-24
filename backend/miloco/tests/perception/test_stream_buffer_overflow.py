@@ -1,6 +1,8 @@
 """MultiTrackSyncBuffer 丢包路径 + consume_drop_stats 行为。"""
 from __future__ import annotations
 
+import time
+
 from miloco.perception.collect.stream_buffer import MultiTrackSyncBuffer
 
 
@@ -133,6 +135,23 @@ def test_drain_ready_returns_only_newest_window():
     assert peeked is not None
     peeked_datas = {f.data for f in peeked["video"]}
     assert b"v1" in peeked_datas
+
+
+def test_ready_time_survives_later_fragments_until_drain(monkeypatch):
+    buffer = MultiTrackSyncBuffer(["video"], window_ms=100)
+    now_ms = 0
+    monkeypatch.setattr(time, "monotonic_ns", lambda: now_ms * 1_000_000)
+
+    for stamp in (10, 110, 215, 240):
+        now_ms = stamp
+        buffer.put("video", b"frame", stamp, stamp)
+
+    now_ms = 340
+    ready = buffer.drain_ready()
+    assert ready is not None
+    assert (ready.start_ms, ready.end_ms) == (100, 200)
+    assert ready.ready_at_monotonic_ms == 215
+    assert ready.drained_at_monotonic_ms == 340
 
 
 def test_drain_skipped_windows_counted_in_stats():

@@ -8,10 +8,14 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from miloco.perception.engine.types import OmniOutput
 from miloco.perception.types import CaptionEntry, MatchedRule, Speech, Suggestion
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,70 @@ def parse_omni_response(
         return _fallback("Response is not an object")
 
     return _build_output(parsed, rule_name_to_id)
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate JSON keys")
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedRuleHits:
+    matched_rule_ids: frozenset[str]
+    complete: bool
+
+
+def parse_shadow_rule_hits(
+    raw: dict[str, Any], rule_name_to_id: dict[str, str]
+) -> ParsedRuleHits | None:
+    """Keep unambiguous hits from intact JSON; only a complete rule list proves misses."""
+    choices = raw.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    choice = choices[0]
+    if choice.get("finish_reason") in ("length", "content_filter"):
+        return None
+    message = choice.get("message")
+    if not isinstance(message, dict) or not isinstance(message.get("content"), str):
+        return None
+
+    text = re.sub(r"<think>[\s\S]*?</think>", "", message["content"]).strip()
+    fence = re.fullmatch(r"```(?:json)?\s*(.*?)\s*```", text, re.IGNORECASE | re.DOTALL)
+    try:
+        parsed = json.loads(fence.group(1) if fence else text, object_pairs_hook=_unique_json_object)
+    except (ValueError, RecursionError):
+        return None
+    rules = parsed.get("matched_rules") if isinstance(parsed, dict) else None
+    if not isinstance(rules, list):
+        return None
+
+    seen: set[str] = set()
+    hits: set[str] = set()
+    uncertain: set[str] = set()
+    complete = True
+    for rule in rules:
+        name = rule.get("rule_name") if isinstance(rule, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            complete = False
+            continue
+        candidates = tuple(_rule_name_candidates(name, rule_name_to_id))
+        if len(candidates) != 1:
+            complete = False
+            uncertain.update(candidates)
+            continue
+        rule_id, = candidates
+        reason = rule.get("reason")
+        if rule_id in seen or not isinstance(rule.get("hit"), bool) or (reason is not None and not isinstance(reason, str)):
+            complete = False
+            uncertain.add(rule_id)
+            continue
+        seen.add(rule_id)
+        if rule["hit"]:
+            hits.add(rule_id)
+    hits.difference_update(uncertain)
+    return ParsedRuleHits(frozenset(hits), complete) if complete or hits else None
 
 
 def parse_identity_assignments(
@@ -306,18 +374,20 @@ def _parse_caption(raw: Any) -> list[CaptionEntry]:
     return []
 
 
+def _rule_name_candidates(name: str, mapping: dict[str, str]) -> Iterator[str]:
+    if name in mapping:
+        yield mapping[name]
+    else:
+        yield from (rid for known, rid in mapping.items() if known and (known in name or name in known))
+
+
 def _resolve_rule_name(name: str, mapping: "dict[str, str] | None") -> "str | None":
     """rule_name → rule_id(UUID)。``mapping is None``（调用方未提供映射，仅测试 / streaming
     benchmark 走此路）时原样返回 name（best-effort）；有映射（含空 dict=本轮零规则）但匹配
     不上时返回 None（丢弃，防 bogus rule_id 入下游）。容错模型对名称的轻微改写。"""
     if mapping is None:
         return name or None
-    if name in mapping:
-        return mapping[name]
-    for rn, rid in mapping.items():
-        if rn and (rn in name or name in rn):
-            return rid
-    return None
+    return next(_rule_name_candidates(name, mapping), None)
 
 
 def _sanitize_for_log(s: str) -> str:

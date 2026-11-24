@@ -20,6 +20,11 @@ from numpy.typing import NDArray
 from miloco.perception.engine.identity.names import build_name_lookup
 from miloco.perception.engine.identity.tier_u import cam_id_from_device_id
 from miloco.perception.engine_base import BasePerceptionEngine
+from miloco.perception.inference_admission import InferenceAdmissionClosed
+from miloco.perception.snapshot_context import (
+    get_event_artifacts,
+    get_rule_shadow_capture,
+)
 from miloco.perception.types import (
     URGENCY_RANK,
     AudioFrame,
@@ -39,6 +44,7 @@ if TYPE_CHECKING:
     from miloco.perception.engine.identity.engine import IdentityEngine
     from miloco.perception.engine.identity.tracking_service import TrackingService
     from miloco.perception.engine.types import BatchPipelineResult, OmniContext
+    from miloco.perception.inference_admission import InferenceAdmission
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +73,10 @@ def _physical_did(did: str) -> str:
     两种粒度都要能命中。
     """
     return did.rsplit(":ch", 1)[0] if ":ch" in did else did
+
+
+def rule_selects_device(selectors: list[str] | None, did: str) -> bool:
+    return not selectors or did in selectors or _physical_did(did) in selectors
 
 
 def _ms_since(start: float) -> float:
@@ -344,6 +354,14 @@ class PerceptionEngine(BasePerceptionEngine):
         self._tierc_last_clear_date: dict[str, str] = {}            # key: device_id → "YYYY-MM-DD"
         # 累计帧序号（重审周期判定用）
         self._global_frame_index = 0
+        self._camera_frame_indices: dict[str, int] = {}
+        self._camera_scheduling = False
+
+    def set_camera_scheduling(self, enabled: bool) -> None:
+        self._camera_scheduling = enabled
+        if not enabled and self._camera_frame_indices:
+            self._global_frame_index = max(self._global_frame_index, *self._camera_frame_indices.values())
+            self._camera_frame_indices.clear()
 
     def _scope_label_for(self, device_id: str, room_name: str) -> str:
         """计算（并记忆）一个 device 在所在 room 内的 scope_label，格式 ``"<room>-dev<idx>"``。
@@ -508,7 +526,9 @@ class PerceptionEngine(BasePerceptionEngine):
                 out.append((cam_id, tid))
         return out
 
-    def set_main_loop(self, loop: "asyncio.AbstractEventLoop") -> None:
+    def set_main_loop(
+        self, loop: asyncio.AbstractEventLoop, *, admission: InferenceAdmission | None = None
+    ) -> None:
         """记录持久 app event loop, 并透传给所有(含已缓存)identity engine。client 层每窗
         调一次(幂等); tier_c 写库协程靠它脱离每窗临时 loop(asyncio.run), 不被窗末 cancel。"""
         self._main_loop = loop
@@ -521,7 +541,7 @@ class PerceptionEngine(BasePerceptionEngine):
             and self._identity_lib is not None
             and self._config.identity_engine.tierc_clear.enabled
         ):
-            self._tierc_clear_task = loop.create_task(self._tierc_clear_loop())
+            self._tierc_clear_task = loop.create_task(self._tierc_clear_loop(admission))
 
     def set_tierc_frame_provider(
         self, provider: "Callable[[str], NDArray[np.uint8] | None]"
@@ -529,7 +549,7 @@ class PerceptionEngine(BasePerceptionEngine):
         """注入"按 did 取最近一帧解码图"的回调(由持有 collector 的层接上),供定期清 live 检测。"""
         self._tierc_frame_provider = provider
 
-    async def _tierc_clear_loop(self) -> None:
+    async def _tierc_clear_loop(self, admission: InferenceAdmission | None) -> None:
         """tier_c 闲时定期清:窗内轮询,逐相机整池清空(默认无条件;require_absence 时确认无人才清)。"""
         cfg = self._config.identity_engine.tierc_clear
         logger.info(
@@ -539,9 +559,13 @@ class PerceptionEngine(BasePerceptionEngine):
         )
         while True:
             try:
-                await self._tierc_clear_tick(cfg)
-            except asyncio.CancelledError:
-                raise
+                if admission is None:
+                    await self._tierc_clear_tick(cfg)
+                else:
+                    await admission.run(lambda: self._tierc_clear_tick(cfg))
+            except InferenceAdmissionClosed:
+                # The engine is draining. Retry at the next periodic tick.
+                pass
             except Exception:  # noqa: BLE001
                 logger.warning("[tierc-clear] tick 异常", exc_info=True)
             await asyncio.sleep(cfg.poll_interval_sec)
@@ -709,11 +733,17 @@ class PerceptionEngine(BasePerceptionEngine):
         self._identity_engines[device_id] = eng
         return eng
 
+    async def stop_tierc_clear(self) -> None:
+        if task := self._tierc_clear_task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self._tierc_clear_task = None
+
     async def close(self) -> None:
         """关闭引擎——释放所有 per-camera IdentityEngine 资源（dispatcher worker 等）。"""
-        if self._tierc_clear_task is not None:
-            self._tierc_clear_task.cancel()
-            self._tierc_clear_task = None
+        await self.stop_tierc_clear()
+        if self._pending_close_tasks:
+            await asyncio.gather(*self._pending_close_tasks, return_exceptions=True)
         for did, eng in self._identity_engines.items():
             if eng is None:
                 continue
@@ -875,6 +905,7 @@ class PerceptionEngine(BasePerceptionEngine):
             if eng is not None:
                 eng.reset()
         self._global_frame_index = 0
+        self._camera_frame_indices.clear()
         # 旧场景基准帧 vs 新场景首帧的 diff 不代表真实变化,清掉退化为冷启动语义
         self._gate_prev_frames.clear()
         # hold 状态机一并清,首通后按 gate.hold_duration_sec(默认 90s)重新起算
@@ -1053,6 +1084,8 @@ class PerceptionEngine(BasePerceptionEngine):
         from miloco.perception.engine.types import OmniContext, RuleCondition
 
         rules = rules or []
+        artifacts = get_event_artifacts()
+        scheduled_camera = artifacts is not None and artifacts.scheduled_camera
 
         if batch.empty:
             return None
@@ -1074,7 +1107,8 @@ class PerceptionEngine(BasePerceptionEngine):
 
         # 进入新一轮前先按 TTL 淘汰过期事件链
         now = time.monotonic()
-        for did in list(self._sugg_table.keys()):
+        source_did = batch.snapshots[0].device.did
+        for did in ([source_did] if scheduled_camera else list(self._sugg_table)):
             self._evict_expired_links(did, now)
 
         # Build per-device contexts with filtered rules（rules 按 device 维度精确筛选——
@@ -1097,10 +1131,7 @@ class PerceptionEngine(BasePerceptionEngine):
                 did = snapshot.device.did
                 dispatched = [
                     r for r in rules
-                    if not r.get("condition", {}).get("perceive_device_ids")
-                    or did in r["condition"]["perceive_device_ids"]
-                    # rule 绑物理 did（整台相机）时，命中该相机的任一通道。
-                    or _physical_did(did) in r["condition"]["perceive_device_ids"]
+                    if rule_selects_device(r.get("condition", {}).get("perceive_device_ids"), did)
                 ]
                 device_rule_map[did] = [r["id"] for r in dispatched]
                 device_rules = [
@@ -1124,6 +1155,13 @@ class PerceptionEngine(BasePerceptionEngine):
                     camera_prompt=camera_prompt,
                     per_camera_crop_enabled=did not in crop_denied,
                 )
+
+        rule_shadow = get_rule_shadow_capture()
+        if rule_shadow is not None:
+            try:
+                rule_shadow.prepare(device_rule_map, rules)
+            except (KeyError, TypeError, ValueError, RecursionError):
+                logger.warning("rule shadow plan could not be recorded", exc_info=True)
 
         # Prepend audio tail from previous window (overlap to reduce boundary truncation)
         # Per-device tail（不是 per-room）—— 修复旧版同 room 多 device 反复覆写同一 key
@@ -1150,6 +1188,9 @@ class PerceptionEngine(BasePerceptionEngine):
 
         # Run batch pipeline（通过 factory 回调懒加载 per-device tracking_service /
         # identity_engine，让 fused 模式下回灌路径打通）
+        frame_index = self._global_frame_index
+        if scheduled_camera:
+            frame_index = self._camera_frame_indices.get(source_did, frame_index)
         try:
             result = await run_batch_pipeline(
                 batch,
@@ -1163,7 +1204,7 @@ class PerceptionEngine(BasePerceptionEngine):
                 # 流式早出的 suggestion 经此闸门解析事件链（与 _merge_results 同一方法、
                 # 同一推理线程），心跳/重复抑制后才外发
                 assign_suggestion_link=self.assign_id_and_update_link,
-                frame_index_offset=self._global_frame_index,
+                frame_index_offset=frame_index,
                 gate_prev_frames=self._gate_prev_frames,
                 gate_last_visual_pass_ts=self._gate_last_visual_pass_ts,
                 gate_last_audio_pass_ts=self._gate_last_audio_pass_ts,
@@ -1180,7 +1221,13 @@ class PerceptionEngine(BasePerceptionEngine):
         # 推进全局帧序号——驱动 IdentityEngine recheck 周期与 dead-track GC
         # 增量按 downsample 后单窗口帧数估算（fps × period_sec），与 run_identity
         # 内部 ``frame_index_offset + len(gate_packet.frames)`` 语义对齐
-        self._global_frame_index += self._config.input.fps * self._config.input.period_sec
+        next_frame_index = frame_index + self._config.input.fps * self._config.input.period_sec
+        if scheduled_camera:
+            self._camera_frame_indices[source_did] = next_frame_index
+            if not artifacts.can_publish():
+                return RealtimePerceptionResult(skipped=True)
+        else:
+            self._global_frame_index = next_frame_index
 
         # Merge all rooms into a single RealtimePerceptionResult
         return self._merge_results(result, contexts, device_rule_map=device_rule_map)
@@ -1231,6 +1278,12 @@ class PerceptionEngine(BasePerceptionEngine):
                     type(exc).__name__,
                 )
 
+        frame_indices = None
+        if self._camera_scheduling:
+            frame_indices = {
+                source.device.did: self._camera_frame_indices.get(source.device.did, self._global_frame_index)
+                for source in batch.snapshots
+            }
         try:
             results = await run_query_pipeline(
                 batch,
@@ -1241,13 +1294,19 @@ class PerceptionEngine(BasePerceptionEngine):
                 last_captions=per_room_last_caption,
                 frame_index_offset=self._global_frame_index,
                 label_lookup=name_lookup,
+                **({"frame_indices": frame_indices} if frame_indices is not None else {}),
             )
         except Exception as e:
             logger.error("Query pipeline failed: %s", e, exc_info=True)
             return OnDemandPerceptionResult(answer="")
 
         # 与 realtime_perceive 保持一致地推进全局帧序号
-        self._global_frame_index += self._config.input.fps * self._config.input.period_sec
+        stride = self._config.input.fps * self._config.input.period_sec
+        if frame_indices is None:
+            self._global_frame_index += stride
+        else:
+            for did, index in frame_indices.items():
+                self._camera_frame_indices[did] = index + stride
 
         # Merge all room answers
         answers = [r.answer for r in results.values() if r.answer]

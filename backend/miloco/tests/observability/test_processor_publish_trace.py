@@ -1,22 +1,26 @@
 """processor._publish_trace 单测:不启动真 engine,只验聚合 + 入队。"""
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
+import pytest
 from miloco.observability.metrics_client import (
     MetricsClient,
     set_metrics_client,
 )
 from miloco.observability.metrics_db import connect
 from miloco.perception.processor import PipelineProcessor
+from miloco.perception.rule_shadow_capture import RULE_SHADOW_EVENT, RuleResponseSample
 from miloco.perception.schema import (
     DecodedVideoFrame,
     DeviceData,
     PerceptionBatch,
     PerceptionLatency,
 )
-from miloco.perception.types import PerceptionDevice
+from miloco.perception.types import PerceptionDevice, RealtimePerceptionResult
 
 
 def _make_batch_with_two_devices() -> PerceptionBatch:
@@ -47,6 +51,55 @@ def _make_batch_with_two_devices() -> PerceptionBatch:
     return batch
 
 
+@pytest.mark.parametrize("shadow_enabled", [False, True])
+async def test_realtime_batch_publishes_rule_shadow_only_when_opted_in(monkeypatch, shadow_enabled):
+    settings = SimpleNamespace(
+        perf=SimpleNamespace(enabled=True),
+        perception=SimpleNamespace(schedule=SimpleNamespace(shadow_rule_observations=shadow_enabled)),
+    )
+    metrics = MagicMock()
+    monkeypatch.setattr("miloco.perception.processor.get_settings", lambda: settings)
+    monkeypatch.setattr("miloco.perception.processor.get_metrics_client", lambda: metrics)
+    batch = _make_batch_with_two_devices()
+    device = batch.devices["d1"]
+    device.window_start_ms = 6000
+    device.window_end_ms = 9000
+    device.ready_at_monotonic_ms = 9010
+
+    async def infer(_batch, *, artifacts, **_kwargs):
+        assert (artifacts.rule_shadow is not None) is shadow_enabled
+        if artifacts.rule_shadow is not None:
+            artifacts.rule_shadow.prepare({"d1": ["rule-a"]}, [{"id": "rule-a"}])
+            artifacts.rule_shadow.record("d1", RuleResponseSample(9100, frozenset({"rule-a"})))
+        return RealtimePerceptionResult(skipped=True), set(), {}, set(), None
+
+    proxy = MagicMock(
+        perception_engine=None,
+        realtime_perceive=AsyncMock(side_effect=infer),
+        handle_realtime_perception_result=AsyncMock(),
+    )
+    processor = PipelineProcessor(
+        collector=MagicMock(collect_batch=MagicMock(return_value=batch)),
+        perception_engine_proxy=proxy,
+        log_repo=MagicMock(),
+    )
+    result = await processor.process_realtime()
+    assert isinstance(result, RealtimePerceptionResult) and result.skipped
+    proxy.handle_realtime_perception_result.assert_awaited_once()
+    if not shadow_enabled:
+        metrics.publish_event.assert_not_called()
+        return
+
+    metrics.publish_event.assert_called_once()
+    event_type, source, payload = metrics.publish_event.call_args.args
+    assert (event_type, source) == (RULE_SHADOW_EVENT, "batch")
+    observation, = payload["observations"]
+    assert observation["key"]["window_sequence"] == 2
+    assert observation["source_id"] == "d1"
+    assert observation["outcome"] == "matched"
+    assert observation["received_at_ms"] == 9100
+
+
 async def test_publish_trace_writes_main_and_two_device_rows(tmp_path):
     db = tmp_path / "obs.db"
     client = MetricsClient(db_path=db)
@@ -59,6 +112,11 @@ async def test_publish_trace_writes_main_and_two_device_rows(tmp_path):
             log_repo=MagicMock(),
         )
         batch = _make_batch_with_two_devices()
+        device = batch.devices["d1"]
+        device.window_start_ms = 6000
+        device.window_end_ms = 9000
+        device.ready_at_monotonic_ms = 9010
+        device.drained_at_monotonic_ms = 9250
         latency = PerceptionLatency(
             in_delay_ms=10.0, out_delay_ms=20.0,
             decode_ms=1.5, collect_ms=2.0, convert_ms=3.0, log_ms=4.0,
@@ -66,6 +124,7 @@ async def test_publish_trace_writes_main_and_two_device_rows(tmp_path):
             window_duration_ms=3000.0, stream_lag_ms=3500.0,
             gate_ms=2.0, identity_ms=4.0, omni_ms=180.0,
             device_count=2, skipped=False,
+            timing_detail={"existing_metric_ms": 12.0},
         )
         # api._merge_results 实际下发的 key 形如 "{room}/gate_video_{did}_ms"
         timing = {
@@ -75,6 +134,8 @@ async def test_publish_trace_writes_main_and_two_device_rows(tmp_path):
             "room-d2/gate_video_d2_ms": 0.5, "room-d2/gate_audio_d2_ms": 0.5,
             "room-d2/gate_video_d2_pass": 0, "room-d2/gate_audio_d2_pass": 1,
             "room-d2/identity_d2_ms": 2.0, "room-d2/omni_d2_ms": 90.0,
+            "_device_pipeline_start_monotonic_ms_d1": 9260,
+            "_fused_match_monotonic_ms_d1": 9325,
         }
         proc._publish_trace(
             trace_id="trace-int",
@@ -83,6 +144,7 @@ async def test_publish_trace_writes_main_and_two_device_rows(tmp_path):
             latency=latency,
             timing=timing,
             stream_lag_ms=3500.0,
+            postprocess_start_monotonic_ms=9500,
         )
         await client.flush()
 
@@ -101,6 +163,16 @@ async def test_publish_trace_writes_main_and_two_device_rows(tmp_path):
             assert row[5] == 3500.0
             assert row[6] == 5  # d1 丢 5,d2 无丢
             assert row[7] == 2  # d1 触发 2 次 overflow
+            saved_timing = conn.execute("SELECT timing_detail FROM traces").fetchone()[0]
+            assert json.loads(saved_timing) == {
+                "existing_metric_ms": 12.0,
+                "schedule/d1/window_start_monotonic_ms": 6000,
+                "schedule/d1/window_end_monotonic_ms": 9000,
+                "schedule/d1/window_to_ready_ms": 10,
+                "schedule/d1/ready_to_drain_ms": 240,
+                "schedule/d1/drain_to_pipeline_ms": 10,
+                "schedule/d1/fused_match_to_batch_postprocess_ms": 175,
+            }
 
             d_rows = conn.execute(
                 "SELECT device_id, video_frame_count, gate_video_pass, gate_audio_pass, "

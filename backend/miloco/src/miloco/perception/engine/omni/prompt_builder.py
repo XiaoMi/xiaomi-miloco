@@ -426,6 +426,7 @@ def build_fused_payload(
                 readonly_history=_build_readonly_history(context),
             ),
             "candidate_track_ids": [],
+            "has_visual_rule_input": False,
         }
 
     # 自适应分辨率(Smart Crop)。prompt 里所有 bbox 都按**全景整帧**归一化到 [0,1000],
@@ -595,16 +596,18 @@ def build_fused_payload(
         visual_input_mode=visual_input_mode,
     )
 
+    rule_conditions = _render_rule_conditions(context)
     messages = _assemble_fused_messages(
         system_prompt=system_prompt,
         user_content=user_content,
-        rule_conditions=_render_rule_conditions(context),
+        rule_conditions=rule_conditions,
         readonly_history=_build_readonly_history(context),
     )
 
     return {
         "messages": messages,
         "candidate_track_ids": [c.track_id for c in candidates],
+        "has_visual_rule_input": bool(rule_conditions and (image_frames or _has_fused_video_block(video_b64))),
     }
 
 
@@ -752,6 +755,10 @@ def _build_payload(
             base["video_base64"] = video_b64
             base["video_media_info"] = media_info
             base["media_info"] = media_info
+    base["has_visual_rule_input"] = bool(
+        context.rule_conditions
+        and (base.get("image_frames") or _has_fused_video_block(base.get("video_base64")))
+    )
     return base
 
 
@@ -1017,6 +1024,10 @@ def _build_user_content(
     return text
 
 
+def _has_fused_video_block(video_b64: str | None) -> bool:
+    return video_b64 is not None and len(video_b64) >= _MIN_VIDEO_B64_LEN
+
+
 def _build_fused_user_content(
     *,
     packets: list[IdentityPacket],
@@ -1262,7 +1273,7 @@ def _build_fused_user_content(
             content.append(adapter.build_audio_block(
                 image_audio_b64, _audio_only_media_info(image_audio_sample_rate)
             ))
-    elif video_b64 and len(video_b64) >= _MIN_VIDEO_B64_LEN:
+    elif video_b64 is not None and _has_fused_video_block(video_b64):
         content.append(adapter.build_video_block(video_b64, media_info))
     elif video_b64:
         from miloco.perception.flow_context import record_video_block_skipped

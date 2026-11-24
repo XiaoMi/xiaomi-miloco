@@ -273,11 +273,19 @@ class RuleRuntimeState:
     exit_debounce_at: float | None = None
     duration_window: "deque[int] | None" = None
     last_duration_round: int | None = None
+    duration_window_seconds: float | None = None
+    camera_duration_sources: frozenset[str] | None = None
     state_duration_fired: bool = False
     # 本轮进入边沿那条事件行的 id：进的时候定下, 退出的时候透传(见 _debounced_exit)。
     # 正常退出的那个感知周期不写事件, 父指针不能在退出那一刻现找, 只能这时存着。
     round_trigger_event_id: str | None = None
     action_cooldown: dict[tuple[str, str], float] = field(default_factory=dict)
+
+    def condition_sources(self) -> Iterable[tuple[str, PerSourceState]]:
+        camera_sources = self.camera_duration_sources
+        if camera_sources is None:
+            return self.sources.items()
+        return ((did, source) for did, source in self.sources.items() if did in camera_sources)
 
 
 @dataclass
@@ -588,9 +596,9 @@ class RuleRunner:
         那个确定值，未知就表达不出来了。两者用途不同，不共用一个值。
         """
         state = self._state.get(rule_id)
-        if state is None or not state.sources:
+        if state is None:
             return None
-        return or3(src.last_bool for src in state.sources.values())
+        return or3(src.last_bool for _, src in state.condition_sources())
 
     def mark_source_unknown(self, rule_id: str, source_did: str) -> None:
         """把一个 source 置成未就绪。源层在设备离线 / 叶子被删 / 求值失败时调。
@@ -957,7 +965,9 @@ class RuleRunner:
                 return TriggerOutcome.NOT_FIRED
 
             src = self._ensure_source(rule_id, source_did)
-            prev = src.last_bool
+            previous_source_value = src.last_bool
+            rule_state = self._state[rule_id]
+            rule_state.camera_duration_sources = None
 
             # out() 统一分流本周期触发结论：duration 规则的结论完全由 _evaluate_duration
             # 决定（frame 路径对 duration 不 fire、只做状态维护），非 duration 规则用
@@ -974,7 +984,6 @@ class RuleRunner:
             if rule.duration_seconds:
                 observed_states = dict(cycle_source_states or {})
                 observed_states.setdefault(source_did, current_bool)
-                rule_state = self._state[rule_id]
                 effective_state = any(observed_states.values()) or any(
                     s.last_bool
                     for did, s in rule_state.sources.items()
@@ -989,60 +998,11 @@ class RuleRunner:
                 # 这里显式断言，让不变式失效时当场炸而不是渲染出一个错标签。
                 assert dur_outcome is not None
 
-            # 帧级抗抖：source 上次 True 时，单帧 False 不立即翻转 — 视为 LLM 漏识，
-            # 留一帧观察窗。下一帧仍 False 才确认 EXIT；翻回 True 则吸收为抖动。
-            #
-            # skip_flicker 给不会抖的源用（record 源的 bool 来自 DB 算术）。对这类源
-            # 留观察窗是有害的：它每次翻转只喂一次，第一次被吸收掉就再没有第二次，
-            # 条件会永久停在旧值。
-            if prev and not skip_flicker:
-                if not current_bool:
-                    if not src.pending_exit:
-                        src.pending_exit = True
-                        logger.debug(
-                            "rule %s source %s exit pending (1st false)",
-                            safe_log(rule_id), safe_log(source_did),
-                        )
-                        return out(TriggerOutcome.NOT_FIRED)
-                    src.pending_exit = False
-                elif src.pending_exit:
-                    src.pending_exit = False
-                    logger.info(
-                        "rule %s source %s flicker absorbed",
-                        safe_log(rule_id),
-                        safe_log(source_did),
-                    )
-                    return out(TriggerOutcome.STILL_IN)
-            elif not skip_flicker and self._state[rule_id].exit_debounce_task is not None:
-                # 仅在 exit_debounce 阶段，对 False → True 加对称双帧抗抖：单帧 True
-                # 视为 LLM 单帧幻觉，留一帧观察。下一帧仍 True 才确认 ENTER 并 cancel
-                # debounce；第二帧 False 则吸收幻觉、debounce 继续完成。修复 omni
-                # 单帧幻觉反复打断 exit_debounce 导致 state 退不出的问题。
-                if current_bool:
-                    if not src.pending_enter:
-                        src.pending_enter = True
-                        logger.debug(
-                            "rule %s source %s enter pending during exit_debounce "
-                            "(1st true)",
-                            safe_log(rule_id), safe_log(source_did),
-                        )
-                        return out(TriggerOutcome.NOT_FIRED)
-                    src.pending_enter = False
-                    logger.info(
-                        "rule %s source %s enter confirmed (2 consecutive true) "
-                        "during exit_debounce",
-                        safe_log(rule_id), safe_log(source_did),
-                    )
-                elif src.pending_enter:
-                    src.pending_enter = False
-                    logger.info(
-                        "rule %s source %s single-frame true absorbed during "
-                        "exit_debounce",
-                        safe_log(rule_id), safe_log(source_did),
-                    )
-                    return out(TriggerOutcome.NOT_FIRED)
-
-            src.last_bool = current_bool
+            source_outcome = self._advance_source(
+                rule_id, source_did, src, previous_source_value, current_bool, skip_flicker=skip_flicker
+            )
+            if source_outcome is not None:
+                return out(source_outcome)
 
             rule_state = self._state[rule_id]
             aggregated = or3(s.last_bool for s in rule_state.sources.values())
@@ -1088,6 +1048,128 @@ class RuleRunner:
                     return dur_outcome
                 return dispatch_outcome
             return out(dispatch_outcome)
+
+    def _advance_source(
+        self, rule_id: str, source_did: str, src: PerSourceState, prev: bool | None,
+        current_bool: bool, *, skip_flicker: bool = False
+    ) -> TriggerOutcome | None:
+        # 帧级抗抖：source 上次 True 时，单帧 False 不立即翻转 — 视为 LLM 漏识，
+        # 留一帧观察窗。下一帧仍 False 才确认 EXIT；翻回 True 则吸收为抖动。
+        #
+        # skip_flicker 给不会抖的源用（record 源的 bool 来自 DB 算术）。对这类源
+        # 留观察窗是有害的：它每次翻转只喂一次，第一次被吸收掉就再没有第二次，
+        # 条件会永久停在旧值。
+        if prev and not skip_flicker:
+            if not current_bool:
+                if not src.pending_exit:
+                    src.pending_exit = True
+                    logger.debug(
+                        "rule %s source %s exit pending (1st false)",
+                        safe_log(rule_id), safe_log(source_did),
+                    )
+                    return TriggerOutcome.NOT_FIRED
+                src.pending_exit = False
+            elif src.pending_exit:
+                src.pending_exit = False
+                logger.info(
+                    "rule %s source %s flicker absorbed",
+                    safe_log(rule_id),
+                    safe_log(source_did),
+                )
+                return TriggerOutcome.STILL_IN
+        elif not skip_flicker and self._state[rule_id].exit_debounce_task is not None:
+            # 仅在 exit_debounce 阶段，对 False → True 加对称双帧抗抖：单帧 True
+            # 视为 LLM 单帧幻觉，留一帧观察。下一帧仍 True 才确认 ENTER 并 cancel
+            # debounce；第二帧 False 则吸收幻觉、debounce 继续完成。修复 omni
+            # 单帧幻觉反复打断 exit_debounce 导致 state 退不出的问题。
+            if current_bool:
+                if not src.pending_enter:
+                    src.pending_enter = True
+                    logger.debug(
+                        "rule %s source %s enter pending during exit_debounce "
+                        "(1st true)",
+                        safe_log(rule_id), safe_log(source_did),
+                    )
+                    return TriggerOutcome.NOT_FIRED
+                src.pending_enter = False
+                logger.info(
+                    "rule %s source %s enter confirmed (2 consecutive true) "
+                    "during exit_debounce",
+                    safe_log(rule_id), safe_log(source_did),
+                )
+            elif src.pending_enter:
+                src.pending_enter = False
+                logger.info(
+                    "rule %s source %s single-frame true absorbed during "
+                    "exit_debounce",
+                    safe_log(rule_id), safe_log(source_did),
+                )
+                return TriggerOutcome.NOT_FIRED
+
+        src.last_bool = current_bool
+
+        return None
+
+    async def apply_camera_window(
+        self,
+        rule_id: str,
+        expected_rule: dict,
+        source_states: Mapping[str, bool],
+        *,
+        source_did: str,
+        context: str,
+        room_name: str,
+        caption: str,
+        device_name: str,
+        event_id: str | None,
+        window_end_unix_ms: int,
+        window_seconds: float,
+    ) -> TriggerOutcome | None:
+        """Apply a complete camera window before evaluating the aggregate edge."""
+        rule = self._rules.get(rule_id)
+        if rule is None or not self._is_effectively_enabled(rule) or rule.model_dump() != expected_rule:
+            return None
+        state = self._ensure_state(rule_id)
+        progressed = False
+        for did, value in source_states.items():
+            src = self._ensure_source(rule_id, did)
+            if self._advance_source(rule_id, did, src, src.last_bool, value) is None:
+                progressed = True
+
+        duration = None
+        if rule.duration_seconds:
+            # Only complete evidence reaches this branch. Keep the window's source
+            # set for edge and debounce checks while leaving the batch cache intact.
+            state.camera_duration_sources = frozenset(source_states)
+            duration = await self._evaluate_duration(
+                rule, any(source_states.values()), source_did, context, caption, device_name,
+                trigger_event_id=event_id,
+                window_end_unix_ms=window_end_unix_ms,
+                window_seconds=window_seconds,
+            )
+
+        if self._rules.get(rule_id) is not rule or not self._is_effectively_enabled(rule):
+            return None
+        aggregated = self.is_condition_satisfied(rule_id)
+        if aggregated is None or not progressed:
+            return duration or TriggerOutcome.NOT_FIRED
+        previous = state.last_rule_state
+        state.last_rule_state = aggregated
+        if previous == aggregated:
+            if aggregated and rule.resolved_direction in (
+                RuleDirection.ENTER, RuleDirection.SESSION,
+            ) and await self._release_pending_enters(rule.task_id):
+                return TriggerOutcome.FIRED
+            return duration or (TriggerOutcome.STILL_IN if aggregated else TriggerOutcome.NOT_FIRED)
+
+        event = RuleEvent.ENTERED if aggregated else RuleEvent.EXITED
+        outcome = await self._dispatch_event(
+            rule, event, source_did, context, room_name, [source_did],
+            caption=caption, device_name=device_name, trigger_event_id=event_id,
+        )
+        if event == RuleEvent.EXITED and duration is not TriggerOutcome.FIRED:
+            return outcome
+        return duration or outcome
 
     # ---- Debug / manual trigger ----
 
@@ -1176,6 +1258,9 @@ class RuleRunner:
         caption: str = "",
         device_name: str = "",
         trigger_event_id: str | None = None,
+        *,
+        window_end_unix_ms: int | None = None,
+        window_seconds: float | None = None,
     ) -> TriggerOutcome:
         """每个采样周期采样一次 OR 聚合状态；窗口 True 比例达阈值即 fire。
 
@@ -1198,13 +1283,21 @@ class RuleRunner:
         state = self._ensure_state(rule.id)
         if rule.resolved_direction is RuleDirection.SESSION and state.state_duration_fired:
             return TriggerOutcome.STILL_IN
+        interval = self._sample_interval if window_seconds is None else window_seconds
+        if state.duration_window_seconds != interval:
+            state.duration_window = None
+            state.last_duration_round = None
+            state.duration_window_seconds = interval
 
-        round_id = int(time.time() / self._sample_interval)
+        sampled_at = time.time() if window_end_unix_ms is None else (window_end_unix_ms - 1) / 1000
+        round_id = int(sampled_at / interval)
         last_round_id = state.last_duration_round
-        if last_round_id == round_id:
+        if last_round_id == round_id or (
+            window_seconds is not None and last_round_id is not None and last_round_id > round_id
+        ):
             return TriggerOutcome.COUNTING
 
-        maxlen = max(1, int(rule.duration_seconds / self._sample_interval))
+        maxlen = max(1, int(rule.duration_seconds / interval))
         win = state.duration_window
         if win is None or win.maxlen != maxlen:
             win = deque(maxlen=maxlen)
@@ -1247,7 +1340,7 @@ class RuleRunner:
             first_true_offset = next(i for i, v in enumerate(win_list) if v == 1)
             first_true_round = (round_id - maxlen + 1) + first_true_offset
             edge_at = ms_to_iso_local(
-                int(first_true_round * self._sample_interval * 1000)
+                int(first_true_round * interval * 1000)
             )
             logger.info(
                 "rule %s (task=%s, %s) duration met: edge_at=%s "
@@ -1926,7 +2019,7 @@ class RuleRunner:
         rs = self._state.get(rule_id)
         if rs is None:
             return []
-        return [did for did, src in rs.sources.items() if src.last_bool]
+        return [did for did, src in rs.condition_sources() if src.last_bool]
 
     @staticmethod
     def _publish_rule_event(event_type: str, rule_id: str, payload: dict) -> None:
@@ -1978,6 +2071,7 @@ class RuleRunner:
                 "slot": kind,
                 "sources": sources,
                 "execute_id": execute_id,
+                "trigger_event_id": trigger_event_id,
             },
         )
 

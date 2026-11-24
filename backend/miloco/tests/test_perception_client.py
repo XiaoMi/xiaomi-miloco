@@ -609,6 +609,41 @@ async def test_early_suggestions_default_low_is_noop(proxy):
     assert [s.id for s in disp.await_args.args[1]] == [1, 2]
 
 
+async def test_retired_window_drops_late_streaming_suggestion(proxy):
+    from unittest.mock import AsyncMock
+
+    from miloco.perception.snapshot_context import (
+        OmniEventArtifacts,
+        event_artifacts_scope,
+    )
+    from miloco.perception.types import Suggestion
+
+    retired = asyncio.Event()
+
+    async def engine_realtime(*_args, **callbacks):
+        callback = callbacks["on_early_suggestions"]
+        await callback([Suggestion(event="first", action="notify", urgency="low", id=1)])
+        retired.set()
+        await callback([Suggestion(event="late", action="notify", urgency="low", id=2)])
+        return _empty_result()
+
+    proxy.perception_engine.realtime_perceive = engine_realtime
+    artifacts = OmniEventArtifacts(publication_guard=lambda: not retired.is_set())
+    with (
+        event_artifacts_scope(artifacts),
+        patch("miloco.perception.client.dispatch_event", new_callable=AsyncMock) as dispatch,
+        patch("miloco.perception.client._publish_perception_event") as publish,
+        patch("miloco.perception.client.get_settings", return_value=_urgency_settings("low")),
+    ):
+        _, _, _, early_ids, _ = await proxy._realtime_perceive_impl(
+            _stub_snapshot(), [], 0, 0.0, asyncio.get_running_loop(), [],
+        )
+
+    assert early_ids == {1}
+    dispatch.assert_awaited_once()
+    publish.assert_called_once()
+
+
 # test_unmatched_enabled_rules_get_false_each_cycle / test_unmatched_skips_early_sent_rules
 # 已迁移到 test_perception_client_rule_dispatch.py(per-device 状态机重构后,
 # false 广播改为按 device_rule_map 精确推退,旧 case 的全集 enabled rule 模型不再适用)。

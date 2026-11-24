@@ -817,12 +817,17 @@ export async function getProcSeries(
 
 export type MinSuggestionUrgency = "low" | "medium" | "high";
 export type OmniVisualInputMode = "video" | "image";
+export type PerceptionScheduleMode = "batch" | "per_camera";
 
 export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
   omni_visual_input_mode: OmniVisualInputMode;
   window_size: number;
+  window_size_effective?: number | null;
+  schedule_mode?: PerceptionScheduleMode;
+  schedule_available?: boolean;
+  schedule_effective?: PerceptionScheduleMode;
   /** Smart Crop 用户开关(backend crop_enhance.user_enabled)。与 video_short_edge
    *  **正交**:裁不裁看这个,多清晰看分辨率档。老后端不返此字段 → undefined。 */
   smart_crop_enabled?: boolean;
@@ -855,7 +860,9 @@ export type UpdatePerceptionConfigResult = PerceptionConfig & {
 // smart_crop_available 从入参里 Omit 掉:它是发版级开关的只读投影,后端 PUT 也不收,
 // 在类型上挡住比让它静默被忽略更好。
 export async function updatePerceptionConfig(
-  input: Partial<Omit<PerceptionConfig, "smart_crop_available">>,
+  input: Partial<
+    Omit<PerceptionConfig, "smart_crop_available" | "schedule_available" | "schedule_effective" | "window_size_effective">
+  >,
 ): Promise<UpdatePerceptionConfigResult> {
   const r = await apiFetch<{ code: number; data: UpdatePerceptionConfigResult }>(
     "/api/admin/perception-config",
