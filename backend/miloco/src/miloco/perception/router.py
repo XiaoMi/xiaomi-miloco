@@ -16,7 +16,10 @@ from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.middleware.exceptions import HTTPException
 from miloco.perception.engine_state import is_perception_enabled, set_perception_enabled
-from miloco.perception.inference_admission import InferenceDrainDeferred
+from miloco.perception.inference_admission import (
+    InferenceAdmissionClosed,
+    InferenceDrainDeferred,
+)
 from miloco.perception.schema import OnDemandPerceptionRequest
 from miloco.schema.common_schema import NormalResponse
 
@@ -63,7 +66,7 @@ async def start_engine():
         )
     try:
         await manager.perception_service.start_engine()
-    except InferenceDrainDeferred as exc:
+    except (InferenceAdmissionClosed, InferenceDrainDeferred) as exc:
         raise HTTPException(
             message="start_deferred: resume intent saved, perception engine is busy. Retry the start operation.",
             status_code=409,
@@ -86,7 +89,7 @@ async def stop_engine():
         )
     try:
         await manager.perception_service.stop_engine()
-    except InferenceDrainDeferred as exc:
+    except (InferenceAdmissionClosed, InferenceDrainDeferred) as exc:
         raise HTTPException(
             message="stop_deferred: pause intent saved, perception engine is busy. Retry the stop operation.",
             status_code=409,
@@ -105,7 +108,7 @@ async def restart_engine():
         running = await manager.perception_service.restart_engine(
             lambda: is_perception_enabled(manager.kv_repo)
         )
-    except InferenceDrainDeferred as exc:
+    except (InferenceAdmissionClosed, InferenceDrainDeferred) as exc:
         raise HTTPException(
             message="restart_deferred: perception engine is busy. Retry the restart operation.",
             status_code=409,

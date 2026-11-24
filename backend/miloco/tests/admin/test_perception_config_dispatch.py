@@ -225,6 +225,18 @@ async def test_saved_fps_can_retry_after_runtime_application_failure(live_settin
         assert tracker.set_fps.call_count == 2
 
 
+async def test_settings_during_shutdown_return_retryable_response_without_saving(live_settings):
+    app, _, _, processor, _ = live_settings
+    processor.seal_inference()
+    settings = "/api/admin/perception-config"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+        response = await c.put(settings, json={"omni_fps": 2, "window_size": 12})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "schedule_stop_deferred"
+        data = (await c.get(settings)).json()["data"]
+        assert (data["omni_fps"], data["omni_fps_effective"], data["window_size"]) == (1, 1, 8)
+
+
 @pytest.mark.parametrize("bad", [0, 1, 32, 63])
 def test_video_short_edge_below_64_rejected(client, bad):
     """短边下限 64。0 曾是「自适应」哨兵，Smart Crop 改走 smart_crop_enabled 独立开关后

@@ -487,6 +487,38 @@ async def test_interactive_lifecycle_calls_defer_while_auth_owns_lock(
         await owner
 
 
+@pytest.mark.parametrize(
+    ("action", "stored_before", "stored_after"),
+    [("start", False, True), ("stop", True, False), ("restart", False, False)],
+)
+async def test_engine_controls_during_shutdown_return_retryable_response(
+    real_db, perception_lifecycle, action, stored_before, stored_after,
+):
+    from miloco.database.kv_repo import KVRepo
+    from miloco.middleware.exceptions import HTTPException
+    from miloco.perception import router as perception_router
+    from miloco.perception.engine_state import (
+        is_perception_enabled,
+        set_perception_enabled,
+    )
+
+    service, runner, processor = perception_lifecycle
+    runner._is_running = False
+    processor.seal_inference()
+    kv = KVRepo()
+    assert set_perception_enabled(kv, stored_before)
+    manager = MagicMock(kv_repo=kv, perception_service=service)
+    with patch.object(perception_router, "manager", manager):
+        with pytest.raises(HTTPException) as raised:
+            await getattr(perception_router, f"{action}_engine")()
+
+    assert raised.value.http_status == 409
+    assert raised.value.message.startswith(f"{action}_deferred:")
+    assert is_perception_enabled(KVRepo()) is stored_after
+    runner._finish_start.assert_not_awaited()
+    runner._finish_stop.assert_not_awaited()
+
+
 async def test_stop_endpoint_fails_loud_when_persist_fails():
     """/engine/stop：落盘失败(KVRepo.set→False) → 抛 HTTPException、不执行 stop（不静默 200）。"""
     from miloco.middleware.exceptions import HTTPException

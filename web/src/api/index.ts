@@ -530,16 +530,7 @@ export async function revealDir(path: string): Promise<void> {
   return impl.realRevealDir(path);
 }
 
-// ── 让它休息 / 唤醒 ────────────────────────────────────────
-// backend 当前只有 stop/start 两态，永久暂停直到手动唤醒，不支持定时恢复。
-// 返回值 {resumesAt: null} 给 UI 留住"以后接定时恢复"的形状，但当前永远 null。
-// 若未来 backend 加 duration 支持，签名改成 pausePerception(opts?: {until?: Date})
-// 让调用方显式传入"暂停到某点"——比 number 形参更清楚语义。
-export async function pausePerception(): Promise<{ resumesAt: string | null }> {
-  await impl.realPausePerception();
-  return { resumesAt: null };
-}
-
+// ── 唤醒 / 重启 ────────────────────────────────────────────
 export async function resumePerception(): Promise<void> {
   return impl.realResumePerception();
 }

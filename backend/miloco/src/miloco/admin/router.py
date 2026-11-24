@@ -31,7 +31,10 @@ from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
 from miloco.perception.engine.omni import probe as _probe
-from miloco.perception.inference_admission import InferenceDrainDeferred
+from miloco.perception.inference_admission import (
+    InferenceAdmissionClosed,
+    InferenceDrainDeferred,
+)
 from miloco.rule.schema import RuleDirection
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
@@ -1758,7 +1761,7 @@ async def _save_perception_config(body: PerceptionConfigBody, current_user: str)
                 )
             except Exception as exc:  # noqa: BLE001
                 if not saved:
-                    if isinstance(exc, InferenceDrainDeferred):
+                    if isinstance(exc, (InferenceAdmissionClosed, InferenceDrainDeferred)):
                         raise HTTPException(status_code=409, detail="schedule_stop_deferred") from exc
                     raise
                 logger.exception("Failed to apply saved perception settings")

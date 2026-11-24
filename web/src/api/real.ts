@@ -1774,13 +1774,7 @@ export async function realRevealDir(path: string): Promise<void> {
   });
 }
 
-// ── 让它休息 / 唤醒 ────────────────────────────────────────
-export async function realPausePerception(): Promise<void> {
-  await apiFetch<Normal<unknown>>("/api/perception/engine/stop", {
-    method: "POST",
-  });
-}
-
+// ── 唤醒 / 重启 ────────────────────────────────────────────
 export async function realResumePerception(): Promise<void> {
   await apiFetch<Normal<unknown>>("/api/perception/engine/start", {
     method: "POST",

@@ -212,6 +212,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
       if (!perceptionPending) onClose();
     } catch (error) {
       if (error instanceof ApiError && error.status === 409 && error.message === "schedule_stop_deferred") {
+        if (schedulerSaved) toast(t("settings.schedulerSaved"), "ok");
         toast(t("settings.perceptionApplyDeferred"), "warn");
         return;
       }
