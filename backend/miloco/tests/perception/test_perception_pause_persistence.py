@@ -434,6 +434,59 @@ async def test_web_restart_after_deferred_drain_preserves_intent_and_results(
         await owner
 
 
+async def test_interactive_lifecycle_calls_defer_while_auth_owns_lock(
+    real_db, perception_lifecycle, monkeypatch,
+):
+    from miloco.database.kv_repo import KVRepo
+    from miloco.middleware.exceptions import HTTPException
+    from miloco.miot.service import _background_tasks
+    from miloco.perception import router as perception_router
+    from miloco.perception.engine_state import is_perception_enabled
+    from miloco.perception.inference_admission import InferenceDrainDeferred
+
+    service, runner, processor = perception_lifecycle
+    miot_service = _make_service(None)
+    kv = KVRepo()
+    miot_service._miot_proxy._kv_repo = kv
+    manager = MagicMock(kv_repo=kv, perception_service=service)
+    release = asyncio.Event()
+    owner = processor._inference_admission.start(release.wait)
+    previous_tasks = set(_background_tasks)
+    monkeypatch.setattr("miloco.miot.service._AUTH_RESTART_SYNC_WAIT_S", 0)
+    monkeypatch.setattr("miloco.perception.service._LIFECYCLE_LOCK_WAIT_S", 0)
+
+    try:
+        with patch("miloco.manager.get_manager", return_value=manager):
+            await miot_service._restart_perception_engine()
+        (restart,) = _background_tasks - previous_tasks
+        assert not processor.accepting_inference
+
+        with patch.object(perception_router, "manager", manager):
+            for action, enabled in (("stop", False), ("restart", False), ("start", True)):
+                with pytest.raises(HTTPException) as raised:
+                    await asyncio.wait_for(getattr(perception_router, f"{action}_engine")(), timeout=1)
+                assert raised.value.http_status == 409
+                assert raised.value.message.startswith(f"{action}_deferred:")
+                assert is_perception_enabled(KVRepo()) is enabled
+
+        save = MagicMock()
+        with pytest.raises(InferenceDrainDeferred):
+            await asyncio.wait_for(
+                service.apply_schedule_config("per_camera", save, restart_window=False, omni_fps=None),
+                timeout=1,
+            )
+        save.assert_not_called()
+        runner._finish_start.assert_not_awaited()
+        runner._finish_stop.assert_not_awaited()
+        release.set()
+        await asyncio.wait_for(restart, timeout=1)
+        runner._finish_stop.assert_awaited_once()
+        runner._finish_start.assert_awaited_once()
+    finally:
+        release.set()
+        await owner
+
+
 async def test_stop_endpoint_fails_loud_when_persist_fails():
     """/engine/stop：落盘失败(KVRepo.set→False) → 抛 HTTPException、不执行 stop（不静默 200）。"""
     from miloco.middleware.exceptions import HTTPException

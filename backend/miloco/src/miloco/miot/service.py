@@ -864,10 +864,8 @@ class MiotService:
 
             async def restart() -> None:
                 try:
-                    await perception_service.restart_engine(
-                        should_start,
-                        wait_seconds=_AUTH_RESTART_DRAIN_TIMEOUT_S,
-                        discard_inflight_results=True,
+                    await perception_service.restart_after_auth(
+                        should_start, wait_seconds=_AUTH_RESTART_DRAIN_TIMEOUT_S,
                     )
                 except InferenceDrainDeferred:
                     logger.warning("授权后感知排空超时，引擎未重启")

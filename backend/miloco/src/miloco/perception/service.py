@@ -20,6 +20,7 @@ from miloco.database.on_demand_log_repo import OnDemandLogRepo
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.middleware.exceptions import BusinessException
 from miloco.perception.collect.collector import MultimodalCollector
+from miloco.perception.inference_admission import InferenceDrainDeferred
 from miloco.perception.processor import PipelineProcessor
 from miloco.perception.runner import PerceptionRunner
 from miloco.perception.schema import (
@@ -32,6 +33,7 @@ from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
 LifecycleResult = TypeVar("LifecycleResult")
+_LIFECYCLE_LOCK_WAIT_S = 5.0
 
 
 class PerceptionService:
@@ -59,9 +61,15 @@ class PerceptionService:
     # ---- Realtime engine lifecycle ----
 
     async def _run_lifecycle(
-        self, operation: Callable[[], Coroutine[Any, Any, LifecycleResult]]
+        self, operation: Callable[[], Coroutine[Any, Any, LifecycleResult]], *,
+        bounded_lock: bool = True,
     ) -> LifecycleResult:
-        await self._lifecycle_lock.acquire()
+        lock_wait = _LIFECYCLE_LOCK_WAIT_S if bounded_lock else None
+        try:
+            async with asyncio.timeout(lock_wait):
+                await self._lifecycle_lock.acquire()
+        except TimeoutError as exc:
+            raise InferenceDrainDeferred("another perception lifecycle operation is still running") from exc
 
         async def run() -> LifecycleResult:
             try:
@@ -86,20 +94,23 @@ class PerceptionService:
     async def stop_engine(self) -> None:
         await self._run_lifecycle(self._engine.stop)
 
-    async def restart_engine(
-        self, should_start: Callable[[], bool], *,
-        wait_seconds: float | None = None, discard_inflight_results: bool = False,
-    ) -> bool:
-        return await self._run_lifecycle(
+    async def restart_engine(self, should_start: Callable[[], bool]) -> bool:
+        return await self._run_lifecycle(lambda: self._engine.restart(should_start))
+
+    async def restart_after_auth(
+        self, should_start: Callable[[], bool], *, wait_seconds: float,
+    ) -> None:
+        await self._run_lifecycle(
             lambda: self._engine.restart(
-                should_start, wait_seconds=wait_seconds, discard_inflight_results=discard_inflight_results
-            )
+                should_start, wait_seconds=wait_seconds, discard_inflight_results=True,
+            ),
+            bounded_lock=False,
         )
 
     async def shutdown_engine(self) -> None:
         # 关机接手排空，长时重启先让出生命周期锁。
         self._engine.seal_inference()
-        await self._run_lifecycle(lambda: self._engine.stop(allow_sealed=True))
+        await self._run_lifecycle(lambda: self._engine.stop(allow_sealed=True), bounded_lock=False)
 
     async def stop_to_unconfigured(self) -> None:
         """等待在途推理结束后关闭引擎实例，回到「未配模型」态。
@@ -110,7 +121,7 @@ class PerceptionService:
             async with self._pipeline.drain_inference(bounded=False):
                 await self._pipeline.stop_to_unconfigured()
 
-        await self._run_lifecycle(soft_stop)
+        await self._run_lifecycle(soft_stop, bounded_lock=False)
 
     @property
     def window_size_effective(self) -> int | None:
@@ -171,13 +182,12 @@ class PerceptionService:
 
         返回是否成功。config 已写盘(不可回滚),失败返 False 不冒泡 500（同 restart 语义）。
         """
-        async with self._lifecycle_lock:
-            try:
-                await self._pipeline.apply_omni_fps(omni_fps)
-                return True
-            except Exception as e:  # noqa: BLE001
-                logger.error("[service] omni_fps 热更失败(config 已写盘) | %s", e, exc_info=True)
-                return False
+        try:
+            await self._run_lifecycle(lambda: self._pipeline.apply_omni_fps(omni_fps))
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.error("[service] omni_fps 热更失败(config 已写盘) | %s", e, exc_info=True)
+            return False
 
     def engine_status(self) -> PerceptionEngineStatus:
         return self._engine.status()

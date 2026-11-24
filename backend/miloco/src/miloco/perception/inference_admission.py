@@ -91,6 +91,7 @@ class InferenceAdmission:
                     async with asyncio.timeout(timeout_s):
                         await ready.wait()
                 except TimeoutError:
+                    # 等待到期后按登记表判断是否能关闭，实际推理继续运行。
                     pass
             if self._sealed and not allow_sealed:
                 raise InferenceAdmissionClosed("perception is shutting down")

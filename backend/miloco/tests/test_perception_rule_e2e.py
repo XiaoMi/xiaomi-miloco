@@ -1012,8 +1012,9 @@ async def test_camera_inference_scheduling(
                     mode, lambda: None, restart_window=False, omni_fps=None,
                 )
             assert service.schedule_mode == ("per_camera" if scheduled_mode else "batch")
+            scheduler = runner._camera_scheduler
             if case == "or_timeout":
-                runner._camera_scheduler._timeout_s = 0.65
+                scheduler._timeout_s = 0.65
             base = (elapsed_ms() // WINDOW_MS + 2) * WINDOW_MS
             for did in CAMERAS:
                 await put_frame(did, 0, base - WINDOW_MS)
@@ -1026,8 +1027,20 @@ async def test_camera_inference_scheduling(
                 await put_frame(FIRST_CAMERA, marker, stamp)
                 if marker == 2 or (case == "or_new_job" and marker == 3):
                     await put_frame(SECOND_CAMERA, marker, stamp)
+                if scheduler is not None:
+                    # 后一帧封住上一窗。等 A 提交上一窗，再送帧，避免积压时取最新窗掩盖时序。
+                    previous = marker - 1
+                    await wait_for(lambda: (
+                        (FIRST_CAMERA, previous) in finished and FIRST_CAMERA not in scheduler._running
+                    ))
+                    if marker == 2:
+                        await wait_for(lambda: (SECOND_CAMERA, 1, scheduled_mode) in started)
+                        if case == "guard_first":
+                            await wait_for(lambda: rule_runner.is_condition_satisfied(guard.id) is True)
 
-            await wait_until(base + 6 * WINDOW_MS)
+            if scheduler is None:
+                await wait_until(base + 6 * WINDOW_MS)
+            await rule_runner.drain()
             assert (FIRST_CAMERA, 1) in finished
             assert (SECOND_CAMERA, 1, scheduled_mode) in started
             if slow_camera:

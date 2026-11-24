@@ -61,7 +61,13 @@ async def start_engine():
             message="failed to persist perception resume intent",
             status_code=500,
         )
-    await manager.perception_service.start_engine()
+    try:
+        await manager.perception_service.start_engine()
+    except InferenceDrainDeferred as exc:
+        raise HTTPException(
+            message="start_deferred: resume intent saved, perception engine is busy. Retry the start operation.",
+            status_code=409,
+        ) from exc
     return NormalResponse(code=0, message="Perception engine started")
 
 
@@ -82,7 +88,7 @@ async def stop_engine():
         await manager.perception_service.stop_engine()
     except InferenceDrainDeferred as exc:
         raise HTTPException(
-            message="stop_deferred: pause intent saved, perception is still running. Retry the stop operation.",
+            message="stop_deferred: pause intent saved, perception engine is busy. Retry the stop operation.",
             status_code=409,
         ) from exc
     return NormalResponse(code=0, message="Perception engine stopped")
@@ -101,7 +107,7 @@ async def restart_engine():
         )
     except InferenceDrainDeferred as exc:
         raise HTTPException(
-            message="restart_deferred: perception inference is still running",
+            message="restart_deferred: perception engine is busy. Retry the restart operation.",
             status_code=409,
         ) from exc
     return NormalResponse(code=0, message="Perception restart finished", data={"running": running})

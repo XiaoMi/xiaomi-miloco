@@ -490,8 +490,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     get_manager().deinit_iot_push()
     get_manager().state_store.stop()
 
-    # 按生产者先于消费者的顺序关闭，感知排空期间仍可派发事件和记录指标。
-    # 给感知单独留出关闭时限，避免 PPCS SDK 卡住拖过整个进程的退出窗口。
+    # 按生产者先于消费者的顺序关闭。感知先撤回在途窗口的发布资格，再等底层任务退出。
+    # 总时限要同时留给排空和资源关闭，避免 PPCS SDK 卡住拖过整个进程的退出窗口。
     try:
         await asyncio.wait_for(
             get_manager().perception_service.shutdown_engine(),
@@ -500,7 +500,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     except TimeoutError:
         logger.warning("Perception shutdown exceeded 10s; continuing process cleanup")
     except InferenceDrainDeferred as exc:
-        logger.warning("Perception shutdown deferred; continuing process cleanup | %s", exc)
+        logger.warning("Inference still in flight; skipping explicit perception teardown | %s", exc)
     except Exception as e:
         logger.error("Failed to stop perception engine: %s", e)
 

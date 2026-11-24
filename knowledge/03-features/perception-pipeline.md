@@ -79,7 +79,9 @@ PerceptionEngineProxy 结果后处理
 
 `MultimodalCollector`（`perception/collect/collector.py`）管理多设备适配器。`CameraDeviceAdapter`（`perception/collect/camera_adapter.py`）负责单摄像头接入，内部用 `MultiTrackSyncBuffer`（`perception/collect/stream_buffer.py`）将音视频帧按时间窗口对齐。
 
-`PerceptionRunner`（`perception/runner.py`）是后台调度器，双触发机制：窗口就绪事件和采集间隔超时。推理在专用单线程 `ThreadPoolExecutor`（`perception-infer`）中执行，不阻塞主事件循环。
+`PerceptionRunner`（`perception/runner.py`）是后台调度器，由窗口就绪事件和采集间隔超时触发。推理在 `perception-infer` 专用线程的事件循环中执行。
+
+`perception.schedule.mode` 默认为 `batch`，可在 Web 设置切为 `per_camera`。按相机调度时，各路独立取最新就绪窗口，受 `perception.schedule.max_concurrent_cameras` 约束。
 
 #### Gate — 变化门控
 
@@ -190,7 +192,7 @@ Omni 层（`engine/omni/omni.py`）调用视觉语言模型（MiMo API，OpenAI 
 
 ### 感知相关 API 路径
 
-主要入口：`POST /api/perception/perceive`（主动查询）和 `/api/perception/engine/start|stop|status`（引擎生命周期管理），完整端点见 `perception/router.py`。
+主动查询使用 `POST /api/perception/perceive`。引擎生命周期入口为 `/api/perception/engine/start|stop|restart|status`。启停或重启因引擎忙而延期时返回 HTTP 409，可重试。完整端点见 `perception/router.py`。
 
 ### 与其他模块的关系
 

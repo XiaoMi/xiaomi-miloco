@@ -582,7 +582,11 @@ function MainApp() {
                 toast(t("app.woke"), "ok");
                 status.reload();
               } catch (e) {
-                toast(e instanceof Error ? e.message : t("app.wakeFail"), "warn");
+                if (e instanceof ApiError && e.status === 409 && e.message.startsWith("start_deferred:")) {
+                  toast(t("app.wakeDeferredRetry"), "warn");
+                } else {
+                  toast(e instanceof Error ? e.message : t("app.wakeFail"), "warn");
+                }
               }
             }}
             onJumpDevices={() => setActiveTab("devices")}

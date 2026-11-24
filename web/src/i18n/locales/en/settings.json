@@ -28,7 +28,7 @@
     "saveFailed": "Save failed",
     "partialSaveFailed": "Scheduler toggle saved, but perception settings failed to save. Please retry.",
     "restartFailed": "Settings saved, but engine restart failed. Please restart manually.",
-    "perceptionApplyDeferred": "Inference is still running. Perception settings could not be applied. Try again shortly.",
+    "perceptionApplyDeferred": "The perception engine is busy. Try applying your settings again shortly.",
     "windowApplyPending": "The window length was saved but is not active yet. Try applying the settings again shortly.",
     "loadFailed": "Failed to load settings",
     "resetDefaults": "Restore Defaults",
