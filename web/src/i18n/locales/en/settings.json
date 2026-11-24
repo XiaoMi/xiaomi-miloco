@@ -30,6 +30,7 @@
     "restartFailed": "Settings saved, but engine restart failed. Please restart manually.",
     "perceptionApplyDeferred": "The perception engine is busy. Try applying your settings again shortly.",
     "windowApplyPending": "The window length was saved but is not active yet. Try applying the settings again shortly.",
+    "omniFpsApplyPending": "The frame rate was saved but is not active yet. Try applying the settings again shortly.",
     "loadFailed": "Failed to load settings",
     "resetDefaults": "Restore Defaults",
     "schedulerSaved": "Saved. Takes effect after the next agent gateway restart.",

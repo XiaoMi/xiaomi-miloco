@@ -128,6 +128,10 @@ class PerceptionService:
         return self._engine.window_size_effective
 
     @property
+    def omni_fps_effective(self) -> int | None:
+        return self._pipeline.omni_fps_effective
+
+    @property
     def schedule_available(self) -> bool:
         return self._engine.schedule_available
 
@@ -146,48 +150,6 @@ class PerceptionService:
         await self._run_lifecycle(lambda: self._engine.apply_schedule_config(
             mode, save, restart_window=restart_window, omni_fps=omni_fps
         ))
-
-    async def apply_config_restart(self) -> bool:
-        """window_size 变更后重启 runner 使新值生效：停 runner → 启 runner。
-
-        window_size 靠 runner.start() 重读（见 runner.start），只需 stop→start，
-        不重建引擎、不重载模型。was_running 时才需重启（未跑时下次 start 自然读新值）。
-        全程持 lifecycle 锁,避免与并发的 start_engine/stop_engine 交错。
-
-        （omni_fps 变更不再走这里——改走 ``apply_omni_fps_live`` 运行时热更，见其注释。）
-
-        返回重启是否成功。config 已由调用方写盘(不可回滚),重启失败时返 False 让调用方
-        区分「已保存但重启失败」,不冒泡成 500——否则前端会把「写盘成功+重启失败」误报
-        成「保存失败」。
-        """
-        async def restart() -> None:
-            if self._engine.is_running:
-                await self._engine.stop()
-                await self._engine.start()
-
-        try:
-            await self._run_lifecycle(restart)
-            return True
-        except Exception as e:  # noqa: BLE001
-            logger.error("[service] 感知参数变更后重启失败(config 已写盘) | %s", e, exc_info=True)
-            return False
-
-    async def apply_omni_fps_live(self, omni_fps: int) -> bool:
-        """运行时热更 omni_fps（含其顶起的 tracker fps）：不停 runner、不重建引擎、
-        不重载模型、不丢在途 track 状态。
-
-        与 ``apply_config_restart`` 并列的轻量入口：只把新 omni_fps 原地推给活跃引擎
-        （PipelineProcessor.apply_omni_fps → proxy → engine.apply_omni_fps）。持 lifecycle
-        锁避免与 start/stop/restart 交错。引擎未起时 proxy 层 no-op（settings 已写盘）。
-
-        返回是否成功。config 已写盘(不可回滚),失败返 False 不冒泡 500（同 restart 语义）。
-        """
-        try:
-            await self._run_lifecycle(lambda: self._pipeline.apply_omni_fps(omni_fps))
-            return True
-        except Exception as e:  # noqa: BLE001
-            logger.error("[service] omni_fps 热更失败(config 已写盘) | %s", e, exc_info=True)
-            return False
 
     def engine_status(self) -> PerceptionEngineStatus:
         return self._engine.status()

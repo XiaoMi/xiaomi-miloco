@@ -476,6 +476,11 @@ class PipelineProcessor:
         await self._perception_engine_proxy.apply_omni_fps(omni_fps)
 
     @property
+    def omni_fps_effective(self) -> int | None:
+        engine = self._perception_engine_proxy.perception_engine
+        return engine.get_input_config().omni_fps if engine is not None else None
+
+    @property
     def last_batch(self) -> PerceptionBatch | None:
         return self._last_batch
 

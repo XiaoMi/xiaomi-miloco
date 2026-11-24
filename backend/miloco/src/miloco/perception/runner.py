@@ -98,16 +98,12 @@ class PerceptionRunner:
         async with self._pipeline.drain_inference():
             save()
             if restart_window and self._is_running:
-                self._pipeline.retire_results()
-                if self._camera_scheduler is not None:
-                    self._camera_scheduler.retire_results()
+                self._retire_results()
                 await self._finish_stop()
                 await self._finish_start()
             if omni_fps is not None:
                 await self._pipeline.apply_omni_fps(omni_fps)
-            if mode != self._schedule_mode or (
-                mode == "per_camera" and (restart_window or omni_fps is not None)
-            ):
+            if mode != self._schedule_mode or (mode == "per_camera" and restart_window):
                 self._set_schedule_mode(mode)
 
     def status(self) -> PerceptionEngineStatus:

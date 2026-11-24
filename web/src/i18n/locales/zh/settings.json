@@ -30,6 +30,7 @@
     "restartFailed": "设置已保存，但引擎重启失败，请手动重启",
     "perceptionApplyDeferred": "感知引擎正忙，设置尚未应用。请稍后重试。",
     "windowApplyPending": "窗长已保存，尚未生效。请稍后再次应用设置。",
+    "omniFpsApplyPending": "帧率已保存，尚未生效。请稍后再次应用设置。",
     "loadFailed": "加载设置失败",
     "resetDefaults": "恢复默认设置",
     "schedulerSaved": "已保存，agent 网关下次重启后生效",

@@ -141,6 +141,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
     config != null &&
     (videoShortEdge !== config.video_short_edge ||
       omniFps !== config.omni_fps ||
+      (config.omni_fps_effective != null && omniFps !== config.omni_fps_effective) ||
       visualInputMode !== (config.omni_visual_input_mode ?? "video") ||
       windowSize !== config.window_size ||
       (config.window_size_effective != null && windowSize !== config.window_size_effective) ||
@@ -170,9 +171,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
         setSchedulerEnabled(s.enabled);
         schedulerSaved = true;
       }
-      // PUT 后端会同步写 config + 重启引擎使参数生效，前端不再单独 pause/resume。
-      // config 写盘不可回滚：写盘成功但重启失败时后端返回 restart_ok=false（非报错），
-      // 此时提示「已保存但需手动重启」而非「保存失败」，避免误导用户以为改动丢失。
+      // PUT 等待写盘和应用。写盘后应用失败时保留差异，允许用户用原值重试。
       if (perceptionDirty) {
         const updated = await updatePerceptionConfig({
           video_short_edge: videoShortEdge,
@@ -188,13 +187,16 @@ export function SettingsDrawer({ open, onClose }: Props) {
         setPerceptionScheduleMode(updated.schedule_mode ?? "batch");
         setSmartCrop(updated.smart_crop_enabled === true);
         if (updated.restart_ok === false) {
+          const fpsPending =
+            updated.omni_fps_effective != null && updated.omni_fps_effective !== updated.omni_fps;
           const windowPending =
             updated.window_size_effective != null &&
             updated.window_size_effective !== updated.window_size;
           const modePending = updated.schedule_effective !== updated.schedule_mode;
-          perceptionPending = windowPending || modePending;
+          perceptionPending = fpsPending || windowPending || modePending;
           const message = modePending ? "settings.perceptionSchedule.pending" :
-            windowPending ? "settings.windowApplyPending" : "settings.restartFailed";
+            windowPending ? "settings.windowApplyPending" :
+            fpsPending ? "settings.omniFpsApplyPending" : "settings.restartFailed";
           toast(t(message), "warn");
         } else {
           toast(t("settings.applySuccess"), "ok");

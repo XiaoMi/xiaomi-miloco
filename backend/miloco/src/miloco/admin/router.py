@@ -1657,6 +1657,7 @@ def _perception_config_payload() -> dict:
     return {
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
+        "omni_fps_effective": service.omni_fps_effective if service is not None else None,
         "omni_visual_input_mode": inp.get("omni_visual_input_mode", "video"),
         "window_size": s.perception.collect.window_size,
         "window_size_effective": window_size_effective,
@@ -1730,21 +1731,19 @@ async def _save_perception_config(body: PerceptionConfigBody, current_user: str)
         # 不参与下方 restart_ok(不需要重启引擎)。
         update.setdefault("perception", {})["min_suggestion_urgency"] = body.min_suggestion_urgency
     if update:
-        # 各参数生效路径不同，按「新值 != 旧值」判断（前端 drawer 多字段一起 PUT）：
-        #   - video_short_edge：每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
-        #   - smart_crop_enabled：同上，crop_enhance_config_from_settings 每窗口热读，无需重启。
-        #   - omni_fps：pipeline 每窗现读引擎内存 config.input.omni_fps（非 settings），但它经
-        #     adjust_fps_for_omni 顶起的 tracker fps 有构造期派生缓存——走 apply_omni_fps_live
-        #     运行时热更（原地刷 _config + 缓存），免重建引擎 / 免模型重载 / 不丢 track。
-        #   - window_size：runner 构造时 cache，需 stop→start 重读（apply_config_restart）。
-        omni_fps_changed = body.omni_fps is not None and body.omni_fps != payload["omni_fps"]
+        # 帧率和窗长还要对比运行时值，让已保存但未生效的配置可用原值重试。
+        effective_omni_fps = payload["omni_fps_effective"]
+        omni_fps_needs_apply = body.omni_fps is not None and (
+            body.omni_fps != payload["omni_fps"]
+            or (effective_omni_fps is not None and body.omni_fps != effective_omni_fps)
+        )
         effective_window_size = payload["window_size_effective"]
         window_needs_apply = body.window_size is not None and (
             body.window_size != payload["window_size"]
             or (effective_window_size is not None and body.window_size != effective_window_size)
         )
         target_mode = body.schedule_mode or payload["schedule_mode"]
-        if mode_needs_apply or (target_mode == "per_camera" and (window_needs_apply or omni_fps_changed)):
+        if mode_needs_apply or window_needs_apply or omni_fps_needs_apply:
             saved = False
 
             def save() -> None:
@@ -1755,12 +1754,12 @@ async def _save_perception_config(body: PerceptionConfigBody, current_user: str)
             try:
                 await manager.perception_service.apply_schedule_config(
                     target_mode, save, restart_window=window_needs_apply,
-                    omni_fps=body.omni_fps if omni_fps_changed else None,
+                    omni_fps=body.omni_fps if omni_fps_needs_apply else None,
                 )
-            except InferenceDrainDeferred as exc:
-                raise HTTPException(status_code=409, detail="schedule_stop_deferred") from exc
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 if not saved:
+                    if isinstance(exc, InferenceDrainDeferred):
+                        raise HTTPException(status_code=409, detail="schedule_stop_deferred") from exc
                     raise
                 logger.exception("Failed to apply saved perception settings")
                 payload = _perception_config_payload()
@@ -1776,14 +1775,4 @@ async def _save_perception_config(body: PerceptionConfigBody, current_user: str)
             return NormalResponse(code=0, message="ok", data=payload)
         update_shared_config(**update)
         payload = _perception_config_payload()
-        # config 已写盘(不可回滚)；热更/重启失败仅带 restart_ok=False，不冒泡成 500——
-        # 否则前端会把「已保存+失败」误报成「保存失败」，误导用户以为改动丢失。同步等完成再返回。
-        restart_ok = True
-        if omni_fps_changed:
-            restart_ok = await manager.perception_service.apply_omni_fps_live(body.omni_fps) and restart_ok
-        if window_needs_apply:
-            restart_ok = await manager.perception_service.apply_config_restart() and restart_ok
-            payload = _perception_config_payload()
-        if omni_fps_changed or window_needs_apply:
-            payload["restart_ok"] = restart_ok
     return NormalResponse(code=0, message="ok", data=payload)

@@ -537,8 +537,8 @@ class PerceptionEngineProxy:
         """运行时热更 omni_fps（含其顶起的 tracker fps）到活跃引擎，不重建、不重载模型。
 
         与 ``rebuild`` 不同：不销毁引擎实例，只原地更新 config + 刷新构造期派生缓存，
-        在途 track 状态全保留。持 ``_engine_lock`` 与在飞 perceive 互斥，避免推理线程
-        读到半更新状态。引擎未起（未配模型 / 降级态，``perception_engine is None``）时
+        在途 track 状态全保留。调用方先排空推理，逐路模式不靠 ``_engine_lock`` 互斥。
+        引擎未起（未配模型 / 降级态，``perception_engine is None``）时
         no-op：settings 已由 PUT config 持久化，下次 ``_init_engine`` 自然读到新值。
         """
         async with self._engine_lock:

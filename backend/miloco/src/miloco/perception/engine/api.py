@@ -922,7 +922,7 @@ class PerceptionEngine(BasePerceptionEngine):
         IdentityEngine 的帧数派生量。fps 必须从 base 重算（见 __init__ self._base_fps）。
 
         「不丢 track」仅对 omni_fps-only 变更成立：本路径不停 runner、不重建实例，故活
-        跃 track 状态原样保留；若同时改 window_size，则另经 apply_config_restart 走
+        跃 track 状态原样保留；若同时改 window_size，runner 会走
         stop→start，track 会随重启丢失（那是 window 变更的固有代价，非本路径）。
         """
         from dataclasses import replace
@@ -931,10 +931,6 @@ class PerceptionEngine(BasePerceptionEngine):
 
         old_omni_fps = self._config.input.omni_fps
         new_fps = adjust_fps_for_omni(self._base_fps, omni_fps)
-        self._config = replace(
-            self._config,
-            input=replace(self._config.input, omni_fps=omni_fps, fps=new_fps),
-        )
         # 构造期缓存 1：后续懒建的 tracking_service 拿新 fps。mock 模式 kwargs 恒为空
         # 且 factory 忽略 kwargs（返回无参 MockTrackingService），不塞 fps，与 __init__
         # 的 mock 分支保持对称，避免留下无消费者的孤儿 key。
@@ -948,6 +944,12 @@ class PerceptionEngine(BasePerceptionEngine):
         for eng in self._identity_engines.values():
             if eng is not None:
                 eng.set_engine_fps(new_fps)
+
+        # 派生配置应用成功后才公布生效帧率，途中失败可以用同一个值再试。
+        self._config = replace(
+            self._config,
+            input=replace(self._config.input, omni_fps=omni_fps, fps=new_fps),
+        )
 
         # 成功路径留痕：旧 rebuild 会经 _init_engine 打 fps 自动调整日志，改热更后运行时
         # 改 omni_fps 若无日志则运维无法确认新值是否真推到活跃引擎 / tracker。

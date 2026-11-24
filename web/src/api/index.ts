@@ -826,6 +826,7 @@ export type PerceptionScheduleMode = "batch" | "per_camera";
 export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
+  omni_fps_effective?: number | null;
   omni_visual_input_mode: OmniVisualInputMode;
   window_size: number;
   window_size_effective?: number | null;
@@ -865,7 +866,8 @@ export type UpdatePerceptionConfigResult = PerceptionConfig & {
 // 在类型上挡住比让它静默被忽略更好。
 export async function updatePerceptionConfig(
   input: Partial<
-    Omit<PerceptionConfig, "smart_crop_available" | "schedule_available" | "schedule_effective" | "window_size_effective">
+    Omit<PerceptionConfig,
+      "smart_crop_available" | "schedule_available" | "schedule_effective" | "window_size_effective" | "omni_fps_effective">
   >,
 ): Promise<UpdatePerceptionConfigResult> {
   const r = await apiFetch<{ code: number; data: UpdatePerceptionConfigResult }>(
