@@ -1127,12 +1127,12 @@ class PerceptionEngineProxy:
             incomplete_rule_ids |= main_loop_pending
             # T6: meaningful_events 后台异步持久化 — 不阻塞 webhook 主路径(B4/B11)。
             # 放 finally:循环之后取到就地累积的触发状态快照（outcomes_by_rule），随 event 落库；
-            # 循环即使抛异常也仍落库。两路快照都只含本周期真值——主循环靠 update_state 返回值，
+            # 窗口仍有效时，循环抛异常也会落库。两路快照都只含本周期真值——主循环靠 update_state 返回值，
             # 早送靠 early_sent_rule_ids 的 value；任一路判定未完成（主循环停在 pending / 早送
             # value 留 None）的规则进 incomplete_rule_ids、展示层显式标「未知」；只有本 cycle
             # 完全没处理到的规则才省略整行。失败仅 log、不抛（降级路径都在 _persist 内自处理）。
             # 任务挂 _PERSIST_BG_TASKS 强引用，防 asyncio 弱引用模型下 GC 在完成前回收。
-            if artifacts is not None:
+            if artifacts is not None and artifacts.can_publish():
                 from miloco.rule.schema import aggregate_outcomes
 
                 # 同 rule 多摄像头取最强信号（FIRED > COUNTING > STILL_IN > NOT_FIRED）。
@@ -1267,6 +1267,9 @@ async def _persist_meaningful_event(
     (老调用方) 自己 mint。注意本函数可能在 ``is_meaningful`` 为假时直接返回 ——
     那种 cycle 不写行,提前发出去的这个 id 就没有宿主。
     """
+    if not artifacts.can_publish():
+        return
+
     from miloco.database.meaningful_events_dao import MeaningfulEventDao  # noqa: F401
     from miloco.manager import get_manager
     from miloco.perception.event_classifier import classify
@@ -1363,6 +1366,9 @@ async def _persist_meaningful_event(
                 if did in relevant_device_ids
             }
 
+        # 规则查询可能让出事件循环。写入前重新确认资格，入库后连续完成产物与 SSE。
+        if not artifacts.can_publish():
+            return
         insert_ok = dao.insert(
             event_id=event_id,
             timestamp=timestamp_ms,

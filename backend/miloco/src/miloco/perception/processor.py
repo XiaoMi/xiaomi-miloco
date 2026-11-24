@@ -579,6 +579,8 @@ class PipelineProcessor:
                 if window.window_start_ms >= self._schedule_cutover_ms
             ]
             if not windows:
+                if _proc_h is not None:
+                    _proc_h.skip_rolling()
                 return False
             if len(windows) != batch.device_count:
                 batch = self._collector.batch_from_windows(windows)
@@ -1111,10 +1113,7 @@ class PipelineProcessor:
                 return None
             return await self._process_on_demand(dids, query)
 
-        try:
-            result = await self._inference_admission.run(infer)
-        except InferenceAdmissionClosed:
-            return None
+        result = await self._inference_admission.run(infer)
         return result if can_publish() else None
 
     async def _process_on_demand(

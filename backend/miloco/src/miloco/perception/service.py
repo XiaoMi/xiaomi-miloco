@@ -20,7 +20,10 @@ from miloco.database.on_demand_log_repo import OnDemandLogRepo
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.middleware.exceptions import BusinessException
 from miloco.perception.collect.collector import MultimodalCollector
-from miloco.perception.inference_admission import InferenceDrainDeferred
+from miloco.perception.inference_admission import (
+    InferenceAdmissionClosed,
+    InferenceDrainDeferred,
+)
 from miloco.perception.processor import PipelineProcessor
 from miloco.perception.runner import PerceptionRunner
 from miloco.perception.schema import (
@@ -237,7 +240,12 @@ class PerceptionService:
         t_start = now_ms()
 
         # Single batch inference call — collector assembles batch, processor infers
-        pipeline_result = await self._pipeline.process_on_demand(valid_dids, request.query)
+        try:
+            pipeline_result = await self._pipeline.process_on_demand(valid_dids, request.query)
+        except InferenceAdmissionClosed as exc:
+            raise BusinessException(
+                "Perception engine is busy. Please retry shortly.", code=2012,
+            ) from exc
 
         if not pipeline_result:
             raise BusinessException(

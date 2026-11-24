@@ -63,6 +63,28 @@ def _build_service(*, od_log_repo=None):
 REQUEST = OnDemandPerceptionRequest(sources=["cam1"], query="谁在客厅？")
 
 
+async def test_on_demand_query_reports_busy_if_inference_is_draining(isolated_settings):
+    from miloco.middleware.exceptions import BusinessException
+    from miloco.perception.inference_admission import InferenceAdmission
+    from miloco.perception.processor import PipelineProcessor
+
+    log_repo = MagicMock()
+    service, _ = _build_service(od_log_repo=log_repo)
+    processor = PipelineProcessor.__new__(PipelineProcessor)
+    processor._inference_admission = InferenceAdmission()
+    processor._result_generation = 0
+    processor._process_on_demand = AsyncMock()
+    service._pipeline = processor
+
+    async with processor.drain_inference():
+        with pytest.raises(BusinessException, match="engine is busy") as raised:
+            await service.on_demand_perceive(REQUEST)
+
+    assert raised.value.code == 2012
+    processor._process_on_demand.assert_not_awaited()
+    log_repo.append.assert_not_called()
+
+
 class TestOnDemandPerceiveArtifacts:
     """service.on_demand_perceive artifact orchestration."""
 

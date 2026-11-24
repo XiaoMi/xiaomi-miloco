@@ -410,6 +410,35 @@ async def test_persist_spawned_even_if_update_state_raises(proxy_with_runner, mo
     assert persisted["called"] is True
 
 
+async def test_retiring_window_during_rule_update_does_not_queue_history(proxy_with_runner, monkeypatch):
+    proxy, _, _ = proxy_with_runner
+    persist = AsyncMock()
+    monkeypatch.setattr("miloco.perception.client._persist_meaningful_event", persist)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    retired = asyncio.Event()
+    manager = MagicMock()
+
+    async def update_rule(*args, **kwargs):
+        entered.set()
+        await release.wait()
+
+    manager.rule_service.update_state = AsyncMock(side_effect=update_rule)
+    result = _result(matched=[("r1", ["cam_A"], "x"), ("r2", ["cam_A"], "y")], device_rule_map={})
+    artifacts = OmniEventArtifacts(publication_guard=lambda: not retired.is_set())
+    with patch("miloco.manager.get_manager", return_value=manager):
+        handling = asyncio.create_task(proxy.handle_realtime_perception_result(result, artifacts=artifacts))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            retired.set()
+        finally:
+            release.set()
+            await asyncio.wait_for(handling, timeout=1)
+
+    manager.rule_service.update_state.assert_awaited_once()
+    persist.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_stale_outcome_not_leaked_on_exception(proxy_with_runner, monkeypatch):
     """异常路径下，本 cycle 未处理到的规则不会把上一 cycle 的旧结论泄进快照。
