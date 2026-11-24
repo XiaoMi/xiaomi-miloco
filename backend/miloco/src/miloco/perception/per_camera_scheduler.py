@@ -111,11 +111,15 @@ class PerCameraScheduler:
             if epoch == self._epoch:
                 logger.warning("Camera window timed out | did=%s", safe_log(connection.did))
 
-        def finish(_: asyncio.Task[None]) -> None:
+        def finish(task: asyncio.Task[None]) -> None:
             deadline_report.cancel()
             job.settle()
             del self._running[connection.did]
             self._wake()
+            if not task.cancelled() and (error := task.exception()) is not None:
+                logger.error(
+                    "Camera window inference failed | did=%s", safe_log(connection.did), exc_info=error,
+                )
 
         def wait_for_peers(rule_id: str) -> CameraExitWait | None:
             peers = [

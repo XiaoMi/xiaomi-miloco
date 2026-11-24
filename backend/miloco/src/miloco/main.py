@@ -490,7 +490,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     get_manager().deinit_iot_push()
     get_manager().state_store.stop()
 
-    # Stop perception while the dispatcher and metrics consumer are still available.
+    # 按生产者先于消费者的顺序关闭，感知排空期间仍可派发事件和记录指标。
+    # 给感知单独留出关闭时限，避免 PPCS SDK 卡住拖过整个进程的退出窗口。
     try:
         await asyncio.wait_for(
             get_manager().perception_service.shutdown_engine(),

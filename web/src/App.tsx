@@ -18,7 +18,7 @@ import {
   listScopeHomes,
   listTasks,
   refreshCameraOnline,
-  pausePerception,
+  restartPerception,
   resumePerception,
   setFeatures,
   setScopeCameraPrompt,
@@ -587,38 +587,24 @@ function MainApp() {
             }}
             onJumpDevices={() => setActiveTab("devices")}
             onRestartEngine={async () => {
-              // 拆两段 try：pause 未完成 → 引擎仍跑；resume 失败 →
-              // 引擎已停下需要住户手动唤醒。两种 toast 文案不同避免割裂——
-              // 否则 pause 成功 + resume 失败时住户看到笼统"重启失败"，但 reload 后
-              // StatusRibbon 跳到蓝色"休息中"，跟"重启失败"的语义错位。
               try {
-                await pausePerception();
+                if (await restartPerception()) {
+                  toast(t("app.engineRestarted"), "ok");
+                }
               } catch (e) {
-                if (e instanceof ApiError && e.status === 409 && e.message.startsWith("stop_deferred:")) {
+                if (e instanceof ApiError && e.status === 409 && e.message.startsWith("restart_deferred:")) {
                   toast(t("app.restartDeferredRetry"), "warn");
                 } else {
                   toast(
                     e instanceof Error
-                      ? t("app.restartFailEngineRunning", { msg: e.message })
-                      : t("app.restartFailEngineRunningNoMsg"),
+                      ? t("app.restartFailWithMessage", { msg: e.message })
+                      : t("app.restartFail"),
                     "warn",
                   );
                 }
+              } finally {
                 status.reload();
-                return;
               }
-              try {
-                await resumePerception();
-                toast(t("app.engineRestarted"), "ok");
-              } catch (e) {
-                toast(
-                  e instanceof Error
-                    ? t("app.engineStoppedWakeManually", { msg: e.message })
-                    : t("app.engineStoppedWakeManuallyNoMsg"),
-                  "warn",
-                );
-              }
-              status.reload();
             }}
           />
         ) : status.error ? (

@@ -131,7 +131,7 @@ interface Props {
   onConnectMiot: () => void;
   onWakeUp: () => void;
   onJumpDevices: () => void;
-  /** running=true 但 ready=false（如模型缺失）时点「重启引擎」：stop + start */
+  /** running=true 但 ready=false（如模型缺失）时点「重启引擎」 */
   onRestartEngine: () => void;
 }
 

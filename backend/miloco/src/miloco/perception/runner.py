@@ -56,6 +56,7 @@ class PerceptionRunner:
         if get_settings().perception.schedule.mode == "per_camera" and self.schedule_available:
             self._set_schedule_mode("per_camera")
 
+        # 复用专用推理线程的事件循环，避免每轮推理反复创建默认 executor。
         self._inference_worker = InferenceWorker(thread_name="perception-infer")
 
     @property
@@ -150,6 +151,7 @@ class PerceptionRunner:
         # 不重读会导致「应用设置」改了 window_size 后引擎仍按旧值跑。
         self._collect_interval = get_settings().perception.collect.window_size
 
+        # worker 的每次启动使用独立线程和事件循环，旧线程尚在退出也不阻塞新一代。
         if not self._inference_worker.is_running:
             self._inference_worker.start()
 
@@ -172,11 +174,30 @@ class PerceptionRunner:
 
     async def stop(self) -> None:
         """Stop the runner once accepted inference has finished."""
+        self._retire_results()
+        async with self._pipeline.drain_inference(allow_sealed=True):
+            await self._finish_stop()
+
+    async def restart(
+        self, should_start: Callable[[], bool], *,
+        wait_seconds: float | None = None, discard_inflight_results: bool = False,
+    ) -> bool:
+        """在同一次排空内完成重启。授权刷新后，旧连接的在途结果先失效。"""
+        if discard_inflight_results:
+            self._retire_results()
+        async with self._pipeline.drain_inference(wait_seconds=wait_seconds):
+            self._retire_results()
+            await self._finish_stop()
+            # 排空和停止期间用户可能点了「让它休息」，也可能开始关机。
+            if not self._pipeline.inference_sealed and should_start():
+                await self._finish_start()
+                return True
+            return False
+
+    def _retire_results(self) -> None:
         self._pipeline.retire_results()
         if self._camera_scheduler is not None:
             self._camera_scheduler.retire_results()
-        async with self._pipeline.drain_inference(allow_sealed=True):
-            await self._finish_stop()
 
     async def _finish_stop(self) -> None:
         if not self._is_running:

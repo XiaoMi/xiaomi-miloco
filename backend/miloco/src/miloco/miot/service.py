@@ -82,6 +82,8 @@ SCOPE_SWITCH_SOURCE = "scope_switch"
 
 # 持有后台 task 引用，避免 CPython GC 回收 fire-and-forget task。
 _background_tasks: set[asyncio.Task] = set()
+_AUTH_RESTART_SYNC_WAIT_S = 5.0
+_AUTH_RESTART_DRAIN_TIMEOUT_S = 60.0
 
 
 def _parse_prop_iid(iid: str) -> tuple[int, int]:
@@ -849,17 +851,33 @@ class MiotService:
         try:
             from miloco.manager import get_manager
             from miloco.perception.engine_state import is_perception_enabled
+            from miloco.perception.inference_admission import InferenceDrainDeferred
 
             perception_service = get_manager().perception_service
-            logger.info("Restarting perception engine after auth callback")
-            await perception_service.stop_engine()  # 未运行时是安全 no-op
             # 尊重用户「休息」意图：被手动暂停时重新授权不自动拉起引擎，
             # 否则重新授权会绕开开机门控、无视暂停继续烧 token。
-            if is_perception_enabled(self._kv_repo):
-                await perception_service.start_engine()
-                logger.info("Perception engine restarted successfully")
-            else:
-                logger.info("感知被用户手动休息，重新授权后不自动拉起引擎")
+            def should_start() -> bool:
+                return is_perception_enabled(self._kv_repo)
+
+            async def restart() -> None:
+                try:
+                    await perception_service.restart_engine(
+                        should_start,
+                        wait_seconds=_AUTH_RESTART_DRAIN_TIMEOUT_S,
+                        discard_inflight_results=True,
+                    )
+                except InferenceDrainDeferred:
+                    logger.warning("授权后感知排空超时，引擎未重启")
+                except Exception:
+                    logger.exception("授权后感知引擎重启失败")
+
+            # 令牌已持久化。授权回调只短暂等待，同一次排空可在后台继续。
+            task = asyncio.create_task(restart())
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
+            _, pending = await asyncio.wait({task}, timeout=_AUTH_RESTART_SYNC_WAIT_S)
+            if pending:
+                logger.info("授权后感知引擎继续在后台等待在途推理结束")
         except Exception as e:
             # 有意不 re-raise：感知引擎重启失败不应导致授权本身失败，
             # token 已持久化，用户可手动重启服务恢复摄像头。

@@ -1787,6 +1787,13 @@ export async function realResumePerception(): Promise<void> {
   });
 }
 
+export async function realRestartPerception(): Promise<boolean> {
+  const response = await apiFetch<Normal<{ running: boolean }>>("/api/perception/engine/restart", {
+    method: "POST",
+  });
+  return response.data.running;
+}
+
 // ── Token 用量统计（用量 tab）─────────────────────────────────
 // 数据全部来自 omni/MiMo 计费。backend 两个接口：
 //   today      → /api/admin/token-usage/buckets  服务端按桶聚合（bin 分钟粒度）

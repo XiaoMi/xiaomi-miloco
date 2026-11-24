@@ -123,9 +123,11 @@ def _log_dropped_suggestions(
 
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from miloco.perception.inference_admission import InferenceAdmission
     from miloco.perception.types import BatchedSnapshot
-    from miloco.rule.schema import TriggerOutcome
+    from miloco.rule.schema import Rule, TriggerOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -332,7 +334,8 @@ class PerceptionEngineProxy:
     scene descriptions.
     """
 
-    def __init__(self):
+    def __init__(self, *, load_enabled_rules: Callable[[], Awaitable[list[Rule]]]):
+        self._load_enabled_rules = load_enabled_rules
         self.perception_engine: PerceptionEngine | None = None
         self._status: str = "not_initialized"
         self._status_message: str = ""
@@ -908,10 +911,9 @@ class PerceptionEngineProxy:
             )
 
     async def get_realtime_rules(self) -> tuple[list[dict], list[str]]:
-        from miloco.manager import get_manager
         from miloco.rule.schema import OMNI_SOURCE_TYPE, RuleDirection
 
-        all_rules = await get_manager().rule_service.get_effectively_enabled_rules()
+        all_rules = await self._load_enabled_rules()
         guard_needed_task_ids = {
             rule.task_id
             for rule in all_rules

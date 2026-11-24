@@ -86,12 +86,25 @@ class PerceptionService:
     async def stop_engine(self) -> None:
         await self._run_lifecycle(self._engine.stop)
 
+    async def restart_engine(
+        self, should_start: Callable[[], bool], *,
+        wait_seconds: float | None = None, discard_inflight_results: bool = False,
+    ) -> bool:
+        return await self._run_lifecycle(
+            lambda: self._engine.restart(
+                should_start, wait_seconds=wait_seconds, discard_inflight_results=discard_inflight_results
+            )
+        )
+
     async def shutdown_engine(self) -> None:
         self._pipeline.seal_inference()
         await self.stop_engine()
 
     async def stop_to_unconfigured(self) -> None:
-        """Close the engine after current work finishes, keeping the runner active."""
+        """等待在途推理结束后关闭引擎实例，回到「未配模型」态。
+
+        保留采集和 tick，后续配好模型可自动拉起引擎。stop_engine 会停止整个 runner。
+        """
         async def soft_stop() -> None:
             async with self._pipeline.drain_inference(bounded=False):
                 await self._pipeline.stop_to_unconfigured()

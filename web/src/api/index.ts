@@ -544,6 +544,10 @@ export async function resumePerception(): Promise<void> {
   return impl.realResumePerception();
 }
 
+export async function restartPerception(): Promise<boolean> {
+  return impl.realRestartPerception();
+}
+
 // ── 摄像头抓帧（占位 — 等 miloco 提供 snapshot 接口后实现）────
 // NOTE: 当前无调用方，保留接口形状供后续接入。不导出，避免误用。
 // export async function snapshotCamera(did: string): Promise<{

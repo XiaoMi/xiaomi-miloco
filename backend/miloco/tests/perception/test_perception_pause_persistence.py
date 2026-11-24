@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -103,7 +104,7 @@ async def test_boot_gate_skips_start_when_paused():
     from miloco.perception import init_perception_module
 
     with _patched_init_deps() as runner_cls:
-        await init_perception_module(MagicMock(), _FakeKV(json.dumps(False)))
+        await init_perception_module(MagicMock(), _FakeKV(json.dumps(False)), load_enabled_rules=AsyncMock())
 
     runner_cls.return_value.start.assert_not_awaited()
 
@@ -113,7 +114,7 @@ async def test_boot_gate_starts_when_enabled():
     from miloco.perception import init_perception_module
 
     with _patched_init_deps() as runner_cls:
-        await init_perception_module(MagicMock(), _FakeKV(json.dumps(True)))
+        await init_perception_module(MagicMock(), _FakeKV(json.dumps(True)), load_enabled_rules=AsyncMock())
 
     runner_cls.return_value.start.assert_awaited_once()
 
@@ -123,7 +124,7 @@ async def test_boot_gate_starts_by_default_when_unset():
     from miloco.perception import init_perception_module
 
     with _patched_init_deps() as runner_cls:
-        await init_perception_module(MagicMock(), _FakeKV(None))
+        await init_perception_module(MagicMock(), _FakeKV(None), load_enabled_rules=AsyncMock())
 
     runner_cls.return_value.start.assert_awaited_once()
 
@@ -141,39 +142,115 @@ def _make_service(kv_raw: str | None):
     return svc
 
 
-def _mock_perception_service():
-    ps = MagicMock()
-    ps.start_engine = AsyncMock()
-    ps.stop_engine = AsyncMock()
-    return ps
+@pytest.fixture
+def perception_lifecycle():
+    from miloco.perception.inference_admission import InferenceAdmission
+    from miloco.perception.processor import PipelineProcessor
+    from miloco.perception.runner import PerceptionRunner
+    from miloco.perception.service import PerceptionService
+
+    processor = PipelineProcessor.__new__(PipelineProcessor)
+    processor._inference_admission = InferenceAdmission()
+    processor._result_generation = 0
+    runner = PerceptionRunner.__new__(PerceptionRunner)
+    runner._pipeline = processor
+    runner._camera_scheduler = None
+    runner._finish_stop = AsyncMock()
+    runner._finish_start = AsyncMock()
+    service = PerceptionService(MagicMock(), processor, runner, MagicMock(), MagicMock())
+    return service, runner, processor
 
 
-async def test_reauth_gate_skips_start_when_paused():
+async def test_reauth_gate_skips_start_when_paused(perception_lifecycle):
     """flag=false：重新授权 stop 后不 start（stop 必被 await，证明是门控挡下而非异常早退）。"""
     svc = _make_service(json.dumps(False))
-    ps = _mock_perception_service()
+    ps, runner, _ = perception_lifecycle
     fake_manager = MagicMock()
     fake_manager.perception_service = ps
 
     with patch("miloco.manager.get_manager", return_value=fake_manager):
         await svc._restart_perception_engine()
 
-    ps.stop_engine.assert_awaited_once()
-    ps.start_engine.assert_not_awaited()
+    runner._finish_stop.assert_awaited_once()
+    runner._finish_start.assert_not_awaited()
 
 
-async def test_reauth_gate_starts_when_enabled():
+async def test_reauth_gate_starts_when_enabled(perception_lifecycle):
     """flag=true：重新授权 stop 后照常 start。"""
     svc = _make_service(json.dumps(True))
-    ps = _mock_perception_service()
+    ps, runner, _ = perception_lifecycle
     fake_manager = MagicMock()
     fake_manager.perception_service = ps
 
     with patch("miloco.manager.get_manager", return_value=fake_manager):
         await svc._restart_perception_engine()
 
-    ps.stop_engine.assert_awaited_once()
-    ps.start_engine.assert_awaited_once()
+    runner._finish_stop.assert_awaited_once()
+    runner._finish_start.assert_awaited_once()
+
+
+@pytest.mark.parametrize("pause_during_drain", [False, True])
+async def test_reauth_restarts_after_background_drain(
+    perception_lifecycle, monkeypatch, pause_during_drain,
+):
+    from miloco.miot.service import _background_tasks
+
+    service, runner, processor = perception_lifecycle
+    miot_service = _make_service(json.dumps(True))
+    fake_manager = MagicMock(perception_service=service)
+    release = asyncio.Event()
+    owner = processor._inference_admission.start(release.wait)
+    can_publish = processor._publication_guard()
+    previous_tasks = set(_background_tasks)
+    monkeypatch.setattr("miloco.miot.service._AUTH_RESTART_SYNC_WAIT_S", 0)
+
+    try:
+        with patch("miloco.manager.get_manager", return_value=fake_manager):
+            await miot_service._restart_perception_engine()
+        runner._finish_stop.assert_not_awaited()
+        runner._finish_start.assert_not_awaited()
+        assert not can_publish()
+        assert not processor.accepting_inference
+        (restart,) = _background_tasks - previous_tasks
+
+        if pause_during_drain:
+            miot_service._miot_proxy._kv_repo = _FakeKV(json.dumps(False))
+        release.set()
+        await asyncio.wait_for(restart, timeout=1)
+        runner._finish_stop.assert_awaited_once()
+        assert runner._finish_start.await_count == int(not pause_during_drain)
+    finally:
+        release.set()
+        await owner
+
+
+async def test_restart_cannot_start_after_process_shutdown_begins(perception_lifecycle):
+    service, runner, processor = perception_lifecycle
+    runner._finish_stop.side_effect = processor.seal_inference
+
+    assert await service.restart_engine(lambda: True) is False
+    runner._finish_stop.assert_awaited_once()
+    runner._finish_start.assert_not_awaited()
+
+
+async def test_reauth_drain_timeout_keeps_running_engine(perception_lifecycle, monkeypatch, caplog):
+    service, runner, processor = perception_lifecycle
+    miot_service = _make_service(json.dumps(True))
+    manager = MagicMock(perception_service=service)
+    release = asyncio.Event()
+    owner = processor._inference_admission.start(release.wait)
+    monkeypatch.setattr("miloco.miot.service._AUTH_RESTART_DRAIN_TIMEOUT_S", 0)
+
+    try:
+        with patch("miloco.manager.get_manager", return_value=manager):
+            await miot_service._restart_perception_engine()
+        assert "授权后感知排空超时，引擎未重启" in caplog.messages
+        assert processor.accepting_inference
+        runner._finish_stop.assert_not_awaited()
+        runner._finish_start.assert_not_awaited()
+    finally:
+        release.set()
+        await owner
 
 
 # ─── 4. 写路径（HTTP 端点确实落盘意图）──────────────────────────────────────
@@ -223,6 +300,49 @@ async def test_start_endpoint_persists_enabled_intent(real_db):
 
     fm.perception_service.start_engine.assert_awaited_once()
     assert is_perception_enabled(KVRepo()) is True
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_web_restart_after_deferred_drain_preserves_intent_and_results(
+    real_db, perception_lifecycle, monkeypatch, enabled,
+):
+    from miloco.database.kv_repo import KVRepo
+    from miloco.middleware.exceptions import HTTPException
+    from miloco.perception import router as perception_router
+    from miloco.perception.engine_state import (
+        is_perception_enabled,
+        set_perception_enabled,
+    )
+
+    service, runner, processor = perception_lifecycle
+    manager = MagicMock(kv_repo=KVRepo(), perception_service=service)
+    assert set_perception_enabled(manager.kv_repo, enabled)
+    release = asyncio.Event()
+    owner = processor._inference_admission.start(release.wait)
+    can_publish = processor._publication_guard()
+    monkeypatch.setattr("miloco.perception.processor._INFERENCE_DRAIN_TIMEOUT_S", 0)
+
+    try:
+        with patch.object(perception_router, "manager", manager):
+            with pytest.raises(HTTPException) as exc:
+                await perception_router.restart_engine()
+            assert exc.value.http_status == 409
+            assert exc.value.message.startswith("restart_deferred:")
+            assert is_perception_enabled(KVRepo()) is enabled
+            assert can_publish()
+            runner._finish_stop.assert_not_awaited()
+            runner._finish_start.assert_not_awaited()
+
+            release.set()
+            await owner
+            result = await perception_router.restart_engine()
+        assert result.data == {"running": enabled}
+        assert is_perception_enabled(KVRepo()) is enabled
+        runner._finish_stop.assert_awaited_once()
+        assert runner._finish_start.await_count == int(enabled)
+    finally:
+        release.set()
+        await owner
 
 
 async def test_stop_endpoint_fails_loud_when_persist_fails():

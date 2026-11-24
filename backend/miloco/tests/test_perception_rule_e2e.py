@@ -33,9 +33,14 @@ from miloco.perception.engine.config import (
     PerceptionConfig,
 )
 from miloco.perception.engine.omni import omni, prompt_builder
-from miloco.perception.inference_admission import InferenceDrainDeferred
+from miloco.perception.inference_admission import (
+    InferenceAdmission,
+    InferenceDrainDeferred,
+)
+from miloco.perception.per_camera_scheduler import PerCameraScheduler
 from miloco.perception.processor import PipelineProcessor
 from miloco.perception.runner import PerceptionRunner
+from miloco.perception.schema import CameraConnection, DeviceData
 from miloco.perception.service import PerceptionService
 from miloco.perception.snapshot_context import OmniEventArtifacts, get_event_artifacts
 from miloco.perception.types import (
@@ -799,6 +804,38 @@ async def wait_for(predicate):
             await asyncio.sleep(0.005)
 
 
+async def test_camera_window_failure_reports_traceback_and_releases_slot(caplog):
+    connection = CameraConnection(FIRST_CAMERA, 1)
+    source = PerceptionDevice(did=FIRST_CAMERA, name="相机", device_type="camera")
+    first_window = DeviceData(meta=source, window_end_ms=1)
+    next_window = DeviceData(meta=source, window_end_ms=2)
+    adapter = MagicMock()
+    adapter.ready_connections.return_value = [connection]
+    adapter.take_ready_window.side_effect = [first_window, next_window]
+    error = RuntimeError("simulated postprocessing failure")
+    infer = AsyncMock(side_effect=[error, None])
+    wake = asyncio.Event()
+    scheduler = PerCameraScheduler(
+        adapter, InferenceAdmission(), infer, wake.set, capacity=1, timeout_s=10,
+    )
+
+    scheduler.schedule_ready(([], []))
+    await asyncio.wait_for(wake.wait(), timeout=1)
+    (record,) = [
+        record for record in caplog.records
+        if record.name == "miloco.perception.per_camera_scheduler"
+    ]
+    assert connection.did in record.getMessage()
+    assert record.exc_info is not None
+    assert record.exc_info[1] is error
+    assert record.exc_info[2] is not None
+
+    wake.clear()
+    scheduler.schedule_ready(([], []))
+    await asyncio.wait_for(wake.wait(), timeout=1)
+    assert [call.args[0] for call in infer.await_args_list] == [first_window, next_window]
+
+
 @pytest.mark.parametrize(("mode", "case"), [
     ("batch", "independent"),
     ("per_camera", "independent"),
@@ -876,7 +913,7 @@ async def test_camera_inference_scheduling(
         get_enabled_rule_ids=lambda: [item.id for item in rules],
         update_state=AsyncMock(wraps=rule_service.update_state),
     )
-    proxy = PerceptionEngineProxy()
+    proxy = PerceptionEngineProxy(load_enabled_rules=svc.get_effectively_enabled_rules)
     proxy.perception_engine = PerceptionEngine(PerceptionConfig(
         gate=GateConfig(cooldown_ms=0, speech_vad_enabled=False),
         identity_engine=IdentityEngineConfig(enabled=False),
