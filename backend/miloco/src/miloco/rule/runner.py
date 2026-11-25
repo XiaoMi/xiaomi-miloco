@@ -166,12 +166,12 @@ Slot = StaticSlot | DynamicSlot | None
 
 _FIRE_PREAMBLE_WITH_RECORD = """**处理流程**：（按时间序 1→2→3 执行；以下 CLI 前缀均省略 miloco-cli task record）
 1. 前置闸门：调 get <task_id>，若 status=completed → 跳过 step 2 和所有通知（避免重复触达）；意图里的设备动作不受影响
-2. record 写操作（必做，且先于意图里的通知 / 设备动作执行）：按额外信息字段选对应 CLI——
-   - 含 actual_started_at → session-start <task_id> --at <actual_started_at>
-   - 含 actual_exited_at → session-end <task_id> --at <actual_exited_at>
-   - 都没有 → 按意图首句：
-     - 计数加一 / +1 → progress-inc <task_id>
-     - 事件追加 → event-append <task_id> --description "<事件>"
+2. record 写操作（必做，且先于意图里的通知 / 设备动作执行）：先按 record_kind 和明确的业务动作分派 CLI，时间戳只作为已选操作的时间参数，不可单独决定动作类型。
+   - record_kind=progress 且意图要求计数加一 / +1 → progress-inc <task_id>；即使额外信息含 actual_started_at，也不得改走 session-start
+   - record_kind=duration 且事件明确表示开始计时（含 actual_started_at）→ session-start <task_id> --at <actual_started_at>
+   - record_kind=duration 且事件明确表示结束计时（含 actual_exited_at）→ session-end <task_id> --at <actual_exited_at>
+   - record_kind=event 且意图要求追加事件 → event-append <task_id> --description "<事件>"
+   - record_kind 缺失或类型与动作不匹配时，不要仅凭时间戳猜测写操作；停止该写操作并按明确的错误/澄清流程处理
 3. 后置判定（看 mutate 响应）：
    - status 从 active 翻 completed → 首次达标，本次通知用户达成，之后该任务静默
    - noop=true 且 reason=task_paused → 暂停态，静默退出

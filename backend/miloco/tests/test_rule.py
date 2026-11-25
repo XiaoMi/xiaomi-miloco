@@ -6429,3 +6429,13 @@ class TestExitRuleEdgeTimestamp:
 
         assert _edge_timestamp(ActionSlot.ON_TARGET, "2026-09-02T10:00:00+08:00") == {}
         assert _edge_timestamp(None, "2026-09-02T10:00:00+08:00") == {}
+
+
+def test_record_bound_fire_preamble_prioritizes_record_kind_over_timestamp():
+    from miloco.rule.runner import _FIRE_PREAMBLE_WITH_RECORD
+
+    assert "先按 record_kind 和明确的业务动作分派 CLI" in _FIRE_PREAMBLE_WITH_RECORD
+    assert (
+        "record_kind=progress 且意图要求计数加一 / +1 → progress-inc <task_id>；即使额外信息含 actual_started_at，也不得改走 session-start"
+        in _FIRE_PREAMBLE_WITH_RECORD
+    )
