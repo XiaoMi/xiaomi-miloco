@@ -167,7 +167,7 @@ Slot = StaticSlot | DynamicSlot | None
 _FIRE_PREAMBLE_WITH_RECORD = """**处理流程**：（按时间序 1→2→3 执行；以下 CLI 前缀均省略 miloco-cli task record）
 1. 前置闸门：调 get <task_id>，若 status=completed → 跳过 step 2 和所有通知（避免重复触达）；意图里的设备动作不受影响
 2. record 写操作（仅当本次 fire 确实要求记录时执行，且先于意图里的通知 / 设备动作）：先按 record_kind 和明确的业务动作分派 CLI；时间戳只作为已选操作的时间参数，不可单独决定动作类型。
-   - record_kind=progress 且意图要求计数加一 / +1 → progress-inc <task_id>；即使额外信息含 actual_started_at，也不得改走 session-start
+   - record_kind=progress 且意图要求计数加一 / +1 → progress-inc <task_id>；即使额外信息含 actual_started_at / actual_exited_at，也不得改走 session-start / session-end
    - record_kind=duration 且意图表示开始计时并含 actual_started_at → session-start <task_id> --at <actual_started_at>
    - record_kind=duration 且意图表示结束计时并含 actual_exited_at → session-end <task_id> --at <actual_exited_at>
    - record_kind=event 且意图要求追加事件 → event-append <task_id> --description "<事件>"

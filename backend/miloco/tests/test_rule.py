@@ -6481,7 +6481,13 @@ def test_record_bound_fire_preamble_prioritizes_record_kind_over_timestamp():
     from miloco.rule.runner import _FIRE_PREAMBLE_WITH_RECORD
 
     lines = _FIRE_PREAMBLE_WITH_RECORD.splitlines()
-    assert any("record_kind=progress" in line and "progress-inc" in line for line in lines)
+    assert any(
+        "record_kind=progress" in line
+        and "progress-inc" in line
+        and "actual_started_at / actual_exited_at" in line
+        and "session-start / session-end" in line
+        for line in lines
+    )
     assert any("record_kind=duration" in line and "actual_started_at" in line for line in lines)
     assert any("record_kind=duration" in line and "actual_exited_at" in line for line in lines)
     assert any("record_kind=event" in line and "event-append" in line for line in lines)

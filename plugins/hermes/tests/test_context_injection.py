@@ -35,7 +35,7 @@ def test_rule_profile_prioritizes_record_kind_over_timestamp(tmp_miloco_home, mo
     out = ci.inject_context(session_id="miloco-rule-abc")
     assert out is not None
     context = out["context"]
-    assert "先按 callback 内 record_kind 和本次明确的业务动作选择 CLI" in context
+    assert "仅当本次 fire 确实要求记录时执行，且先于通知 / 设备动作" in context
     assert "按 JSON 字段名选对应 CLI" not in context
 
 
