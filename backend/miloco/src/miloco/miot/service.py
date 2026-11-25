@@ -1277,8 +1277,17 @@ class MiotService:
         """Get detected audio codec for a camera channel."""
         return self._miot_proxy.get_audio_codec(camera_id, channel)
 
-    async def start_video_stream(self, camera_id: str, channel: int, callback) -> int:
+    async def start_video_stream(
+        self,
+        camera_id: str,
+        channel: int,
+        callback,
+        frame_interval_ms: int = 0,
+    ) -> int:
         """Subscribe to *decoded* video frames for live transcode.
+
+        ``frame_interval_ms`` is the live frame interval this subscription asks
+        the decoder for (0 = every decoded frame).
 
         Returns the SDK ``reg_id`` (needed by :meth:`stop_video_stream`).
         The callback receives BGR ndarrays produced by the SDK's PyAV
@@ -1298,11 +1307,23 @@ class MiotService:
                 )
                 return -1
             return await self._miot_proxy.start_camera_decode_video_stream(
-                camera_id, channel, callback
+                camera_id, channel, callback, frame_interval_ms=frame_interval_ms
             )
         except Exception as e:
             logger.error("Failed to start video stream: %s", e)
             raise MiotServiceException(f"Failed to start video stream: {str(e)}") from e
+
+    async def set_video_stream_interval(
+        self, camera_id: str, channel: int, reg_id: int, frame_interval_ms: int
+    ) -> bool:
+        """Change the live frame interval of a running decoded video stream."""
+        try:
+            return await self._miot_proxy.set_camera_decode_video_frame_interval(
+                camera_id, channel, reg_id, frame_interval_ms
+            )
+        except Exception as e:
+            logger.warning("Failed to set video stream interval: %s", e)
+            return False
 
     async def stop_video_stream(self, camera_id: str, channel: int, reg_id: int):
         """Unsubscribe from the decoded video stream (paired with start)."""

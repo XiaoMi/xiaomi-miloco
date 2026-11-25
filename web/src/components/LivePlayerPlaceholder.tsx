@@ -22,6 +22,8 @@ interface Props {
   disabledMessage?: string;
   dimmed?: boolean;
   dimmedMessage?: string;
+  /** 实时画面请求帧率(fps);不传则由后端用 camera.live_default_fps。 */
+  liveFps?: number;
 }
 
 export function LivePlayerPlaceholder({
@@ -34,6 +36,7 @@ export function LivePlayerPlaceholder({
   disabledMessage,
   dimmed = false,
   dimmedMessage,
+  liveFps,
 }: Props) {
   const { t } = useTranslation();
   const [expanded, setExpanded] = useState(false);
@@ -50,11 +53,12 @@ export function LivePlayerPlaceholder({
 
   // (did, channel) 变才重算 src,平时稳定。useMemo 比 render 阶段写 ref 更标准,
   // concurrent mode 重跑 render 时也安全(useMemo 自动跟 deps 一致)。
-  const refKey = `${cameraDid}|${channel}`;
+  const refKey = `${cameraDid}|${channel}|${liveFps ?? ""}`;
   const src = useMemo(
     () =>
-      `/api/miot/watch?camera_id=${encodeURIComponent(cameraDid)}&channel=${channel}&embedded=1`,
-    [cameraDid, channel],
+      `/api/miot/watch?camera_id=${encodeURIComponent(cameraDid)}&channel=${channel}&embedded=1` +
+      (liveFps ? `&fps=${liveFps}` : ""),
+    [cameraDid, channel, liveFps],
   );
 
   // refKey 变(cam 或 channel 切换)时重置 loading mask,让"拉流中…"再显一次盖

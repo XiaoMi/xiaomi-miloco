@@ -86,6 +86,19 @@ DEFAULT_AUDIO_CHANNEL = 0
 _CHANNEL_SEP = ":ch"
 
 
+def _window_phase_offsets(
+    dids: list[str], *, window_ms: int, enabled: bool
+) -> dict[str, int]:
+    """Return deterministic, evenly spaced window phases for camera IDs."""
+    if window_ms <= 0:
+        raise ValueError("window_ms must be positive")
+    ordered = sorted(dids)
+    if not enabled or len(ordered) <= 1:
+        return {did: 0 for did in ordered}
+    count = len(ordered)
+    return {did: index * window_ms // count for index, did in enumerate(ordered)}
+
+
 def split_channel_did(did: str) -> tuple[str, int]:
     """拆合成 did → (物理 did, 通道号)。
 
@@ -122,6 +135,33 @@ class _CameraDeviceState:
     # 订阅完成时刻的 monotonic wall_ms。首帧未到（last_video_frame_ms == 0）时
     # 替代它参与静默判定，给「等首帧」一个上界，见 _FIRST_FRAME_THRESHOLD_MS。
     connected_at_ms: int = 0
+    # 最近一次收进 sync buffer 的视频帧时刻（monotonic ms），感知入口限速用。
+    last_accepted_video_ms: int = 0
+
+
+def _perception_frame_gap_ms() -> int:
+    """Minimum gap between video frames the perception buffer accepts.
+
+    Perception consumes ``adjust_fps_for_omni(input.fps, input.omni_fps)`` frames
+    per second (the engine raises fps to an omni_fps multiple when needed),
+    but the decoder may run much faster (e.g. a live viewer raises it to the live
+    frame rate). Every frame put into the sync buffer is kept until its window is
+    drained, so frames beyond the perception rate are dropped at the entry point
+    instead of piling up. 10% slack avoids aliasing against the camera frame clock.
+    Returns 0 (accept everything) when the rate cannot be determined.
+    """
+    try:
+        from miloco.perception.engine.omni.provider import adjust_fps_for_omni
+
+        engine_input = get_settings().perception.engine.get("input", {}) or {}
+        base = int(float(engine_input.get("fps", 0) or 0))
+        omni = int(float(engine_input.get("omni_fps", 0) or 0))
+        fps = max(adjust_fps_for_omni(base, omni), base, omni)
+    except Exception:  # noqa: BLE001
+        return 0
+    if fps <= 0:
+        return 0
+    return int(1000 / fps * 0.9)
 
 
 class CameraDeviceAdapter(BaseDeviceAdapter):
@@ -141,6 +181,58 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         self._last_ondemand_refresh_ms = 0
         # 静默重连防抖标记：did -> 最近一次重连的 monotonic ms。
         self._last_reconnect_ms: dict[str, int] = {}
+        # 已应用及待确认的错峰成员集合。成员变化连续两轮稳定后才重排，
+        # 避免单轮网络抖动清空所有存活相机的窗口。
+        self._phase_members: tuple[str, ...] | None = None
+        self._pending_phase_members: tuple[str, ...] | None = None
+        self._pending_phase_rounds = 0
+
+    def _rebalance_window_phases(self) -> int:
+        """Evenly stagger connected cameras using stable synthetic-DID order."""
+        collect_cfg = get_settings().perception.collect
+        window_ms = collect_cfg.window_size * 1000
+        enabled = getattr(collect_cfg, "stagger_devices", False)
+        members = tuple(sorted(self._devices))
+        if not enabled or not members:
+            self._phase_members = None
+            self._pending_phase_members = None
+            self._pending_phase_rounds = 0
+        elif self._phase_members is None:
+            if members:
+                self._phase_members = members
+        elif members != self._phase_members:
+            if members != self._pending_phase_members:
+                self._pending_phase_members = members
+                self._pending_phase_rounds = 1
+                return 0
+            self._pending_phase_rounds += 1
+            if self._pending_phase_rounds < 2:
+                return 0
+            self._phase_members = members
+            self._pending_phase_members = None
+            self._pending_phase_rounds = 0
+        else:
+            self._pending_phase_members = None
+            self._pending_phase_rounds = 0
+
+        offsets = _window_phase_offsets(
+            list(members),
+            window_ms=window_ms,
+            enabled=enabled,
+        )
+        changed = 0
+        for did, phase_ms in offsets.items():
+            if self._devices[did].sync_buffer.set_phase_offset_ms(phase_ms):
+                changed += 1
+        if changed:
+            logger.info(
+                "[camera] Rebalanced perception window phases: devices=%d "
+                "window_ms=%d offsets=%s",
+                len(offsets),
+                window_ms,
+                offsets,
+            )
+        return changed
 
     async def discover_devices(
         self,
@@ -297,6 +389,7 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
             all_devices, disconnect_require_lan=disconnect_require_lan
         )
         await self._converge_feed_cap(all_devices)
+        self._rebalance_window_phases()
 
     async def _converge_feed_cap(self, all_devices: dict | None = None) -> None:
         """把超出投喂上限的通道断掉,口径与 select_active_camera_dids 完全一致。
@@ -780,6 +873,17 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
                     # 避免 stale 回调虚高 SOURCE 节点的处理速率指标。
                     h.skip_rolling()
                     return
+                gap_ms = _perception_frame_gap_ms()
+                now_ms = _monotonic_ms()
+                if (
+                    gap_ms > 0
+                    and state.last_accepted_video_ms
+                    and now_ms - state.last_accepted_video_ms < gap_ms
+                ):
+                    # 比感知采样更密的帧（如实时画面提速时）不进 buffer，避免整帧堆积。
+                    h.skip_rolling()
+                    return
+                state.last_accepted_video_ms = now_ms
                 wall_ms, unix_ms = self._calibrate(state, ts)
                 decode_latency_ms = self._compute_decode_latency(
                     recv_unix_ms, decoded_unix_ms

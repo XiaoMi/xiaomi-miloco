@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 from typing import Optional
@@ -25,6 +26,11 @@ from miot.tuning import ENCODE_THREADS, SWSCALE_THREADS
 from numpy.typing import NDArray
 
 logger = logging.getLogger(__name__)
+
+
+# 实时画面按时间强制关键帧：低帧率（如 1~5fps）下固定 GOP 帧数会让新打开的画面
+# 等很久才出图（gop=30 在 1fps 下就是 30 秒），所以每隔这么多秒强制一个 IDR。
+KEYFRAME_INTERVAL_S = 2.0
 
 
 class H264LiveEncoder:
@@ -49,6 +55,7 @@ class H264LiveEncoder:
         # 的 frame.pts setter 是 signed int64,哨兵值会抛 OverflowError 导致整帧被丢、
         # 重连窗口内连刷几十条 error + 画面卡顿。跟 NalClipRecorder(ws.py)同款做法。
         self._pts_counter = 0
+        self._last_idr_mono = 0.0
 
     def _open_encoder(self, width: int, height: int) -> None:
         codec = av.codec.CodecContext.create("libx264", "w")
@@ -93,6 +100,8 @@ class H264LiveEncoder:
                 "scenecut=0:bframes=0:repeat-headers=1:level=4.0:"
                 "slices=1:sliced-threads=0"
             ),
+            # pict_type=I 的强制帧按 IDR 编码（见 _encode_sync 的按时间关键帧）
+            "forced-idr": "1",
         }
         codec.open()
         self._codec = codec
@@ -101,6 +110,7 @@ class H264LiveEncoder:
         # 重建编码器(分辨率切换)= libx264 重新初始化,PTS 必须从 0 重起,
         # 否则跟新编码器的 SPS/PPS 时间基不一致。
         self._pts_counter = 0
+        self._last_idr_mono = 0.0
         logger.info(
             "H264 encoder opened %dx%d gop=%d preset=ultrafast tune=zerolatency",
             width, height, self._gop,
@@ -151,10 +161,16 @@ class H264LiveEncoder:
         # 保留(不改 ws.py 调用契约)但此路不再使用。
         frame.pts = self._pts_counter * 33
         self._pts_counter += 1
+        now = time.monotonic()
+        if now - self._last_idr_mono >= KEYFRAME_INTERVAL_S:
+            frame.pict_type = av.video.frame.PictureType.I
 
         out: list[tuple[bytes, bool]] = []
         for packet in codec.encode(frame):
-            out.append((bytes(packet), bool(packet.is_keyframe)))
+            is_key = bool(packet.is_keyframe)
+            if is_key:
+                self._last_idr_mono = now
+            out.append((bytes(packet), is_key))
         return out
 
     async def encode(
