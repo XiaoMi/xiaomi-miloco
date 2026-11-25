@@ -200,6 +200,8 @@ describe("before_prompt_build 组装", () => {
     expect(r.prependSystemContext).not.toContain("## 能力概览");
     expect(r.prependSystemContext).toContain("规则触发");
     expect(r.prependSystemContext).not.toContain("语音指令");
+    expect(r.prependSystemContext).toContain("先按 callback 内 record_kind 和本次明确的业务动作选择 CLI");
+    expect(r.prependSystemContext).not.toContain("按 JSON 字段名选对应 CLI");
     expect(r.prependSystemContext).toContain("## 家庭记忆");
   });
 

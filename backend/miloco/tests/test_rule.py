@@ -4110,6 +4110,53 @@ class TestPreambleSelection:
         assert "task_id" not in _extra_info(enter_prompt)
         assert "record_kind" not in _extra_info(enter_prompt)
 
+    def test_duration_fire_without_session_boundary_timestamp_is_no_write(self, runner):
+        runner._task_record_service.detect_record_kind = MagicMock(
+            return_value="duration"
+        )
+        rule = _make_state_rule(
+            rule_id="rule-duration-target",
+            task_id=TASK_ID,
+            on_enter_desc="累计达标，通知用户",
+        )
+
+        prompt = runner._compose_prompt_text(rule, "累计达标，通知用户", {})
+        info = _extra_info(prompt)
+
+        assert info["record_kind"] == "duration"
+        assert "actual_started_at" not in info
+        assert "actual_exited_at" not in info
+        assert "本次无需写 record 的合法 fire" in prompt
+
+    @pytest.mark.asyncio
+    @patch("miloco.rule.runner.dispatch_event", new_callable=AsyncMock)
+    async def test_progress_fire_keeps_kind_and_edge_timestamp_together(
+        self, mock_send, runner
+    ):
+        mock_send.return_value = True
+        runner._task_record_service.detect_record_kind = MagicMock(
+            return_value="progress"
+        )
+        rule = _make_state_rule(
+            rule_id="rule-progress-record",
+            task_id=TASK_ID,
+            on_enter_desc="喝水计数加一",
+        )
+        runner.add_rule(rule)
+        runner.set_task_actions(
+            TASK_ID,
+            {"on_enter_actions": [], "on_enter_desc": "喝水计数加一"},
+        )
+
+        await runner.update_state("rule-progress-record", "cam-001", True, "")
+        await runner.drain()
+
+        prompt = _last_dispatched_prompt(mock_send, event=RuleEvent.ENTERED)
+        info = _extra_info(prompt)
+        assert info["record_kind"] == "progress"
+        assert info["actual_started_at"]
+        assert "时间戳只作为已选操作的时间参数" in prompt
+
 
 # ============================================================
 # on_target_desc 累计达标 timer 路径（spec 2026-06-15）
@@ -6364,9 +6411,8 @@ class TestTaskRuleSetWiring:
 class TestExitRuleEdgeTimestamp:
     """exit 型 rule 的"条件刚成立"走 ENTERED 边沿, 但它是 session 终点。
 
-    记账那步的 CLI 是按 metadata 的键名分派的 (_FIRE_PREAMBLE_WITH_RECORD 第 2 步),
-    键名跟着边沿走就会塞成起点 —— agent 把刚该结束的计时段又开一遍, 而 session-end
-    永远等不到它那一行, 计时段永不关闭。
+    第 2 步先按 record_kind 和业务动作选 CLI，边沿时间戳只作为 duration session
+    边界的参数；键名跟着边沿走就会塞成起点，agent 可能把刚该结束的计时段又开一遍。
     """
 
     @staticmethod
@@ -6434,8 +6480,10 @@ class TestExitRuleEdgeTimestamp:
 def test_record_bound_fire_preamble_prioritizes_record_kind_over_timestamp():
     from miloco.rule.runner import _FIRE_PREAMBLE_WITH_RECORD
 
-    assert "先按 record_kind 和明确的业务动作分派 CLI" in _FIRE_PREAMBLE_WITH_RECORD
-    assert (
-        "record_kind=progress 且意图要求计数加一 / +1 → progress-inc <task_id>；即使额外信息含 actual_started_at，也不得改走 session-start"
-        in _FIRE_PREAMBLE_WITH_RECORD
-    )
+    lines = _FIRE_PREAMBLE_WITH_RECORD.splitlines()
+    assert any("record_kind=progress" in line and "progress-inc" in line for line in lines)
+    assert any("record_kind=duration" in line and "actual_started_at" in line for line in lines)
+    assert any("record_kind=duration" in line and "actual_exited_at" in line for line in lines)
+    assert any("record_kind=event" in line and "event-append" in line for line in lines)
+    assert any("本次无需写 record" in line for line in lines)
+    assert any("明确要求写 record" in line and "不要仅凭时间戳" in line for line in lines)
