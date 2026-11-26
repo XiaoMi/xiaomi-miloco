@@ -181,6 +181,7 @@ async def test_set_property_writes_ledger_row(bound_client, tmp_path):
     assert r["success"] == 1
     assert r["result_code"] is None  # 成功无 worst_code
     assert json.loads(r["value_json"]) is True
+    assert json.loads(r["detail"])["control_total_ms"] >= 0
 
 
 @pytest.mark.asyncio
@@ -903,3 +904,28 @@ async def test_scene_home_not_allowed_still_writes_ledger(bound_client, tmp_path
     assert r["success"] == 0
     assert r["source_id"] == "rule-77"
     assert r["home_id"] == "H-other"
+
+
+@pytest.mark.asyncio
+async def test_call_action_writes_miot_timing_to_detail_json(bound_client, tmp_path):
+    client, obs_db = bound_client
+    svc = _make_service(tmp_path)
+    svc._miot_proxy.call_device_action.return_value = {
+        "code": 0,
+        "source": "local_central",
+        "latency": 41,
+        "exe_time": 12,
+        "net_cost": 29,
+    }
+    await svc.control_device(
+        "dev1",
+        DeviceControlRequest(type="call_action", iid="action.2.1", params=[]),
+    )
+    await client.flush()
+
+    detail = json.loads(_rows(obs_db)[0]["detail"])
+    assert detail["miot_transport"] == "local_central"
+    assert detail["miot_rtt_ms"] == 41
+    assert detail["device_exe_time_ms"] == 12
+    assert detail["net_cost_ms"] == 29
+    assert detail["control_total_ms"] >= 0

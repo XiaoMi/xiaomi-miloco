@@ -130,7 +130,7 @@ class ActionLedgerRecord:
     """一次设备控制 / TTS / 场景触发的持久审计,对应 action_ledger 表一行。
 
     value_json 已是序列化好的字符串(set 值 / action in_params,含 TTS 全文);
-    调用方负责 json.dumps,避免 record 层再持有原始对象。
+    detail 是可选扩展 JSON,由 to_row 序列化后写入 TEXT 列。
     """
     id: str
     timestamp: int              # 写入时刻 ms
@@ -155,9 +155,10 @@ class ActionLedgerRecord:
     auth_state: str | None = None
     phase: str | None = None     # v5: enter | exit | legacy(链路记录之前写入的老行)
     trigger_event_id: str | None = None  # v5: 触发它的事件 id,无链路留 NULL
+    detail: dict[str, Any] | None = None  # v7:扩展观测 JSON
 
     def to_row(self) -> dict[str, Any]:
-        return {
+        row = {
             "id": self.id,
             "timestamp": self.timestamp,
             "action_type": self.action_type,
@@ -178,6 +179,9 @@ class ActionLedgerRecord:
             "phase": self.phase,
             "trigger_event_id": self.trigger_event_id,
         }
+        if self.detail is not None:
+            row["detail"] = json.dumps(self.detail, ensure_ascii=False)
+        return row
 
 
 @dataclass

@@ -225,7 +225,7 @@ def test_action_ledger_columns(tmp_path):
         "id", "timestamp", "action_type", "did", "device_name", "room",
         "iid", "value_json", "result_code", "result_msg", "success",
         "error", "trace_id", "source", "source_id", "home_id",
-        "auth_state", "phase", "trigger_event_id",
+        "auth_state", "phase", "trigger_event_id", "detail",
     }
 
 
@@ -512,3 +512,35 @@ def test_v1_to_v2_migration_adds_action_ledger(tmp_path):
     assert conn.execute(
         "SELECT trace_id FROM traces"
     ).fetchone()[0] == "t1"
+
+
+def test_fresh_schema_action_ledger_has_detail_json_column(tmp_path):
+    conn = connect(tmp_path / "obs.db")
+    init_schema(conn)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(action_ledger)")}
+    assert "detail" in cols
+
+
+def test_v6_to_v7_migration_adds_detail_without_changing_old_rows(tmp_path):
+    conn = connect(tmp_path / "obs.db")
+    conn.execute("CREATE TABLE traces (trace_id TEXT PRIMARY KEY, timestamp INTEGER)")
+    conn.execute("CREATE TABLE traces_device (device_trace_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE events (event_id TEXT PRIMARY KEY)")
+    conn.execute("CREATE TABLE agent_runs (run_id TEXT PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE action_ledger (id TEXT PRIMARY KEY, timestamp INTEGER, "
+        "action_type TEXT, did TEXT, success INTEGER, source TEXT, source_id TEXT, "
+        "home_id TEXT, phase TEXT, trigger_event_id TEXT, auth_state TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO action_ledger (id, timestamp, action_type, did, success) "
+        "VALUES ('legacy-action', 123, 'call_action', 'device-1', 1)"
+    )
+    conn.execute("PRAGMA user_version = 6")
+
+    init_schema(conn)
+
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    assert conn.execute(
+        "SELECT detail FROM action_ledger WHERE id = 'legacy-action'"
+    ).fetchone() == (None,)

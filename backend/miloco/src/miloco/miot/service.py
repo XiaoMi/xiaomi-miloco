@@ -11,6 +11,7 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from miot.types import (
     MIoTActionParam,
@@ -156,6 +157,29 @@ def _auth_state_of(miot_proxy) -> str | None:
         return None
 
 
+def _action_timing_detail(
+    result: object, started_at: float | None, finished_at: float | None = None
+) -> dict[str, Any]:
+    if started_at is None:
+        return {}
+    if finished_at is None:
+        finished_at = time.monotonic()
+    detail: dict[str, Any] = {
+        "control_total_ms": round(max(0.0, (finished_at - started_at) * 1000), 3),
+    }
+    if isinstance(result, dict):
+        for result_key, detail_key in (
+            ("source", "miot_transport"),
+            ("latency", "miot_rtt_ms"),
+            ("exe_time", "device_exe_time_ms"),
+            ("net_cost", "net_cost_ms"),
+        ):
+            value = result.get(result_key)
+            if value is not None:
+                detail[detail_key] = value
+    return detail
+
+
 async def _write_action_ledger(
     miot_proxy: MiotProxy,
     *,
@@ -172,6 +196,7 @@ async def _write_action_ledger(
     home_id: str | None = None,
     phase: str | None = None,
     trigger_event_id: str | None = None,
+    detail: dict[str, Any] | None = None,
 ) -> None:
     """落一行 action_ledger + 打一条 INFO 结果日志。**fail-open**:
 
@@ -258,6 +283,7 @@ async def _write_action_ledger(
                     auth_state=_auth_state_of(miot_proxy),
                     phase=phase,
                     trigger_event_id=trigger_event_id,
+                    detail=detail,
                 )
             )
 
@@ -1424,6 +1450,7 @@ class MiotService:
         # 尝试参数先归一好,成功/异常路径共用——SDK/网络抛异常时台账也能看到
         # agent 当时试图设置什么值 / 播什么 TTS / 什么参数。
         attempted_value_json = _request_value_json(request)
+        control_started_at: float | None = None
         try:
             # 授权失效排在家庭校验之前判。那道校验靠两份纯内存的设备缓存，而填满
             # 它们要走云端——降级态下重启一次，缓存是空的且填不回来，先判归属的话
@@ -1450,7 +1477,9 @@ class MiotService:
                         did=did, siid=siid, piid=piid, value=request.value
                     )
                 ]
+                control_started_at = time.monotonic()
                 results = await self._miot_proxy.set_device_properties(params)
+                control_finished_at = time.monotonic()
                 self._safe_lru_touch(did, [request.iid])
                 success, code, msg = summarize_results(results)
                 await _write_action_ledger(
@@ -1463,6 +1492,9 @@ class MiotService:
                     result_msg=msg,
                     success=success,
                     error=None,
+                    detail=_action_timing_detail(
+                        results, control_started_at, control_finished_at
+                    ),
                 )
                 return {"results": results}
 
@@ -1479,7 +1511,9 @@ class MiotService:
                             did=did, siid=siid, piid=piid, value=prop.value
                         )
                     )
+                control_started_at = time.monotonic()
                 results = await self._miot_proxy.set_device_properties(params)
+                control_finished_at = time.monotonic()
                 self._safe_lru_touch(did, [p.iid for p in request.properties])
                 success, code, msg = summarize_results(results)
                 await _write_action_ledger(
@@ -1493,6 +1527,9 @@ class MiotService:
                     result_msg=msg,
                     success=success,
                     error=None,
+                    detail=_action_timing_detail(
+                        results, control_started_at, control_finished_at
+                    ),
                 )
                 return {"results": results}
 
@@ -1503,7 +1540,9 @@ class MiotService:
             param = MIoTActionParam(
                 did=did, siid=siid, aiid=aiid, in_=request.params or []
             )
+            control_started_at = time.monotonic()
             result = await self._miot_proxy.call_device_action(param)
+            control_finished_at = time.monotonic()
             self._safe_lru_touch(did, [request.iid])
             success, code, msg = summarize_results(result)
             # call_action 的 in_params 存 value_json —— speaker play-text 的 TTS 全文落这里
@@ -1517,6 +1556,9 @@ class MiotService:
                 result_msg=msg,
                 success=success,
                 error=None,
+                detail=_action_timing_detail(
+                    result, control_started_at, control_finished_at
+                ),
             )
             return {"result": result}
 
@@ -1532,6 +1574,10 @@ class MiotService:
                 result_code=None, result_msg=None,
                 success=False,
                 error=_refusal_ledger_reason(self._miot_proxy),
+                detail=(
+                    _action_timing_detail(None, control_started_at)
+                    if control_started_at is not None else None
+                ),
             )
             raise
         # 兜底：原写法 `except A, B:` 是 Python 2 语法，在 Python 3 上为 SyntaxError，
@@ -1551,6 +1597,10 @@ class MiotService:
                 result_msg=None,
                 success=False,
                 error=str(e),
+                detail=(
+                    _action_timing_detail(None, control_started_at)
+                    if control_started_at is not None else None
+                ),
             )
             raise MiotServiceException(f"Failed to control device: {str(e)}") from e
 
