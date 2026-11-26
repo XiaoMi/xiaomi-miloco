@@ -30,6 +30,10 @@ from miloco.perception.engine.omni.provider import (
     build_request_headers,
     get_adapter,
 )
+from miloco.perception.engine.omni.telemetry import (
+    OmniCallTelemetry,
+    publish_omni_telemetry,
+)
 from miloco.perception.snapshot_context import push_omni_trace
 
 logger = logging.getLogger(__name__)
@@ -255,6 +259,7 @@ async def call_omni(
 
     cb = get_omni_circuit_breaker()
     t0 = time.monotonic()
+    telemetry = OmniCallTelemetry(streaming=bool(forced_stream), started_at=t0)
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     short_circuited = False
@@ -264,6 +269,7 @@ async def call_omni(
         async with httpx.AsyncClient(timeout=config.timeout) as client:
             if not forced_stream:
                 resp = await client.post(url, headers=headers, json=body)
+                telemetry.record_response(resp)
                 classified = classify_response(resp)
                 if classified is not None:
                     await cb.record_failure(classified)
@@ -280,7 +286,7 @@ async def call_omni(
                 # 补一次 classify + record_failure 后再抛,与非流路径行为对齐。
                 try:
                     raw = await _collect_stream_response(
-                        client, url, headers, body, adapter
+                        client, url, headers, body, adapter, telemetry=telemetry
                     )
                 except httpx.HTTPStatusError as e:
                     classified = classify_response(e.response)
@@ -323,18 +329,21 @@ async def call_omni(
     finally:
         # 熔断短路 latency=0(不占实际墙钟),便于 dashboard 区分"实际尝试失败"和"熔断跳过"
         latency_ms = 0.0 if short_circuited else (time.monotonic() - t0) * 1000
+        telemetry_data = telemetry.to_dict(duration_ms=latency_ms)
         push_omni_trace(
             request_messages=messages,
             response_raw=raw,
             latency_ms=latency_ms,
             error=error,
             model=config.model,
+            telemetry=telemetry_data,
             inference_params={
                 "temperature": config.temperature,
                 "top_p": config.top_p,
                 "max_tokens": config.max_completion_tokens,
             },
         )
+        publish_omni_telemetry(model=config.model, telemetry=telemetry_data)
 
 
 async def _iter_sse_chunks(resp) -> AsyncGenerator[dict, None]:
@@ -358,6 +367,7 @@ async def _collect_stream_response(
     headers: dict[str, str],
     body: dict[str, Any],
     adapter: OmniProviderAdapter,
+    telemetry: OmniCallTelemetry | None = None,
 ) -> dict[str, Any]:
     """读取 SSE 流并拼接为等效的非流式响应 dict（OpenAI 形态）。
 
@@ -370,6 +380,8 @@ async def _collect_stream_response(
     async with client.stream(
         "POST", url, headers=headers, json=body,
     ) as resp:
+        if telemetry is not None:
+            telemetry.record_response(resp)
         if resp.status_code != 200:
             await resp.aread()
             logger.error("Omni stream error %d: %s", resp.status_code, resp.text[:500])
@@ -387,6 +399,8 @@ async def _collect_stream_response(
             if chunk_usage is not None:
                 usage = chunk_usage
             if delta:
+                if telemetry is not None:
+                    telemetry.observe_content(delta)
                 content_parts.append(delta)
     return {
         "choices": [{"message": {"content": "".join(content_parts)}}],
@@ -498,6 +512,7 @@ async def call_omni_stream(
     short_circuited = False
     cb = get_omni_circuit_breaker()
     t0 = time.monotonic()
+    telemetry = OmniCallTelemetry(streaming=True, started_at=t0)
     try:
         await cb.before_call()
         async with httpx.AsyncClient(
@@ -509,6 +524,7 @@ async def call_omni_stream(
                 headers=headers,
                 json=body,
             ) as resp:
+                telemetry.record_response(resp)
                 classified = classify_response(resp)
                 if classified is not None:
                     await resp.aread()
@@ -524,6 +540,7 @@ async def call_omni_stream(
                         if usage_out is not None:
                             usage_out.update(extract_usage({"usage": raw_usage_seen}))
                     if delta:
+                        telemetry.observe_content(delta)
                         response_chunks.append(delta)
                         yield delta
         await cb.record_success()
@@ -555,15 +572,18 @@ async def call_omni_stream(
             "usage": raw_usage_seen or {},
         }
         latency_ms = 0.0 if short_circuited else (time.monotonic() - t0) * 1000
+        telemetry_data = telemetry.to_dict(duration_ms=latency_ms)
         push_omni_trace(
             request_messages=messages,
             response_raw=raw_for_trace,
             latency_ms=latency_ms,
             error=error,
             model=config.model,
+            telemetry=telemetry_data,
             inference_params={
                 "temperature": config.temperature,
                 "top_p": config.top_p,
                 "max_tokens": config.max_completion_tokens,
             },
         )
+        publish_omni_telemetry(model=config.model, telemetry=telemetry_data)

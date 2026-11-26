@@ -231,6 +231,7 @@ def push_omni_trace(
     error: dict[str, Any] | None,
     model: str,
     inference_params: dict[str, Any] | None = None,
+    telemetry: dict[str, Any] | None = None,
 ) -> None:
     """omni HTTP 调用出口(含失败 finally 分支):累积一次调用到 artifacts.trace.
 
@@ -268,6 +269,8 @@ def push_omni_trace(
             "latency_ms": latency_ms,
             "error": error,
         }
+        if telemetry is not None:
+            call_record["telemetry"] = telemetry
         visual_input = _summarize_visual_input(request_messages)
         if visual_input:
             call_record["visual_input"] = visual_input
