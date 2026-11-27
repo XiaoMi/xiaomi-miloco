@@ -10,15 +10,58 @@ import hashlib
 import importlib.metadata
 import json
 import random
+import time
 from asyncio import AbstractEventLoop
+from collections import deque
 from os import path
 from typing import Dict, Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import yaml
 from aiohttp import ClientSession, ClientTimeout
 
 MIOT_ROOT_PATH: str = path.dirname(path.abspath(__file__))
+
+#: 第三方服务的请求配额：host -> (窗口秒数, 窗口内最多请求数)。
+#: 按 1 分钟一个桶滑动统计：窗口内允许把冷启动的数百个请求一次跑完（尖峰），
+#: 但连续高频会在配额用完后被挡到最老的分钟桶过期。
+_RATE_LIMIT_HOSTS: Dict[str, tuple[float, int]] = {
+    "miot-spec.org": (600.0, 1200),
+}
+#: 配额桶的步长（秒）。窗口必须是步长的整数倍。
+_RATE_WINDOW_STEP_SEC: float = 60.0
+_rate_locks: Dict[str, asyncio.Lock] = {}
+#: host -> deque[(分钟序号, 该分钟请求数)]，只保留窗口内的桶。
+_rate_windows: Dict[str, deque[tuple[int, int]]] = {}
+
+
+async def _acquire_rate_slot(url: str) -> None:
+    """对受控 host 取一个请求配额；按分钟桶滑动，超出后等最老的桶过期。"""
+    host = urlparse(url).hostname or ""
+    cfg = _RATE_LIMIT_HOSTS.get(host)
+    if not cfg:
+        return
+    window, limit = cfg
+    step = _RATE_WINDOW_STEP_SEC
+    slots = max(1, int(window // step))
+    lock = _rate_locks.setdefault(host, asyncio.Lock())
+    async with lock:
+        buckets = _rate_windows.setdefault(host, deque())
+        while True:
+            now = time.monotonic()
+            current = int(now // step)
+            while buckets and buckets[0][0] <= current - slots:
+                buckets.popleft()
+            if sum(count for _, count in buckets) < limit:
+                if buckets and buckets[-1][0] == current:
+                    buckets[-1] = (current, buckets[-1][1] + 1)
+                else:
+                    buckets.append((current, 1))
+                return
+            # 等最老的桶滑出窗口（下一个分钟边界）；只补一个小余量，
+            # 不要用 step 兜底，否则差几秒到期也会白等一整分钟。
+            wait = (buckets[0][0] + slots) * step - now + 0.01
+            await asyncio.sleep(max(wait, 0.01))
 
 
 def gen_absolute_path(relative_path: str) -> str:
@@ -96,6 +139,7 @@ async def http_get_json_async(
         encoded_params = urlencode(params)
         full_url = f"{url}?{encoded_params}"
 
+    await _acquire_rate_slot(url)
     async with ClientSession(loop=loop) as session:
         async with session.get(
             url=full_url, headers=headers or {}, timeout=ClientTimeout(total=30)
@@ -112,6 +156,7 @@ async def http_post_json_async(
     loop: Optional[AbstractEventLoop] = None,
 ) -> Dict:
     """Http post json."""
+    await _acquire_rate_slot(url)
     async with ClientSession(loop=loop) as session:
         async with session.post(
             url=url,

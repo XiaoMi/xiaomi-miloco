@@ -53,6 +53,26 @@ from .types import (
 
 _LOGGER = logging.getLogger(__name__)
 
+#: 拆相机前等在飞 miot_camera_start 收敛的时间；等不到就放弃该实例（free 会 UAF）。
+_START_SETTLE_TIMEOUT_S: float = 10.0
+
+class _NativeLibState:
+    """原生库的进程级状态：完成初始化、持有 log handler 的实例。
+
+    原生库永不 deinit（见 deinit_async），后续客户端复用这把库、只更新 token；
+    owner 同时保活 log handler 指针。用类属性而不是模块全局，避免被
+    CodeQL 判成「未使用的全局变量」（实际是跨实例读写）。
+    """
+
+    owner: "MIoTCamera | None" = None
+    #: 放弃 free 的实例：原生侧仍持有它们的回调 trampoline，必须活到进程退出。
+    #: 不能只挂在 manager 上——重绑后新建的 manager 不是 owner，旧 manager
+    #: 只剩循环引用，一次 GC 就会把 trampoline 连同实例一起释放。
+    leaked_instances: list["MIoTCameraInstance"] = []
+
+
+_native_lib = _NativeLibState()
+
 
 #  level, msg
 _MIOT_CAMERA_LOG_HANDLER = CFUNCTYPE(None, c_int, c_char_p)
@@ -154,6 +174,10 @@ class MIoTCameraInstance:
         self._reconnect_timer = None
         self._reconnect_timeout = CAMERA_RECONNECT_TIME_MIN
         self._decoders = []
+        # 在飞的 miot_camera_start：原生 start 是阻塞 ctypes 调用，在飞时 free 会
+        # 与它互锁/UAF。重连定时器可能叠加出多条 start，所以用集合 + 计数表达。
+        self._start_tasks: set[asyncio.Task] = set()
+        self._start_inflight: int = 0
 
         model: str = camera_info.model
         channel_count: int = camera_info.channel_count
@@ -181,6 +205,22 @@ class MIoTCameraInstance:
     async def destroy_async(self) -> None:
         """Destroy camera."""
         await self.stop_async()
+        if getattr(self, "_start_inflight", 0) > 0:
+            # start 未返回时 free 会 use-after-free（原生线程还持有 user_data）。
+            # 放弃释放并标记泄漏；上层在下次 deinit（解绑）时读标记并重启进程回收。
+            self._manager.native_start_leaked = True
+            # 原生侧仍持有 _callback_refs 里的 trampoline，实例必须活到进程退出，
+            # 否则 GC 后原生回调会跳到已释放内存。业务回调清掉，帧直接丢弃。
+            self._callbacks.clear()
+            # 进程级保活；manager 上的列表只用于诊断/测试断言。
+            _native_lib.leaked_instances.append(self)
+            self._manager._leaked_instances.append(self)
+            _LOGGER.error(
+                "camera %s: native start still in flight; skip unregister/free "
+                "(instance leaked until process exit)",
+                self._did,
+            )
+            return
         for key in list(self._callback_refs.keys()):
             if key == "status":
                 self._lib_miot_camera.miot_camera_unregister_status_changed(
@@ -247,7 +287,7 @@ class MIoTCameraInstance:
         _LOGGER.info("register status changed, %s, %s", self._did, result)
 
         self._reconnect_timer = self._main_loop.call_later(
-            0, lambda: self._main_loop.create_task(self.__try_start_async())
+            0, self.__schedule_start
         )
 
     async def stop_async(self) -> None:
@@ -259,6 +299,11 @@ class MIoTCameraInstance:
             self._reconnect_timer = None
             self.__reset_try_start_timeout()
 
+        await self.__settle_start_async()
+
+        # start 仍未收敛也照常调 stop：session 指针要等 session_open 返回才赋值，
+        # 在飞时它还是 NULL，stop 只会翻状态、跳过 session_close，不碰 rwlock；
+        # 而 start 已返回时 stop 是我们唯一能关掉已建立会话的入口。
         result: int = await self._main_loop.run_in_executor(
             None, self._lib_miot_camera.miot_camera_stop, self._c_instance
         )
@@ -554,6 +599,38 @@ class MIoTCameraInstance:
             if need_unreg:
                 await self.__unregister_raw_data_async(channel)
 
+    async def __settle_start_async(self) -> None:
+        """等在飞的全部 miot_camera_start 收敛（不可取消，只能等）。"""
+        tasks = [t for t in getattr(self, "_start_tasks", set()) if not t.done()]
+        if not tasks:
+            return
+        _done, pending = await asyncio.wait(
+            tasks, timeout=_START_SETTLE_TIMEOUT_S
+        )
+        if pending:
+            _LOGGER.warning(
+                "camera %s: %d start task(s) still in flight after %.0fs",
+                self._did,
+                len(pending),
+                _START_SETTLE_TIMEOUT_S,
+            )
+
+    def __schedule_start(self) -> None:
+        """建一个可跟踪的 start task（可能多条并存，由集合统一等）。"""
+        task = self._main_loop.create_task(self.__try_start_async())
+        self._start_tasks.add(task)
+
+        def _on_done(done: asyncio.Task) -> None:
+            self._start_tasks.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                _LOGGER.warning(
+                    "camera %s: start task ended with error: %s",
+                    self._did,
+                    done.exception(),
+                )
+
+        task.add_done_callback(_on_done)
+
     async def __try_start_async(self) -> None:
         _LOGGER.info("try start camera, %s", self._did)
         # Cancel reconnect task if exists.
@@ -561,20 +638,24 @@ class MIoTCameraInstance:
             self._reconnect_timer.cancel()
             self._reconnect_timer = None
 
-        result: int = await self._main_loop.run_in_executor(
-            None,
-            self._lib_miot_camera.miot_camera_start,
-            self._c_instance,
-            byref(
-                _MIoTCameraConfigC(
-                    (c_uint8 * ((self.camera_info.channel_count or 1) + 1))(
-                        *self._video_qualities
-                    ),
-                    self._enable_audio,
-                    self._pin_code.encode("utf-8") if self._pin_code else None,
-                )
-            ),
-        )
+        self._start_inflight += 1
+        try:
+            result: int = await self._main_loop.run_in_executor(
+                None,
+                self._lib_miot_camera.miot_camera_start,
+                self._c_instance,
+                byref(
+                    _MIoTCameraConfigC(
+                        (c_uint8 * ((self.camera_info.channel_count or 1) + 1))(
+                            *self._video_qualities
+                        ),
+                        self._enable_audio,
+                        self._pin_code.encode("utf-8") if self._pin_code else None,
+                    )
+                ),
+            )
+        finally:
+            self._start_inflight -= 1
         _LOGGER.info(
             "try start camera, result->%s, did->%s, enable_audio->%s, enable_reconnect->%s, pin_code->%.2s**",
             result,
@@ -589,8 +670,7 @@ class MIoTCameraInstance:
         # Reconnect.
         if self._enable_reconnect:
             self._reconnect_timer = self._main_loop.call_later(
-                self.__get_try_start_timeout(),
-                lambda: self._main_loop.create_task(self.__try_start_async()),
+                self.__get_try_start_timeout(), self.__schedule_start
             )
         else:
             _LOGGER.error("camera start failed, %s, %s", self._did, result)
@@ -624,8 +704,7 @@ class MIoTCameraInstance:
             )
         if camera_status == MIoTCameraStatus.DISCONNECTED and self._enable_reconnect:
             self._reconnect_timer = self._main_loop.call_later(
-                self.__get_try_start_timeout(),
-                lambda: self._main_loop.create_task(self.__try_start_async()),
+                self.__get_try_start_timeout(), self.__schedule_start
             )
 
     def __on_raw_data(self, frame_header_ptr: Any, data: bytes) -> None:
@@ -918,24 +997,20 @@ class MIoTCamera:
         self._enable_hw_accel = enable_hw_accel
         self._camera_map = {}
         self._init_done = False
+        #: 拆除时发现原生 start 仍在飞 → 该实例被迫放弃（不能 free）。
+        #: 泄漏的实例留在 miss 全局表里，本进程内无法回收；上层据此重启进程。
+        self.native_start_leaked = False
+        #: 放弃释放的实例：原生回调指针还在它们身上，必须活到进程退出。
+        self._leaked_instances: list[MIoTCameraInstance] = []
 
-        # Load shared library (idempotent, OS-level only). The paired
-        # miot_camera_init / miot_camera_deinit are managed by
-        # init_async / deinit_async so the same instance can be reused
-        # across bind/unbind cycles.
+        # Load shared library (idempotent, OS-level only). miot_camera_init runs
+        # once per process (see init_async); deinit_async never deinits it.
         self._lib_miot_camera = _load_dynamic_lib()
         # MUST add to refs, otherwise it will be freed.
         self._log_handler = _MIOT_CAMERA_LOG_HANDLER(self._on_miot_camera_log)
 
     def __del__(self):
-        """Del."""
-        # __init__ may raise before these attrs are assigned; guard with getattr.
-        if getattr(self, "_lib_miot_camera", None) and getattr(self, "_init_done", False):
-            try:
-                self._lib_miot_camera.miot_camera_set_log_handler(None)
-                self._lib_miot_camera.miot_camera_deinit()
-            except Exception:
-                pass
+        """Del。不 deinit 原生库：会与在飞 start 互锁，且库随进程退出回收。"""
         self._lib_miot_camera = None  # type: ignore
         self._init_done = False
 
@@ -955,6 +1030,11 @@ class MIoTCamera:
             return
         self._frame_interval = frame_interval
         self._enable_hw_accel = enable_hw_accel
+        if _native_lib.owner is not None and _native_lib.owner is not self:
+            # 原生库已由别的客户端初始化且永不 deinit：只更新令牌，复用旧库。
+            await self.update_access_token_async(self._access_token)
+            self._init_done = True
+            return
         self._lib_miot_camera.miot_camera_set_log_handler(self._log_handler)
         try:
             self._lib_miot_camera.miot_camera_init(
@@ -976,35 +1056,30 @@ class MIoTCamera:
                 )
             raise
         self._init_done = True
+        _native_lib.owner = self
         _LOGGER.info(
             "miot camera lib version: %s", await self.get_camera_version_async()
         )
 
     async def deinit_async(self) -> None:
-        """Deinit."""
+        """拆除相机实例，但不拆原生库。
+
+        miot_camera_deinit 会与在飞的 miot_camera_start 在 libmiss 的 rwlock
+        上互锁，冻死事件循环。原生库按进程级单例保留，换账号走
+        update_access_token_async()。
+        """
         if not self._init_done:
             return
-        try:
-            for did in list(self._camera_map.keys()):
-                try:
-                    await self.destroy_camera_async(did=did)
-                except Exception as err:
-                    _LOGGER.warning("destroy_camera(%s) failed: %s", did, err)
-            self._camera_map.clear()
+        for did in list(self._camera_map.keys()):
             try:
-                self._lib_miot_camera.miot_camera_set_log_handler(None)
+                await self.destroy_camera_async(did=did)
             except Exception as err:
-                _LOGGER.warning("miot_camera_set_log_handler(None) failed: %s", err)
-            try:
-                self._lib_miot_camera.miot_camera_deinit()
-            except Exception as err:
-                _LOGGER.warning("miot_camera_deinit failed: %s", err)
-        finally:
-            # Keep self._lib_miot_camera so init_async can call miot_camera_init
-            # on the same instance again. Always clear _init_done so that
-            # __del__ won't attempt a second miot_camera_deinit after a partial
-            # failure here.
-            self._init_done = False
+                _LOGGER.warning("destroy_camera(%s) failed: %s", did, err)
+        self._camera_map.clear()
+        _LOGGER.info(
+            "camera client deinit (native library kept initialized, leaked=%s)",
+            self.native_start_leaked,
+        )
 
     async def update_access_token_async(self, access_token: str) -> None:
         """Update access token."""

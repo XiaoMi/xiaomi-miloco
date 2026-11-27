@@ -28,6 +28,11 @@ class MIoTErrorCode(Enum):
     CODE_OAUTH_INVALID_REFRESH_TOKEN = -10021
     # Http error code
     CODE_HTTP_INVALID_ACCESS_TOKEN = -10030
+    # 云端限流（HTTP 429 或业务码 -127）。与「凭据失效」无关：退避后重试即可，
+    # 上层不应据此判定授权失效或停掉感知。
+    CODE_HTTP_RATE_LIMITED = -10031
+    # 本地退避窗口内被直接拒绝，请求根本没有发出去。调用方看到它只需等待。
+    CODE_HTTP_BACKOFF = -10032
     # MIoT mips error code
     CODE_MIPS_INVALID_RESULT = -10040
     # 网关**已回包**但结构无法识别 —— 与 -10040(回包不是合法 JSON)同类:两者都

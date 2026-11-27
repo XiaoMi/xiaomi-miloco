@@ -5,7 +5,7 @@
 Unit tests for init/deinit idempotency fixes.
 
 These tests cover the failure paths introduced by commit 0c6f190:
-- MIoTCamera.deinit_async: C call failure must still clear _init_done.
+- MIoTCamera.deinit_async: keeps the native library initialized (never deinits).
 - MIoTCamera.__del__: partial __init__ failure must not AttributeError.
 - MIoTClient.deinit_async: one sub-client failure must not strand state.
 - MIoTClient.init_async: partial init failure must trigger full cleanup.
@@ -34,9 +34,8 @@ def fake_camera_lib():
     return lib
 
 
-async def test_camera_deinit_c_failure_clears_init_done(fake_camera_lib):
-    """miot_camera_deinit raising must not leave _init_done=True — otherwise
-    __del__ would later call miot_camera_deinit a second time (double-free)."""
+async def test_camera_deinit_keeps_native_library(fake_camera_lib):
+    """deinit 只拆相机实例，不拆原生库（deinit 会与在飞 start 互锁）。"""
     from miot.camera import MIoTCamera
 
     with patch("miot.camera._load_dynamic_lib", return_value=fake_camera_lib):
@@ -44,21 +43,14 @@ async def test_camera_deinit_c_failure_clears_init_done(fake_camera_lib):
         await cam.init_async()
         assert cam._init_done is True
 
-        fake_camera_lib.miot_camera_deinit.side_effect = RuntimeError("C crash")
-        # Should not raise; the warning is logged internally.
-        await cam.deinit_async()
-        assert cam._init_done is False
-
-        # Second deinit is a no-op.
-        fake_camera_lib.miot_camera_deinit.reset_mock()
         await cam.deinit_async()
         fake_camera_lib.miot_camera_deinit.assert_not_called()
-
-        # Reinit on the same instance should succeed.
-        fake_camera_lib.miot_camera_deinit.side_effect = None
-        await cam.init_async()
+        # 保持 initialized：后续客户端复用这把库，只更新 token。
         assert cam._init_done is True
+
+        # 幂等：再次 deinit 仍然不碰原生库。
         await cam.deinit_async()
+        fake_camera_lib.miot_camera_deinit.assert_not_called()
 
 
 async def test_camera_init_c_failure_rolls_back_log_handler(fake_camera_lib):
@@ -90,8 +82,8 @@ async def test_camera_init_c_failure_rolls_back_log_handler(fake_camera_lib):
 
 
 async def test_camera_deinit_destroy_failure_still_clears_map(fake_camera_lib):
-    """A failure inside destroy_camera_async must not stop _camera_map.clear()
-    nor leave _init_done=True."""
+    """A failure inside destroy_camera_async must not stop _camera_map.clear()；
+    原生库保持 initialized（deinit_async 不再拆它）。"""
     from miot.camera import MIoTCamera
 
     with patch("miot.camera._load_dynamic_lib", return_value=fake_camera_lib):
@@ -103,7 +95,7 @@ async def test_camera_deinit_destroy_failure_still_clears_map(fake_camera_lib):
         cam._camera_map["did-broken"] = broken_instance
 
         await cam.deinit_async()
-        assert cam._init_done is False
+        assert cam._init_done is True
         assert cam._camera_map == {}
 
 
@@ -352,3 +344,13 @@ async def test_client_init_deinit_init_cycle():
         assert client._init_done is True
         await client.deinit_async()
         assert client._init_done is False
+
+
+async def test_client_deinit_propagates_camera_leak():
+    """camera_client 上报的泄漏必须传到 client，供上层决定重启。"""
+    client = _make_client_with_fake_subclients()
+    client._camera_client.native_start_leaked = True
+
+    await client.deinit_async()
+
+    assert client.native_camera_leaked is True

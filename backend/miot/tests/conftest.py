@@ -249,3 +249,16 @@ def test_baidu_oauth2_redirect_uri() -> str:
 @pytest.fixture(scope="session")
 def test_name_baidu_oauth_info() -> str:
     return "baidu_oauth_info"
+
+
+@pytest.fixture(autouse=True)
+def _reset_camera_lib_owner():
+    """原生相机库 owner 是进程级单例（永不 deinit）。每个用例用独立的 mock 库，
+    必须复位，否则第二个实例会走 update-token 路径、不调用 miot_camera_init。"""
+    import miot.camera as _camera
+
+    _camera._native_lib.owner = None
+    _camera._native_lib.leaked_instances.clear()
+    yield
+    _camera._native_lib.owner = None
+    _camera._native_lib.leaked_instances.clear()

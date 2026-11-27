@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import platform
+import random
 import time
 from enum import Enum, auto
 from pathlib import Path
@@ -26,6 +27,11 @@ _LOGGER = logging.getLogger(__name__)
 # miot-spec.org 设备/服务类型目录刷新会按类型逐个拉取（各数百个）。并发上限避免一次性发出
 # 数百个连接打爆对端 / 耗尽本地连接器——旧实现无上限 gather，弱网下整批一起卡到超时、刷屏。
 _SPEC_FETCH_CONCURRENCY = 16
+
+#: 解析失败后的重试间隔（秒）：立即重试对端故障时会把请求量放大 3 倍。
+_SPEC_RETRY_DELAYS: tuple[float, ...] = (0.5, 1.0)
+#: 同一 URN 解析失败后，这段时间内不再联网（负缓存），避免每次操作都重打 3 次。
+_SPEC_FAILURE_TTL_SEC: float = 600.0
 
 
 async def _bounded_gather(coros: List, *, return_exceptions: bool = False) -> List:
@@ -1242,6 +1248,8 @@ class MIoTSpecParser:
         # self._spec_modify = _SpecModify(loop=self._main_loop)
 
         self._init_done = False
+        #: urn -> 失败负缓存截止时间（time.time()）。只在本进程内有效。
+        self._failed_until: Dict[str, float] = {}
         # 惰性初始化由 parse_async 触发，且 refresh_async 会并发 fan-out 多个 parse_async；
         # 用锁 + 双重检查保证首次并发只跑一次目录拉取，不会同时打多份。
         self._init_lock = asyncio.Lock()
@@ -1281,15 +1289,25 @@ class MIoTSpecParser:
             if isinstance(cache_result, Dict):
                 _LOGGER.debug("get from cache, %s", urn)
                 return MIoTSpecDevice(**cache_result)
+            if self._failed_until.get(urn, 0.0) > time.time():
+                _LOGGER.debug("skip parse, recent failure, %s", urn)
+                return None
         # 缓存未命中、确需联网解析 → 此处才惰性加载标准库 + 类型目录（幂等 + 并发安全）。
         # 缓存命中的设备直接走上面 return，不触发任何 spec 目录请求。
         await self.init_async()
-        # Retry three times
         for index in range(3):
             try:
-                return await self.__parse(urn=urn)
+                result = await self.__parse(urn=urn)
+                self._failed_until.pop(urn, None)
+                return result
             except Exception as err:
                 _LOGGER.error("parse error, retry, %d, %s, %s", index, urn, err)
+                if index < len(_SPEC_RETRY_DELAYS):
+                    # 抖动避免对端故障恢复时所有设备同一时刻重试
+                    await asyncio.sleep(
+                        _SPEC_RETRY_DELAYS[index] * (0.5 + random.random())
+                    )
+        self._failed_until[urn] = time.time() + _SPEC_FAILURE_TTL_SEC
         return None
 
     async def get_cached_async(self, urn: str) -> Optional[MIoTSpecDevice]:
