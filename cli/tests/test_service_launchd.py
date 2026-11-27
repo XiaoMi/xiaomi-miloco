@@ -264,6 +264,7 @@ def test_launchd_kill_non_miloco_port_holder_reports(monkeypatch):
     monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
     monkeypatch.setattr(service, "_find_pid_by_port", lambda url: 4242)  # 用户 http.server
     monkeypatch.setattr(service, "_is_miloco_backend_proc", lambda pid: False)
+    monkeypatch.setattr(service, "_miloco_backend_verdict", lambda pid: False)
     monkeypatch.setattr(service, "_is_port_in_use", lambda url: True)
     monkeypatch.setattr(service, "_has_port_lookup_tool", lambda: True)
     killed = []
@@ -275,6 +276,43 @@ def test_launchd_kill_non_miloco_port_holder_reports(monkeypatch):
         service._launchd_kill(cfg, pretty=False)
     assert killed == []  # 未误杀
     assert "非 miloco" in captured.get("error", "")
+
+
+def test_launchd_kill_unresolvable_port_holder_reports(monkeypatch):
+    """kill 时端口仍被占、但连 pid 都反查不到：不把「查不到」当成清理成功。"""
+    monkeypatch.setattr(service, "_launchctl", lambda *a: _cp(0))
+    monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
+    monkeypatch.setattr(service, "_find_pid_by_port", lambda url: None)
+    monkeypatch.setattr(service, "_is_port_in_use", lambda url: True)
+    monkeypatch.setattr(service, "_has_port_lookup_tool", lambda: True)
+    captured = {}
+    monkeypatch.setattr(service, "print_result", lambda p, pretty: captured.update(p))
+    cfg = {"server": {"url": "http://127.0.0.1:1810"}}
+    with pytest.raises(SystemExit):
+        service._launchd_kill(cfg, pretty=False)
+    assert "cleaned" not in captured.get("message", "")
+    assert "查不到监听进程的 pid" in captured.get("error", "")
+
+
+def test_launchd_kill_unreadable_port_holder_reports(monkeypatch):
+    """kill 时端口仍被占、但 ps 读不到监听者命令行：如实报「身份查不到」，不假称不是 miloco。"""
+    monkeypatch.setattr(service, "_launchctl", lambda *a: _cp(0))
+    monkeypatch.setattr(service, "_reap_legacy_supervisord", lambda: [])
+    monkeypatch.setattr(service, "_find_pid_by_port", lambda url: 4242)
+    monkeypatch.setattr(service, "_is_miloco_backend_proc", lambda pid: False)
+    monkeypatch.setattr(service, "_miloco_backend_verdict", lambda pid: None)
+    monkeypatch.setattr(service, "_is_port_in_use", lambda url: True)
+    monkeypatch.setattr(service, "_has_port_lookup_tool", lambda: True)
+    killed = []
+    monkeypatch.setattr(service, "_terminate", lambda pid, *a, **k: killed.append(pid))
+    captured = {}
+    monkeypatch.setattr(service, "print_result", lambda p, pretty: captured.update(p))
+    cfg = {"server": {"url": "http://127.0.0.1:1810"}}
+    with pytest.raises(SystemExit):
+        service._launchd_kill(cfg, pretty=False)
+    assert killed == []  # 未误杀
+    assert "身份查不到" in captured.get("error", "")
+    assert "非 miloco" not in captured.get("error", "")
 
 
 def test_launchd_start_already_running(monkeypatch):

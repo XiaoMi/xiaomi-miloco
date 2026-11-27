@@ -15,7 +15,11 @@ def _is_healthy(url: str) -> bool:
     import httpx
 
     try:
-        return httpx.get(url.rstrip("/") + "/health", timeout=2, verify=False).status_code == 200
+        # 本地 backend 是 http（main.py 起 uvicorn 不带 ssl 参数），httpx 对 http 不做
+        # 证书校验，不传 verify —— 照抄别处的 verify=False 对 http 无作用，还会挂一条
+        # CodeQL request-without-cert-validation（回环地址上的误报）。与 service.py 的
+        # _wait_for_health / _backend_ready 同口径。
+        return httpx.get(url.rstrip("/") + "/health", timeout=2).status_code == 200
     except Exception:
         return False
 
