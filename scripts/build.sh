@@ -478,13 +478,14 @@ pack_install_scripts() {
     local out_dir="$DIST_DIR"   # 自包含脚本是构建产物，只进 dist/，不落仓库根
 
     local setup_py="$scripts_dir/install.py"
+    local uninstall_py="$scripts_dir/installer_uninstall.py"
     local manifest="$DIST_DIR/manifest.json"   # 内嵌已填好 version/bundles 的成品 manifest
     local i18n_en="$scripts_dir/i18n/en.json"
     local i18n_zh="$scripts_dir/i18n/zh.json"
     local tpl_sh="$scripts_dir/install.sh"
     local tpl_ps1="$scripts_dir/install.ps1"
 
-    for f in "$setup_py" "$manifest" "$i18n_en" "$i18n_zh" "$tpl_sh" "$tpl_ps1"; do
+    for f in "$setup_py" "$uninstall_py" "$manifest" "$i18n_en" "$i18n_zh" "$tpl_sh" "$tpl_ps1"; do
         [[ -f "$f" ]] || { log "跳过自包含脚本打包: $f 不存在"; return; }
     done
 
@@ -522,6 +523,7 @@ mkdir -p "$WORK_DIR/i18n"
 
 INJECT_SH
         _embed_sh_resource B64_SETUP_PY     "$setup_py"        '"$WORK_DIR/install.py"'
+        _embed_sh_resource B64_UNINSTALL_PY "$uninstall_py"    '"$WORK_DIR/installer_uninstall.py"'
         _embed_sh_resource B64_MANIFEST     "$manifest"        '"$WORK_DIR/manifest.json"'
         _embed_sh_resource B64_I18N_EN      "$i18n_en"         '"$WORK_DIR/i18n/en.json"'
         _embed_sh_resource B64_I18N_ZH      "$i18n_zh"         '"$WORK_DIR/i18n/zh.json"'
@@ -547,6 +549,7 @@ New-Item -ItemType Directory -Path (Join-Path $script:WorkDir "i18n") -Force | O
 
 INJECT_PS1
         _embed_ps1_resource "$setup_py"        '(Join-Path $script:WorkDir "install.py")'
+        _embed_ps1_resource "$uninstall_py"    '(Join-Path $script:WorkDir "installer_uninstall.py")'
         _embed_ps1_resource "$manifest"        '(Join-Path $script:WorkDir "manifest.json")'
         _embed_ps1_resource "$i18n_en"         '(Join-Path (Join-Path $script:WorkDir "i18n") "en.json")'
         _embed_ps1_resource "$i18n_zh"         '(Join-Path (Join-Path $script:WorkDir "i18n") "zh.json")'

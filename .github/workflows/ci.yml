@@ -72,6 +72,16 @@ jobs:
       - name: hermes 插件测试
         run: uv run --with pytest --with httpx --with anyio python -m pytest plugins/hermes/tests/ -v
 
+  scripts-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: astral-sh/setup-uv@e58605a9b6da7c637471fab8847a5e5a6b8df081 # v5
+        with:
+          enable-cache: true
+      - name: 安装器卸载测试
+        run: uv run --with pytest python -m pytest scripts/tests/ -v
+
   web-test:
     runs-on: ubuntu-latest
     steps:

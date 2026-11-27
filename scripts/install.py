@@ -26,21 +26,27 @@ from __future__ import annotations
 import argparse
 import asyncio
 import atexit
+import copy
+import datetime
+import enum
 import hashlib
 import json
 import locale
 import os
 import platform as _platform
+import re
 import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tarfile
-from dataclasses import dataclass, replace
+import tempfile
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable, NoReturn
+from typing import TYPE_CHECKING, Callable, Iterable, Mapping, NoReturn, Sequence
 
 import httpx
 import questionary
@@ -57,6 +63,27 @@ from rich.progress import (
 
 if TYPE_CHECKING:
     from rich.progress import TaskID
+
+try:
+    from .installer_uninstall import (
+        _RC_EXPORT_RE,
+        _RC_MARKER_RE,
+        _atomic_write_text,
+        _same_path,
+        _unquote,
+        run_uninstall,
+    )
+except ImportError:  # 直接执行 / 自包含安装脚本：同目录 import
+    if str(Path(__file__).resolve().parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from installer_uninstall import (
+        _RC_EXPORT_RE,
+        _RC_MARKER_RE,
+        _atomic_write_text,
+        _same_path,
+        _unquote,
+        run_uninstall,
+    )
 
 # ---------------------------------------------------------------------------
 # Cleanup registry
@@ -1464,6 +1491,11 @@ class Installer:
         env = os.environ.copy()
         env["MILOCO_HOME"] = str(self.miloco_home)
         env["HERMES_HOME"] = str(hermes_home)
+        # install-hermes.sh 的 1.9 遇到已有 `export MILOCO_HOME=` 时会原地改写
+        # 整行（re.sub 全局），会把用户自己指向别处的 export 覆盖掉，卸载时
+        # 就再也无法保留用户数据。先把用户行摘出来，跑完再把它们插回安装器
+        # 标记块之前（保证安装器的 export 在后、新 shell 里生效）。
+        saved = self._hermes_stash_user_rc_exports()
         try:
             subprocess.run(
                 ["bash", str(script), "--post-install"],
@@ -1471,6 +1503,75 @@ class Installer:
             )
         except subprocess.CalledProcessError as exc:
             self.ui.warn(self.ui.i18n.t("plugin.hermes_post_install_failed", str(exc.returncode)))
+        finally:
+            self._hermes_restore_user_rc_exports(saved)
+
+    def _hermes_stash_user_rc_exports(
+        self, home: Path | None = None
+    ) -> dict[Path, list[str]]:
+        """临时摘掉用户自己的 `export MILOCO_HOME`，返回 {rc 文件: 原行}。"""
+        saved: dict[Path, list[str]] = {}
+        home = home or Path.home()
+        for rc in (home / ".zshrc", home / ".bashrc"):
+            if not rc.is_file():
+                continue
+            try:
+                text = rc.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            keep: list[str] = []
+            user_lines: list[str] = []
+            for line in text.splitlines(keepends=True):
+                match = _RC_EXPORT_RE.match(line.rstrip("\r\n"))
+                value = _unquote(match.group(1)) if match else ""
+                if value and not _same_path(value, {self.miloco_home}):
+                    user_lines.append(line)
+                else:
+                    keep.append(line)
+            if not user_lines:
+                continue
+            try:
+                _atomic_write_text(rc, "".join(keep))
+            except OSError:
+                continue
+            saved[rc] = user_lines
+        return saved
+
+    def _hermes_restore_user_rc_exports(self, saved: dict[Path, list[str]]) -> None:
+        for rc, user_lines in saved.items():
+            try:
+                text = rc.read_text(encoding="utf-8")
+                lines = text.splitlines(keepends=True)
+                index = next(
+                    (
+                        i
+                        for i, line in enumerate(lines)
+                        if _RC_MARKER_RE.match(line.rstrip("\r\n"))
+                    ),
+                    None,
+                )
+                if index is None:
+                    # install-hermes.sh 遇到已有 export 是原地更新，不写 marker；
+                    # 此时以第一个受管 export 作为锚点，保证用户行仍在它之前。
+                    for i, line in enumerate(lines):
+                        match = _RC_EXPORT_RE.match(line.rstrip("\r\n"))
+                        if match and _same_path(
+                            _unquote(match.group(1)), {self.miloco_home}
+                        ):
+                            index = i
+                            break
+                if index is None:
+                    if text and not text.endswith("\n"):
+                        text += "\n"
+                    text = text + "".join(user_lines)
+                else:
+                    lines[index:index] = user_lines
+                    text = "".join(lines)
+                _atomic_write_text(rc, text)
+            except (OSError, UnicodeDecodeError) as exc:
+                self.ui.warn(
+                    self.ui.i18n.t("plugin.hermes_rc_restore_failed", str(rc), str(exc))
+                )
 
     def _hermes_deploy_plugin(self, hermes_home: Path, extract_dir: Path) -> None:
         plugin_dir = hermes_home / "plugins" / "miloco" / "miloco-plugin"
@@ -1803,86 +1904,6 @@ class Installer:
 
 
 # ---------------------------------------------------------------------------
-# Uninstaller
-# ---------------------------------------------------------------------------
-
-
-class Uninstaller:
-    def __init__(self, ui: UI, miloco_home: Path) -> None:
-        self.ui = ui
-        self.miloco_home = miloco_home
-
-    # 与 cli/src/miloco_cli/commands/service.py::_LAUNCHD_LABEL 保持一致。
-    LAUNCHD_LABEL = "com.xiaomi.miloco.backend"
-
-    def _remove_launchagent(self) -> None:
-        """macOS：卸载前拆掉 LaunchAgent job 并删 plist。
-
-        plist 是本安装器引入的**持久产物**且 ``RunAtLoad=true``：不清的话
-        miloco.app 随 miloco_home 一起被删（或 uv tool 卸载后 python_bin 失效）之后，
-        下次登录 launchd 仍会按 plist 去 spawn 一个不存在的二进制，持续产生失败记录，
-        直到用户重装到同一个 MILOCO_HOME 才被覆盖。
-        """
-        if _platform.system() != "Darwin":
-            return
-        plist = (
-            Path.home() / "Library" / "LaunchAgents" / f"{self.LAUNCHD_LABEL}.plist"
-        )
-        target = f"gui/{os.getuid()}/{self.LAUNCHD_LABEL}"
-        try:
-            subprocess.run(
-                ["launchctl", "bootout", target], capture_output=True, timeout=20
-            )
-        except Exception:
-            pass  # 没加载 / 无 launchctl：best-effort，删 plist 才是关键一步
-        if plist.exists():
-            try:
-                plist.unlink()
-                self.ui.ok(f"LaunchAgent removed: {plist}")
-            except OSError as e:
-                self.ui.warn(f"remove LaunchAgent plist failed: {e}")
-
-    def run(self) -> None:
-        self.ui.info(self.ui.i18n.t("uninstall.title"))
-        self._remove_launchagent()
-
-        for pkg, msg_key in [
-            ("miloco-cli", "uninstall.cli_removed"),
-            ("miloco", "uninstall.miloco_removed"),
-            ("supervisor", None),
-        ]:
-            try:
-                subprocess.run(
-                    ["uv", "tool", "uninstall", pkg], capture_output=True, check=True
-                )
-                self.ui.ok(msg_key if msg_key else f"{pkg} uninstalled")
-            except subprocess.CalledProcessError:
-                pass
-
-        if shutil.which("openclaw"):
-            try:
-                subprocess.run(
-                    ["openclaw", "plugins", "uninstall", "miloco-openclaw-plugin"],
-                    input="y\n",
-                    text=True,
-                    capture_output=True,
-                )
-                self.ui.ok(self.ui.i18n.t("uninstall.plugin_removed"))
-            except subprocess.CalledProcessError:
-                pass
-
-        if self.miloco_home.is_dir():
-            if self.ui.prompt_confirm(
-                self.ui.i18n.t("uninstall.delete_home_ask", str(self.miloco_home)),
-                default=False,
-            ):
-                shutil.rmtree(self.miloco_home)
-                self.ui.ok(self.ui.i18n.t("uninstall.home_deleted"))
-
-        self.ui.ok(self.ui.i18n.t("uninstall.done"))
-
-
-# ---------------------------------------------------------------------------
 # Arg parsing & entry
 # ---------------------------------------------------------------------------
 
@@ -2072,7 +2093,7 @@ def _decide_agent_platform(
 
     必须在 miloco_home 计算之前跑，否则交互选 hermes 时 miloco_home 仍走 openclaw 默认。
 
-    非交互路径（agent-prepare/agent-finish/uninstall/no tty）走本机 detect：
+    非交互路径（agent-prepare/agent-finish/no tty）走本机 detect：
     - 检测命中（hermes/openclaw）→ 用检测结果
     - 检测未命中（都没装）→ 视为配置错误，raise SystemExit 中断安装
 
@@ -2081,6 +2102,7 @@ def _decide_agent_platform(
     同样的反向问题也存在 hermes fallback 到 openclaw 上。
 
     用户显式 --agent-platform=hermes/openclaw：探测结果只告警，不否决显式参数。
+    --uninstall 在 main() 里更早分流，不会走到这里。
     """
     if args.agent_platform:
         # 用户显式指定：探测只用于告警，不能否决调用方的权威参数。
@@ -2244,14 +2266,15 @@ def main() -> None:
     if not plat.is_interactive and _try_tty_fallback():
         plat = replace(plat, is_interactive=True)
 
+    # --uninstall 必须在 mkdir / 平台决策之前分流：卸载是只读盘点 + 按痕迹清理，
+    # 不依赖 --agent-platform，也不能因为非交互环境而无法清理。
     if args.uninstall:
-        if not plat.is_interactive:
-            if not _try_tty_fallback():
-                ui.fail(ui.i18n.t("error.non_interactive"))
-        uninstall_home = _resolve_uninstall_home()
-        Uninstaller(ui, uninstall_home).run()
+        miloco_home = (
+            None if "MILOCO_HOME" in os.environ else _resolve_uninstall_home()
+        )
+        rc = run_uninstall(ui, args=args, miloco_home=miloco_home)
         _default_runtime_pointer().unlink(missing_ok=True)
-        return
+        sys.exit(rc)
 
     agent_platform = _decide_agent_platform(args, plat, ui)
     miloco_home = _resolve_install_home(agent_platform)
