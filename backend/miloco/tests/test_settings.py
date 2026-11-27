@@ -158,6 +158,27 @@ def test_notify_dedup_window_negative_loads_not_rejected(monkeypatch) -> None:
     assert get_settings().notify.dedup_window_sec == -5.0
 
 
+def test_rule_defer_blocked_enter_timeout_default() -> None:
+    """被前提拦下的进入默认挂起 60s。"""
+    assert get_settings().rule.defer_blocked_enter_timeout_sec == 60.0
+
+
+def test_rule_defer_blocked_enter_timeout_env_override(monkeypatch) -> None:
+    """支持 env / config.json 覆盖挂起时限。"""
+    monkeypatch.setenv("MILOCO_RULE__DEFER_BLOCKED_ENTER_TIMEOUT_SEC", "30")
+    reset_settings()
+    assert get_settings().rule.defer_blocked_enter_timeout_sec == 30.0
+
+
+def test_rule_defer_blocked_enter_timeout_negative_loads_not_rejected(
+    monkeypatch,
+) -> None:
+    """0 与负数是语义值（0=不挂起，负数=不限时），不能被 pydantic 拒绝。"""
+    monkeypatch.setenv("MILOCO_RULE__DEFER_BLOCKED_ENTER_TIMEOUT_SEC", "-5")
+    reset_settings()
+    assert get_settings().rule.defer_blocked_enter_timeout_sec == -5.0
+
+
 def test_directory_paths_derive_from_miloco_home(tmp_path: Path) -> None:
     s = get_settings()
     assert s.directories.workspace_dir == tmp_path

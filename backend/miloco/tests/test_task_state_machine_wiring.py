@@ -482,6 +482,23 @@ def test_attach_registers_direction_from_db(tmp_path, monkeypatch):
     assert runner._state_machine.runtime_state("t1") is TaskRuntimeState.ON
 
 
+def test_attach_passes_defer_blocked_enter_timeout(tmp_path, monkeypatch):
+    """启动装配把 rule.defer_blocked_enter_timeout_sec 交给状态机。
+
+    env 必须在 _seed_db 之前设: 它内部会 reset_settings, 之后 init_database 会把
+    settings 缓存住, 事后再设就只改到一份没人读的新配置。
+    """
+    monkeypatch.setenv("MILOCO_RULE__DEFER_BLOCKED_ENTER_TIMEOUT_SEC", "5")
+    rule_repo = _seed_db(tmp_path, monkeypatch, None)
+    runner = _runner(rule_repo.get_all(), monkeypatch)
+
+    from miloco.rule.service import attach_task_state_machine
+
+    attach_task_state_machine(runner, rule_repo)
+
+    assert runner._state_machine._defer_blocked_enter_timeout_sec == 5.0
+
+
 # ── reconfigure: 配置变了、现实没变 ───────────────────────────────────
 
 
