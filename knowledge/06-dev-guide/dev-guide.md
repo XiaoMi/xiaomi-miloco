@@ -75,7 +75,7 @@ cd backend && uv run task dev
 3. **后端默认 YAML**（`config/settings.yaml`）— 后端打包时的默认值
 4. **代码默认值**
 
-`settings.schema.json`（同目录）是 `config.json` 面向用户的 JSON Schema 契约，覆盖核心可配置段（`debug` / `server` / `agent` / `model`）的类型与语义描述。其余段（`perception` / `rule` / `camera` / `directories` 等）的完整字段定义以 `settings.yaml`（含注释）与 `settings.py` 的 pydantic 模型为准。
+`settings.schema.json`（同目录）是 `config.json` 面向用户的 JSON Schema 契约，覆盖核心可配置段（`debug` / `server` / `agent` / `model`）及按需纳入的部分非核心字段，但不完整覆盖所有配置。完整字段定义以 `settings.yaml`（含注释）与 `settings.py` 的 pydantic 模型为准。
 
 ### 配置分段与用途
 

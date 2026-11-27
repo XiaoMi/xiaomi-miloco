@@ -131,6 +131,19 @@
         }
       }
     },
+    "rule": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "规则引擎相关配置",
+      "properties": {
+        "guard_pending_timeout_seconds": {
+          "type": "number",
+          "default": 60.0,
+          "exclusiveMinimum": 0,
+          "description": "guard 拦截的主规则进入信号最多保留多久（秒）"
+        }
+      }
+    },
     "scheduler": {
       "type": "object",
       "additionalProperties": true,

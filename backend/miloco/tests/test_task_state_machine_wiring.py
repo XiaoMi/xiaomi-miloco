@@ -46,7 +46,12 @@ def _rule(rule_id="r1", task_id="t1", mode=RuleMode.EVENT, **kw):
     )
 
 
-def _runner(rules, monkeypatch, sample_interval_seconds=3.0):
+def _runner(
+    rules,
+    monkeypatch,
+    sample_interval_seconds=3.0,
+    guard_pending_timeout_seconds=60.0,
+):
     monkeypatch.setattr(
         "miloco.task_record.service.TaskRecordService.__init__", lambda self: None
     )
@@ -56,6 +61,7 @@ def _runner(rules, monkeypatch, sample_interval_seconds=3.0):
         rule_log_repo=None,
         sample_interval_seconds=sample_interval_seconds,
         task_record_service=object(),
+        guard_pending_timeout_seconds=guard_pending_timeout_seconds,
     )
 
 
@@ -465,6 +471,19 @@ def test_attach_owns_task_with_boundary_actions(tmp_path, monkeypatch):
     assert runner._state_machine.runtime_state("t1") is TaskRuntimeState.OFF
     rule = rule_repo.get_all()[0]
     assert runner._select_slot(rule, RuleEvent.ENTERED) == ("dynamic", "task 侧")
+
+
+def test_attach_passes_guard_pending_timeout_to_state_machine(tmp_path, monkeypatch):
+    rule_repo = _seed_db(tmp_path, monkeypatch, None)
+    runner = _runner(
+        rule_repo.get_all(), monkeypatch, guard_pending_timeout_seconds=7.5
+    )
+
+    from miloco.rule.service import attach_task_state_machine
+
+    attach_task_state_machine(runner, rule_repo)
+
+    assert runner._state_machine._pending_enter_timeout_seconds == 7.5
 
 
 def test_attach_registers_direction_from_db(tmp_path, monkeypatch):
