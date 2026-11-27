@@ -15,7 +15,8 @@
   不再注册 habit tool。
   注：早期版本有 ``miloco_status`` + ``miloco_test_push`` 两个调试工具，PR #279 收敛为
   外部脚本 ``plugins/hermes/scripts/miloco-status.sh``（确定性 wrapper，不走 LLM 推断）。
-- 启动时 reconcile 4 个受管 cron job（移植自 ``home-profile/scheduler.ts``）。
+- 启动时 reconcile 4 个受管 cron job（移植自 ``home-profile/scheduler.ts``）；
+  「自动定时任务」开关 ``scheduler.enabled=false`` 时改为 teardown 并跳过 reconcile。
 - register() 时拉起 backend（``miloco-cli service start``，Author #8：插件自管
   backend 生命周期，install 漏跑 / backend 异常退出时 register 自动拉起）。
 
@@ -38,7 +39,8 @@ from __future__ import annotations
 
 import logging
 
-from .cron_setup import reconcile_cron_jobs
+from .config import is_scheduler_auto_manage_enabled
+from .cron_setup import reconcile_cron_jobs, teardown_cron_jobs
 from .tools_notify import (
     MILOCO_IM_PUSH_SCHEMA,
     MILOCO_NOTIFY_BIND_SCHEMA,
@@ -99,15 +101,24 @@ def register(ctx) -> None:
 
     # ── 受管 cron reconcile ────────────────────────────────────────────
     # 放最后：cron 模块不在时 graceful 跳过，不影响已注册的 hook/tool。
+    # 「自动定时任务」开关关闭时对齐 OpenClaw scheduler.ts：teardown 并跳过 reconcile
+    # （否则网关重启会把受管 job 重建 / resume 回来，#612）。
     try:
-        result = reconcile_cron_jobs()
-        if result.get("skipped"):
-            logger.info("miloco cron reconcile 跳过（cron 模块不可用）")
-        else:
+        if not is_scheduler_auto_manage_enabled():
+            removed = teardown_cron_jobs()
             logger.info(
-                "miloco cron reconcile 完成: created=%s updated=%s removed=%s",
-                result.get("created"), result.get("updated"), result.get("removed"),
+                "miloco cron 自动管理已关闭（scheduler.enabled=false），跳过 reconcile，移除受管 job %s 个",
+                removed,
             )
+        else:
+            result = reconcile_cron_jobs()
+            if result.get("skipped"):
+                logger.info("miloco cron reconcile 跳过（cron 模块不可用）")
+            else:
+                logger.info(
+                    "miloco cron reconcile 完成: created=%s updated=%s removed=%s",
+                    result.get("created"), result.get("updated"), result.get("removed"),
+                )
     except Exception as exc:  # noqa: BLE001
         logger.exception("miloco cron reconcile 失败: %s", exc)
 
