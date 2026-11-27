@@ -394,6 +394,25 @@ describe("TaskDetailSheet · 设备并发", () => {
     expect(html).not.toContain("--action-dev-");
   });
 
+  it("槽换成 Agent 文案后，不再显示设备数回退提示", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([rule({ ruleId: "e1" })], {
+          onEnterExecutionMode: "parallel_by_device",
+          onEnterDesc: "让 Agent 处理进入",
+          onEnterActions: [],
+        })}
+        catalog={CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    expect(html).toContain("让 Agent 处理进入");
+    // 没有静态设备动作，就不该出现「只有 1 台设备 / 含场景」这类设备数提示
+    expect(html).not.toContain(i18n.t("tasks.executionModeOneDeviceFallback"));
+    expect(html).not.toContain(i18n.t("tasks.executionModeSceneFallback"));
+  });
+
   it("槽内含场景时整槽回退顺序，标识不再显示设备并发", () => {
     const html = renderToStaticMarkup(
       <TaskDetailSheet

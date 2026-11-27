@@ -47,7 +47,7 @@
     "executionModeOneDeviceFallback": "Only one device · runs sequentially",
     "executionModeSceneBlocked": "\"{{slot}}\" contains a scene, so the whole slot runs sequentially. Parallel by device is unavailable.",
     "executionModeOneDeviceBlocked": "\"{{slot}}\" has only one device, so parallel by device has nothing to run in parallel.",
-    "deviceActionCount": "{{count}} actions · ordered",
+    "deviceActionCount": "{{count}} action(s) · ordered",
     "directionEnter": "Enter",
     "directionExit": "Exit",
     "directionSession": "Session",

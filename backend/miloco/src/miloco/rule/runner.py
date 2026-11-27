@@ -90,7 +90,12 @@ _RULE_DEVICE_PARALLEL_LIMIT = 16
 # 每个设备组的兜底墙钟: 组内动作数 × 该值。正常路径由 miot SDK 的本地 RPC
 # 5s / 云端 HTTP 15s 先收口, 这里只防某个 await 永久挂住、把 gather 和整条
 # rule fire 一起拖死。超时不是"动作失败"的新语义, 而是让等待有终点。
-_RULE_ACTION_WATCHDOG_SECONDS = 30.0
+#
+# 一条幂等 prop 动作最多走两次 SDK 调用：先 get 预检现值, 再 set 下发。每次
+# 调用都可能本地 RPC 5s 超时后转云端 HTTP 15s, 所以单条动作最坏约 40s。
+# 30s 预算只够一次调用, 会把「本地刚超时、云端还能赶完」的动作误判成超时,
+# 并在取消时跳过台账。预算取 45s, 留 5s 余量。
+_RULE_ACTION_WATCHDOG_SECONDS = 45.0
 
 
 def _summarize_rule_result(obj: object) -> tuple[bool, int | None, str | None]:
@@ -2176,8 +2181,9 @@ class RuleRunner:
             # 先排队再起表：闸门等待不算执行预算，否则 >16 个设备时，排在后面的
             # 组可能还没轮到就被判超时。
             async with limiter:
-                # 组内每条动作各自有 SDK 超时（本地 RPC 5s / 云端 15s）；这里的墙钟
-                # 按动作数放宽，只兜"某个 await 永久不返回"。
+                # 组内每条动作最坏两次 SDK 调用（幂等预检 + 下发），每次本地
+                # RPC 5s 失败后云端 15s；这里的墙钟按动作数放宽，只兜"某个
+                # await 永久不返回"，不能比单条动作的正常最坏耗时还短。
                 budget = _RULE_ACTION_WATCHDOG_SECONDS * len(items)
                 try:
                     await asyncio.wait_for(run_group(items), timeout=budget)

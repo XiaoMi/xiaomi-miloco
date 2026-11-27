@@ -886,8 +886,10 @@ function ActionSlot({
   const hasScene = actions.some((a) => a.iid === "scene");
   const canParallel = actionsCanRunParallel(actions);
   const effectiveParallel = mode === "parallel_by_device" && canParallel;
+  // 只有静态动作才有「设备数」可谈。槽被换成 Agent 文案后，执行方式列会保留，
+  // 但不能再挂一行描述不存在的设备动作的回退提示。
   const fallbackNote =
-    mode === "parallel_by_device" && !canParallel
+    actions.length > 0 && mode === "parallel_by_device" && !canParallel
       ? hasScene
         ? t("tasks.executionModeSceneFallback")
         : t("tasks.executionModeOneDeviceFallback")

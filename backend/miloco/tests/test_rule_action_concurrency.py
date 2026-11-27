@@ -223,6 +223,15 @@ async def test_device_parallelism_is_capped(runner, monkeypatch):
     assert [r.action for r in results] == actions
 
 
+def test_watchdog_budget_covers_the_two_calls_of_an_idempotent_action():
+    """幂等 prop 动作先预检再下发，单条动作最坏是两次 SDK 调用。
+
+    每次调用本地 RPC 5s 失败后转云端 15s，两次共 40s；组级预算不能比这更短，
+    否则正常但慢的动作会被 watchdog 误杀，连台账都来不及写。
+    """
+    assert runner_module._RULE_ACTION_WATCHDOG_SECONDS >= 40.0
+
+
 def test_slot_execution_mode_reads_each_slot_independently(runner):
     """三个槽各读各的键；进入配并发不会把退出也带成并发。"""
     assert runner._slot_execution_mode("missing", ActionSlot.ON_ENTER) == "sequential"

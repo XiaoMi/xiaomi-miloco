@@ -29,6 +29,7 @@ import {
   realEventCropMeta,
   realUpdateRuleQuery,
   realUpdateTaskDescription,
+  realUpdateTaskExecutionModes,
   realListTasks,
   _resetUsageStatsCache,
 } from "@/api/real";
@@ -916,6 +917,20 @@ describe("任务详情就地编辑 — 写接口契约", () => {
     expect(cap.method).toBe("PATCH");
     expect(cap.url).toBe("/api/tasks/piano_practice");
     expect(cap.body).toEqual({ description: "每天练琴 30 分钟" });
+  });
+
+  it("改执行方式：PATCH /api/tasks/{id}/actions 只带改过的槽", async () => {
+    const cap = captureFetch();
+    await realUpdateTaskExecutionModes("piano_practice", {
+      enter: "parallel_by_device",
+      target: "sequential",
+    });
+    expect(cap.method).toBe("PATCH");
+    expect(cap.url).toBe("/api/tasks/piano_practice/actions");
+    expect(cap.body).toEqual({
+      on_enter_execution_mode: "parallel_by_device",
+      on_target_execution_mode: "sequential",
+    });
   });
 
   it("改触发条件：PATCH /api/rules/{id} 只带 condition.query（不动感知设备）", async () => {
