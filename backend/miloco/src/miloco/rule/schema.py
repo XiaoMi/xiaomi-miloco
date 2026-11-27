@@ -26,7 +26,7 @@ from collections.abc import Iterable
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class RuleMode(str, Enum):
@@ -160,10 +160,33 @@ def parse_device_iid(iid: str) -> tuple[bool, int, int] | None:
         return None
 
 
+class GenerateSpec(BaseModel):
+    """生成式动作的参数规格 —— 执行前按一次画面观测生成 ``params`` 里的文本。
+
+    输出契约由代码持有（``{"result": "<text>"}``），``prompt`` 只写「要生成什么」，
+    不写 JSON 格式要求。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(
+        ..., min_length=1, max_length=1000,
+        description="语义要求；JSON 契约由系统提示词固定",
+    )
+    sources: list[str] | None = Field(
+        default=None, min_length=1, max_length=3,
+        description="观测相机 did；省略时按触发相机 → 规则相机回退",
+    )
+    max_chars: int = Field(
+        default=30, ge=1, le=200, strict=True,
+        description="生成文本目标上限；写进系统提示词，代码截断留有容差并优先收尾在句末标点",
+    )
+
+
 class RuleAction(BaseModel):
     """V3 action format (per latest v3-system-overview.md §6.3 / §5.5 Step 4c).
 
-    Three shapes share the same model:
+    Four shapes share the same model:
 
     - **Device control** (idempotent, e.g. light on / set temperature)::
 
@@ -175,19 +198,31 @@ class RuleAction(BaseModel):
           {"did": "<id>", "iid": "action.<siid>.<aiid>", "params": ["<text>"],
            "idempotent": false, "cooldown_minutes": 10}
 
+    - **Generated notify / TTS** (``generate`` present; ``params`` carries
+      ``{{result}}``, the text generated from one camera observation)::
+
+          {"did": "<id>", "iid": "action.<siid>.<aiid>",
+           "params": ["{{result}}"],
+           "generate": {"prompt": "<what to generate>",
+                        "sources": ["<camera_did>"], "max_chars": 30},
+           "idempotent": false, "cooldown_minutes": 30}
+
     - **Scene trigger** (non-idempotent, must declare a cooldown)::
 
           {"did": "<scene_id>", "iid": "scene",
            "idempotent": false, "cooldown_minutes": 5}
 
     The shapes are distinguished by ``iid`` (``prop.`` / ``action.`` prefix, or
-    the bare ``scene`` sentinel) and by which payload field is set (``value`` /
-    ``params`` / neither). There is no ``type`` field on RuleAction itself.
+    the bare ``scene`` sentinel), by which payload field is set (``value`` /
+    ``params`` / neither), and by whether ``generate`` is present. There is no
+    ``type`` field on RuleAction itself.
 
     Validation note: ``idempotent=False`` requires ``cooldown_minutes``, and
-    ``iid=scene`` requires ``idempotent=False``. Service / cli layers enforce
-    both; the schema keeps the fields optional so PATCH-style partial updates
-    are not blocked when only one is sent.
+    ``iid=scene`` requires ``idempotent=False``. ``generate`` additionally
+    requires ``action.*``, ``idempotent=False``, ``cooldown_minutes >= 1`` and
+    a ``{{result}}`` placeholder in non-empty ``params``. Service / cli layers
+    enforce these; the schema keeps the fields optional so PATCH-style partial
+    updates are not blocked when only one is sent.
     """
 
     did: str = Field(
@@ -211,6 +246,10 @@ class RuleAction(BaseModel):
     cooldown_minutes: int | None = Field(
         None,
         description="Cooldown for non-idempotent actions; required when idempotent=False.",
+    )
+    generate: GenerateSpec | None = Field(
+        None,
+        description="生成式参数：执行前调一次 omni，把结果替换进 params 的 {{result}}",
     )
 
 
@@ -543,7 +582,8 @@ class RuleActionExecuteResult(BaseModel):
     skipped: bool = Field(
         False,
         description="True when execution was skipped due to idempotent check "
-        "(value already at target) or cooldown window not yet elapsed.",
+        "(value already at target), cooldown window not yet elapsed, or the "
+        "same generate action already being in flight.",
     )
     error: str | None = Field(
         None, description="Error message when result=False"
