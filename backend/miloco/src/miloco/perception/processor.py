@@ -13,6 +13,8 @@ import logging
 import re
 import time
 import uuid
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from miloco.config import get_settings
@@ -41,9 +43,19 @@ from miloco.observability.types import (
 from miloco.perception import omni_probe_registry
 from miloco.perception.client import PerceptionEngineProxy
 from miloco.perception.collect.collector import MultimodalCollector
+from miloco.perception.engine.config import OmniConfig
 from miloco.perception.engine.types import RealtimePerceptionResult
+from miloco.perception.inference_admission import (
+    InferenceAdmission,
+    InferenceAdmissionClosed,
+    InferenceDrainDeferred,
+)
 from miloco.perception.inference_worker import InferenceWorker
+from miloco.perception.per_camera_scheduler import PerCameraScheduler, RealtimeRules
 from miloco.perception.schema import (
+    CameraExitWaitFactory,
+    CameraWindowSource,
+    DeviceData,
     PerceptionBatch,
     PerceptionLatency,
     PerceptionLogEntry,
@@ -52,6 +64,8 @@ from miloco.perception.snapshot_context import OmniEventArtifacts
 from miloco.perception.types import OnDemandPerceptionResult
 
 logger = logging.getLogger("perf")
+
+_INFERENCE_DRAIN_TIMEOUT_S = 5.0
 
 
 def _ms_since(start: float) -> float:
@@ -204,6 +218,10 @@ class PipelineProcessor:
         self._collector = collector
         self._perception_engine_proxy = perception_engine_proxy
         self._log_repo = log_repo
+        self._inference_admission = InferenceAdmission()
+        self._perception_engine_proxy.bind_inference_admission(self._inference_admission)
+        self._result_generation = 0
+        self._schedule_cutover_ms: int | None = None
         self._last_latency: PerceptionLatency | None = None
         self._last_batch: PerceptionBatch | None = None
         # SSE 订阅者队列 + 队列归属的 loop;由 events_router / metric stream 等通过
@@ -357,6 +375,85 @@ class PipelineProcessor:
         except AttributeError:
             return None
 
+    @property
+    def accepting_inference(self) -> bool:
+        return self._inference_admission.accepting
+
+    @property
+    def inference_sealed(self) -> bool:
+        return self._inference_admission.sealed
+
+    def seal_inference(self) -> None:
+        self.retire_results()
+        self._inference_admission.seal()
+
+    def retire_results(self) -> None:
+        """Withdraw publication eligibility without cancelling engine work."""
+        self._result_generation += 1
+
+    @property
+    def inference_idle(self) -> bool:
+        return self._inference_admission.idle
+
+    async def get_realtime_rules(self) -> RealtimeRules:
+        return await self._perception_engine_proxy.get_realtime_rules()
+
+    def set_camera_scheduler(
+        self, adapter: CameraWindowSource | None, wake: Callable[[], None]
+    ) -> PerCameraScheduler | None:
+        self.retire_results()
+        cutover_ms = self._schedule_cutover_ms = time.monotonic_ns() // 1_000_000
+        self._perception_engine_proxy.set_camera_scheduling(adapter is not None)
+        if adapter is None:
+            return None
+
+        settings = get_settings().perception
+        omni_timeout_s = (settings.engine.get("omni") or {}).get("timeout") or OmniConfig.timeout
+        timeout_s = max(15.0, float(omni_timeout_s) + settings.collect.window_size)
+
+        async def infer(
+            window: DeviceData, can_publish: Callable[[], bool], rules: RealtimeRules,
+            camera_exit_wait: CameraExitWaitFactory,
+        ) -> None:
+            if window.window_start_ms < cutover_ms:
+                return
+            current_run = self._publication_guard()
+
+            def may_publish() -> bool:
+                return current_run() and can_publish()
+
+            async with get_monitor().track_async(NodeName.PROCESSOR, "realtime") as handle:
+                await self._process_realtime_inner(
+                    handle, can_publish=may_publish, camera_window=window, window_rules=rules,
+                    camera_exit_wait=camera_exit_wait,
+                )
+
+        return PerCameraScheduler(
+            adapter, self._inference_admission, infer, wake,
+            capacity=settings.schedule.max_concurrent_cameras,
+            timeout_s=timeout_s,
+        )
+
+    def _publication_guard(self) -> Callable[[], bool]:
+        generation = self._result_generation
+
+        def can_publish() -> bool:
+            return generation == self._result_generation
+
+        return can_publish
+
+    @asynccontextmanager
+    async def drain_inference(
+        self, *, allow_sealed: bool = False, bounded: bool = True, wait_seconds: float | None = None
+    ) -> AsyncIterator[None]:
+        timeout_s = wait_seconds if wait_seconds is not None else _INFERENCE_DRAIN_TIMEOUT_S
+        if not bounded:
+            timeout_s = None
+        async with self._inference_admission.drain(timeout_s, allow_sealed=allow_sealed) as drained:
+            if not drained:
+                raise InferenceDrainDeferred("stop_deferred: perception inference is still running")
+            yield
+
     async def close(self) -> None:
         """关闭底层 perception engine proxy(含 IdentityEngine dispatcher 等资源)。
 
@@ -377,6 +474,11 @@ class PipelineProcessor:
     async def apply_omni_fps(self, omni_fps: int) -> None:
         """运行时热更 omni_fps（含顶起的 tracker fps），免重建引擎。透传 proxy。"""
         await self._perception_engine_proxy.apply_omni_fps(omni_fps)
+
+    @property
+    def omni_fps_effective(self) -> int | None:
+        engine = self._perception_engine_proxy.perception_engine
+        return engine.get_input_config().omni_fps if engine is not None else None
 
     @property
     def last_batch(self) -> PerceptionBatch | None:
@@ -443,15 +545,45 @@ class PipelineProcessor:
                     should continue draining remaining windows).
             None — no data available to process (buffer empty).
         """
-        async with get_monitor().track_async(NodeName.PROCESSOR, "realtime") as _proc_h:
-            return await self._process_realtime_inner(_proc_h)
+        can_publish = self._publication_guard()
+        try:
+            return await self._inference_admission.run(lambda: self._process_realtime(can_publish))
+        except InferenceAdmissionClosed:
+            return None
 
-    async def _process_realtime_inner(self, _proc_h=None) -> RealtimePerceptionResult | None | bool:
+    async def _process_realtime(
+        self, can_publish: Callable[[], bool],
+    ) -> RealtimePerceptionResult | None | bool:
+        async with get_monitor().track_async(NodeName.PROCESSOR, "realtime") as _proc_h:
+            return await self._process_realtime_inner(_proc_h, can_publish=can_publish)
+
+    async def _process_realtime_inner(
+        self, _proc_h=None, *, can_publish: Callable[[], bool] | None = None,
+        camera_window: DeviceData | None = None,
+        window_rules: RealtimeRules | None = None,
+        camera_exit_wait: CameraExitWaitFactory | None = None,
+    ) -> RealtimePerceptionResult | None | bool:
+        if can_publish is not None and not can_publish():
+            return None
         t_cycle = time.monotonic()
 
         # 1. Drain all active devices into a batch (consuming from buffers)
         t = time.monotonic()
-        batch = self._collector.collect_batch(drain=True)
+        if camera_window is None:
+            batch = self._collector.collect_batch(drain=True)
+        else:
+            batch = self._collector.batch_from_windows([camera_window])
+        if camera_window is None and self._schedule_cutover_ms is not None and not batch.empty:
+            windows = [
+                window for window in batch.devices.values()
+                if window.window_start_ms >= self._schedule_cutover_ms
+            ]
+            if not windows:
+                if _proc_h is not None:
+                    _proc_h.skip_rolling()
+                return False
+            if len(windows) != batch.device_count:
+                batch = self._collector.batch_from_windows(windows)
         collect_ms = _ms_since(t)
 
         if batch.empty:
@@ -491,9 +623,11 @@ class PipelineProcessor:
             # artifacts.clips value 是 (bytes, kind) — kind ∈ {"mp4","m4a"} 区分视频/
             # audio-only 路径,持久化层据此选 clip.mp4 / clip.m4a 扩展名 + Content-Type.
             # artifacts.trace 由 omni HTTP 调用 finally 填入,随 clip 一起落到 event_dir.
-            from miloco.perception.snapshot_context import OmniEventArtifacts
-
-            artifacts = OmniEventArtifacts()
+            artifacts = OmniEventArtifacts(
+                publication_guard=can_publish, scheduled_camera=camera_window is not None,
+                camera_exit_wait=camera_exit_wait,
+            )
+            schedule_args = {"window_rules": window_rules} if window_rules is not None else {}
             try:
                 (
                     result,
@@ -507,8 +641,11 @@ class PipelineProcessor:
                     trace_id=trace_id,
                     device_trace_ids=device_trace_ids,
                     collect_flow_diagnostics=self._flow_store is not None,
+                    **schedule_args,
                 )
             except Exception as e:
+                if not artifacts.can_publish():
+                    return None
                 logger.error("[processor] 实时感知失败 | %s", e, exc_info=True)
                 # 系统级失败也要留 trace,否则 dashboard 上 cycle 数缺失,问题不可见。
                 # cycle_error_msg 标记"这是异常 cycle",前端列表可红字提示。
@@ -532,6 +669,8 @@ class PipelineProcessor:
                     )
                 return False  # data consumed but failed — caller should continue
 
+            if not artifacts.can_publish():
+                return None
             if not result:
                 return False  # data consumed but skipped — caller should continue
 
@@ -594,6 +733,8 @@ class PipelineProcessor:
                 # 挂回事件行(见 handle_realtime_perception_result 的说明)。
                 cycle_event_id=cycle_event_id,
             )
+            if not artifacts.can_publish():
+                return None
 
             # --- Assemble latency report from result.timing ---
             if self._perf_enabled:
@@ -965,6 +1106,19 @@ class PipelineProcessor:
         2. Run perception_engine_proxy.on_demand_perceive(batch, query) for fusion inference
         3. Return (result, artifacts) — artifacts contain clips + omni trace
         """
+        can_publish = self._publication_guard()
+
+        async def infer():
+            if not can_publish():
+                return None
+            return await self._process_on_demand(dids, query)
+
+        result = await self._inference_admission.run(infer)
+        return result if can_publish() else None
+
+    async def _process_on_demand(
+        self, dids: list[str] | None, query: str
+    ) -> tuple[OnDemandPerceptionResult, OmniEventArtifacts] | None:
         async with get_monitor().track_async(NodeName.PROCESSOR, "on_demand") as _proc_h:
             # Peek without consuming — realtime pipeline still needs this data
             batch = self._collector.collect_batch(dids, drain=False)

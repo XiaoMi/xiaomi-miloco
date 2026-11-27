@@ -13,19 +13,52 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
+from threading import Event
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
+from miloco.config import get_settings
+from miloco.observability.context import get_device_context
 from miloco.perception.client import PerceptionEngineProxy
-from miloco.perception.types import MatchedRule, RealtimePerceptionResult
+from miloco.perception.collect.camera_adapter import CameraDeviceAdapter
+from miloco.perception.collect.collector import MultimodalCollector
+from miloco.perception.collect.stream_buffer import MultiTrackSyncBuffer
+from miloco.perception.engine.api import PerceptionEngine
+from miloco.perception.engine.config import (
+    GateConfig,
+    IdentityEngineConfig,
+    PerceptionConfig,
+)
+from miloco.perception.engine.omni import omni, prompt_builder
+from miloco.perception.inference_admission import (
+    InferenceAdmission,
+    InferenceDrainDeferred,
+)
+from miloco.perception.per_camera_scheduler import PerCameraScheduler
+from miloco.perception.processor import PipelineProcessor
+from miloco.perception.runner import PerceptionRunner
+from miloco.perception.schema import CameraConnection, DeviceData
+from miloco.perception.service import PerceptionService
+from miloco.perception.snapshot_context import OmniEventArtifacts, get_event_artifacts
+from miloco.perception.types import (
+    MatchedRule,
+    PerceptionDevice,
+    RealtimePerceptionResult,
+)
 from miloco.rule.runner import RuleRunner
 from miloco.rule.schema import (
     Rule,
     RuleAction,
     RuleCondition,
+    RuleDirection,
     RuleLifecycle,
     RuleMode,
 )
+from miloco.rule.service import RuleService
+from miloco.task.state_machine import TaskStateMachine, derive_directions
 
 TASK_ID = "e2e-task"
 
@@ -194,7 +227,7 @@ async def test_e2e_rule_statuses_snapshot_to_persist(proxy_with_runner, monkeypa
         await proxy.handle_realtime_perception_result(
             _result(matched=[("rule_X", ["cam_A"], "人来")],
                     device_rule_map={"cam_A": ["rule_X"]}),
-            artifacts=object(),  # 非 None → 进 persist 分支（patch 后不真落库）
+            artifacts=OmniEventArtifacts(),  # 非 None → 进 persist 分支（patch 后不真落库）
         )
         await asyncio.sleep(0.05)  # 让后台 persist task 跑起来
 
@@ -236,7 +269,7 @@ async def test_e2e_rule_statuses_multi_cam_aggregates_to_fired(
                          ("rule_or", ["cam_B"], "B 命中")],
                 device_rule_map={"cam_A": ["rule_or"], "cam_B": ["rule_or"]},
             ),
-            artifacts=object(),
+            artifacts=OmniEventArtifacts(),
         )
         await asyncio.sleep(0.05)
     await runner.drain()
@@ -280,7 +313,7 @@ async def test_main_loop_update_state_raise_marks_rule_incomplete(
             await proxy.handle_realtime_perception_result(
                 _result(matched=[("rule_X", ["cam_A"], "有人进门")],
                         device_rule_map={"cam_A": ["rule_X"]}),
-                artifacts=object(),
+                artifacts=OmniEventArtifacts(),
             )
         await asyncio.sleep(0.05)
 
@@ -327,7 +360,7 @@ async def test_e2e_early_send_failure_marks_rule_incomplete(
             ),
             # 早送 cam_A 判定未完成:pair 已登记(去重/抑制推退照旧),但 value 留 None
             early_sent_rule_ids={("rule_or", "cam_A"): None},
-            artifacts=object(),
+            artifacts=OmniEventArtifacts(),
         )
         await asyncio.sleep(0.05)
     await runner.drain()
@@ -370,11 +403,40 @@ async def test_persist_spawned_even_if_update_state_raises(proxy_with_runner, mo
             await proxy.handle_realtime_perception_result(
                 _result(matched=[("rule_X", ["cam_A"], "x")],
                         device_rule_map={"cam_A": ["rule_X"]}),
-                artifacts=object(),  # 非 None → 进 persist 分支
+                artifacts=OmniEventArtifacts(),  # 非 None → 进 persist 分支
             )
         await asyncio.sleep(0.05)  # 让 finally 里 spawn 的 persist task 跑起来
 
     assert persisted["called"] is True
+
+
+async def test_retiring_window_during_rule_update_does_not_queue_history(proxy_with_runner, monkeypatch):
+    proxy, _, _ = proxy_with_runner
+    persist = AsyncMock()
+    monkeypatch.setattr("miloco.perception.client._persist_meaningful_event", persist)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    retired = asyncio.Event()
+    manager = MagicMock()
+
+    async def update_rule(*args, **kwargs):
+        entered.set()
+        await release.wait()
+
+    manager.rule_service.update_state = AsyncMock(side_effect=update_rule)
+    result = _result(matched=[("r1", ["cam_A"], "x"), ("r2", ["cam_A"], "y")], device_rule_map={})
+    artifacts = OmniEventArtifacts(publication_guard=lambda: not retired.is_set())
+    with patch("miloco.manager.get_manager", return_value=manager):
+        handling = asyncio.create_task(proxy.handle_realtime_perception_result(result, artifacts=artifacts))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            retired.set()
+        finally:
+            release.set()
+            await asyncio.wait_for(handling, timeout=1)
+
+    manager.rule_service.update_state.assert_awaited_once()
+    persist.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -420,7 +482,7 @@ async def test_stale_outcome_not_leaked_on_exception(proxy_with_runner, monkeypa
             await proxy.handle_realtime_perception_result(
                 _result(matched=[("rule_2", ["cam_A"], "x")],
                         device_rule_map={"cam_A": ["rule_2"]}),
-                artifacts=object(),
+                artifacts=OmniEventArtifacts(),
             )
         await asyncio.sleep(0.05)
 
@@ -728,7 +790,7 @@ async def test_e2e_ledger_link_matches_persisted_event_id(
         await proxy.handle_realtime_perception_result(
             _result(matched=[("rule_L", ["cam_A"], "人来")],
                     device_rule_map={"cam_A": ["rule_L"]}),
-            artifacts=object(),  # 非 None → 真进 persist 分支
+            artifacts=OmniEventArtifacts(),  # 非 None → 真进 persist 分支
             cycle_event_id="ev-cycle-1",
         )
         await asyncio.sleep(0.05)  # 让后台 persist task 跑起来
@@ -749,3 +811,372 @@ async def test_e2e_ledger_link_matches_persisted_event_id(
     assert links == [("enter", "ev-cycle-1"), ("exit", "ev-cycle-1")], (
         f"台账链路两列未指向同一条事件行,实际 {links}"
     )
+
+
+WINDOW_MS = 80
+FIRST_CAMERA = "cam_A"
+SECOND_CAMERA = "cam_B"
+CAMERAS = (FIRST_CAMERA, SECOND_CAMERA)
+
+
+def elapsed_ms():
+    return time.monotonic_ns() // 1_000_000
+
+
+async def wait_until(stamp_ms):
+    await asyncio.sleep(max(0, stamp_ms - elapsed_ms()) / 1000)
+
+
+async def wait_for(predicate):
+    async with asyncio.timeout(3):
+        while not predicate():
+            await asyncio.sleep(0.005)
+
+
+async def test_camera_window_failure_reports_traceback_and_releases_slot(caplog):
+    connection = CameraConnection(FIRST_CAMERA, 1)
+    source = PerceptionDevice(did=FIRST_CAMERA, name="相机", device_type="camera")
+    first_window = DeviceData(meta=source, window_end_ms=1)
+    next_window = DeviceData(meta=source, window_end_ms=2)
+    adapter = MagicMock()
+    adapter.ready_connections.return_value = [connection]
+    adapter.take_ready_window.side_effect = [first_window, next_window]
+    error = RuntimeError("simulated postprocessing failure")
+    infer = AsyncMock(side_effect=[error, None])
+    wake = asyncio.Event()
+    scheduler = PerCameraScheduler(
+        adapter, InferenceAdmission(), infer, wake.set, capacity=1, timeout_s=10,
+    )
+
+    scheduler.schedule_ready(([], []))
+    await asyncio.wait_for(wake.wait(), timeout=1)
+    (record,) = [
+        record for record in caplog.records
+        if record.name == "miloco.perception.per_camera_scheduler"
+    ]
+    assert connection.did in record.getMessage()
+    assert record.exc_info is not None
+    assert record.exc_info[1] is error
+    assert record.exc_info[2] is not None
+
+    wake.clear()
+    scheduler.schedule_ready(([], []))
+    await asyncio.wait_for(wake.wait(), timeout=1)
+    assert [call.args[0] for call in infer.await_args_list] == [first_window, next_window]
+
+
+@pytest.mark.parametrize(("mode", "case"), [
+    ("batch", "independent"),
+    ("per_camera", "independent"),
+    ("per_camera", "or_handoff"),
+    ("per_camera", "or_broadcast"),
+    ("per_camera", "or_exit"),
+    ("per_camera", "or_new_job"),
+    ("per_camera", "or_wait_limit"),
+    ("per_camera", "or_timeout"),
+    ("per_camera", "or_reconnect"),
+    ("per_camera", "enter_first"),
+    ("per_camera", "guard_first"),
+    ("per_camera", "stale_guard"),
+    ("per_camera", "unrelated_camera"),
+])
+async def test_camera_inference_scheduling(
+    mode, case, proxy_with_runner, mock_miot_proxy, mock_log_repo, monkeypatch,
+):
+    _, rule_runner, manager_context = proxy_with_runner
+    slow_camera = case != "guard_first"
+    is_or = case.startswith("or_")
+    or_handoff = case in ("or_handoff", "or_broadcast")
+    is_guard = case in ("enter_first", "guard_first", "stale_guard")
+    scheduled_mode = mode == "per_camera"
+    selectors = list(CAMERAS) if is_or else [FIRST_CAMERA]
+    if case == "or_broadcast":
+        selectors = []
+    rule = _make_state_rule("simulated-entry", selectors)
+    rules = [rule]
+    independent_rule = None
+    if or_handoff:
+        independent_rule = _make_state_rule("simulated-independent", [FIRST_CAMERA])
+        rules.append(independent_rule)
+        rule_runner.set_task_actions(independent_rule.task_id, {
+            "on_enter_actions": [action.model_dump() for action in independent_rule.on_enter_actions],
+        })
+    guard = None
+    if is_guard:
+        guard = Rule(
+            id="simulated-guard", name="[guard] 前提", task_id=rule.task_id,
+            direction=RuleDirection.GUARD,
+            condition=RuleCondition(perceive_device_ids=[SECOND_CAMERA], query="有人"),
+        )
+        rules.append(guard)
+        state_machine = TaskStateMachine(
+            is_condition_satisfied=rule_runner.is_condition_satisfied,
+            dispatch_action=MagicMock(),
+        )
+        state_machine.register_task(rule.task_id, derive_directions(
+            (item.id, item.resolved_direction.value) for item in rules
+        ))
+        rule_runner.attach_state_machine(state_machine)
+    for item in rules:
+        rule_runner.add_rule(item)
+    rule_runner.set_task_actions(
+        rule.task_id, {
+            "on_enter_actions": [action.model_dump() for action in rule.on_enter_actions],
+            "on_exit_actions": [action.model_dump() for action in rule.on_exit_actions],
+        }
+    )
+
+    monkeypatch.setattr(get_settings().perception.schedule, "mode", "batch")
+    monkeypatch.setattr(PerceptionEngineProxy, "_init_engine", lambda _: None)
+    monkeypatch.setattr("miloco.perception.engine.omni.dedup_embedder.EventEmbedder", MagicMock)
+    monkeypatch.setattr("miloco.perception.engine.api._camera_prompt_map", dict)
+    monkeypatch.setattr("miloco.perception.engine.api._crop_denied_dids", set)
+    monkeypatch.setattr("miloco.perception.engine.api._voice_allowed_dids", set)
+    monkeypatch.setattr("miloco.miot.filter.voice_allowed_camera_dids", lambda _: set())
+    monkeypatch.setattr("miloco.perception.client._persist_meaningful_event", AsyncMock())
+    monkeypatch.setattr("miloco.miot.service._write_action_ledger", AsyncMock())
+    rule_service = RuleService.__new__(RuleService)
+    rule_service._runner = rule_runner
+    svc = MagicMock(
+        get_effectively_enabled_rules=AsyncMock(return_value=rules),
+        get_enabled_rule_ids=lambda: [item.id for item in rules],
+        update_state=AsyncMock(wraps=rule_service.update_state),
+    )
+    proxy = PerceptionEngineProxy(load_enabled_rules=svc.get_effectively_enabled_rules)
+    proxy.perception_engine = PerceptionEngine(PerceptionConfig(
+        gate=GateConfig(cooldown_ms=0, speech_vad_enabled=False),
+        identity_engine=IdentityEngineConfig(enabled=False),
+    ))
+    proxy._status = "ready"
+
+    camera_api = MagicMock()
+    camera_api.get_cached_camera.return_value = None
+    camera_api.start_camera_decode_video_stream = AsyncMock(return_value=1)
+    camera_api.start_camera_decode_audio_stream = AsyncMock(return_value=-1)
+    camera_api.stop_camera_decode_video_stream = AsyncMock()
+    ready = asyncio.Event()
+    adapter = CameraDeviceAdapter(camera_api, on_window_ready=ready.set)
+    collector = MultimodalCollector([adapter])
+    processor = PipelineProcessor(collector, proxy, mock_log_repo)
+    monkeypatch.setattr(processor, "drive_omni_probe", MagicMock())
+    runner = PerceptionRunner(collector, processor, mock_log_repo, ready)
+    monkeypatch.setattr(runner, "_sync_devices", AsyncMock())
+    service = PerceptionService(collector, processor, runner, mock_log_repo, MagicMock())
+
+    wall_offset = time.time_ns() // 1_000_000 - elapsed_ms()
+    monkeypatch.setattr(adapter, "_calibrate", lambda _state, stamp: (stamp, stamp + wall_offset))
+    callbacks = {}
+    for did in CAMERAS:
+        await adapter.connect_device(
+            did, source=PerceptionDevice(did=did, name=did, room_name=did, device_type="camera"),
+        )
+        buffer = MultiTrackSyncBuffer(
+            ["decoded_video"], window_ms=WINDOW_MS, max_windows=12, on_window_ready=ready.set,
+        )
+        adapter._devices[did].sync_buffer = buffer
+        _, _, callbacks[did] = camera_api.start_camera_decode_video_stream.call_args.args
+
+    async def put_frame(did, marker, stamp):
+        pixels = np.full((48, 48, 3), marker * 25, dtype=np.uint8)
+        await callbacks[did](did, pixels, stamp, 0)
+
+    def encode_for_simulation(packets, **_kwargs):
+        marker = int(packets[0].all_frames[0][0, 0, 0]) // 25
+        return "v" * 1100, {"marker": marker}
+
+    loop = asyncio.get_running_loop()
+    release = Event()
+    release_next = Event()
+    started = []
+    finished = []
+    actions = []
+
+    async def model_response(payload, _config):
+        did = get_device_context().device_id
+        marker = payload["video_media_info"]["marker"]
+        scheduled = get_event_artifacts().scheduled_camera
+        loop.call_soon_threadsafe(started.append, (did, marker, scheduled))
+        if slow_camera and did == SECOND_CAMERA and marker == 1:
+            assert await asyncio.to_thread(release.wait, 5)
+        elif case == "or_new_job" and did == SECOND_CAMERA and marker == 2:
+            assert await asyncio.to_thread(release_next.wait, 5)
+        else:
+            await asyncio.sleep(0.008)
+        hit = None
+        if is_or:
+            if (did, marker) == (FIRST_CAMERA, 1) or (
+                did == SECOND_CAMERA and marker == 1
+                and case not in ("or_exit", "or_new_job")
+            ):
+                hit = rule
+            elif (did, marker) == (FIRST_CAMERA, 4):
+                hit = independent_rule
+        elif did == FIRST_CAMERA and (marker == 1 if case == "unrelated_camera" else marker >= 2):
+            hit = rule
+        elif did == SECOND_CAMERA and guard is not None and marker >= 1:
+            hit = guard
+        hits = [{"rule_name": hit.name, "reason": f"window {marker}", "hit": True}] if hit else []
+        loop.call_soon_threadsafe(finished.append, (did, marker))
+        return {"choices": [{
+            "message": {"content": json.dumps({"matched_rules": hits})},
+            "finish_reason": "stop",
+        }]}
+
+    async def record_action(properties):
+        actions.extend(prop.did for prop in properties)
+        return [{"code": 0}]
+
+    monkeypatch.setattr(prompt_builder, "_encode_batch_video", encode_for_simulation)
+    monkeypatch.setattr(omni, "call_omni", model_response)
+    monkeypatch.setattr(mock_miot_proxy, "set_device_properties", record_action)
+    if case == "or_wait_limit":
+        monkeypatch.setattr("miloco.perception.per_camera_scheduler._OR_EXIT_WAIT_S", 0.5)
+
+    with manager_context() as manager:
+        manager.return_value.rule_service = svc
+        await service.start_engine()
+        try:
+            if mode == "per_camera":
+                await service.apply_schedule_config(
+                    mode, lambda: None, restart_window=False, omni_fps=None,
+                )
+            assert service.schedule_mode == ("per_camera" if scheduled_mode else "batch")
+            scheduler = runner._camera_scheduler
+            if case == "or_timeout":
+                scheduler._timeout_s = 0.65
+            base = (elapsed_ms() // WINDOW_MS + 2) * WINDOW_MS
+            for did in CAMERAS:
+                await put_frame(did, 0, base - WINDOW_MS)
+            await wait_until(base)
+            for did in CAMERAS:
+                await put_frame(did, 1, base)
+            for marker in range(2, 6):
+                stamp = base + (marker - 1) * WINDOW_MS
+                await wait_until(stamp)
+                await put_frame(FIRST_CAMERA, marker, stamp)
+                if marker == 2 or (case == "or_new_job" and marker == 3):
+                    await put_frame(SECOND_CAMERA, marker, stamp)
+                if scheduler is not None:
+                    # 后一帧封住上一窗。等 A 提交上一窗，再送帧，避免积压时取最新窗掩盖时序。
+                    previous = marker - 1
+                    await wait_for(lambda: (
+                        (FIRST_CAMERA, previous) in finished and FIRST_CAMERA not in scheduler._running
+                    ))
+                    if marker == 2:
+                        await wait_for(lambda: (SECOND_CAMERA, 1, scheduled_mode) in started)
+                        if case == "guard_first":
+                            await wait_for(lambda: rule_runner.is_condition_satisfied(guard.id) is True)
+
+            if scheduler is None:
+                await wait_until(base + 6 * WINDOW_MS)
+            await rule_runner.drain()
+            assert (FIRST_CAMERA, 1) in finished
+            assert (SECOND_CAMERA, 1, scheduled_mode) in started
+            if slow_camera:
+                assert (SECOND_CAMERA, 1) not in finished
+            before_release = [tag for did, tag in finished if did == FIRST_CAMERA]
+            action_before_release = bool(actions)
+
+            if scheduled_mode:
+                assert before_release == [1, 2, 3, 4]
+                first_match = next(
+                    call for call in svc.update_state.await_args_list if call.args[:3] == (rule.id, FIRST_CAMERA, True)
+                )
+                first_positive_window = 1 if is_or or case == "unrelated_camera" else 2
+                assert first_match.args[3] == f"window {first_positive_window}"
+                assert action_before_release is (case not in ("enter_first", "stale_guard"))
+                if is_or:
+                    assert rule_runner.is_condition_satisfied(rule.id) is None
+                    assert actions == (
+                        ["enter-simulated-entry", "enter-simulated-independent"]
+                        if or_handoff else ["enter-simulated-entry"]
+                    )
+                if case == "unrelated_camera":
+                    assert actions == ["enter-simulated-entry", "exit-simulated-entry"]
+                if case in ("enter_first", "stale_guard"):
+                    assert rule_runner.is_condition_satisfied(rule.id) is True
+                    assert rule_runner.is_condition_satisfied(guard.id) is not True
+                if case == "guard_first":
+                    hits = [call.args[0] for call in svc.update_state.await_args_list if call.args[2]]
+                    assert hits[0] == guard.id
+            else:
+                assert before_release == [1]
+                assert not action_before_release
+
+            if mode == "per_camera" and slow_camera:
+                with patch("miloco.perception.processor._INFERENCE_DRAIN_TIMEOUT_S", 0.01):
+                    save = MagicMock()
+                    with pytest.raises(InferenceDrainDeferred):
+                        await service.apply_schedule_config("batch", save, restart_window=False, omni_fps=None)
+                    save.assert_not_called()
+
+            if case in ("stale_guard", "or_reconnect"):
+                await adapter.disconnect_device(SECOND_CAMERA)
+                await adapter.connect_device(
+                    SECOND_CAMERA, source=PerceptionDevice(
+                        did=SECOND_CAMERA, name=SECOND_CAMERA, device_type="camera",
+                    ),
+                )
+            if case in ("or_wait_limit", "or_timeout", "or_reconnect"):
+                async with asyncio.timeout(1):
+                    await wait_for(lambda: "exit-simulated-entry" in actions)
+                assert (SECOND_CAMERA, 1) not in finished
+
+            release.set()
+            await wait_for(lambda: (SECOND_CAMERA, 1) in finished)
+            if case == "or_new_job":
+                await wait_for(lambda: (SECOND_CAMERA, 2, True) in started)
+                async with asyncio.timeout(0.5):
+                    await wait_for(lambda: "exit-simulated-entry" in actions)
+                assert (SECOND_CAMERA, 2) not in finished
+                release_next.set()
+            if case == "stale_guard":
+                await wait_for(lambda: processor.inference_idle)
+                await rule_runner.drain()
+                assert rule_runner.is_condition_satisfied(guard.id) is not True
+                assert not actions
+                return
+            await wait_for(lambda: (FIRST_CAMERA, 4) in finished and bool(actions))
+            await wait_for(lambda: processor.inference_idle)
+            if is_or:
+                if or_handoff:
+                    assert rule_runner.is_condition_satisfied(rule.id) is True
+                    expected = ["enter-simulated-entry", "enter-simulated-independent"]
+                elif case == "or_wait_limit":
+                    assert rule_runner.is_condition_satisfied(rule.id) is True
+                    expected = ["enter-simulated-entry", "exit-simulated-entry", "enter-simulated-entry"]
+                else:
+                    await wait_for(lambda: "exit-simulated-entry" in actions)
+                    assert rule_runner.is_condition_satisfied(rule.id) is False
+                    expected = ["enter-simulated-entry", "exit-simulated-entry"]
+                if case in ("or_timeout", "or_reconnect"):
+                    assert (rule.id, SECOND_CAMERA) not in rule_runner._last_source_state
+                await rule_runner.drain()
+                assert actions == expected
+                assert service.schedule_mode == "per_camera"
+                return
+            await rule_runner.drain()
+            if case == "unrelated_camera":
+                assert actions == ["enter-simulated-entry", "exit-simulated-entry"]
+                return
+            assert actions == ["enter-simulated-entry"]
+
+            if scheduled_mode:
+                await service.apply_schedule_config("batch", lambda: None, restart_window=False, omni_fps=None)
+                assert service.schedule_mode == "batch"
+                rollback_at = (elapsed_ms() // WINDOW_MS + 2) * WINDOW_MS
+                await wait_until(rollback_at)
+                for did in CAMERAS:
+                    await put_frame(did, 6, rollback_at)
+                await wait_until(rollback_at + WINDOW_MS)
+                for did in CAMERAS:
+                    await put_frame(did, 7, rollback_at + WINDOW_MS)
+                await wait_for(lambda: all((did, 6) in finished for did in CAMERAS))
+                assert all((did, 6, False) in started for did in CAMERAS)
+                await wait_for(lambda: processor.inference_idle)
+                await rule_runner.drain()
+                assert actions == ["enter-simulated-entry"]
+        finally:
+            release.set()
+            release_next.set()
+            await service.stop_engine()

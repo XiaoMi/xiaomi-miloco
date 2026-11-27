@@ -25,11 +25,16 @@ from sse_starlette.sse import EventSourceResponse
 
 from miloco.admin import log_pack as _log_pack_mod
 from miloco.config import get_settings
+from miloco.config.settings import PerceptionScheduleMode
 from miloco.database.token_usage_repo import get_token_usage_repo
 from miloco.manager import get_manager
 from miloco.middleware import verify_token, verify_token_query_fallback
 from miloco.observability import debug as debug_mod
 from miloco.perception.engine.omni import probe as _probe
+from miloco.perception.inference_admission import (
+    InferenceAdmissionClosed,
+    InferenceDrainDeferred,
+)
 from miloco.rule.schema import RuleDirection
 from miloco.schema.common_schema import NormalResponse
 from miloco.utils.agent_config import update_shared_config
@@ -41,6 +46,7 @@ logger = logging.getLogger(name=__name__)
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
 manager = get_manager()
+_perception_config_write_lock = asyncio.Lock()
 
 
 @router.get("/status", summary="System Status", response_model=NormalResponse)
@@ -1601,6 +1607,7 @@ class PerceptionConfigBody(BaseModel):
     omni_fps: int | None = Field(default=None, ge=1, le=30)
     omni_visual_input_mode: Literal["video", "image"] | None = None
     window_size: int | None = Field(default=None, ge=1, le=60)
+    schedule_mode: PerceptionScheduleMode | None = None
     # Smart Crop 用户开关。与 video_short_edge 正交:裁不裁看这个,多清晰看 video_short_edge。
     # 写进 perception.engine.crop_enhance.user_enabled;发版级开关 enabled 不由 API 写。
     # 注意本开关（连同 enabled）只是**必要非充分**条件：还要该机位自己的 per-camera 闸也开
@@ -1648,11 +1655,18 @@ def _perception_config_payload() -> dict:
             "event=perception_config_crop_enhance_read_failed 报 available=false", exc_info=True
         )
         ce = CropEnhanceConfig()
+    service = getattr(manager, "perception_service", None)
+    window_size_effective = service.window_size_effective if service is not None else None
     return {
         "video_short_edge": inp.get("video_short_edge", 512),
         "omni_fps": inp.get("omni_fps", 1),
+        "omni_fps_effective": service.omni_fps_effective if service is not None else None,
         "omni_visual_input_mode": inp.get("omni_visual_input_mode", "video"),
         "window_size": s.perception.collect.window_size,
+        "window_size_effective": window_size_effective,
+        "schedule_mode": s.perception.schedule.mode,
+        "schedule_available": service is not None and service.schedule_available,
+        "schedule_effective": service.schedule_mode if service is not None else "batch",
         # 双闸分开暴露:smart_crop_enabled = 用户态(开关位置,取 user_enabled)vs
         # smart_crop_available = 决定开关能不能点(取发版级开关 enabled)。
         # available=false 时前端置灰 + 提示「服务端尚未开放」,避免"开关开着但**发版级闸**
@@ -1684,6 +1698,15 @@ def get_perception_config(current_user: str = Depends(verify_token)):
     response_model=NormalResponse,
 )
 async def put_perception_config(body: PerceptionConfigBody, current_user: str = Depends(verify_token)):
+    async with _perception_config_write_lock:
+        return await _save_perception_config(body, current_user)
+
+
+async def _save_perception_config(body: PerceptionConfigBody, current_user: str):
+    payload = _perception_config_payload()
+    if body.schedule_mode == "per_camera" and not payload["schedule_available"]:
+        raise HTTPException(status_code=409, detail="schedule_not_available")
+
     update: dict = {}
     if body.video_short_edge is not None:
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("input", {})["video_short_edge"] = body.video_short_edge
@@ -1695,6 +1718,12 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         ] = body.omni_visual_input_mode
     if body.window_size is not None:
         update.setdefault("perception", {}).setdefault("collect", {})["window_size"] = body.window_size
+    schedule_changed = body.schedule_mode is not None and body.schedule_mode != payload["schedule_mode"]
+    mode_needs_apply = schedule_changed or (
+        body.schedule_mode is not None and body.schedule_mode != payload["schedule_effective"]
+    )
+    if mode_needs_apply:
+        update.setdefault("perception", {}).setdefault("schedule", {})["mode"] = body.schedule_mode
     if body.smart_crop_enabled is not None:
         update.setdefault("perception", {}).setdefault("engine", {}).setdefault("crop_enhance", {})[
             "user_enabled"
@@ -1704,26 +1733,49 @@ async def put_perception_config(body: PerceptionConfigBody, current_user: str = 
         # get_settings() 现读,update_shared_config 已含 reset_settings,下个 cycle 即生效,
         # 不参与下方 restart_ok(不需要重启引擎)。
         update.setdefault("perception", {})["min_suggestion_urgency"] = body.min_suggestion_urgency
-    payload = _perception_config_payload()
     if update:
-        # 各参数生效路径不同，按「新值 != 旧值」判断（前端 drawer 多字段一起 PUT）：
-        #   - video_short_edge：每帧实时读 settings，写盘 + reset_settings 后下帧即生效，无需重启。
-        #   - smart_crop_enabled：同上，crop_enhance_config_from_settings 每窗口热读，无需重启。
-        #   - omni_fps：pipeline 每窗现读引擎内存 config.input.omni_fps（非 settings），但它经
-        #     adjust_fps_for_omni 顶起的 tracker fps 有构造期派生缓存——走 apply_omni_fps_live
-        #     运行时热更（原地刷 _config + 缓存），免重建引擎 / 免模型重载 / 不丢 track。
-        #   - window_size：runner 构造时 cache，需 stop→start 重读（apply_config_restart）。
-        omni_fps_changed = body.omni_fps is not None and body.omni_fps != payload["omni_fps"]
-        window_changed = body.window_size is not None and body.window_size != payload["window_size"]
+        # 帧率和窗长还要对比运行时值，让已保存但未生效的配置可用原值重试。
+        effective_omni_fps = payload["omni_fps_effective"]
+        omni_fps_needs_apply = body.omni_fps is not None and (
+            body.omni_fps != payload["omni_fps"]
+            or (effective_omni_fps is not None and body.omni_fps != effective_omni_fps)
+        )
+        effective_window_size = payload["window_size_effective"]
+        window_needs_apply = body.window_size is not None and (
+            body.window_size != payload["window_size"]
+            or (effective_window_size is not None and body.window_size != effective_window_size)
+        )
+        target_mode = body.schedule_mode or payload["schedule_mode"]
+        if mode_needs_apply or window_needs_apply or omni_fps_needs_apply:
+            saved = False
+
+            def save() -> None:
+                nonlocal saved
+                update_shared_config(**update)
+                saved = True
+
+            try:
+                await manager.perception_service.apply_schedule_config(
+                    target_mode, save, restart_window=window_needs_apply,
+                    omni_fps=body.omni_fps if omni_fps_needs_apply else None,
+                )
+            except Exception as exc:  # noqa: BLE001
+                if not saved:
+                    if isinstance(exc, (InferenceAdmissionClosed, InferenceDrainDeferred)):
+                        raise HTTPException(status_code=409, detail="schedule_stop_deferred") from exc
+                    raise
+                logger.exception("Failed to apply saved perception settings")
+                payload = _perception_config_payload()
+                payload["restart_ok"] = False
+                return NormalResponse(code=0, message="ok", data=payload)
+            payload = _perception_config_payload()
+            payload["restart_ok"] = True
+            if mode_needs_apply:
+                logger.info(
+                    "event=perception_schedule_applied user=%s effective_mode=%s",
+                    safe_log(current_user), safe_log(payload["schedule_effective"]),
+                )
+            return NormalResponse(code=0, message="ok", data=payload)
         update_shared_config(**update)
         payload = _perception_config_payload()
-        # config 已写盘(不可回滚)；热更/重启失败仅带 restart_ok=False，不冒泡成 500——
-        # 否则前端会把「已保存+失败」误报成「保存失败」，误导用户以为改动丢失。同步等完成再返回。
-        restart_ok = True
-        if omni_fps_changed:
-            restart_ok = await manager.perception_service.apply_omni_fps_live(body.omni_fps) and restart_ok
-        if window_changed:
-            restart_ok = await manager.perception_service.apply_config_restart() and restart_ok
-        if omni_fps_changed or window_changed:
-            payload["restart_ok"] = restart_ok
     return NormalResponse(code=0, message="ok", data=payload)

@@ -530,18 +530,13 @@ export async function revealDir(path: string): Promise<void> {
   return impl.realRevealDir(path);
 }
 
-// ── 让它休息 / 唤醒 ────────────────────────────────────────
-// backend 当前只有 stop/start 两态，永久暂停直到手动唤醒，不支持定时恢复。
-// 返回值 {resumesAt: null} 给 UI 留住"以后接定时恢复"的形状，但当前永远 null。
-// 若未来 backend 加 duration 支持，签名改成 pausePerception(opts?: {until?: Date})
-// 让调用方显式传入"暂停到某点"——比 number 形参更清楚语义。
-export async function pausePerception(): Promise<{ resumesAt: string | null }> {
-  await impl.realPausePerception();
-  return { resumesAt: null };
-}
-
+// ── 唤醒 / 重启 ────────────────────────────────────────────
 export async function resumePerception(): Promise<void> {
   return impl.realResumePerception();
+}
+
+export async function restartPerception(): Promise<boolean> {
+  return impl.realRestartPerception();
 }
 
 // ── 摄像头抓帧（占位 — 等 miloco 提供 snapshot 接口后实现）────
@@ -817,12 +812,18 @@ export async function getProcSeries(
 
 export type MinSuggestionUrgency = "low" | "medium" | "high";
 export type OmniVisualInputMode = "video" | "image";
+export type PerceptionScheduleMode = "batch" | "per_camera";
 
 export interface PerceptionConfig {
   video_short_edge: number;
   omni_fps: number;
+  omni_fps_effective?: number | null;
   omni_visual_input_mode: OmniVisualInputMode;
   window_size: number;
+  window_size_effective?: number | null;
+  schedule_mode?: PerceptionScheduleMode;
+  schedule_available?: boolean;
+  schedule_effective?: PerceptionScheduleMode;
   /** Smart Crop 用户开关(backend crop_enhance.user_enabled)。与 video_short_edge
    *  **正交**:裁不裁看这个,多清晰看分辨率档。老后端不返此字段 → undefined。 */
   smart_crop_enabled?: boolean;
@@ -855,7 +856,10 @@ export type UpdatePerceptionConfigResult = PerceptionConfig & {
 // smart_crop_available 从入参里 Omit 掉:它是发版级开关的只读投影,后端 PUT 也不收,
 // 在类型上挡住比让它静默被忽略更好。
 export async function updatePerceptionConfig(
-  input: Partial<Omit<PerceptionConfig, "smart_crop_available">>,
+  input: Partial<
+    Omit<PerceptionConfig,
+      "smart_crop_available" | "schedule_available" | "schedule_effective" | "window_size_effective" | "omni_fps_effective">
+  >,
 ): Promise<UpdatePerceptionConfigResult> {
   const r = await apiFetch<{ code: number; data: UpdatePerceptionConfigResult }>(
     "/api/admin/perception-config",

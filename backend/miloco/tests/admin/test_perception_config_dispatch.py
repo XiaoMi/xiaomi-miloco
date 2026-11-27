@@ -1,22 +1,12 @@
 # Copyright (C) 2025 Xiaomi Corporation
 # This software may be used and distributed according to the terms of the Xiaomi Miloco License Agreement.
 
-"""PUT /api/admin/perception-config 的 dispatch 测试 + GET 投影语义测试。
-
-各参数生效路径不同，端点据「新值 != 旧值」分派：
-- video_short_edge：每帧实时读 settings，写盘即生效 —— 既不热更也不重启。
-- omni_fps：运行时热更 → ``apply_omni_fps_live``（免重建 / 免模型重载 / 不丢 track）。
-- window_size：runner 构造期 cache → ``apply_config_restart``（stop→start 重读）。
-- smart_crop_enabled / min_suggestion_urgency：均为热读，写盘 + reset_settings 即生效，
-  两者都不参与热更 / 重启分派。
-
-本测试 mock service 层，只验证端点把哪个参数分派到哪个入口（含「都不变则都不调」）。
-另有若干用例不涉分派，只验 GET 投影的取值语义（分辨率档 roundtrip、Smart Crop 双闸、
-min_suggestion_urgency 的默认值与 Literal 校验）。
-"""
+"""验证感知设置的保存、运行时应用以及 GET 的生效值。"""
+import asyncio
 import json as _json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import ANY, AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -43,11 +33,19 @@ def client(tmp_path, monkeypatch):
     )
     reset_settings()
 
-    # mock service 层：两条入口都返 True（成功）。perception_service 是 Manager 上的
-    # property（无 setter），故整体替换模块级 manager 全局，而非在实例上 setattr。
     svc = MagicMock()
-    svc.apply_omni_fps_live = AsyncMock(return_value=True)
-    svc.apply_config_restart = AsyncMock(return_value=True)
+    svc.schedule_available = False
+    svc.schedule_mode = "batch"
+    svc.window_size_effective = None
+    svc.omni_fps_effective = 1
+
+    async def apply(mode, save, *, restart_window, omni_fps):
+        save()
+        svc.schedule_mode = mode
+        if omni_fps is not None:
+            svc.omni_fps_effective = omni_fps
+
+    svc.apply_schedule_config = AsyncMock(side_effect=apply)
     fake_manager = MagicMock()
     fake_manager.perception_service = svc
     monkeypatch.setattr(router_mod, "manager", fake_manager)
@@ -59,36 +57,52 @@ def client(tmp_path, monkeypatch):
     reset_settings()
 
 
-def test_omni_fps_change_hot_reloads_not_restart(client):
+def test_schedule_can_be_enabled_and_disabled(client):
     c, svc = client
-    resp = c.put("/api/admin/perception-config", json={"omni_fps": 2})
-    assert resp.status_code == 200
-    svc.apply_omni_fps_live.assert_awaited_once_with(2)
-    svc.apply_config_restart.assert_not_awaited()
+    svc.schedule_available = True
+
+    initial = c.get("/api/admin/perception-config").json()["data"]
+    assert initial["schedule_mode"] == "batch"
+
+    enabled = c.put("/api/admin/perception-config", json={"schedule_mode": "per_camera"})
+    assert enabled.status_code == 200
+    data = enabled.json()["data"]
+    assert (data["schedule_mode"], data["schedule_effective"]) == (
+        "per_camera", "per_camera",
+    )
+
+    disabled = c.put("/api/admin/perception-config", json={"schedule_mode": "batch"})
+    assert disabled.status_code == 200
+    data = disabled.json()["data"]
+    assert (data["schedule_mode"], data["schedule_effective"]) == (
+        "batch", "batch",
+    )
+    assert [call.args[0] for call in svc.apply_schedule_config.await_args_list] == ["per_camera", "batch"]
 
 
-def test_window_size_change_restarts_not_hot_reload(client):
+@pytest.mark.parametrize(
+    ("settings", "restart_window", "omni_fps"),
+    [
+        ({"omni_fps": 2}, False, 2),
+        ({"window_size": 12}, True, None),
+        ({"omni_fps": 2, "window_size": 12}, True, 2),
+    ],
+)
+def test_apply_uses_only_requested_runtime_changes(client, settings, restart_window, omni_fps):
     c, svc = client
-    resp = c.put("/api/admin/perception-config", json={"window_size": 12})
+    resp = c.put("/api/admin/perception-config", json=settings)
     assert resp.status_code == 200
-    svc.apply_config_restart.assert_awaited_once()
-    svc.apply_omni_fps_live.assert_not_awaited()
-
-
-def test_both_change_triggers_both_paths(client):
-    c, svc = client
-    resp = c.put("/api/admin/perception-config", json={"omni_fps": 2, "window_size": 12})
-    assert resp.status_code == 200
-    svc.apply_omni_fps_live.assert_awaited_once_with(2)
-    svc.apply_config_restart.assert_awaited_once()
+    assert resp.json()["data"]["restart_ok"] is True
+    svc.apply_schedule_config.assert_awaited_once_with(
+        "batch", ANY, restart_window=restart_window, omni_fps=omni_fps,
+    )
 
 
 def test_video_short_edge_only_neither_path(client):
     c, svc = client
     resp = c.put("/api/admin/perception-config", json={"video_short_edge": 720})
     assert resp.status_code == 200
-    svc.apply_omni_fps_live.assert_not_awaited()
-    svc.apply_config_restart.assert_not_awaited()
+    svc.apply_schedule_config.assert_not_awaited()
 
 
 def test_unchanged_omni_fps_is_noop(client):
@@ -96,8 +110,131 @@ def test_unchanged_omni_fps_is_noop(client):
     c, svc = client
     resp = c.put("/api/admin/perception-config", json={"omni_fps": 1})
     assert resp.status_code == 200
-    svc.apply_omni_fps_live.assert_not_awaited()
-    svc.apply_config_restart.assert_not_awaited()
+    svc.apply_schedule_config.assert_not_awaited()
+
+
+@pytest.fixture
+def live_settings(client, monkeypatch):
+    import miloco.admin.router as router_mod
+    from miloco.perception.client import PerceptionEngineProxy
+    from miloco.perception.engine.api import PerceptionEngine
+    from miloco.perception.engine.config import PerceptionConfig
+    from miloco.perception.inference_admission import InferenceAdmission
+    from miloco.perception.processor import PipelineProcessor
+    from miloco.perception.runner import PerceptionRunner
+    from miloco.perception.service import PerceptionService
+
+    c, _ = client
+    engine = PerceptionEngine.__new__(PerceptionEngine)
+    engine._config = PerceptionConfig()
+    engine._base_fps = engine.get_input_config().fps
+    engine._tracking_mode = "real"
+    engine._tracking_service_kwargs = {}
+    engine._tracking_services = {}
+    engine._identity_engines = {}
+    proxy = PerceptionEngineProxy.__new__(PerceptionEngineProxy)
+    proxy._engine_lock = asyncio.Lock()
+    proxy.perception_engine = engine
+    processor = PipelineProcessor.__new__(PipelineProcessor)
+    processor._perception_engine_proxy = proxy
+    processor._inference_admission = InferenceAdmission()
+    processor._result_generation = 0
+    runner = PerceptionRunner.__new__(PerceptionRunner)
+    runner._pipeline = processor
+    runner._collector = MagicMock()
+    runner._is_running = False
+    runner._finish_stop = AsyncMock()
+    runner._finish_start = AsyncMock()
+    runner._schedule_mode = "batch"
+    runner._camera_scheduler = None
+    service = PerceptionService(MagicMock(), processor, runner, MagicMock(), MagicMock())
+    monkeypatch.setattr(router_mod.manager, "perception_service", service)
+    return c.app, service, runner, processor, engine
+
+
+@pytest.mark.parametrize("mode", ["batch", "per_camera"])
+@pytest.mark.parametrize("auth_holds_lock", [False, True])
+async def test_busy_fps_save_keeps_configuration_and_same_request_retries(
+    live_settings, monkeypatch, mode, auth_holds_lock,
+):
+    from miloco.admin.router import update_shared_config
+
+    app, service, runner, processor, engine = live_settings
+    update_shared_config(perception={"schedule": {"mode": mode}})
+    runner._schedule_mode = mode
+    scheduler = MagicMock() if mode == "per_camera" else None
+    runner._camera_scheduler = scheduler
+    release = asyncio.Event()
+    owner = processor._inference_admission.start(release.wait)
+    monkeypatch.setattr("miloco.perception.service._LIFECYCLE_LOCK_WAIT_S", 0)
+    monkeypatch.setattr("miloco.perception.processor._INFERENCE_DRAIN_TIMEOUT_S", 0)
+    auth = None
+    try:
+        if auth_holds_lock:
+            auth = asyncio.create_task(service.restart_after_auth(lambda: True, wait_seconds=10))
+            async with asyncio.timeout(1):
+                while processor.accepting_inference:
+                    await asyncio.sleep(0)
+        settings = "/api/admin/perception-config"
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+            response = await asyncio.wait_for(c.put(settings, json={"omni_fps": 2}), timeout=1)
+            assert response.status_code == 409
+            assert response.json()["detail"] == "schedule_stop_deferred"
+            blocked = (await c.get(settings)).json()["data"]
+            assert (blocked["omni_fps"], blocked["omni_fps_effective"]) == (1, 1)
+
+            release.set()
+            await owner
+            if auth is not None:
+                await asyncio.wait_for(auth, timeout=1)
+            response = await c.put(settings, json={"omni_fps": 2})
+            assert response.status_code == 200
+            data = response.json()["data"]
+            assert data["restart_ok"] is True
+            assert (data["omni_fps"], data["omni_fps_effective"]) == (2, 2)
+            assert engine.get_input_config().omni_fps == 2
+            assert runner._camera_scheduler is scheduler
+    finally:
+        release.set()
+        await owner
+        if auth is not None:
+            await auth
+
+
+async def test_saved_fps_can_retry_after_runtime_application_failure(live_settings):
+    app, _, _, _, engine = live_settings
+    tracker = MagicMock()
+    tracker.set_fps.side_effect = RuntimeError("simulated tracker refresh error")
+    engine._tracking_services["camera"] = tracker
+    settings = "/api/admin/perception-config"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+        response = await c.put(settings, json={"omni_fps": 2})
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["restart_ok"] is False
+        assert (data["omni_fps"], data["omni_fps_effective"]) == (2, 1)
+        reloaded = (await c.get(settings)).json()["data"]
+        assert (reloaded["omni_fps"], reloaded["omni_fps_effective"]) == (2, 1)
+
+        tracker.set_fps.side_effect = None
+        response = await c.put(settings, json={"omni_fps": 2})
+        assert response.status_code == 200
+        data = response.json()["data"]
+        assert data["restart_ok"] is True
+        assert (data["omni_fps"], data["omni_fps_effective"]) == (2, 2)
+        assert tracker.set_fps.call_count == 2
+
+
+async def test_settings_during_shutdown_return_retryable_response_without_saving(live_settings):
+    app, _, _, processor, _ = live_settings
+    processor.seal_inference()
+    settings = "/api/admin/perception-config"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+        response = await c.put(settings, json={"omni_fps": 2, "window_size": 12})
+        assert response.status_code == 409
+        assert response.json()["detail"] == "schedule_stop_deferred"
+        data = (await c.get(settings)).json()["data"]
+        assert (data["omni_fps"], data["omni_fps_effective"], data["window_size"]) == (1, 1, 8)
 
 
 @pytest.mark.parametrize("bad", [0, 1, 32, 63])
@@ -114,8 +251,7 @@ def test_video_short_edge_fixed_value_roundtrip(client):
     c, svc = client
     resp = c.put("/api/admin/perception-config", json={"video_short_edge": 720})
     assert resp.status_code == 200
-    svc.apply_omni_fps_live.assert_not_awaited()
-    svc.apply_config_restart.assert_not_awaited()
+    svc.apply_schedule_config.assert_not_awaited()
     data = c.get("/api/admin/perception-config").json()["data"]
     assert data["video_short_edge"] == 720
     assert "resolution_mode" not in data  # 哨兵派生字段已随哨兵一并移除
@@ -136,8 +272,7 @@ def test_smart_crop_switch_roundtrip(client):
         json={"smart_crop_enabled": False, "video_short_edge": 768},
     )
     assert resp.status_code == 200
-    svc.apply_omni_fps_live.assert_not_awaited()
-    svc.apply_config_restart.assert_not_awaited()
+    svc.apply_schedule_config.assert_not_awaited()
     data = resp.json()["data"]
     assert data["smart_crop_enabled"] is False
     assert data["video_short_edge"] == 768
@@ -288,8 +423,7 @@ def test_min_urgency_change_writes_config_no_restart(client):
     assert resp.status_code == 200
     data = resp.json()["data"]
     assert data["min_suggestion_urgency"] == "medium"
-    svc.apply_omni_fps_live.assert_not_awaited()
-    svc.apply_config_restart.assert_not_awaited()
+    svc.apply_schedule_config.assert_not_awaited()
 
 
 def test_min_urgency_get_returns_current(client):
@@ -311,8 +445,7 @@ def test_min_urgency_rejects_bogus_value(client):
 
 
 def test_min_urgency_mixed_with_omni_fps(client):
-    """混合 PUT:同时改 omni_fps + min_urgency,前者走 hot-reload,后者走 hot-read,
-    互不干扰——apply_omni_fps_live 被调 1 次(omni_fps),apply_config_restart 不调。"""
+    """混合 PUT 只热更帧率，同时保存按需热读的紧急程度。"""
     c, svc = client
     resp = c.put(
         "/api/admin/perception-config",
@@ -322,5 +455,4 @@ def test_min_urgency_mixed_with_omni_fps(client):
     data = resp.json()["data"]
     assert data["omni_fps"] == 2
     assert data["min_suggestion_urgency"] == "high"
-    svc.apply_omni_fps_live.assert_awaited_once_with(2)
-    svc.apply_config_restart.assert_not_awaited()
+    svc.apply_schedule_config.assert_awaited_once_with("batch", ANY, restart_window=False, omni_fps=2)

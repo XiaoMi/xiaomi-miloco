@@ -348,7 +348,8 @@ class Manager:
         # Initialize perception module
         async with mon.track_async(NodeName.PERCEPTION_SERVICE, "init"):
             self._perception_service = await init_perception_module(
-                self._miot_proxy, self._kv_repo
+                self._miot_proxy, self._kv_repo,
+                load_enabled_rules=self._rule_service.get_effectively_enabled_rules,
             )
 
         self._task_service = TaskService(rule_service=self._rule_service)

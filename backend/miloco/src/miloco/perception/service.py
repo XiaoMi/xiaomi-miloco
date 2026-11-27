@@ -12,11 +12,18 @@ ensuring a unified data path.
 import asyncio
 import logging
 import shutil
+from collections.abc import Callable, Coroutine
+from typing import Any, TypeVar
 
+from miloco.config.settings import PerceptionScheduleMode
 from miloco.database.on_demand_log_repo import OnDemandLogRepo
 from miloco.database.perception_repo import PerceptionLogRepo
 from miloco.middleware.exceptions import BusinessException
 from miloco.perception.collect.collector import MultimodalCollector
+from miloco.perception.inference_admission import (
+    InferenceAdmissionClosed,
+    InferenceDrainDeferred,
+)
 from miloco.perception.processor import PipelineProcessor
 from miloco.perception.runner import PerceptionRunner
 from miloco.perception.schema import (
@@ -28,6 +35,8 @@ from miloco.perception.types import PerceptionDevice
 from miloco.utils.time_utils import ms_to_iso_local, now_ms
 
 logger = logging.getLogger(__name__)
+LifecycleResult = TypeVar("LifecycleResult")
+_LIFECYCLE_LOCK_WAIT_S = 5.0
 
 
 class PerceptionService:
@@ -50,67 +59,100 @@ class PerceptionService:
         # 让出点且改 runner._is_running,不加锁会在「应用设置重启」与用户手动
         # 启停/删模型交错时出现 executor 未重挂、孤儿 task 等状态错乱。
         self._lifecycle_lock = asyncio.Lock()
+        self._lifecycle_task: asyncio.Task[Any] | None = None
 
     # ---- Realtime engine lifecycle ----
 
+    async def _run_lifecycle(
+        self, operation: Callable[[], Coroutine[Any, Any, LifecycleResult]], *,
+        bounded_lock: bool = True,
+    ) -> LifecycleResult:
+        lock_wait = _LIFECYCLE_LOCK_WAIT_S if bounded_lock else None
+        try:
+            async with asyncio.timeout(lock_wait):
+                await self._lifecycle_lock.acquire()
+        except TimeoutError as exc:
+            raise InferenceDrainDeferred("another perception lifecycle operation is still running") from exc
+
+        async def run() -> LifecycleResult:
+            try:
+                return await operation()
+            finally:
+                self._lifecycle_lock.release()
+
+        owner = asyncio.create_task(run())
+        self._lifecycle_task = owner
+        owner.add_done_callback(self._retire_lifecycle_task)
+        return await asyncio.shield(owner)
+
+    def _retire_lifecycle_task(self, owner: asyncio.Task[Any]) -> None:
+        if self._lifecycle_task is owner:
+            self._lifecycle_task = None
+        if not owner.cancelled() and (error := owner.exception()) is not None:
+            logger.warning("[service] 感知生命周期操作未完成 | %s", error)
+
     async def start_engine(self) -> None:
-        async with self._lifecycle_lock:
-            await self._engine.start()
+        await self._run_lifecycle(self._engine.start)
 
     async def stop_engine(self) -> None:
-        async with self._lifecycle_lock:
-            await self._engine.stop()
+        await self._run_lifecycle(self._engine.stop)
+
+    async def restart_engine(self, should_start: Callable[[], bool]) -> bool:
+        return await self._run_lifecycle(lambda: self._engine.restart(should_start))
+
+    async def restart_after_auth(
+        self, should_start: Callable[[], bool], *, wait_seconds: float,
+    ) -> None:
+        await self._run_lifecycle(
+            lambda: self._engine.restart(
+                should_start, wait_seconds=wait_seconds, discard_inflight_results=True,
+            ),
+            bounded_lock=False,
+        )
+
+    async def shutdown_engine(self) -> None:
+        # 关机接手排空，长时重启先让出生命周期锁。
+        self._engine.seal_inference()
+        await self._run_lifecycle(lambda: self._engine.stop(allow_sealed=True), bounded_lock=False)
 
     async def stop_to_unconfigured(self) -> None:
-        """软停引擎回到「未配模型」态(删当前生效模型用),保留 tick 自愈循环。
+        """等待在途推理结束后关闭引擎实例，回到「未配模型」态。
 
-        与 stop_engine 的区别:stop_engine 停整个 realtime 循环(含采集/设备同步);
-        本方法只关引擎实例 + 降级状态,采集与 tick 继续,后续配好新模型自动自愈拉起。
+        保留采集和 tick，后续配好模型可自动拉起引擎。stop_engine 会停止整个 runner。
         """
-        async with self._lifecycle_lock:
-            await self._pipeline.stop_to_unconfigured()
+        async def soft_stop() -> None:
+            async with self._pipeline.drain_inference(bounded=False):
+                await self._pipeline.stop_to_unconfigured()
 
-    async def apply_config_restart(self) -> bool:
-        """window_size 变更后重启 runner 使新值生效：停 runner → 启 runner。
+        await self._run_lifecycle(soft_stop, bounded_lock=False)
 
-        window_size 靠 runner.start() 重读（见 runner.start），只需 stop→start，
-        不重建引擎、不重载模型。was_running 时才需重启（未跑时下次 start 自然读新值）。
-        全程持 lifecycle 锁,避免与并发的 start_engine/stop_engine 交错。
+    @property
+    def window_size_effective(self) -> int | None:
+        return self._engine.window_size_effective
 
-        （omni_fps 变更不再走这里——改走 ``apply_omni_fps_live`` 运行时热更，见其注释。）
+    @property
+    def omni_fps_effective(self) -> int | None:
+        return self._pipeline.omni_fps_effective
 
-        返回重启是否成功。config 已由调用方写盘(不可回滚),重启失败时返 False 让调用方
-        区分「已保存但重启失败」,不冒泡成 500——否则前端会把「写盘成功+重启失败」误报
-        成「保存失败」。
-        """
-        async with self._lifecycle_lock:
-            try:
-                was_running = self._engine.is_running
-                if was_running:
-                    await self._engine.stop()
-                    await self._engine.start()
-                return True
-            except Exception as e:  # noqa: BLE001
-                logger.error("[service] 感知参数变更后重启失败(config 已写盘) | %s", e, exc_info=True)
-                return False
+    @property
+    def schedule_available(self) -> bool:
+        return self._engine.schedule_available
 
-    async def apply_omni_fps_live(self, omni_fps: int) -> bool:
-        """运行时热更 omni_fps（含其顶起的 tracker fps）：不停 runner、不重建引擎、
-        不重载模型、不丢在途 track 状态。
+    @property
+    def schedule_mode(self) -> PerceptionScheduleMode:
+        return self._engine.schedule_mode
 
-        与 ``apply_config_restart`` 并列的轻量入口：只把新 omni_fps 原地推给活跃引擎
-        （PipelineProcessor.apply_omni_fps → proxy → engine.apply_omni_fps）。持 lifecycle
-        锁避免与 start/stop/restart 交错。引擎未起时 proxy 层 no-op（settings 已写盘）。
-
-        返回是否成功。config 已写盘(不可回滚),失败返 False 不冒泡 500（同 restart 语义）。
-        """
-        async with self._lifecycle_lock:
-            try:
-                await self._pipeline.apply_omni_fps(omni_fps)
-                return True
-            except Exception as e:  # noqa: BLE001
-                logger.error("[service] omni_fps 热更失败(config 已写盘) | %s", e, exc_info=True)
-                return False
+    async def apply_schedule_config(
+        self,
+        mode: PerceptionScheduleMode,
+        save: Callable[[], None],
+        *,
+        restart_window: bool,
+        omni_fps: int | None,
+    ) -> None:
+        await self._run_lifecycle(lambda: self._engine.apply_schedule_config(
+            mode, save, restart_window=restart_window, omni_fps=omni_fps
+        ))
 
     def engine_status(self) -> PerceptionEngineStatus:
         return self._engine.status()
@@ -198,7 +240,12 @@ class PerceptionService:
         t_start = now_ms()
 
         # Single batch inference call — collector assembles batch, processor infers
-        pipeline_result = await self._pipeline.process_on_demand(valid_dids, request.query)
+        try:
+            pipeline_result = await self._pipeline.process_on_demand(valid_dids, request.query)
+        except InferenceAdmissionClosed as exc:
+            raise BusinessException(
+                "Perception engine is busy. Please retry shortly.", code=2012,
+            ) from exc
 
         if not pipeline_result:
             raise BusinessException(

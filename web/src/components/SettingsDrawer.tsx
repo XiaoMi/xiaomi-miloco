@@ -8,7 +8,9 @@ import {
   type MinSuggestionUrgency,
   type OmniVisualInputMode,
   type PerceptionConfig,
+  type PerceptionScheduleMode,
 } from "@/api";
+import { ApiError } from "@/api/client";
 import { useEscClose } from "@/hooks/useEscClose";
 import { toast } from "./Toast";
 
@@ -53,6 +55,8 @@ export function SettingsDrawer({ open, onClose }: Props) {
     DEFAULTS.omni_visual_input_mode,
   );
   const [windowSize, setWindowSize] = useState(DEFAULTS.window_size);
+  const [perceptionScheduleMode, setPerceptionScheduleMode] =
+    useState<PerceptionScheduleMode>("batch");
   // Smart Crop 用户开关。与分辨率档正交（各自独立 dirty / 各自独立生效），
   // 不是第五个分辨率档 —— crop 视频的短边本身也按所选档等比跟随。
   const [smartCrop, setSmartCrop] = useState(DEFAULTS.smart_crop_enabled === true);
@@ -86,6 +90,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
         setOmniFps(c.omni_fps);
         setVisualInputMode(c.omni_visual_input_mode ?? "video");
         setWindowSize(c.window_size);
+        setPerceptionScheduleMode(c.schedule_mode ?? "batch");
         setSmartCrop(c.smart_crop_enabled === true);
         // 老 backend 若不返 min_suggestion_urgency 时回退到"不过滤"默认,与 backend 的
         // Literal default 对齐,不误导用户以为拿到了远端值。
@@ -127,12 +132,20 @@ export function SettingsDrawer({ open, onClose }: Props) {
   // 决定，且此刻在小字里指向 CLI 会让用户去找一个界面上不存在的开关。待前端补上
   // 逐机位控件时，与该控件一并订正这行文案。
   const smartCropAvailable = config?.smart_crop_available === true;
+  const perceptionScheduleAvailable = config?.schedule_available === true;
+  const perceptionScheduleDirty =
+    perceptionScheduleAvailable &&
+    (perceptionScheduleMode !== (config?.schedule_mode ?? "batch") ||
+      perceptionScheduleMode !== (config?.schedule_effective ?? "batch"));
   const perceptionDirty =
     config != null &&
     (videoShortEdge !== config.video_short_edge ||
       omniFps !== config.omni_fps ||
+      (config.omni_fps_effective != null && omniFps !== config.omni_fps_effective) ||
       visualInputMode !== (config.omni_visual_input_mode ?? "video") ||
       windowSize !== config.window_size ||
+      (config.window_size_effective != null && windowSize !== config.window_size_effective) ||
+      perceptionScheduleDirty ||
       // 不可用时恒 false：置灰的开关不该产出待保存改动
       (smartCropAvailable && smartCrop !== (config.smart_crop_enabled === true)) ||
       minUrgency !== (config.min_suggestion_urgency ?? DEFAULT_MIN_URGENCY));
@@ -148,6 +161,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
     // 调度开关先于感知参数提交；记录其是否已写盘，供 catch 区分「部分成功」——
     // 开关已存但感知失败时不应笼统报「保存失败」，那会让用户误以为开关也没存住。
     let schedulerSaved = false;
+    let perceptionPending = false;
     try {
       // scheduler 开关仅写盘 config.json（agent 网关下次启动读取生效），
       // 与感知参数各自独立 PUT——只在各自变更时提交，避免仅改开关却重启引擎。
@@ -157,23 +171,33 @@ export function SettingsDrawer({ open, onClose }: Props) {
         setSchedulerEnabled(s.enabled);
         schedulerSaved = true;
       }
-      // PUT 后端会同步写 config + 重启引擎使参数生效，前端不再单独 pause/resume。
-      // config 写盘不可回滚：写盘成功但重启失败时后端返回 restart_ok=false（非报错），
-      // 此时提示「已保存但需手动重启」而非「保存失败」，避免误导用户以为改动丢失。
+      // PUT 等待写盘和应用。写盘后应用失败时保留差异，允许用户用原值重试。
       if (perceptionDirty) {
         const updated = await updatePerceptionConfig({
           video_short_edge: videoShortEdge,
           omni_fps: omniFps,
           omni_visual_input_mode: visualInputMode,
           window_size: windowSize,
+          ...(perceptionScheduleDirty ? { schedule_mode: perceptionScheduleMode } : {}),
           // 只在发版级开关放开时才提交,不可用时不往后端写一个用户按不动的值
           ...(smartCropAvailable ? { smart_crop_enabled: smartCrop } : {}),
           min_suggestion_urgency: minUrgency,
         });
         setConfig(updated);
+        setPerceptionScheduleMode(updated.schedule_mode ?? "batch");
         setSmartCrop(updated.smart_crop_enabled === true);
         if (updated.restart_ok === false) {
-          toast(t("settings.restartFailed"), "warn");
+          const fpsPending =
+            updated.omni_fps_effective != null && updated.omni_fps_effective !== updated.omni_fps;
+          const windowPending =
+            updated.window_size_effective != null &&
+            updated.window_size_effective !== updated.window_size;
+          const modePending = updated.schedule_effective !== updated.schedule_mode;
+          perceptionPending = fpsPending || windowPending || modePending;
+          const message = modePending ? "settings.perceptionSchedule.pending" :
+            windowPending ? "settings.windowApplyPending" :
+            fpsPending ? "settings.omniFpsApplyPending" : "settings.restartFailed";
+          toast(t(message), "warn");
         } else {
           toast(t("settings.applySuccess"), "ok");
         }
@@ -185,8 +209,13 @@ export function SettingsDrawer({ open, onClose }: Props) {
       if (schedulerSaved) {
         toast(t("settings.schedulerSaved"), "ok");
       }
-      onClose();
-    } catch {
+      if (!perceptionPending) onClose();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409 && error.message === "schedule_stop_deferred") {
+        if (schedulerSaved) toast(t("settings.schedulerSaved"), "ok");
+        toast(t("settings.perceptionApplyDeferred"), "warn");
+        return;
+      }
       // 部分成功(开关已存、感知失败)与全败区分:前者 schedulerDirty 已随
       // schedulerLoaded 收敛为 false,重试只补发感知那半,故文案要如实说明。
       toast(
@@ -205,6 +234,7 @@ export function SettingsDrawer({ open, onClose }: Props) {
     setOmniFps(DEFAULTS.omni_fps);
     setVisualInputMode(DEFAULTS.omni_visual_input_mode);
     setWindowSize(DEFAULTS.window_size);
+    if (perceptionScheduleAvailable) setPerceptionScheduleMode("batch");
     // 同 scheduler：不可用（发版级开关未放开，置灰）时不动视觉，否则会拨出一个恒不 dirty 的值
     if (smartCropAvailable) setSmartCrop(DEFAULTS.smart_crop_enabled === true);
     setMinUrgency(DEFAULT_MIN_URGENCY);
@@ -384,6 +414,36 @@ export function SettingsDrawer({ open, onClose }: Props) {
                 <p className="text-caption text-text-tertiary">
                   {t("settings.omniFpsHint")}
                 </p>
+              </div>
+
+              <div className="space-y-2.5">
+                <label
+                  htmlFor="perception-schedule-mode"
+                  className="text-body font-medium text-text-primary block"
+                >
+                  {t("settings.perceptionSchedule.label")}
+                </label>
+                <select
+                  id="perception-schedule-mode"
+                  aria-describedby="perception-schedule-status"
+                  disabled={!perceptionScheduleAvailable || busy}
+                  value={perceptionScheduleMode}
+                  onChange={(event) =>
+                    setPerceptionScheduleMode(event.target.value === "per_camera" ? "per_camera" : "batch")
+                  }
+                  className="w-full rounded-xl border border-border bg-bg-primary px-3 py-2.5 text-body text-text-primary disabled:opacity-60"
+                >
+                  <option value="batch">{t("settings.perceptionSchedule.batch")}</option>
+                  <option value="per_camera">{t("settings.perceptionSchedule.per_camera")}</option>
+                </select>
+                <div id="perception-schedule-status" className="space-y-1 text-caption text-text-tertiary">
+                  {config.schedule_effective && (
+                    <p>{t("settings.perceptionSchedule.effective", {
+                      mode: t(`settings.perceptionSchedule.${config.schedule_effective}`),
+                    })}</p>
+                  )}
+                  {!perceptionScheduleAvailable && <p>{t("settings.perceptionSchedule.unavailable")}</p>}
+                </div>
               </div>
 
               {/* 感知窗口 */}

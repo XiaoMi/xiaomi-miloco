@@ -79,3 +79,21 @@ async def test_processor_empty_batch_never_calls_persist_side():
     assert await proc._process_realtime_inner() is None
     proc._perception_engine_proxy.realtime_perceive.assert_not_awaited()
     proc._perception_engine_proxy.handle_realtime_perception_result.assert_not_awaited()
+
+
+async def test_cutover_discard_does_not_record_rolling_inference():
+    processor = PipelineProcessor(
+        collector=MagicMock(),
+        perception_engine_proxy=MagicMock(),
+        log_repo=MagicMock(),
+    )
+    batch = _batch_with_one_device()
+    batch.devices["cam_A"].window_start_ms = 100
+    processor._collector.collect_batch.return_value = batch
+    processor._schedule_cutover_ms = 101
+    processor._perception_engine_proxy.realtime_perceive = AsyncMock()
+    handle = MagicMock()
+
+    assert await processor._process_realtime_inner(handle) is False
+    handle.skip_rolling.assert_called_once()
+    processor._perception_engine_proxy.realtime_perceive.assert_not_awaited()

@@ -15,11 +15,12 @@ from miloco.perception.processor import PipelineProcessor
 logger = logging.getLogger(__name__)
 
 
-async def init_perception_module(miot_proxy, kv_repo):
+async def init_perception_module(miot_proxy, kv_repo, *, load_enabled_rules):
     """
     初始化感知模块所有组件
     :param miot_proxy: 外部传入的 miot 代理实例
     :param kv_repo: 持久化 KV 仓库，用于读取用户「感知开关」意图
+    :param load_enabled_rules: 获取当前生效规则的异步函数
     """
     from miloco.perception.runner import PerceptionRunner
     from miloco.perception.service import PerceptionService
@@ -27,7 +28,7 @@ async def init_perception_module(miot_proxy, kv_repo):
     # 1. 初始化基础依赖实例
     perception_log_repo = PerceptionLogRepo()
     on_demand_log_repo = OnDemandLogRepo()
-    perception_engine_proxy = PerceptionEngineProxy()
+    perception_engine_proxy = PerceptionEngineProxy(load_enabled_rules=load_enabled_rules)
 
     # 2. 创建窗口就绪事件（回调从流线程触发，需 threadsafe 调度到事件循环）
     loop = asyncio.get_running_loop()

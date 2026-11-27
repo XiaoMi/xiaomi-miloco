@@ -321,6 +321,14 @@ class PerceptionCollectSettings(BaseModel):
     )
 
 
+PerceptionScheduleMode = Literal["batch", "per_camera"]
+
+
+class PerceptionScheduleSettings(BaseModel):
+    mode: PerceptionScheduleMode = "batch"
+    max_concurrent_cameras: int = Field(default=4, ge=1, le=16)
+
+
 class PerceptionSettings(BaseModel):
     """感知管线相关配置。"""
 
@@ -370,6 +378,7 @@ class PerceptionSettings(BaseModel):
         default_factory=PerceptionCollectSettings,
         description="采集窗口策略",
     )
+    schedule: PerceptionScheduleSettings = Field(default_factory=PerceptionScheduleSettings)
     engine: dict[str, Any] = Field(
         default_factory=dict,
         description="感知 engine 其它参数（input/identity 等，沿用 dataclass 消费）",

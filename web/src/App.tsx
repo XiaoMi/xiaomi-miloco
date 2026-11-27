@@ -18,7 +18,7 @@ import {
   listScopeHomes,
   listTasks,
   refreshCameraOnline,
-  pausePerception,
+  restartPerception,
   resumePerception,
   setFeatures,
   setScopeCameraPrompt,
@@ -27,6 +27,7 @@ import {
   toggleScopeCameraVoice,
   switchScopeHome,
 } from "./api";
+import { ApiError } from "./api/client";
 import { useAsync } from "./hooks/useAsync";
 import { miotTone } from "@/lib/miotTone";
 import type { Pet, Person } from "./lib/types";
@@ -581,39 +582,35 @@ function MainApp() {
                 toast(t("app.woke"), "ok");
                 status.reload();
               } catch (e) {
-                toast(e instanceof Error ? e.message : t("app.wakeFail"), "warn");
+                if (e instanceof ApiError && e.status === 409 && e.message.startsWith("start_deferred:")) {
+                  toast(t("app.wakeDeferredRetry"), "warn");
+                } else {
+                  toast(e instanceof Error ? e.message : t("app.wakeFail"), "warn");
+                }
               }
             }}
             onJumpDevices={() => setActiveTab("devices")}
             onRestartEngine={async () => {
-              // 拆两段 try：pause 失败 → 引擎仍跑（无副作用）；resume 失败 →
-              // 引擎已停下需要住户手动唤醒。两种 toast 文案不同避免割裂——
-              // 否则 pause 成功 + resume 失败时住户看到笼统"重启失败"，但 reload 后
-              // StatusRibbon 跳到蓝色"休息中"，跟"重启失败"的语义错位。
               try {
-                await pausePerception();
+                if (await restartPerception()) {
+                  toast(t("app.engineRestarted"), "ok");
+                } else {
+                  toast(t("app.engineStoppedWakeManually"), "warn");
+                }
               } catch (e) {
-                toast(
-                  e instanceof Error
-                    ? t("app.restartFailEngineRunning", { msg: e.message })
-                    : t("app.restartFailEngineRunningNoMsg"),
-                  "warn",
-                );
+                if (e instanceof ApiError && e.status === 409 && e.message.startsWith("restart_deferred:")) {
+                  toast(t("app.restartDeferredRetry"), "warn");
+                } else {
+                  toast(
+                    e instanceof Error
+                      ? t("app.restartFailWithMessage", { msg: e.message })
+                      : t("app.restartFail"),
+                    "warn",
+                  );
+                }
+              } finally {
                 status.reload();
-                return;
               }
-              try {
-                await resumePerception();
-                toast(t("app.engineRestarted"), "ok");
-              } catch (e) {
-                toast(
-                  e instanceof Error
-                    ? t("app.engineStoppedWakeManually", { msg: e.message })
-                    : t("app.engineStoppedWakeManuallyNoMsg"),
-                  "warn",
-                );
-              }
-              status.reload();
             }}
           />
         ) : status.error ? (

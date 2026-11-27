@@ -11,6 +11,8 @@
 """
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from miloco.perception.types import (
@@ -102,6 +104,53 @@ def _artifacts(clips: dict | None = None, ref_frames: dict | None = None):
 
 @pytest.mark.asyncio
 class TestSSEPublishFromPersist:
+    @pytest.mark.parametrize("retired_during_lookup", [False, True])
+    async def test_retired_window_never_writes_history_or_sse(
+        self, isolated_env, monkeypatch, retired_during_lookup,
+    ):
+        from miloco.manager import get_manager
+        from miloco.perception.client import _persist_meaningful_event
+        from miloco.perception.snapshot_writer import get_snapshot_root
+
+        _, pipeline = isolated_env
+        manager = get_manager()
+        lookup_started = asyncio.Event()
+        release_lookup = asyncio.Event()
+        retired = asyncio.Event()
+
+        async def load_rule(_rule_id):
+            lookup_started.set()
+            await release_lookup.wait()
+            return None
+
+        rules = SimpleNamespace(get_rule=AsyncMock(side_effect=load_rule))
+        monkeypatch.setattr(manager, "_rule_service", rules)
+        artifacts = _artifacts({"cam_living_01": _make_clip()})
+        artifacts.publication_guard = lambda: not retired.is_set()
+        result = RealtimePerceptionResult(
+            matched_rules=[
+                MatchedRule(rule_id="r1", reason="x", source_device_ids=["cam_living_01"]),
+            ],
+        )
+        if not retired_during_lookup:
+            retired.set()
+            release_lookup.set()
+        writing = asyncio.create_task(_persist_meaningful_event(
+            result=result, device_ids=["cam_living_01"], artifacts=artifacts, event_id="retired-window",
+        ))
+        try:
+            if retired_during_lookup:
+                await asyncio.wait_for(lookup_started.wait(), timeout=1)
+                retired.set()
+        finally:
+            release_lookup.set()
+            await asyncio.wait_for(writing, timeout=1)
+
+        assert rules.get_rule.await_count == int(retired_during_lookup)
+        assert manager.meaningful_events_dao.query() == []
+        assert not (get_snapshot_root() / "retired-window").exists()
+        assert pipeline.publish_calls == []
+
     async def test_publish_after_persist(self, isolated_env):
         """_persist 完成后 pipeline._publish("meaningful_event", ...) 被调用,
         payload 字段与 /api/events list 元素同形."""
