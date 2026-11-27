@@ -30,6 +30,15 @@ def test_profile_rule_and_suggestion(tmp_miloco_home):
     assert ci.resolve_profile("miloco-suggest-xyz") == "suggestion"
 
 
+def test_rule_profile_prioritizes_record_kind_over_timestamp(tmp_miloco_home, monkeypatch):
+    monkeypatch.setattr(ci, "get_catalog", lambda: "")
+    out = ci.inject_context(session_id="miloco-rule-abc")
+    assert out is not None
+    context = out["context"]
+    assert "仅当本次 fire 确实要求记录时执行，且先于通知 / 设备动作" in context
+    assert "按 JSON 字段名选对应 CLI" not in context
+
+
 def test_profile_full(tmp_miloco_home):
     assert ci.resolve_profile("agent:main:miloco") == "full"
     assert ci.resolve_profile("anything-else") == "full"

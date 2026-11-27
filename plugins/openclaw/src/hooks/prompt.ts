@@ -82,7 +82,7 @@ const PERCEPTION_FORMAT = {
 
   **处理流程**：                               ← 仅 record-bound rule（task 绑了 record）出现，按时间序 1→2→3 执行：
   1. 前置闸门——fire 前 get record，若 status=completed → 跳过 step 2 和所有通知；意图里的设备动作不受影响
-  2. record 写操作纪律——按 JSON 字段名选对应 CLI（actual_started_at/exited_at → session-start/end；意图首句 计数加一 → progress-inc / 事件追加 → event-append），先于通知 / 设备动作执行
+  2. record 写操作——仅当本次 fire 确实要求记录时执行，且先于通知 / 设备动作；先按 callback 内 record_kind 和本次明确的业务动作选择 CLI。时间戳仅作已选操作的时间参数，不能单独决定动作类型。无需写 record 的合法 fire 不调用 record 写 CLI
   3. 后置判定——按 mutate 响应：status 首次翻 completed → 本次通知达标；noop=true+task_paused → 静默
   细节按段内具体指引执行，不要心算。
 
