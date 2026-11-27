@@ -1,0 +1,2366 @@
+{
+  "version": "1.0",
+  "source_url": "https://cdn.cnbj1.fds.api.mi-img.com/developer-docs/prod/mdResource/f1aab7ed683f468de4b7d8cd9130b7b8.md",
+  "generated_at": "2026-04-29T11:14:35.285358+00:00",
+  "count": 393,
+  "entries": [
+    {
+      "category": "灯",
+      "service_type_name": "light",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "灯",
+      "service_type_name": "light",
+      "kind": "prop",
+      "type_name": "brightness"
+    },
+    {
+      "category": "灯",
+      "service_type_name": "light",
+      "kind": "prop",
+      "type_name": "color-temperature"
+    },
+    {
+      "category": "灯",
+      "service_type_name": "light",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "灯",
+      "service_type_name": "light",
+      "kind": "prop",
+      "type_name": "color"
+    },
+    {
+      "category": "灯",
+      "service_type_name": "ambient-light",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "灯",
+      "service_type_name": "ambient-light",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "air-purifier",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "air-purifier",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "air-purifier",
+      "kind": "prop",
+      "type_name": "stepless-fan-level"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "air-purifier",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "air-purifier",
+      "kind": "prop",
+      "type_name": "uv"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "filter",
+      "kind": "prop",
+      "type_name": "filter-life-level"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "environment",
+      "kind": "prop",
+      "type_name": "pm25-density"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "environment",
+      "kind": "prop",
+      "type_name": "relative-humidity"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "environment",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "environment",
+      "kind": "prop",
+      "type_name": "air-quality"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "environment",
+      "kind": "prop",
+      "type_name": "hcho-density"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "alarm",
+      "kind": "prop",
+      "type_name": "alarm"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "physical-controls-locked",
+      "kind": "prop",
+      "type_name": "physical-controls-locked"
+    },
+    {
+      "category": "空气净化器",
+      "service_type_name": "indicator-light",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "新风机",
+      "service_type_name": "air-fresh",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "新风机",
+      "service_type_name": "air-fresh",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "新风机",
+      "service_type_name": "air-fresh",
+      "kind": "prop",
+      "type_name": "stepless-fan-level"
+    },
+    {
+      "category": "新风机",
+      "service_type_name": "air-fresh",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "新风机",
+      "service_type_name": "environment",
+      "kind": "prop",
+      "type_name": "co2-density"
+    },
+    {
+      "category": "电风扇",
+      "service_type_name": "fan",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "电风扇",
+      "service_type_name": "fan",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "电风扇",
+      "service_type_name": "fan",
+      "kind": "prop",
+      "type_name": "stepless-fan-level"
+    },
+    {
+      "category": "电风扇",
+      "service_type_name": "fan",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "电风扇",
+      "service_type_name": "fan",
+      "kind": "prop",
+      "type_name": "horizontal-swing"
+    },
+    {
+      "category": "电风扇",
+      "service_type_name": "fan",
+      "kind": "prop",
+      "type_name": "vertical-swing"
+    },
+    {
+      "category": "电风扇",
+      "service_type_name": "fan",
+      "kind": "prop",
+      "type_name": "wind-reverse"
+    },
+    {
+      "category": "单控开关",
+      "service_type_name": "switch",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "带温湿度查询功能开关",
+      "service_type_name": "switch",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "带温湿度查询功能开关",
+      "service_type_name": "switch",
+      "kind": "prop",
+      "type_name": "relative-humidity"
+    },
+    {
+      "category": "窗帘",
+      "service_type_name": "curtain",
+      "kind": "prop",
+      "type_name": "motor-control"
+    },
+    {
+      "category": "窗帘",
+      "service_type_name": "curtain",
+      "kind": "prop",
+      "type_name": "target-position"
+    },
+    {
+      "category": "窗帘",
+      "service_type_name": "curtain",
+      "kind": "prop",
+      "type_name": "battery-level"
+    },
+    {
+      "category": "晾衣架",
+      "service_type_name": "airer",
+      "kind": "prop",
+      "type_name": "motor-control"
+    },
+    {
+      "category": "晾衣架",
+      "service_type_name": "airer",
+      "kind": "prop",
+      "type_name": "dryer"
+    },
+    {
+      "category": "晾衣架",
+      "service_type_name": "airer",
+      "kind": "prop",
+      "type_name": "uv"
+    },
+    {
+      "category": "电机控制器",
+      "service_type_name": "motor-controller",
+      "kind": "prop",
+      "type_name": "motor-control"
+    },
+    {
+      "category": "浴霸",
+      "service_type_name": "bath-heater",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "浴霸",
+      "service_type_name": "bath-heater",
+      "kind": "prop",
+      "type_name": "heating"
+    },
+    {
+      "category": "浴霸",
+      "service_type_name": "bath-heater",
+      "kind": "prop",
+      "type_name": "blow"
+    },
+    {
+      "category": "浴霸",
+      "service_type_name": "bath-heater",
+      "kind": "prop",
+      "type_name": "ventilation"
+    },
+    {
+      "category": "浴霸",
+      "service_type_name": "bath-heater",
+      "kind": "prop",
+      "type_name": "dryer"
+    },
+    {
+      "category": "浴霸",
+      "service_type_name": "bath-heater",
+      "kind": "prop",
+      "type_name": "stop-working"
+    },
+    {
+      "category": "浴霸",
+      "service_type_name": "bath-heater",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "浴霸",
+      "service_type_name": "fan-control",
+      "kind": "prop",
+      "type_name": "horizontal-swing"
+    },
+    {
+      "category": "浴霸",
+      "service_type_name": "fan-control",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "凉霸",
+      "service_type_name": "ceiling-fan",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "凉霸",
+      "service_type_name": "ceiling-fan",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "凉霸",
+      "service_type_name": "ceiling-fan",
+      "kind": "prop",
+      "type_name": "vertical-swing"
+    },
+    {
+      "category": "凉霸",
+      "service_type_name": "ceiling-fan",
+      "kind": "prop",
+      "type_name": "horizontal-swing"
+    },
+    {
+      "category": "加湿器",
+      "service_type_name": "humidifier",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "加湿器",
+      "service_type_name": "humidifier",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "加湿器",
+      "service_type_name": "humidifier",
+      "kind": "prop",
+      "type_name": "stepless-fan-level"
+    },
+    {
+      "category": "加湿器",
+      "service_type_name": "humidifier",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "加湿器",
+      "service_type_name": "humidifier",
+      "kind": "prop",
+      "type_name": "target-humidity"
+    },
+    {
+      "category": "香薰机",
+      "service_type_name": "diffuser",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "香薰机",
+      "service_type_name": "diffuser",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "香薰机",
+      "service_type_name": "diffuser",
+      "kind": "prop",
+      "type_name": "target-humidity"
+    },
+    {
+      "category": "香薰机",
+      "service_type_name": "diffuser",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "香薰机",
+      "service_type_name": "diffuser",
+      "kind": "prop",
+      "type_name": "anion"
+    },
+    {
+      "category": "除湿机",
+      "service_type_name": "dehumidifier",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "除湿机",
+      "service_type_name": "dehumidifier",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "除湿机",
+      "service_type_name": "dehumidifier",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "除湿机",
+      "service_type_name": "dehumidifier",
+      "kind": "prop",
+      "type_name": "target-humidity"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "start-sweep"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "pause-sweeping"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "start-vacuum-room-sweep"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "start-room-sweep"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "start-dust-arrest"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "start-mop-wash"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "start-dry"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "stop-dry"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "mop-water-output-level"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "start-eject"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "start-call-clean"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "prop",
+      "type_name": "sweep-mop-type"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "start-build-map"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "pause-build-map"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "continue-build-map"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "action",
+      "type_name": "stop-build-map-and-gocharge"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "vacuum",
+      "kind": "prop",
+      "type_name": "suction-level"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "battery",
+      "kind": "prop",
+      "type_name": "battery-level"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "battery",
+      "kind": "action",
+      "type_name": "start-charge"
+    },
+    {
+      "category": "蓝牙温湿度传感器",
+      "service_type_name": "temperature-humidity-sensor",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "蓝牙温湿度传感器",
+      "service_type_name": "temperature-humidity-sensor",
+      "kind": "prop",
+      "type_name": "relative-humidity"
+    },
+    {
+      "category": "电暖器/暖风机/电暖风",
+      "service_type_name": "heater",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "电暖器/暖风机/电暖风",
+      "service_type_name": "heater",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "电暖器/暖风机/电暖风",
+      "service_type_name": "heater",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "电暖器/暖风机/电暖风",
+      "service_type_name": "heater",
+      "kind": "prop",
+      "type_name": "heat"
+    },
+    {
+      "category": "电暖器/暖风机/电暖风",
+      "service_type_name": "heater",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "电热毯",
+      "service_type_name": "electric-blanket",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "电热毯",
+      "service_type_name": "electric-blanket",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "净水器",
+      "service_type_name": "water-purifier",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "净水器",
+      "service_type_name": "water-purifier",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "净水器",
+      "service_type_name": "tds-sensor",
+      "kind": "prop",
+      "type_name": "tds-in"
+    },
+    {
+      "category": "净水器",
+      "service_type_name": "tds-sensor",
+      "kind": "prop",
+      "type_name": "tds-out"
+    },
+    {
+      "category": "净水器",
+      "service_type_name": "filter",
+      "kind": "prop",
+      "type_name": "filter-left-time"
+    },
+    {
+      "category": "热水器",
+      "service_type_name": "water-heater",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "热水器",
+      "service_type_name": "water-heater",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "热水器",
+      "service_type_name": "water-heater",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "热水器",
+      "service_type_name": "water-heater",
+      "kind": "prop",
+      "type_name": "eco"
+    },
+    {
+      "category": "热水器",
+      "service_type_name": "water-heater",
+      "kind": "prop",
+      "type_name": "hot-water-recirculation"
+    },
+    {
+      "category": "油烟机",
+      "service_type_name": "hood",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "油烟机",
+      "service_type_name": "hood",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "heater"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "eco"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "dryer"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "sleep-mode"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "soft-wind"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "un-straight-blowing"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "air-conditioner",
+      "kind": "prop",
+      "type_name": "uv"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "environment",
+      "kind": "prop",
+      "type_name": "pm2.5-density"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "fan-control",
+      "kind": "prop",
+      "type_name": "vertical-swing"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "fan-control",
+      "kind": "prop",
+      "type_name": "vertical-position"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "fan-control",
+      "kind": "prop",
+      "type_name": "horizontal-position"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "ir-aircondition-control",
+      "kind": "action",
+      "type_name": "fan-speed-up"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "ir-aircondition-control",
+      "kind": "action",
+      "type_name": "fan-speed-down"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "ir-aircondition-control",
+      "kind": "action",
+      "type_name": "temperature-up"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "ir-aircondition-control",
+      "kind": "action",
+      "type_name": "temperature-down"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "ir-aircondition-control",
+      "kind": "action",
+      "type_name": "turn-on"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "ir-aircondition-control",
+      "kind": "action",
+      "type_name": "turn-off"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "ir-aircondition-control",
+      "kind": "prop",
+      "type_name": "ir-mode"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "ir-aircondition-control",
+      "kind": "prop",
+      "type_name": "ir-temperature"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "action",
+      "type_name": "start-wash"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "action",
+      "type_name": "pause"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "rinsh-times"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "drying-time"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "door-state"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "stop-wash"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "washer",
+      "kind": "prop",
+      "type_name": "spin-speed"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "detergent-management",
+      "kind": "prop",
+      "type_name": "detergent-self-delivery"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "detergent-management",
+      "kind": "prop",
+      "type_name": "detergent-left-level"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "fabric-softener-management",
+      "kind": "prop",
+      "type_name": "fabric-softener-self-delivery"
+    },
+    {
+      "category": "洗衣机",
+      "service_type_name": "fabric-softener-management",
+      "kind": "prop",
+      "type_name": "fabric-softener-left-level"
+    },
+    {
+      "category": "洗碗机",
+      "service_type_name": "dishwasher",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "洗碗机",
+      "service_type_name": "dishwasher",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "洗碗机",
+      "service_type_name": "dishwasher",
+      "kind": "action",
+      "type_name": "start-wash"
+    },
+    {
+      "category": "洗碗机",
+      "service_type_name": "dishwasher",
+      "kind": "action",
+      "type_name": "pause"
+    },
+    {
+      "category": "洗碗机",
+      "service_type_name": "dishwasher",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "洗碗机",
+      "service_type_name": "dishwasher",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "洗碗机",
+      "service_type_name": "dishwasher",
+      "kind": "action",
+      "type_name": "stop-washing"
+    },
+    {
+      "category": "冰箱",
+      "service_type_name": "fridge",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "冰箱",
+      "service_type_name": "fridge",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "冰箱",
+      "service_type_name": "fridge-chamber",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "冰箱",
+      "service_type_name": "fridge-chamber",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "massage",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "massage",
+      "kind": "action",
+      "type_name": "stop-massage"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "massage",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "massage",
+      "kind": "prop",
+      "type_name": "heating"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "massage",
+      "kind": "prop",
+      "type_name": "foot-roller-switch"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "massage",
+      "kind": "prop",
+      "type_name": "all-airbag-switch"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "massage",
+      "kind": "prop",
+      "type_name": "massage-strength"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "action",
+      "kind": "prop",
+      "type_name": "pause"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "action",
+      "kind": "prop",
+      "type_name": "resume"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "backrest-control",
+      "kind": "prop",
+      "type_name": "backrest-angle"
+    },
+    {
+      "category": "按摩椅",
+      "service_type_name": "backrest-control",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "走步机",
+      "service_type_name": "walking-pad",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "走步机",
+      "service_type_name": "walking-pad",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "走步机",
+      "service_type_name": "walking-pad",
+      "kind": "prop",
+      "type_name": "speed-level"
+    },
+    {
+      "category": "走步机",
+      "service_type_name": "walking-pad",
+      "kind": "action",
+      "type_name": "stop-working"
+    },
+    {
+      "category": "电饭煲",
+      "service_type_name": "cooker",
+      "kind": "action",
+      "type_name": "start-cook"
+    },
+    {
+      "category": "电饭煲",
+      "service_type_name": "cooker",
+      "kind": "action",
+      "type_name": "cancel-cooking"
+    },
+    {
+      "category": "电饭煲",
+      "service_type_name": "cooker",
+      "kind": "prop",
+      "type_name": "cook-time"
+    },
+    {
+      "category": "电饭煲",
+      "service_type_name": "cooker",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "电饭煲",
+      "service_type_name": "cooker",
+      "kind": "prop",
+      "type_name": "cook-mode"
+    },
+    {
+      "category": "热水壶",
+      "service_type_name": "kettle",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "热水壶",
+      "service_type_name": "kettle",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "饮水机/净饮机",
+      "service_type_name": "water-dispenser",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "饮水机/净饮机",
+      "service_type_name": "water-dispenser",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "饮水机/净饮机",
+      "service_type_name": "filter",
+      "kind": "prop",
+      "type_name": "filter-life-time"
+    },
+    {
+      "category": "微波炉",
+      "service_type_name": "microwave-oven",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "television",
+      "kind": "action",
+      "type_name": "turn-on"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "television",
+      "kind": "action",
+      "type_name": "turn-off"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "television",
+      "kind": "prop",
+      "type_name": "input-control"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "television",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "television",
+      "kind": "prop",
+      "type_name": "brightness"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "television",
+      "kind": "prop",
+      "type_name": "sleep-mode"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "television",
+      "kind": "action",
+      "type_name": "channel-up"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "television",
+      "kind": "action",
+      "type_name": "channel-down"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "speaker",
+      "kind": "prop",
+      "type_name": "volume"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "speaker",
+      "kind": "prop",
+      "type_name": "mute"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "play-control",
+      "kind": "action",
+      "type_name": "play"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "play-control",
+      "kind": "action",
+      "type_name": "pause"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "message-router",
+      "kind": "prop",
+      "type_name": "request"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "message-router",
+      "kind": "prop",
+      "type_name": "response"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "message-router",
+      "kind": "action",
+      "type_name": "post"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "prop",
+      "type_name": "channel-number"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "prop",
+      "type_name": "channel-name"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "turn-on"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "turn-off"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "volume-up"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "volume-down"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "mute-on"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "mute-off"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "channel-up"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "channel-down"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "set-channel-number"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "set-channel-name"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "play"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "pause"
+    },
+    {
+      "category": "电视",
+      "service_type_name": "ir-tv-control",
+      "kind": "action",
+      "type_name": "stop"
+    },
+    {
+      "category": "投影仪",
+      "service_type_name": "projector",
+      "kind": "action",
+      "type_name": "turn-on"
+    },
+    {
+      "category": "投影仪",
+      "service_type_name": "projector",
+      "kind": "action",
+      "type_name": "turn-off"
+    },
+    {
+      "category": "投影仪",
+      "service_type_name": "projector",
+      "kind": "prop",
+      "type_name": "input-control"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "tv-box",
+      "kind": "action",
+      "type_name": "turn-on"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "tv-box",
+      "kind": "action",
+      "type_name": "turn-off"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "tv-box",
+      "kind": "action",
+      "type_name": "channel-up"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "tv-box",
+      "kind": "action",
+      "type_name": "channel-down"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "play-control",
+      "kind": "action",
+      "type_name": "stop"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "play-control",
+      "kind": "action",
+      "type_name": "previous"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "play-control",
+      "kind": "action",
+      "type_name": "next"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "turn-on"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "turn-off"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "volume-up"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "volume-down"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "mute-on"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "mute-off"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "channel-up"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "channel-down"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "prop",
+      "type_name": "channel-number"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "set-channel-number"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "play"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "pause"
+    },
+    {
+      "category": "电视盒子",
+      "service_type_name": "ir-box-control",
+      "kind": "action",
+      "type_name": "stop"
+    },
+    {
+      "category": "分体电视",
+      "service_type_name": "split-tv",
+      "kind": "prop",
+      "type_name": "brightness"
+    },
+    {
+      "category": "分体电视",
+      "service_type_name": "split-tv",
+      "kind": "prop",
+      "type_name": "input-control"
+    },
+    {
+      "category": "分体电视",
+      "service_type_name": "split-tv",
+      "kind": "prop",
+      "type_name": "channel-control"
+    },
+    {
+      "category": "分体电视",
+      "service_type_name": "split-tv",
+      "kind": "action",
+      "type_name": "turn-on"
+    },
+    {
+      "category": "分体电视",
+      "service_type_name": "split-tv",
+      "kind": "action",
+      "type_name": "turn-off"
+    },
+    {
+      "category": "分体电视",
+      "service_type_name": "split-tv",
+      "kind": "action",
+      "type_name": "channel-up"
+    },
+    {
+      "category": "分体电视",
+      "service_type_name": "split-tv",
+      "kind": "action",
+      "type_name": "channel-down"
+    },
+    {
+      "category": "可视门铃",
+      "service_type_name": "p2p-stream",
+      "kind": "action",
+      "type_name": "start-p2p-stream"
+    },
+    {
+      "category": "可视门铃",
+      "service_type_name": "p2p-stream",
+      "kind": "action",
+      "type_name": "stop-stream"
+    },
+    {
+      "category": "摄像头",
+      "service_type_name": "camera",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "摄像头",
+      "service_type_name": "camera",
+      "kind": "prop",
+      "type_name": "zoom-in"
+    },
+    {
+      "category": "摄像头",
+      "service_type_name": "camera",
+      "kind": "prop",
+      "type_name": "zoom-out"
+    },
+    {
+      "category": "摄像头",
+      "service_type_name": "camera",
+      "kind": "prop",
+      "type_name": "image-rollover"
+    },
+    {
+      "category": "摄像头",
+      "service_type_name": "camera",
+      "kind": "prop",
+      "type_name": "motion-detection"
+    },
+    {
+      "category": "摄像头",
+      "service_type_name": "camera",
+      "kind": "prop",
+      "type_name": "night-shot"
+    },
+    {
+      "category": "宠物饮水机",
+      "service_type_name": "pet-drinking-fountain",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "宠物饮水机",
+      "service_type_name": "pet-drinking-fountain",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "宠物喂食器",
+      "service_type_name": "pet-feeder",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "宠物喂食器",
+      "service_type_name": "pet-feeder",
+      "kind": "action",
+      "type_name": "pet-food-out"
+    },
+    {
+      "category": "智能床",
+      "service_type_name": "bed",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "智能床",
+      "service_type_name": "bed",
+      "kind": "prop",
+      "type_name": "backrest-angle"
+    },
+    {
+      "category": "智能床",
+      "service_type_name": "bed",
+      "kind": "prop",
+      "type_name": "leg-rest-angle"
+    },
+    {
+      "category": "艾灸盒",
+      "service_type_name": "moxibustion",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "艾灸盒",
+      "service_type_name": "moxibustion",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "艾灸盒",
+      "service_type_name": "moxibustion",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "艾灸盒",
+      "service_type_name": "moxibustion",
+      "kind": "prop",
+      "type_name": "target-time"
+    },
+    {
+      "category": "开窗器",
+      "service_type_name": "motor-control",
+      "kind": "prop",
+      "type_name": "open"
+    },
+    {
+      "category": "开窗器",
+      "service_type_name": "motor-control",
+      "kind": "prop",
+      "type_name": "target-position"
+    },
+    {
+      "category": "按摩器",
+      "service_type_name": "massager",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "按摩器",
+      "service_type_name": "massager",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "集成灶",
+      "service_type_name": "fan-control",
+      "kind": "prop",
+      "type_name": "low"
+    },
+    {
+      "category": "集成灶",
+      "service_type_name": "fan-control",
+      "kind": "prop",
+      "type_name": "high"
+    },
+    {
+      "category": "电磁炉",
+      "service_type_name": "induction-cooker",
+      "kind": "action",
+      "type_name": "pause"
+    },
+    {
+      "category": "电磁炉",
+      "service_type_name": "induction-cooker",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "电磁炉",
+      "service_type_name": "right",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "电磁炉",
+      "service_type_name": "left",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "杀菌灯",
+      "service_type_name": "germicidal-lamp",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "杀菌灯",
+      "service_type_name": "germicidal-lamp",
+      "kind": "prop",
+      "type_name": "target-time"
+    },
+    {
+      "category": "温控器",
+      "service_type_name": "thermostat",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "温控器",
+      "service_type_name": "thermostat",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "温控器",
+      "service_type_name": "thermostat",
+      "kind": "prop",
+      "type_name": "fan-level"
+    },
+    {
+      "category": "温控器",
+      "service_type_name": "thermostat",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "灭蚊器",
+      "service_type_name": "mosquito-dispeller",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "灭蚊器",
+      "service_type_name": "mosquito-dispeller",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "灭蚊器",
+      "service_type_name": "repellent",
+      "kind": "prop",
+      "type_name": "repellent-left-level"
+    },
+    {
+      "category": "空气炸锅",
+      "service_type_name": "air-fryer",
+      "kind": "action",
+      "type_name": "start-cook"
+    },
+    {
+      "category": "空气炸锅",
+      "service_type_name": "air-fryer",
+      "kind": "action",
+      "type_name": "cancel-cooking"
+    },
+    {
+      "category": "空气炸锅",
+      "service_type_name": "air-fryer",
+      "kind": "action",
+      "type_name": "pause"
+    },
+    {
+      "category": "空气炸锅",
+      "service_type_name": "air-fryer",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "网关",
+      "service_type_name": "gateway",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "网关",
+      "service_type_name": "gateway",
+      "kind": "prop",
+      "type_name": "color"
+    },
+    {
+      "category": "花盆",
+      "service_type_name": "flowerpot",
+      "kind": "prop",
+      "type_name": "watering"
+    },
+    {
+      "category": "花盆",
+      "service_type_name": "plant-monitor",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "花盆",
+      "service_type_name": "plant-monitor",
+      "kind": "prop",
+      "type_name": "humidity"
+    },
+    {
+      "category": "花盆",
+      "service_type_name": "plant-monitor",
+      "kind": "prop",
+      "type_name": "illumination"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "fish-tank",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "fish-tank",
+      "kind": "prop",
+      "type_name": "water-pump"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "fish-tank",
+      "kind": "prop",
+      "type_name": "pump-flux"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "fish-tank",
+      "kind": "prop",
+      "type_name": "automatic-feeding"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "fish-tank",
+      "kind": "prop",
+      "type_name": "water-pump-status"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "fish-tank",
+      "kind": "prop",
+      "type_name": "wpet-food-out"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "fish-tank",
+      "kind": "prop",
+      "type_name": "no-disturb"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "fish-tank",
+      "kind": "prop",
+      "type_name": "temperature"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "fish-tank",
+      "kind": "prop",
+      "type_name": "brightness"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "indicator-light",
+      "kind": "prop",
+      "type_name": "toggle-light-mode"
+    },
+    {
+      "category": "养生壶",
+      "service_type_name": "health-pot",
+      "kind": "action",
+      "type_name": "cancel-cooking"
+    },
+    {
+      "category": "养生壶",
+      "service_type_name": "health-pot",
+      "kind": "prop",
+      "type_name": "cook-mode"
+    },
+    {
+      "category": "养生壶",
+      "service_type_name": "health-pot",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "垃圾桶",
+      "service_type_name": "garbage-can",
+      "kind": "prop",
+      "type_name": "target-lid-state"
+    },
+    {
+      "category": "垃圾桶",
+      "service_type_name": "garbage-can",
+      "kind": "prop",
+      "type_name": "physical-controls-locked"
+    },
+    {
+      "category": "垃圾桶",
+      "service_type_name": "garbage-can",
+      "kind": "action",
+      "type_name": "package"
+    },
+    {
+      "category": "垃圾桶",
+      "service_type_name": "garbage-can",
+      "kind": "prop",
+      "type_name": "battery-level"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "motor-control"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "foot-massage"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "constant-temperature-heating"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "target-time"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "sterilization-foot-bath"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "massage-strength"
+    },
+    {
+      "category": "足浴盆",
+      "service_type_name": "foot-bath",
+      "kind": "prop",
+      "type_name": "heat-level"
+    },
+    {
+      "category": "蒸烤箱",
+      "service_type_name": "oven",
+      "kind": "prop",
+      "type_name": "pause"
+    },
+    {
+      "category": "蒸烤箱",
+      "service_type_name": "oven",
+      "kind": "prop",
+      "type_name": "cook-mode"
+    },
+    {
+      "category": "蒸烤箱",
+      "service_type_name": "oven",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "蒸烤箱",
+      "service_type_name": "oven",
+      "kind": "prop",
+      "type_name": "target-temperature"
+    },
+    {
+      "category": "蒸烤箱",
+      "service_type_name": "oven",
+      "kind": "action",
+      "type_name": "start-cook"
+    },
+    {
+      "category": "蒸烤箱",
+      "service_type_name": "oven",
+      "kind": "action",
+      "type_name": "cancel-cooking"
+    },
+    {
+      "category": "蒸烤箱",
+      "service_type_name": "oven",
+      "kind": "prop",
+      "type_name": "cook-time"
+    },
+    {
+      "category": "蒸烤箱",
+      "service_type_name": "oven",
+      "kind": "prop",
+      "type_name": "filter-life-level"
+    },
+    {
+      "category": "烘干机",
+      "service_type_name": "dryer",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "烘干机",
+      "service_type_name": "dryer",
+      "kind": "prop",
+      "type_name": "start-drying"
+    },
+    {
+      "category": "烘干机",
+      "service_type_name": "dryer",
+      "kind": "prop",
+      "type_name": "pause"
+    },
+    {
+      "category": "烘干机",
+      "service_type_name": "dryer",
+      "kind": "prop",
+      "type_name": "physical-controls-locked"
+    },
+    {
+      "category": "烘干机",
+      "service_type_name": "dryer",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "烘干机",
+      "service_type_name": "dryer",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "跑步机",
+      "service_type_name": "treadmill",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "跑步机",
+      "service_type_name": "treadmill",
+      "kind": "prop",
+      "type_name": "start-work"
+    },
+    {
+      "category": "跑步机",
+      "service_type_name": "treadmill",
+      "kind": "prop",
+      "type_name": "pause"
+    },
+    {
+      "category": "跑步机",
+      "service_type_name": "treadmill",
+      "kind": "prop",
+      "type_name": "speed-level"
+    },
+    {
+      "category": "跑步机",
+      "service_type_name": "treadmill",
+      "kind": "prop",
+      "type_name": "current-step-count"
+    },
+    {
+      "category": "跑步机",
+      "service_type_name": "treadmill",
+      "kind": "prop",
+      "type_name": "current-calorie-consumption"
+    },
+    {
+      "category": "跑步机",
+      "service_type_name": "treadmill",
+      "kind": "prop",
+      "type_name": "working-time"
+    },
+    {
+      "category": "跑步机",
+      "service_type_name": "treadmill",
+      "kind": "prop",
+      "type_name": "current-distance"
+    },
+    {
+      "category": "压力锅",
+      "service_type_name": "pressure-cooker",
+      "kind": "prop",
+      "type_name": "start-cook"
+    },
+    {
+      "category": "压力锅",
+      "service_type_name": "pressure-cooker",
+      "kind": "prop",
+      "type_name": "cook-mode"
+    },
+    {
+      "category": "压力锅",
+      "service_type_name": "pressure-cooker",
+      "kind": "prop",
+      "type_name": "cancel-cooking"
+    },
+    {
+      "category": "压力锅",
+      "service_type_name": "pressure-cooker",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "果汁机/破壁料理机",
+      "service_type_name": "juicer",
+      "kind": "prop",
+      "type_name": "cancel-cooking"
+    },
+    {
+      "category": "果汁机/破壁料理机",
+      "service_type_name": "juicer",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "果汁机/破壁料理机",
+      "service_type_name": "juicer",
+      "kind": "prop",
+      "type_name": "cook-mode"
+    },
+    {
+      "category": "果汁机/破壁料理机",
+      "service_type_name": "juicer",
+      "kind": "action",
+      "type_name": "start-cook"
+    },
+    {
+      "category": "智能枕",
+      "service_type_name": "pillow",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "智能枕",
+      "service_type_name": "pillow",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "智能枕",
+      "service_type_name": "massager",
+      "kind": "prop",
+      "type_name": "heat-level"
+    },
+    {
+      "category": "空调伴侣",
+      "service_type_name": "air-condition-outlet",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "空调伴侣",
+      "service_type_name": "air-condition-outlet",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "干衣机",
+      "service_type_name": "clothes-dryer",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "干衣机",
+      "service_type_name": "clothes-dryer",
+      "kind": "prop",
+      "type_name": "mode"
+    },
+    {
+      "category": "擦地机",
+      "service_type_name": "mopping-machine",
+      "kind": "action",
+      "type_name": "fill-hot-water"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "prop",
+      "type_name": "channel-number"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "prop",
+      "type_name": "channel-name"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "turn-on"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "turn-off"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "volume-up"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "volume-down"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "mute-on"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "mute-off"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "channel-up"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "channel-down"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "play"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "pause"
+    },
+    {
+      "category": "机顶盒",
+      "service_type_name": "ir-stb-control",
+      "kind": "action",
+      "type_name": "stop"
+    },
+    {
+      "category": "猫砂盆",
+      "service_type_name": "cat-toilet",
+      "kind": "action",
+      "type_name": "start-clean"
+    },
+    {
+      "category": "猫砂盆",
+      "service_type_name": "cat-toilet",
+      "kind": "prop",
+      "type_name": "usage-count"
+    },
+    {
+      "category": "猫砂盆",
+      "service_type_name": "deodorant",
+      "kind": "prop",
+      "type_name": "deodorant-left-time"
+    },
+    {
+      "category": "猫砂盆",
+      "service_type_name": "cat-litter",
+      "kind": "prop",
+      "type_name": "cat-litter-left-level"
+    },
+    {
+      "category": "控制面板",
+      "service_type_name": "controller-panel",
+      "kind": "prop",
+      "type_name": "on"
+    },
+    {
+      "category": "路由器",
+      "service_type_name": "controller-panel",
+      "kind": "prop",
+      "type_name": "download-speed"
+    },
+    {
+      "category": "路由器",
+      "service_type_name": "controller-panel",
+      "kind": "prop",
+      "type_name": "upload-speed"
+    },
+    {
+      "category": "扫地机器人",
+      "service_type_name": "identify",
+      "kind": "action",
+      "type_name": "identify"
+    },
+    {
+      "category": "空调",
+      "service_type_name": "environment",
+      "kind": "prop",
+      "type_name": "pm2"
+    },
+    {
+      "category": "开窗器",
+      "service_type_name": "motor-control",
+      "kind": "prop",
+      "type_name": "close"
+    },
+    {
+      "category": "开窗器",
+      "service_type_name": "motor-control",
+      "kind": "prop",
+      "type_name": "pause"
+    },
+    {
+      "category": "按摩器",
+      "service_type_name": "massager",
+      "kind": "prop",
+      "type_name": "massager"
+    },
+    {
+      "category": "网关",
+      "service_type_name": "gateway",
+      "kind": "prop",
+      "type_name": "brightness"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "ambient-light",
+      "kind": "prop",
+      "type_name": "brightness"
+    },
+    {
+      "category": "鱼缸",
+      "service_type_name": "light",
+      "kind": "prop",
+      "type_name": "toggle-light-mode"
+    },
+    {
+      "category": "摄像机灯",
+      "service_type_name": "p2p-stream",
+      "kind": "prop",
+      "type_name": "start"
+    },
+    {
+      "category": "摄像机灯",
+      "service_type_name": "p2p-stream",
+      "kind": "prop",
+      "type_name": "stop"
+    },
+    {
+      "category": "多功能料理锅",
+      "service_type_name": "multifunction-cooking-pot",
+      "kind": "prop",
+      "type_name": "left-time"
+    },
+    {
+      "category": "多功能料理锅",
+      "service_type_name": "multifunction-cooking-pot",
+      "kind": "prop",
+      "type_name": "heat-level"
+    },
+    {
+      "category": "多功能料理锅",
+      "service_type_name": "multifunction-cooking-pot",
+      "kind": "prop",
+      "type_name": "cancel-cooking"
+    },
+    {
+      "category": "多功能料理锅",
+      "service_type_name": "multifunction-cooking-pot",
+      "kind": "prop",
+      "type_name": "pause"
+    }
+  ]
+}

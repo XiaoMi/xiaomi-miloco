@@ -168,6 +168,11 @@ _SCHEMA_PATHS: dict[str, tuple[type, Any, str]] = {
         "多模态模型服务 Base URL",
     ),
     "model.omni.api_key": (str, "", "多模态模型 API Key"),
+    "iot_observation.enabled": (
+        bool,
+        False,
+        "是否启用家庭知识 Observe 的 IoT 事实旁路；仅写独立证据账本，不晋升档案或执行动作",
+    ),
     "scheduler.enabled": (
         bool,
         True,

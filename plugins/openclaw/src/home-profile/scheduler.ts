@@ -49,7 +49,7 @@ const kCronTasks = [
       kind: "agentTurn",
       lightContext: true,
       message: `执行 home-dreaming 流程。依次完成以下步骤：
-1. **Observe** — 加载 miloco-home-observe skill，从感知/交互记忆中提取新知识写入候选区
+1. **Observe** — 加载 miloco-home-observe skill，先独立处理 IoT 旁路（只描述共性/差异，可无发现，不写档案），再从感知/交互记忆中提取新知识写入候选区；旁路失败不阻断后续步骤
 2. **Promote** — 加载 miloco-home-promote skill，将候选区中达到条件的知识提升到正式档案
 3. **Prune** — 加载 miloco-home-prune skill，统一主体命名、清理过期数据、提交持久化
 

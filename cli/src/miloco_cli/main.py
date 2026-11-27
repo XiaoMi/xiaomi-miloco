@@ -27,6 +27,7 @@ from miloco_cli.commands.home_profile import home_profile_group
 from miloco_cli.commands.identity import identity_group
 from miloco_cli.commands.monitor import monitor_group
 from miloco_cli.commands.notify import notify_group
+from miloco_cli.commands.observe import observe_group
 from miloco_cli.commands.perceive import perceive_group
 from miloco_cli.commands.person import person_group
 from miloco_cli.commands.pet import pet_group
@@ -94,6 +95,7 @@ cli.add_command(service_group)
 cli.add_command(config_group)
 cli.add_command(debug_group)
 cli.add_command(notify_group)
+cli.add_command(observe_group)
 cli.add_command(scope_group)
 cli.add_command(state_group)
 cli.add_command(doctor_cmd)

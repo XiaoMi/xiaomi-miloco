@@ -43,6 +43,25 @@ database:
   check_same_thread: false   # 是否强制单线程访问
   isolation_level: null      # 事务隔离级别；null 表示默认
 
+# IoT Observe 旁路（默认关闭；只写独立证据账本，不晋升档案或执行动作）
+iot_observation:
+  enabled: false
+  timeout_seconds: 5.0
+  queue_size: 4096
+  max_changes: 200000
+  max_coverage: 100000
+  max_attributes: 4096
+  soft_bytes: 134217728
+  hard_bytes: 167772160
+  retention_days: 28
+  timezone: "Asia/Shanghai"
+  batch_events: 48
+  batch_bytes: 12288
+  max_observations: 128
+  max_evidence: 8192
+  accumulated_days: 3
+  review_days: 7
+
 # FastAPI 应用元信息
 app:
   title: "Miloco backend"
