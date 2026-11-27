@@ -11,6 +11,7 @@ import type { BackendPropSpec, TaskDeviceMeta } from "./real";
 import { apiFetch } from "./client";
 import { decodeGraphResponse } from "@/lib/graphDecode";
 import type {
+  ActionExecutionMode,
   ActivityEvent,
   Device,
   EventCropMeta,
@@ -308,6 +309,14 @@ export async function updateTaskDescription(
   description: string,
 ): Promise<void> {
   return impl.realUpdateTaskDescription(taskId, description);
+}
+
+// 改某个动作槽的执行方式；进入 / 退出 / 达标各自独立。
+export async function updateTaskExecutionModes(
+  taskId: string,
+  modes: Partial<Record<"enter" | "exit" | "target", ActionExecutionMode>>,
+): Promise<void> {
+  return impl.realUpdateTaskExecutionModes(taskId, modes);
 }
 
 // 改驱动规则的触发条件文本（任务详情里就地编辑）。

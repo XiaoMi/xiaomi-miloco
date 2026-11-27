@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 # 步进跑到此值。历史基线 v1 (cron 挪出 task_link + rule 加 FK CASCADE 前)。
 # v4 = task 运行态重构的 expand-contract 阶段 A (只加列, 阶段 B 才删列)。
 # v5 = on-demand 日志持久化视觉 artifact 元数据。
-_DB_SCHEMA_VERSION = 5
+# v6 = task 每个静态动作槽自己的执行方式 (全串行 / 按设备并发、设备内有序)。
+_DB_SCHEMA_VERSION = 6
 
 
 def incremental_vacuum(
@@ -604,6 +605,9 @@ class SQLiteConnector:
                 created_at  INTEGER NOT NULL,
                 lifecycle   TEXT NOT NULL DEFAULT 'permanent',
                 expires_at  INTEGER,
+                on_enter_execution_mode  TEXT NOT NULL DEFAULT 'sequential',
+                on_exit_execution_mode   TEXT NOT NULL DEFAULT 'sequential',
+                on_target_execution_mode TEXT NOT NULL DEFAULT 'sequential',
                 on_enter_actions  TEXT NOT NULL DEFAULT '[]',
                 on_enter_desc     TEXT,
                 on_exit_actions   TEXT NOT NULL DEFAULT '[]',
@@ -1318,6 +1322,12 @@ def _table_columns(cursor: sqlite3.Cursor, table: str) -> set[str]:
 # 每级取该级迁移真正新加的列。判定从高到低, 全中即认这一级。新增迁移必须在这里
 # 补一行, 否则形状兜底那条路会把新库判成上一级、把该级迁移再跑一遍。
 _SCHEMA_VERSION_MARKERS: tuple[tuple[int, tuple[tuple[str, str], ...]], ...] = (
+    # 三列一起中才算 v6：半迁库（只加了一列）要退回 v5 让迁移补齐。
+    (6, (
+        ("task", "on_enter_execution_mode"),
+        ("task", "on_exit_execution_mode"),
+        ("task", "on_target_execution_mode"),
+    )),
     (5, (
         ("on_demand_log", "visual_artifact_kind"),
         ("on_demand_log", "image_frame_counts"),
@@ -1934,12 +1944,33 @@ def _migrate_v4_to_v5(conn: sqlite3.Connection) -> None:
         raise
 
 
+_V6_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("on_enter_execution_mode", "TEXT NOT NULL DEFAULT 'sequential'"),
+    ("on_exit_execution_mode", "TEXT NOT NULL DEFAULT 'sequential'"),
+    ("on_target_execution_mode", "TEXT NOT NULL DEFAULT 'sequential'"),
+)
+
+
+def _migrate_v5_to_v6(conn: sqlite3.Connection) -> None:
+    """v5 → v6: 每个静态动作槽自己的执行方式（默认串行，老库行为不变）。"""
+    cursor = conn.cursor()
+    try:
+        added = _add_columns_if_missing(cursor, "task", _V6_TASK_COLUMNS)
+        cursor.execute("PRAGMA user_version = 6")
+        conn.commit()
+        logger.info("v5→v6 migration done: added=%s", added)
+    except Exception:
+        conn.rollback()
+        raise
+
+
 # schema 步进迁移登记表
 _SCHEMA_MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     2: _migrate_v1_to_v2,
     3: _migrate_v2_to_v3,
     4: _migrate_v3_to_v4,
     5: _migrate_v4_to_v5,
+    6: _migrate_v5_to_v6,
 }
 
 

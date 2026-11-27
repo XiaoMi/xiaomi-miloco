@@ -43,8 +43,11 @@ def _load_actions(raw: str | None) -> list[dict[str, Any]]:
 
 
 def _boundary_actions_of(row: Any) -> dict[str, Any]:
-    """把一行 task 的六个动作列拼成动作槽。行里必须已经 SELECT 过这几列。"""
+    """把一行 task 的动作列拼成动作槽。行里必须已经 SELECT 过这几列。"""
     return {
+        "on_enter_execution_mode": row["on_enter_execution_mode"] or "sequential",
+        "on_exit_execution_mode": row["on_exit_execution_mode"] or "sequential",
+        "on_target_execution_mode": row["on_target_execution_mode"] or "sequential",
         "on_enter_actions": _load_actions(row["on_enter_actions"]),
         "on_enter_desc": row["on_enter_desc"],
         "on_exit_actions": _load_actions(row["on_exit_actions"]),
@@ -112,8 +115,9 @@ class TaskRepo:
         with self.db.get_connection() as conn:
             task_row = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at, lifecycle, "
-                "expires_at, on_enter_actions, on_enter_desc, on_exit_actions, "
-                "on_exit_desc, on_target_actions, on_target_desc "
+                "expires_at, on_enter_execution_mode, on_exit_execution_mode, "
+                "on_target_execution_mode, on_enter_actions, on_enter_desc, "
+                "on_exit_actions, on_exit_desc, on_target_actions, on_target_desc "
                 "FROM task WHERE task_id=?",
                 (task_id,),
             ).fetchone()
@@ -146,9 +150,10 @@ class TaskRepo:
         with self.db.get_connection() as conn:
             tasks = conn.execute(
                 "SELECT task_id, description, status, paused_at, created_at, "
-                "lifecycle, expires_at, on_enter_actions, on_enter_desc, "
-                "on_exit_actions, on_exit_desc, on_target_actions, on_target_desc "
-                "FROM task ORDER BY created_at DESC"
+                "lifecycle, expires_at, on_enter_execution_mode, "
+                "on_exit_execution_mode, on_target_execution_mode, on_enter_actions, "
+                "on_enter_desc, on_exit_actions, on_exit_desc, on_target_actions, "
+                "on_target_desc FROM task ORDER BY created_at DESC"
             ).fetchall()
             all_crons = conn.execute(
                 "SELECT task_id, cron_id, dispatch_owner FROM cron "
@@ -187,9 +192,10 @@ class TaskRepo:
         """
         with self.db.get_connection() as conn:
             row = conn.execute(
-                "SELECT lifecycle, on_enter_actions, on_enter_desc, "
-                "on_exit_actions, on_exit_desc, on_target_actions, on_target_desc "
-                "FROM task WHERE task_id=?",
+                "SELECT lifecycle, on_enter_execution_mode, "
+                "on_exit_execution_mode, on_target_execution_mode, "
+                "on_enter_actions, on_enter_desc, on_exit_actions, on_exit_desc, "
+                "on_target_actions, on_target_desc FROM task WHERE task_id=?",
                 (task_id,),
             ).fetchone()
         if row is None:
@@ -203,6 +209,9 @@ class TaskRepo:
         传空串只会存空串。``*_actions`` 三列是 NOT NULL, 清空它们就是写空列表。
         """
         allowed = {
+            "on_enter_execution_mode",
+            "on_exit_execution_mode",
+            "on_target_execution_mode",
             "on_enter_actions",
             "on_enter_desc",
             "on_exit_actions",

@@ -709,6 +709,8 @@ session + duration record 三 desc 分工：
 
 同槽 action 与 desc 互斥；清空用 `--clear <槽名>`。达标动作按 §达标通知机制 装。
 
+静态动作默认每个槽全串行。用户要求多台设备同时响应、而同一台设备内的控制仍保持先后时，按槽加 `--on-enter-execution-mode parallel_by_device`（退出 / 达标同名 flag）：按设备分组并发，同组内仍按动作传入顺序执行。三个槽各自独立，进入配并发不会把退出也带成并发；恢复串行显式传 `sequential`。槽内出现场景动作时整槽回退串行。
+
 同方向 ≥2 条的装配顺序：`task create` → `task set-actions` → 逐条 `rule create`。
 
 ## Rule flag 映射

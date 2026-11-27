@@ -20,6 +20,10 @@ import type { Task, TaskRuleBrief } from "@/lib/types";
 const count = (haystack: string, needle: string): number =>
   haystack.split(needle).length - 1;
 
+// 只数可见文本节点；aria-label / title 里也会带同一句，不能当可见文案数。
+const countVisible = (haystack: string, text: string): number =>
+  count(haystack, `>${text}<`);
+
 function rule(over: Partial<TaskRuleBrief> & { ruleId: string }): TaskRuleBrief {
   return {
     name: `[t1] ${over.ruleId}`,
@@ -37,6 +41,33 @@ const CATALOG: ActionCatalog = {
   scenes: new Map(),
   ready: false,
   t: (key) => key,
+};
+
+/** 两台设备 + 一个场景：按设备分组的渲染要靠它翻出名字。 */
+const TWO_DEVICE_CATALOG: ActionCatalog = {
+  devices: new Map([
+    [
+      "d1",
+      {
+        did: "d1",
+        name: "小爱音箱",
+        room: "客厅",
+        spec: {},
+      },
+    ],
+    [
+      "d2",
+      {
+        did: "d2",
+        name: "客厅主灯",
+        room: "客厅",
+        spec: {},
+      },
+    ],
+  ]),
+  scenes: new Map([["scene-1", "回家"]]),
+  ready: true,
+  t: (key, opts) => String(i18n.t(key, opts as never)),
 };
 
 /** 带一台音箱的目录：动作行的设备名 / 能力名都靠它翻译。 */
@@ -81,6 +112,9 @@ function task(
     runtimeState: "on",
     ruleBriefs,
     actions: {
+      onEnterExecutionMode: "sequential",
+      onExitExecutionMode: "sequential",
+      onTargetExecutionMode: "sequential",
       onEnterDesc: null,
       onExitDesc: null,
       onTargetDesc: null,
@@ -305,6 +339,83 @@ describe("TaskDetailSheet · 动作行", () => {
     expect(html).toContain("「关灯」");
     // 英文 type_name 不该出现在界面上；did · iid 只留在 title 里排查用
     expect(html).not.toContain("play-text");
+  });
+});
+
+describe("TaskDetailSheet · 设备并发", () => {
+  it("进入并发按设备分组，退出顺序仍是平铺；两个槽的标识互不同步", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([rule({ ruleId: "e1" })], {
+          onEnterExecutionMode: "parallel_by_device",
+          onExitExecutionMode: "sequential",
+          onEnterActions: [
+            { did: "d1", iid: "prop.2.1", value: true },
+            { did: "d1", iid: "prop.3.1", value: 60 },
+            { did: "d2", iid: "prop.2.1", value: 4000 },
+          ],
+          onExitActions: [{ did: "d1", iid: "prop.2.1", value: false }],
+        })}
+        catalog={TWO_DEVICE_CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    // 进入槽是设备并发，退出槽是顺序执行；同一个 task 里可以并存
+    expect(countVisible(html, i18n.t("tasks.executionModeParallel"))).toBe(1);
+    expect(countVisible(html, i18n.t("tasks.executionModeSequential"))).toBe(1);
+    // 分组卡头：设备名 + 设备内动作数（同一台设备的两条动作不拆成两行）
+    expect(html).toContain("客厅主灯");
+    expect(html).toContain(i18n.t("tasks.deviceActionCount", { count: 2 }));
+    expect(html).toContain(i18n.t("tasks.deviceActionCount", { count: 1 }));
+  });
+
+  it("并发设备卡统一用品牌单色，不再按设备分色", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([rule({ ruleId: "e1" })], {
+          onEnterExecutionMode: "parallel_by_device",
+          onEnterActions: Array.from({ length: 5 }, (_, i) => ({
+            did: `dev-${i}`,
+            iid: "prop.2.1",
+            value: true,
+          })),
+        })}
+        catalog={CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    // 单色：五张设备卡同一条品牌边，序号同一种品牌色；不再出现设备色 token
+    expect(
+      count(html, "border-left-color:var(--color-brand-primary)"),
+    ).toBe(5);
+    expect(html).toContain("background-color:var(--color-brand-soft)");
+    expect(html).not.toContain("--action-dev-");
+  });
+
+  it("槽内含场景时整槽回退顺序，标识不再显示设备并发", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([rule({ ruleId: "e1" })], {
+          onEnterExecutionMode: "parallel_by_device",
+          onExitExecutionMode: "parallel_by_device",
+          onEnterActions: [
+            { did: "scene-1", iid: "scene" },
+            { did: "d1", iid: "prop.2.1", value: true },
+            { did: "d2", iid: "prop.2.1", value: true },
+          ],
+          onExitActions: [{ did: "d1", iid: "prop.2.1", value: false }],
+        })}
+        catalog={TWO_DEVICE_CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    // 进入槽被场景拖回顺序；退出槽只有一台设备，也没有并发标识
+    expect(countVisible(html, i18n.t("tasks.executionModeParallel"))).toBe(0);
+    expect(html).toContain(i18n.t("tasks.executionModeSceneFallback"));
+    expect(html).toContain(i18n.t("tasks.executionModeOneDeviceFallback"));
   });
 });
 

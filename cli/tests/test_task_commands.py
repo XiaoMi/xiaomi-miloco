@@ -299,3 +299,34 @@ def test_summary_pretty_flag(runner):
         result = runner.invoke(task_group, ["summary", "--pretty"])
         assert result.exit_code == 0
         assert '"task_id"' in result.output
+
+
+def test_set_actions_sends_only_the_slot_modes_that_were_given(runner):
+    with patch("miloco_cli.client.api_patch") as mock_patch:
+        mock_patch.return_value = {"code": 0, "message": "ok", "data": None}
+        result = runner.invoke(
+            task_group,
+            [
+                "set-actions",
+                "t1",
+                "--on-enter-execution-mode",
+                "parallel_by_device",
+                "--on-target-execution-mode",
+                "parallel_by_device",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        path, body = mock_patch.call_args.args
+        assert path == "/api/tasks/t1/actions"
+        assert body == {
+            "on_enter_execution_mode": "parallel_by_device",
+            "on_target_execution_mode": "parallel_by_device",
+        }
+
+
+def test_set_actions_rejects_an_unknown_execution_mode(runner):
+    result = runner.invoke(
+        task_group,
+        ["set-actions", "t1", "--on-exit-execution-mode", "parallel"],
+    )
+    assert result.exit_code != 0

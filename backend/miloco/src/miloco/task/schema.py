@@ -94,9 +94,19 @@ class TaskUpdateRequest(BaseModel):
     _check_expiry = field_validator("expires_at")(_validated_iso)
 
 
+# 每个静态动作槽自己的执行方式。sequential = 按配置顺序一条一条下发（旧行为，
+# 默认）；parallel_by_device = 同一设备的动作仍按配置顺序串行，不同设备之间并发。
+# 槽里只要有一处 scene，整槽回退 sequential：场景影响面跨设备且无法事先枚举，
+# 和设备动作并发会让「先开灯、再触发电影场景」这类顺序静默失效。
+ActionExecutionMode = Literal["sequential", "parallel_by_device"]
+
+
 class TaskBoundaryActions(BaseModel):
     """task 的边界动作槽。``*_actions`` 走设备直控, ``*_desc`` 走 Agent。"""
 
+    on_enter_execution_mode: ActionExecutionMode = "sequential"
+    on_exit_execution_mode: ActionExecutionMode = "sequential"
+    on_target_execution_mode: ActionExecutionMode = "sequential"
     on_enter_actions: list[dict[str, Any]] = Field(default_factory=list)
     on_enter_desc: str | None = None
     on_exit_actions: list[dict[str, Any]] = Field(default_factory=list)
@@ -108,10 +118,15 @@ class TaskBoundaryActions(BaseModel):
 class TaskActionsUpdateRequest(BaseModel):
     """``PATCH /tasks/{task_id}/actions`` 入参。
 
-    partial 语义: 只有出现在请求体里的槽才会被改, 显式传 ``null`` 表示清空该槽。
+    partial 语义: 只有出现在请求体里的字段才会被改, 显式传 ``null`` 表示清空该槽。
     "没传"和"传了 null"靠 ``model_fields_set`` 区分, 不能用默认值判断。
+    三个 ``*_execution_mode`` 是 NOT NULL 的枚举, 不接受 null —— 恢复顺序请显式
+    传 ``sequential``。
     """
 
+    on_enter_execution_mode: ActionExecutionMode | None = None
+    on_exit_execution_mode: ActionExecutionMode | None = None
+    on_target_execution_mode: ActionExecutionMode | None = None
     on_enter_actions: list[dict[str, Any]] | None = None
     on_enter_desc: str | None = None
     on_exit_actions: list[dict[str, Any]] | None = None

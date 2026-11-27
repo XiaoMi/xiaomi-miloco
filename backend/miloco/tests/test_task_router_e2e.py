@@ -289,3 +289,31 @@ def test_e2e_summary_empty(client):
     resp = client.get("/api/tasks/summary")
     assert resp.status_code == 200
     assert resp.json()["data"] == []
+
+
+def test_patch_actions_sets_each_slot_mode_independently(client):
+    _create_task(client, "t1")
+    r = client.patch(
+        "/api/tasks/t1/actions",
+        json={
+            "on_enter_execution_mode": "parallel_by_device",
+            "on_target_execution_mode": "parallel_by_device",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["code"] == 0
+
+    view = client.get("/api/tasks/t1").json()["data"]
+    assert view["actions"]["on_enter_execution_mode"] == "parallel_by_device"
+    # 没传的槽保持默认，不能跟着一起翻
+    assert view["actions"]["on_exit_execution_mode"] == "sequential"
+    assert view["actions"]["on_target_execution_mode"] == "parallel_by_device"
+
+
+def test_patch_actions_rejects_an_unknown_execution_mode(client):
+    _create_task(client, "t1")
+    r = client.patch(
+        "/api/tasks/t1/actions",
+        json={"on_exit_execution_mode": "parallel"},
+    )
+    assert r.status_code == 422

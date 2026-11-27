@@ -1066,9 +1066,16 @@ export interface TaskAction {
   cooldownMinutes?: number | null;
 }
 
+// 单个动作槽的执行方式：sequential=按配置顺序全串行；parallel_by_device=
+// 按设备并发、设备内保持顺序。三个槽各自独立，进入与退出不必一致。
+export type ActionExecutionMode = "sequential" | "parallel_by_device";
+
 // task 的三个动作槽。*_actions 是设备直控，*_desc 交给 Agent。
 // 原始动作必须原样带出来：抽屉要回答「哪个设备的哪个动作」，只有数量没法渲染。
 export interface TaskBoundaryActions {
+  onEnterExecutionMode: ActionExecutionMode;
+  onExitExecutionMode: ActionExecutionMode;
+  onTargetExecutionMode: ActionExecutionMode;
   onEnterDesc: string | null;
   onExitDesc: string | null;
   onTargetDesc: string | null;

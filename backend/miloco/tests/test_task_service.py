@@ -924,6 +924,9 @@ def test_full_view_exposes_every_action_slot(service):
 
     _mk_task(service)
     assert set(TaskRepo().get_full_view("t1")["actions"]) == {
+        "on_enter_execution_mode",
+        "on_exit_execution_mode",
+        "on_target_execution_mode",
         "on_enter_actions",
         "on_enter_desc",
         "on_exit_actions",
@@ -965,6 +968,51 @@ def test_set_actions_clears_a_slot_when_explicitly_null(service):
     view = service.get_full_view("t1")
     assert view.actions.on_enter_desc == "进"
     assert view.actions.on_exit_desc is None
+
+
+def test_set_actions_changes_each_slot_mode_independently(service):
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    _mk_task(service)
+    service.set_boundary_actions(
+        "t1",
+        TaskActionsUpdateRequest(
+            on_enter_execution_mode="parallel_by_device",
+            on_target_execution_mode="parallel_by_device",
+        ),
+    )
+    service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_exit_execution_mode="parallel_by_device")
+    )
+
+    view = service.get_full_view("t1")
+    assert view.actions.on_enter_execution_mode == "parallel_by_device"
+    assert view.actions.on_exit_execution_mode == "parallel_by_device"
+    assert view.actions.on_target_execution_mode == "parallel_by_device"
+
+    # 只改一个槽，不会把别的槽带回默认
+    service.set_boundary_actions(
+        "t1", TaskActionsUpdateRequest(on_enter_execution_mode="sequential")
+    )
+    view = service.get_full_view("t1")
+    assert view.actions.on_enter_execution_mode == "sequential"
+    assert view.actions.on_exit_execution_mode == "parallel_by_device"
+    assert view.actions.on_target_execution_mode == "parallel_by_device"
+
+
+def test_set_actions_rejects_null_execution_mode(service):
+    """枚举列 NOT NULL：null 不是"清空"，恢复顺序要显式传 sequential。"""
+    from miloco.middleware.exceptions import ValidationException
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    _mk_task(service)
+    with pytest.raises(ValidationException, match="on_exit_execution_mode"):
+        service.set_boundary_actions(
+            "t1", TaskActionsUpdateRequest(on_exit_execution_mode=None)
+        )
+    assert (
+        service.get_full_view("t1").actions.on_exit_execution_mode == "sequential"
+    )
 
 
 def test_set_actions_reports_missing_task(service):
