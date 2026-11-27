@@ -2,9 +2,11 @@
 
 import base64
 
+import pytest
 from miloco.perception.engine.omni import provider
 from miloco.perception.engine.omni.provider import (
     GeminiAdapter,
+    KimiAdapter,
     LocalMediaInfo,
     MiMoAdapter,
     OpenAICompatAdapter,
@@ -81,16 +83,66 @@ class TestGetAdapter:
     def test_gemini_case_insensitive(self):
         assert isinstance(get_adapter("Gemini-3-Pro"), GeminiAdapter)
 
+    def test_kimi(self):
+        assert isinstance(get_adapter("kimi-k2.6"), KimiAdapter)
+
+    def test_kimi_case_insensitive(self):
+        assert isinstance(get_adapter("Kimi-K2.6"), KimiAdapter)
     def test_openai_compat_family(self):
-        # MiMo / Qwen 都归 OpenAI 兼容族；Gemini 不是。
+        # MiMo / Qwen / Kimi 都归 OpenAI 兼容族；Gemini 不是。
         assert isinstance(get_adapter("mimo-v2.6-flash"), OpenAICompatAdapter)
         assert isinstance(get_adapter("qwen3.5-omni-flash"), OpenAICompatAdapter)
+        assert isinstance(get_adapter("kimi-k2.6"), OpenAICompatAdapter)
         assert not isinstance(get_adapter("gemini-3-flash-preview"), OpenAICompatAdapter)
 
     def test_singleton(self):
         assert get_adapter("mimo-v2.6-flash") is get_adapter("mimo-v2.6-flash")
         assert get_adapter("qwen3.5-omni-flash") is get_adapter("qwen3.5-omni-plus")
         assert get_adapter("gemini-3-flash") is get_adapter("gemini-3-pro")
+        assert get_adapter("kimi-k2.6") is get_adapter("kimi-k2-turbo-preview")
+
+
+def test_fused_capability_error_avoids_duplicate_error_log(caplog):
+    """Fused cleanup re-raises capability rejection for pipeline classification."""
+    import asyncio
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from miloco.perception.engine.config import OmniConfig
+    from miloco.perception.engine.omni.omni import run_omni_fused
+    from miloco.perception.engine.types import OmniContext
+
+    deliver_fused_failure = AsyncMock()
+    identity_engine = SimpleNamespace(
+        library=SimpleNamespace(list_persons=lambda: []),
+        take_fused_pending=lambda: SimpleNamespace(
+            candidates=[object()], gallery_snapshot={}
+        ),
+        deliver_fused_failure=deliver_fused_failure,
+    )
+    capability_error = provider.OmniCapabilityError(
+        "Kimi does not support audio input"
+    )
+
+    caplog.set_level(logging.WARNING, logger="miloco.perception.engine.omni.omni")
+    with patch(
+        "miloco.perception.engine.omni.omni.build_fused_payload",
+        side_effect=capability_error,
+    ), pytest.raises(provider.OmniCapabilityError):
+        asyncio.run(
+            run_omni_fused(
+                [],
+                OmniContext(),
+                OmniConfig(model="kimi-k2.6"),
+                identity_engine,
+            )
+        )
+
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    deliver_fused_failure.assert_awaited_once_with(
+        "Kimi does not support audio input"
+    )
 
 
 class TestMiMoAdapter:
@@ -136,6 +188,149 @@ class TestMiMoAdapter:
         assert body["stream"] is True
         assert body["stream_options"] == {"include_usage": True}
         assert body["thinking"] == {"type": "disabled"}
+
+
+class TestKimiAdapter:
+    adapter = KimiAdapter()
+
+    def test_video_block_matches_moonshot_documented_shape(self):
+        block = self.adapter.build_video_block("AAAA", _VIDEO_MEDIA)
+        assert block == {
+            "type": "video_url",
+            "video_url": {"url": "data:video/mp4;base64,AAAA"},
+        }
+
+    def test_audio_block_is_rejected_before_request_assembly(self):
+        with pytest.raises(ValueError, match="Kimi.*does not support audio"):
+            self.adapter.build_audio_block("BBBB", _AUDIO_MEDIA)
+
+    def test_kimi_k2_6_omits_non_modifiable_sampling_parameters(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="kimi-k2.6",
+            max_tokens=512, temperature=0.1, top_p=1.0, stream=False,
+        )
+        assert "temperature" not in body
+        assert "top_p" not in body
+        assert body["thinking"] == {"type": "disabled"}
+
+    def test_other_kimi_models_passthrough_sampling(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="kimi-k2-turbo-preview",
+            max_tokens=512, temperature=0.1, top_p=0.9, stream=False,
+        )
+        assert body["temperature"] == 0.1
+        assert body["top_p"] == 0.9
+        assert "thinking" not in body
+
+    def test_stream_keeps_usage_options_and_disables_thinking(self):
+        body = self.adapter.build_request_body(
+            _MESSAGES, model="kimi-k2.6",
+            max_tokens=512, temperature=0.1, top_p=1.0, stream=True,
+        )
+        assert body["stream"] is True
+        assert body["stream_options"] == {"include_usage": True}
+        assert "temperature" not in body
+        assert "top_p" not in body
+        assert body["thinking"] == {"type": "disabled"}
+
+
+class TestKimiAdapterWireShape:
+    """感知主链路真实组包（``_build_messages`` → ``build_request_body``）的线格式断言。
+
+    上面的 ``TestKimiAdapter`` 只单测 block 构造，本类补上「block 进到messages 后、
+    最终发给 Moonshot 的那个 body 长什么样」这一段——block 单测过不代表组包后形状正确
+    （例如MiMo 私有fps 被带进 video_url.url、或 K2.6 未显式关闭思考）。
+
+    ⚠️ 能力边界：这些断言证明 **本仓组包逻辑** 产出预期形状（含 data URI 承载方式），
+    **不能证明 Moonshot 线上接受该形状**。后者需真实 Moonshot key + 真实视频/音频的
+    非 probe 请求，见 PR #575 描述「未验证项」。仓内无 mock 可替代该证据。
+    """
+
+    adapter = KimiAdapter()
+
+    def _wire_body(self, payload: dict) -> dict:
+        """走生产同款路径组包：payload → messages → request body。"""
+        from miloco.perception.engine.omni.omni_client import _build_messages
+
+        adapter = get_adapter(payload.get("model", "kimi-k2.6"))
+        messages = _build_messages(payload, adapter)
+        return adapter.build_request_body(
+            messages,
+            model=payload.get("model", "kimi-k2.6"),
+            max_tokens=512,
+            temperature=0.1,
+            top_p=1.0,
+            stream=False,
+        )
+
+    def test_fused_video_payload_data_uri_survives_assembly(self):
+        """视频窗口（video_base64 命中，audio 分支不进）——data URI 必须原样进 wire body。"""
+        body = self._wire_body({
+            "system_prompt": "你是助手",
+            "user_content": "看这段视频",
+            "video_base64": "VIDEOB64",
+            "audio_base64": "AUD",
+            "media_info": _VIDEO_MEDIA,
+            "crops": [],
+        })
+        content = body["messages"][1]["content"]
+        assert content[0] == {"type": "text", "text": "看这段视频"}
+        assert content[1] == {
+            "type": "video_url",
+            "video_url": {"url": "data:video/mp4;base64,VIDEOB64"},
+        }
+        # MiMo 私有字段不能顺着 group 漏进 Kimi 请求
+        assert "fps" not in content[1]
+        assert "media_resolution" not in content[1]
+        # audio_base64 与 video_base64 同时在场时走 video 分支（生产 elif 语义）
+        assert len(content) == 2
+        assert content[1]["type"] == "video_url"
+
+    def test_audio_only_payload_is_rejected_before_wire_body(self):
+        """纯音频窗口不能退化成 text-only，也不能生成 Moonshot 不支持的块。"""
+        with pytest.raises(ValueError, match="Kimi.*does not support audio"):
+            self._wire_body({
+                "system_prompt": "你是助手",
+                "user_content": "听这段音频",
+                "audio_base64": "AUD",
+                "media_info": _AUDIO_MEDIA,
+                "crops": [],
+            })
+
+    def test_wire_body_pairs_media_blocks_with_normalized_sampling(self):
+        """多模态与 K2.6 默认采样必须同时成立：媒体块就位且受管字段省略。"""
+        body = self._wire_body({
+            "system_prompt": "你是助手",
+            "user_content": "看这段视频",
+            "video_base64": "VIDEOB64",
+            "media_info": _VIDEO_MEDIA,
+            "crops": [],
+        })
+        assert "temperature" not in body
+        assert "top_p" not in body
+        assert body["thinking"] == {"type": "disabled"}
+        # 多模态走 OpenAI 兼容族 endpoint，不该被转成 Gemini 原生协议
+        assert "contents" not in body
+        assert body["messages"][1]["content"][1]["type"] == "video_url"
+
+    def test_mimo_media_blocks_absent_from_kimi_wire_body(self):
+        """反向对照：MiMo 私有扩展不得出现在 Kimi body 的任何 content block 里。
+
+        顺序按 ``_build_messages`` 生产语义：text → video/audio → crops（图片）。
+        """
+        body = self._wire_body({
+            "system_prompt": "你是助手",
+            "user_content": "看这段视频",
+            "video_base64": "VIDEOB64",
+            "media_info": _VIDEO_MEDIA,
+            "crops": [{"media_type": "image/png", "data": "IMG"}],
+        })
+        blocks = body["messages"][1]["content"][1:]
+        assert [b["type"] for b in blocks] == ["video_url", "image_url"]
+        for b in blocks:
+            assert "fps" not in b
+            assert "media_resolution" not in b
+        assert blocks[0]["video_url"]["url"].startswith("data:video/mp4;base64,")
 
 
 class TestQwenOmniAdapter:
