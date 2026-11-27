@@ -1157,11 +1157,8 @@ class RuleRunner:
         - No EXIT synthesis. The follow-up EXITED event must come from real
           perception; for state-mode rules this means on_exit / debounce will
           not fire just because you triggered.
-        - The ``source_did`` is picked per source so it lands on the same
-          OR key production uses. It still falls back to ``"manual"`` for an
-          omni rule with an empty device list; that key is never fed again, so
-          OR-aggregation keeps a state-mode rule stuck at ENTERED until the
-          runner is rebuilt (process restart).
+        - A synthetic manual source dispatches without updating the state
+          machine because perception cannot clear that source.
 
         Returns the execution result, or None when the rule is missing,
         disabled, or has an empty ENTER slot.
@@ -1178,6 +1175,11 @@ class RuleRunner:
 
         # Bridge: update state machine so future events diff correctly
         source_did = self._manual_source_did(rule)
+        if source_did == "manual":
+            # A synthetic source never receives a negative perception update.
+            return await self._fire(
+                rule, RuleEvent.ENTERED, [source_did], context, str(uuid.uuid4())
+            )
         src = self._ensure_source(rule_id, source_did)
         src.last_bool = True
         state = self._state[rule_id]
