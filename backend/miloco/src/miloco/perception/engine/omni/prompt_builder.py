@@ -635,11 +635,38 @@ def _assemble_fused_messages(
     return messages
 
 
-def _render_rule_conditions(context: OmniContext) -> str | None:
-    """渲染「# 待判断规则」段：每条 ``- <rule.name>：<query>``；无规则返回 None。
+_CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-    rule_name 是 ``[task_id] 描述`` 形式的完整名称（逐条 rule 唯一），模型在 matched_rules
-    里照抄它，response_parser 用 name→rule_id 映射还原回 UUID。sort by rule_id 求顺序确定。
+
+_CODE_CAPACITY = len(_CODE_ALPHABET) + len(_CODE_ALPHABET) ** 2
+
+
+def rule_code(index: int) -> str:
+    """规则代号：0→A、25→Z、26→AA、51→AZ、701→ZZ。
+
+    单个大写字母在这套模型的分词表里只占 1 个 token，两位字母同样是 1 个 token，
+    所以超过 26 条时扩到两位不额外收费。两位用尽即到容量上限（702 条），
+    再往上没有可用的短代号，显式报错而不是回绕或渲染超长代号。
+    """
+    if index >= _CODE_CAPACITY:
+        raise ValueError(f"rule_code 超出两位代号容量: index={index}")
+    if index < len(_CODE_ALPHABET):
+        return _CODE_ALPHABET[index]
+    index -= len(_CODE_ALPHABET)
+    return _CODE_ALPHABET[index // len(_CODE_ALPHABET)] + _CODE_ALPHABET[index % len(_CODE_ALPHABET)]
+
+
+def ordered_rule_conditions(context: OmniContext) -> list:
+    """本轮规则按 rule_id 排序——渲染与 name→id 映射必须用同一个顺序，否则代号对不上。"""
+    return sorted(context.rule_conditions, key=lambda x: x.rule_id)
+
+
+def _render_rule_conditions(context: OmniContext) -> str | None:
+    """渲染「# 待判断规则」段：每条 ``- <代号>：<rule.name>：<query>``；无规则返回 None。
+
+    同一份规则列表在提示词里出现两次：这里渲染成「代号：完整名：条件」，模型在
+    matched_rules 里只回代号（一个 token 顶掉整条规则名，约 20 个 token）。代号到
+    rule_id 的还原由 ``omni._rule_name_to_id`` 用**同一个排序**建立，改这里必须同步改那里。
 
     无规则时返回 None（整段不渲染）：此时 matched_rules 字段仍在 schema 里，「无规则段 →
     matched_rules 必须为空数组」的约束写在 field_registry 的 matched_rules spec 里（恒在
@@ -648,8 +675,8 @@ def _render_rule_conditions(context: OmniContext) -> str | None:
     if not context.rule_conditions:
         return None
     lines = [
-        f"- {rc.rule_name or f'[{rc.rule_id}]'}：{rc.query}"
-        for rc in sorted(context.rule_conditions, key=lambda x: x.rule_id)
+        f"- {rule_code(i)}：{rc.rule_name or f'[{rc.rule_id}]'}：{rc.query}"
+        for i, rc in enumerate(ordered_rule_conditions(context))
     ]
     return "# 待判断规则\n" + "\n".join(lines)
 

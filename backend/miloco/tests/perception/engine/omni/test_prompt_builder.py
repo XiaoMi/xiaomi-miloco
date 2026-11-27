@@ -16,6 +16,7 @@ from miloco.perception.engine.omni.prompt_builder import (
     build_stream_prompt,
     build_system_prompt,
     build_tier_c_verify_payload,
+    rule_code,
 )
 from miloco.perception.engine.types import (
     AudioAnalysis,
@@ -146,6 +147,27 @@ class TestBuildPrompt:
         payload = build_prompt(ep, ctx)
         assert "[help] 求救：用户呼救" in payload["user_content"]
         assert "允许证据" not in payload["user_content"]
+
+    def test_rule_section_uses_codes_in_rule_id_order(self):
+        """每条规则前加代号，按 rule_id 排序；与 _rule_name_to_id 的分配同序。"""
+        ep = _mock_edge_packet()
+        ctx = OmniContext(
+            rule_conditions=[
+                RuleCondition(rule_id="b", rule_name="[b] 乙规则", query="条件二"),
+                RuleCondition(rule_id="a", rule_name="[a] 甲规则", query="条件一"),
+            ],
+        )
+        payload = build_prompt(ep, ctx)
+        assert "- A：[a] 甲规则：条件一" in payload["user_content"]
+        assert "- B：[b] 乙规则：条件二" in payload["user_content"]
+
+        from miloco.perception.engine.omni.omni import _rule_name_to_id
+
+        mapping = _rule_name_to_id(ctx)
+        assert mapping["A"] == "a"
+        assert mapping["B"] == "b"
+        # 完整名仍可还原，兼容模型偶尔照抄旧格式
+        assert mapping["[a] 甲规则"] == "a"
 
     def test_empty_context(self):
         ep = _mock_edge_packet()
@@ -3788,3 +3810,18 @@ class TestPersonCropInject:
         )
         assert imgs[-1] == guide + 1, _dbg     # 引导语紧跟的那张，仍是 video 前最后一张
         assert self._note_idx(content) < guide, _dbg  # 人像注入整段在引导语之前
+
+
+class TestRuleCode:
+    """代号分配：A–Z → AA–ZZ，容量边界逐点钉住。"""
+
+    @pytest.mark.parametrize("index,expected", [
+        (0, "A"), (25, "Z"), (26, "AA"), (27, "AB"),
+        (51, "AZ"), (52, "BA"), (701, "ZZ"),
+    ])
+    def test_boundaries(self, index, expected):
+        assert rule_code(index) == expected
+
+    def test_over_capacity_rejected(self):
+        with pytest.raises(ValueError):
+            rule_code(702)
