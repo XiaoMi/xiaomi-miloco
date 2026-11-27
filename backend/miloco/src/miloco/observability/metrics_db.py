@@ -11,13 +11,14 @@ v5:action_ledger 补链路两列 phase / trigger_event_id,并把迁移前的老�
 phase='legacy'——「写在链路记录之前」与「确实没有触发源」必须能分开。
 v6:action_ledger 补 auth_state(下发当时的米家授权状态)——只看 success /
 result_code 分不清「设备真的没响应」与「当时授权已失效、根本没发」。
+v7:action_ledger 增加 detail JSON 列，容纳扩展观测数据。
 """
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _TRACES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS traces (
@@ -164,7 +165,8 @@ CREATE TABLE IF NOT EXISTS action_ledger (
   home_id       TEXT,
   auth_state    TEXT,
   phase         TEXT,
-  trigger_event_id TEXT
+  trigger_event_id TEXT,
+  detail        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_action_ledger_ts ON action_ledger(timestamp);
 CREATE INDEX IF NOT EXISTS idx_action_ledger_source_ts ON action_ledger(source, timestamp);
@@ -347,6 +349,13 @@ def _migrate_v6_action_auth_state(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE action_ledger ADD COLUMN auth_state TEXT")
 
 
+def _migrate_v7_action_detail(conn: sqlite3.Connection) -> None:
+    """v6 → v7:add an optional JSON detail column to action_ledger."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(action_ledger)")}
+    if "detail" not in cols:
+        conn.execute("ALTER TABLE action_ledger ADD COLUMN detail TEXT")
+
+
 # 步进迁移注册表:{target_version: fn}。fn 以 additive DDL 为主,须幂等
 # (v5 例外:另含一次老行回填,同样幂等)。
 _MIGRATIONS = {
@@ -355,4 +364,5 @@ _MIGRATIONS = {
     4: _migrate_v4_action_home,
     5: _migrate_v5_action_link,
     6: _migrate_v6_action_auth_state,
+    7: _migrate_v7_action_detail,
 }

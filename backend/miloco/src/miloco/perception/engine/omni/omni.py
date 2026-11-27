@@ -54,6 +54,10 @@ from miloco.perception.engine.omni.response_parser import (
     try_extract_speeches,
     try_extract_suggestions,
 )
+from miloco.perception.engine.omni.telemetry import (
+    OmniCallTelemetry,
+    publish_omni_telemetry,
+)
 from miloco.perception.engine.types import IdentityPacket, OmniContext, OmniOutput
 from miloco.perception.snapshot_context import push_omni_trace
 from miloco.perception.types import MatchedRule, Speech, Suggestion
@@ -327,6 +331,7 @@ async def _call_omni_messages(
     client = _get_fused_http_client(config.timeout)
     cb = get_omni_circuit_breaker()
     t0 = time.monotonic()
+    telemetry = OmniCallTelemetry(streaming=bool(forced_stream), started_at=t0)
     raw: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     short_circuited = False
@@ -335,6 +340,7 @@ async def _call_omni_messages(
         await cb.before_call()
         if not forced_stream:
             resp = await client.post(url, headers=headers, json=body)
+            telemetry.record_response(resp)
             classified = classify_response(resp)
             if classified is not None:
                 await cb.record_failure(classified)
@@ -358,7 +364,7 @@ async def _call_omni_messages(
             # classify + record_failure 后再抛,与非流路径行为对齐。
             try:
                 raw = await _collect_stream_response(
-                    client, url, headers, body, adapter
+                    client, url, headers, body, adapter, telemetry=telemetry
                 )
             except httpx.HTTPStatusError as e:
                 classified = classify_response(e.response)
@@ -407,19 +413,21 @@ async def _call_omni_messages(
         ) from e
     finally:
         latency_ms = 0.0 if short_circuited else (time.monotonic() - t0) * 1000
+        telemetry_data = telemetry.to_dict(duration_ms=latency_ms)
         push_omni_trace(
             request_messages=messages,
             response_raw=raw,
             latency_ms=latency_ms,
             error=error,
             model=config.model,
+            telemetry=telemetry_data,
             inference_params={
                 "temperature": config.temperature,
                 "top_p": config.top_p,
                 "max_tokens": config.max_completion_tokens,
             },
         )
-
+        publish_omni_telemetry(model=config.model, telemetry=telemetry_data)
 
 def _summarize_multimodal_payload(messages: list[dict]) -> str:
     """扫 fused messages, 输出每个多模态块 (image_url / video_url / input_audio)

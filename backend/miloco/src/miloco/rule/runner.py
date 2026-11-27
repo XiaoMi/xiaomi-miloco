@@ -2295,6 +2295,7 @@ class RuleRunner:
         import json as _json
 
         from miloco.miot.service import (
+            _action_timing_detail,
             _refusal_ledger_reason,
             _write_action_ledger,
         )
@@ -2310,6 +2311,8 @@ class RuleRunner:
         except Exception:
             _lvalue = None  # 参数不可序列化时不反噬规则执行
 
+        control_started_at: float | None = None
+        result_for_timing: object = None
         try:
             if is_prop:
                 params = [
@@ -2317,7 +2320,10 @@ class RuleRunner:
                         did=action.did, siid=siid, piid=p_a_id, value=action.value
                     )
                 ]
+                control_started_at = time.monotonic()
                 results = await self._miot_proxy.set_device_properties(params)
+                control_finished_at = time.monotonic()
+                result_for_timing = results
                 success, _lcode, _lmsg = _summarize_rule_result(results)
             else:
                 param = MIoTActionParam(
@@ -2326,7 +2332,10 @@ class RuleRunner:
                     aiid=p_a_id,
                     in_=action.params or [],
                 )
+                control_started_at = time.monotonic()
                 result = await self._miot_proxy.call_device_action(param)
+                control_finished_at = time.monotonic()
+                result_for_timing = result
                 success, _lcode, _lmsg = _summarize_rule_result(result)
             # 有实际结果时与 control_device 同口径(负码即失败,镜像 #394,msg 是失败码
             # 释义);空/不可判定返回按失败处理(见 _summarize_rule_result:未确认的执行
@@ -2339,6 +2348,9 @@ class RuleRunner:
                 value_json=_lvalue, result_code=_lcode, result_msg=_lmsg,
                 success=success, error=err, source="rule", source_id=rule_id,
                 phase=phase, trigger_event_id=trigger_event_id,
+                detail=_action_timing_detail(
+                    result_for_timing, control_started_at, control_finished_at
+                ),
             )
 
             # 冷却的用途是**防非幂等动作重复执行**,所以判据不是"成功",而是"这条指令
@@ -2377,6 +2389,10 @@ class RuleRunner:
                 ),
                 source="rule", source_id=rule_id,
                 phase=phase, trigger_event_id=trigger_event_id,
+                detail=(
+                    _action_timing_detail(None, control_started_at)
+                    if control_started_at is not None else None
+                ),
             )
             # 授权失效不逐条告警：失效是长期状态，而规则命中一次就下发一次——这条
             # 是量最大的下发路径，逐条打 ERROR 会把「什么时候失效」那一行淹掉。
