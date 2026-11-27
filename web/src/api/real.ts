@@ -5,7 +5,7 @@
  * 与 mock 对齐返回类型（types.ts），让 src/api/index.ts 能透明切换。
  */
 
-import { ApiError, apiFetch, resolveToken } from "./client";
+import { ApiError, apiFetch, errorMessage, resolveToken } from "./client";
 import { textResidual } from "@/lib/usageTokens";
 import { authHeaders } from "./register";
 import i18n from "@/i18n";
@@ -350,7 +350,7 @@ export async function realEnrollPersonSample(
   });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+    throw new Error(errorMessage(body) ?? `HTTP ${resp.status}`);
   }
 }
 
@@ -433,7 +433,7 @@ export async function realObservePet(
   });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+    throw new Error(errorMessage(body) ?? `HTTP ${resp.status}`);
   }
   const r = (await resp.json()) as Normal<{
     detected: boolean;
@@ -492,7 +492,7 @@ export async function realUploadPetAvatar(
   });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+    throw new Error(errorMessage(body) ?? `HTTP ${resp.status}`);
   }
   const r = (await resp.json()) as Normal<BackendPet>;
   return mapBackendPet(r.data);
@@ -512,7 +512,7 @@ export async function realUploadPersonAvatar(
   });
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+    throw new Error(errorMessage(body) ?? `HTTP ${resp.status}`);
   }
 }
 
@@ -547,7 +547,7 @@ export async function realUploadPetReferenceCrops(
   );
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    throw new Error(body.message ?? body.detail ?? `HTTP ${resp.status}`);
+    throw new Error(errorMessage(body) ?? `HTTP ${resp.status}`);
   }
   const r = (await resp.json()) as Normal<BackendPet>;
   return mapBackendPet(r.data);
