@@ -611,6 +611,29 @@ function ActionChips({
   );
 }
 
+// Agent 文案的两种落位：平铺视图里是动作容器的一行；设备卡视图里需要在卡片
+// 列表上方独立成块。共享文案 key 与排版，外框形态由调用方决定。
+function AgentActionDesc({
+  desc,
+  standalone = false,
+}: {
+  desc: string;
+  standalone?: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div
+      className={
+        standalone
+          ? "mb-2 rounded-xl bg-bg-primary border border-border px-3.5 py-2.5 text-body text-text-secondary leading-relaxed break-words"
+          : "px-3.5 py-2.5 text-body text-text-secondary leading-relaxed break-words"
+      }
+    >
+      {t("tasks.agentAction", { desc })}
+    </div>
+  );
+}
+
 // 顺序槽：一台一行，保留原来的「设备（房间）· 能力 · 值」读法。
 function FlatActionRows({
   actions,
@@ -624,11 +647,7 @@ function FlatActionRows({
   const { t } = useTranslation();
   return (
     <div className="rounded-xl bg-bg-primary border border-border divide-y divide-border">
-      {desc?.trim() && (
-        <div className="px-3.5 py-2.5 text-body text-text-secondary leading-relaxed break-words">
-          {t("tasks.agentAction", { desc: desc.trim() })}
-        </div>
-      )}
+      {desc?.trim() && <AgentActionDesc desc={desc.trim()} />}
       {actions.map((action, i) => {
         const d = describeTaskAction(action, catalog);
         return (
@@ -928,9 +947,7 @@ function ActionSlot({
           {/* v3→v4 迁移可能让老 event rule 同时有动作和 Agent 文案；切到设备卡
               视图后文案不能凭空消失，否则用户会以为它被清掉了。 */}
           {desc?.trim() && (
-            <div className="mb-2 rounded-xl bg-bg-primary border border-border px-3.5 py-2.5 text-body text-text-secondary leading-relaxed break-words">
-              {t("tasks.agentAction", { desc: desc.trim() })}
-            </div>
+            <AgentActionDesc desc={desc.trim()} standalone />
           )}
           <GroupedActionCards groups={groups} catalog={catalog} />
         </>

@@ -298,8 +298,9 @@ async def test_fire_reads_mode_from_the_selected_slot(runner, monkeypatch):
         "t1",
         {
             "on_enter_execution_mode": "parallel_by_device",
-            # 退出和达标都取并发，但进入也并发；达标改成顺序才能区分它有没有
-            # 被误映射到进入/退出槽。三个槽的独立读取另由
+            # 三个槽刻意取不同组合：进入 / 退出并发，达标顺序。达标若不是
+            # 并发，一旦被误映射到进入或退出槽，seen 的第三项就会变成
+            # parallel_by_device，直接失败。三个槽各读各键另由
             # test_slot_execution_mode_reads_each_slot_independently 覆盖。
             "on_exit_execution_mode": "parallel_by_device",
             "on_target_execution_mode": "sequential",
