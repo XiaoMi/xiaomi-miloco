@@ -410,10 +410,14 @@ describe("TaskDetailSheet · 设备并发", () => {
         onChanged={noop}
       />,
     );
-    // v3→v4 迁移可能同时落动作与文案；切到设备卡后文案不能消失
-    expect(html).toContain("让 Agent 处理进入");
-    expect(html).toContain("客厅主灯");
-    expect(html).toContain(i18n.t("tasks.executionModeParallel"));
+    // v3→v4 迁移可能同时落动作与文案；切到设备卡后文案不能消失，
+    // 且要排在设备卡之前（与平铺视图的阅读顺序一致）。
+    expect(count(html, "让 Agent 处理进入")).toBe(1);
+    expect(html.indexOf("让 Agent 处理进入")).toBeLessThan(
+      html.indexOf("客厅主灯"),
+    );
+    expect(count(html, i18n.t("tasks.deviceActionCount", { count: 1 }))).toBe(2);
+    expect(countVisible(html, i18n.t("tasks.executionModeParallel"))).toBe(1);
   });
 
   it("槽换成 Agent 文案后，不再显示设备数回退提示", () => {

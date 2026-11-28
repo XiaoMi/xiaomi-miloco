@@ -43,19 +43,35 @@ def _ok(action: RuleAction, result: bool = True, error: str | None = None):
 async def test_sequential_mode_keeps_strict_config_order(runner, monkeypatch):
     """默认模式仍是旧行为：严格按配置顺序，一条完成才走下一条。"""
     order: list[str] = []
+    b_started = asyncio.Event()
+    release_a = asyncio.Event()
 
     async def fake(rule_id, action, **_):
         order.append(action.did)
+        if action.did == "A" and action.iid == "prop.2.1":
+            await release_a.wait()
+        elif action.did == "B":
+            b_started.set()
         await asyncio.sleep(0)
         return _ok(action)
 
     monkeypatch.setattr(runner, "_execute_action", fake)
     actions = [_action("A"), _action("B"), _action("A", "prop.3.1")]
 
-    results = await runner._execute_static_actions(
-        "rule-1", actions, phase=None, trigger_event_id=None, mode="sequential",
+    task = asyncio.create_task(
+        runner._execute_static_actions(
+            "rule-1", actions, phase=None, trigger_event_id=None,
+            mode="sequential",
+        )
     )
+    await asyncio.sleep(0.01)
+    # 第一条 A 还卡着时 B 不能开始；仅比对 order 列表的话，gather 并发也会
+    # 在 append 后得到同样的 ["A","B","A"]，证明不了「一条完成才走下一条」。
+    assert not b_started.is_set()
+    release_a.set()
+    results = await asyncio.wait_for(task, timeout=1)
 
+    assert b_started.is_set()
     assert order == ["A", "B", "A"]
     assert [r.action for r in results] == actions
 
@@ -226,11 +242,12 @@ async def test_device_parallelism_is_capped(runner, monkeypatch):
 def test_watchdog_budget_covers_the_two_calls_of_an_idempotent_action():
     """幂等 prop 动作先预检再下发，单条动作最坏是两次 SDK 调用。
 
-    预检读走云端默认 30s，下发 set 是 15s，本地各先试 5s；单条最坏
-    5 + 30 + 15 = 50s。组级预算不能比这更短，否则正常但慢的动作会被
-    watchdog 误杀，连台账都来不及写。
+    预检读走云端默认 30s，下发 set 是 15s，本地各先试 5s；常见最坏
+    5 + 30 + 15 = 50s。若云端读耗尽 30s，本地冷却同时到期，下发会再试
+    一次本地 5s，严格上界 55s。组级预算不能比这更短，否则正常但慢的
+    动作会被 watchdog 误杀，连台账都来不及写。
     """
-    assert runner_module._RULE_ACTION_WATCHDOG_SECONDS >= 50.0
+    assert runner_module._RULE_ACTION_WATCHDOG_SECONDS >= 55.0
 
 
 def test_slot_execution_mode_reads_each_slot_independently(runner):
@@ -281,8 +298,11 @@ async def test_fire_reads_mode_from_the_selected_slot(runner, monkeypatch):
         "t1",
         {
             "on_enter_execution_mode": "parallel_by_device",
-            "on_exit_execution_mode": "sequential",
-            "on_target_execution_mode": "parallel_by_device",
+            # 退出和达标都取并发，但进入也并发；达标改成顺序才能区分它有没有
+            # 被误映射到进入/退出槽。三个槽的独立读取另由
+            # test_slot_execution_mode_reads_each_slot_independently 覆盖。
+            "on_exit_execution_mode": "parallel_by_device",
+            "on_target_execution_mode": "sequential",
             "on_enter_actions": [
                 {"did": "A", "iid": "prop.2.1", "value": True},
                 {"did": "B", "iid": "prop.2.1", "value": True},
@@ -326,6 +346,6 @@ async def test_fire_reads_mode_from_the_selected_slot(runner, monkeypatch):
     assert target_result is not None
     assert seen == [
         "parallel_by_device",
-        "sequential",
         "parallel_by_device",
+        "sequential",
     ]

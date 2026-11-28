@@ -94,9 +94,11 @@ _RULE_DEVICE_PARALLEL_LIMIT = 16
 #
 # 一条幂等 prop 动作最多走两次 SDK 调用：先 get 预检现值, 再 set 下发。
 # 两趟的云端上限不同：预检读走 get_props_async 默认 30s, 下发 set 是 15s;
-# 本地 RPC 每次先试 5s, 读超时会把 did 打进本地冷却, 下发因此直接走云端。
-# 单条最坏 5 + 30 + 15 = 50s; 预算取 60s, 留 10s 余量。低于 50s 会把
-# 「本地刚超时、云端还能赶完」的动作误判成超时, 取消时还会跳过台账。
+# 本地 RPC 每次先试 5s, 读超时会把 did 打进本地冷却。常见最坏是
+# 5 + 30 + 15 = 50s; 若云端读恰好耗尽 30s, 本地冷却同时到期, 下发还会
+# 再试一次本地 5s, 严格上界 5 + 30 + 5 + 15 = 55s。预算取 60s 覆盖该
+# 极端路径; 低于 55s 会把「本地刚超时、云端还能赶完」的动作误判成超时,
+# 取消时还会跳过台账。
 _RULE_ACTION_WATCHDOG_SECONDS = 60.0
 
 
@@ -2181,8 +2183,9 @@ class RuleRunner:
             # 组可能还没轮到就被判超时。
             async with limiter:
                 # 组内每条动作最坏两次 SDK 调用（预检读云端 30s，下发行云端
-                # 15s，各自先试 5s 本地）；这里的墙钟按动作数放宽，只兜"某个
-                # await 永久不返回"，不能比单条动作的正常最坏耗时还短。
+                # 15s，各自先试 5s 本地；极端情况下发会再试一次本地）；这里
+                # 的墙钟按动作数放宽，只兜"某个 await 永久不返回"，不能比
+                # 单条动作的正常最坏耗时还短。
                 budget = _RULE_ACTION_WATCHDOG_SECONDS * len(items)
                 try:
                     await asyncio.wait_for(run_group(items), timeout=budget)
