@@ -186,3 +186,29 @@ def test_get_description(repo):
     repo.create_task(task_id="t_desc", description="健身追踪")
     assert repo.get_description("t_desc") == "健身追踪"
     assert repo.get_description("nonexistent") is None
+
+
+def test_slot_execution_modes_default_to_sequential_and_persist_per_slot(repo):
+    repo.create_task(task_id="t1", description="d")
+    expected = {
+        "on_enter_execution_mode": "sequential",
+        "on_exit_execution_mode": "sequential",
+        "on_target_execution_mode": "sequential",
+    }
+    boundary = repo.get_boundary_actions("t1")
+    assert {k: boundary[k] for k in expected} == expected
+    full = repo.get_full_view("t1")
+    assert {k: full["actions"][k] for k in expected} == expected
+    listed = repo.list_all()[0]
+    assert {k: listed["actions"][k] for k in expected} == expected
+
+    assert repo.set_boundary_actions(
+        "t1",
+        on_enter_execution_mode="parallel_by_device",
+        on_target_execution_mode="parallel_by_device",
+    ) is True
+    boundary = repo.get_boundary_actions("t1")
+    assert boundary["on_enter_execution_mode"] == "parallel_by_device"
+    # 没传的槽保持原样，不能跟着一起翻
+    assert boundary["on_exit_execution_mode"] == "sequential"
+    assert boundary["on_target_execution_mode"] == "parallel_by_device"

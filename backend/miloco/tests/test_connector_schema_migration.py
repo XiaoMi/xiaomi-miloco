@@ -621,3 +621,41 @@ def test_rollback_refuses_on_newer_schema(v1_db):
 
     with pytest.raises(RuntimeError, match="expected 2"):
         rollback_v2_to_v1()
+
+
+def test_v5_to_v6_adds_three_slot_modes_with_sequential_default(tmp_path):
+    """老 task 行升级后三个槽都必须是 sequential——新增开关不能改变存量行为。"""
+    import sqlite3
+
+    from miloco.database.connector import _migrate_v5_to_v6
+
+    conn = sqlite3.connect(tmp_path / "v5.db")
+    try:
+        conn.execute(
+            "CREATE TABLE task ("
+            " task_id TEXT PRIMARY KEY, description TEXT NOT NULL,"
+            " created_at INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO task (task_id, description, created_at) "
+            "VALUES ('t1', 'd', 0)"
+        )
+        conn.execute("PRAGMA user_version = 5")
+        conn.commit()
+
+        _migrate_v5_to_v6(conn)
+        _migrate_v5_to_v6(conn)  # 幂等：重复跑不再加列
+
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(task)")}
+        assert {
+            "on_enter_execution_mode",
+            "on_exit_execution_mode",
+            "on_target_execution_mode",
+        } <= cols
+        assert conn.execute(
+            "SELECT on_enter_execution_mode, on_exit_execution_mode, "
+            "on_target_execution_mode FROM task WHERE task_id='t1'"
+        ).fetchone() == ("sequential", "sequential", "sequential")
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
+    finally:
+        conn.close()

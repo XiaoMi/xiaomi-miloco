@@ -58,6 +58,15 @@ _ACTION_SLOT_NAMES = frozenset(
     }
 )
 
+# 三个槽的执行方式各自独立；和动作列一样按 partial 语义只写传进来的键。
+_EXECUTION_MODE_NAMES = frozenset(
+    {
+        "on_enter_execution_mode",
+        "on_exit_execution_mode",
+        "on_target_execution_mode",
+    }
+)
+
 
 def _action_desc(a) -> str:
     """event 模式的动作展示串。场景没有 value/params,只按 iid 渲染会变成
@@ -153,10 +162,17 @@ class TaskService:
         slots = {
             name: getattr(req, name)
             for name in req.model_fields_set
-            if name in _ACTION_SLOT_NAMES
+            if name in _ACTION_SLOT_NAMES or name in _EXECUTION_MODE_NAMES
         }
         if not slots:
             return self.repo.get_description(task_id) is not None
+        for name in _EXECUTION_MODE_NAMES & slots.keys():
+            # NOT NULL 的枚举: null 不是"清空", 而是让下一行 UPDATE 撞约束变 500。
+            # 恢复默认请显式传 sequential。
+            if slots[name] is None:
+                raise ValidationException(
+                    f"{name} 不能清空，恢复串行请显式传 sequential"
+                )
         # 槽是最小写入单位: 同槽两列互斥, 而选槽时静态优先
         # (runner._select_slot)。只写传进来的那一列, 用户把动作从设备直控改成
         # Agent 文案时残留的静态列会继续赢 —— 请求返回成功、task get 显示新文案、

@@ -40,3 +40,27 @@ def test_refs_fields_rejected_as_unknown():
 
 def test_empty_task_now_allowed():
     TaskCreateRequest(task_id="t", description="x")
+
+
+def test_boundary_actions_default_mode_is_sequential_per_slot():
+    """老调用方不传这些字段时三个槽仍是全串行——新增开关不改变存量行为。"""
+    from miloco.task.schema import TaskBoundaryActions
+
+    actions = TaskBoundaryActions()
+    assert actions.on_enter_execution_mode == "sequential"
+    assert actions.on_exit_execution_mode == "sequential"
+    assert actions.on_target_execution_mode == "sequential"
+
+
+def test_actions_update_modes_are_enum_checked_per_slot():
+    from miloco.task.schema import TaskActionsUpdateRequest
+
+    req = TaskActionsUpdateRequest(
+        on_enter_execution_mode="parallel_by_device",
+        on_exit_execution_mode="sequential",
+    )
+    assert {"on_enter_execution_mode", "on_exit_execution_mode"} <= (
+        req.model_fields_set
+    )
+    with pytest.raises(ValidationError):
+        TaskActionsUpdateRequest(on_exit_execution_mode="parallel")

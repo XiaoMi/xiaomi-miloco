@@ -10,6 +10,7 @@ import { textResidual } from "@/lib/usageTokens";
 import { authHeaders } from "./register";
 import i18n from "@/i18n";
 import type {
+  ActionExecutionMode,
   ActivityEvent,
   Device,
   DeviceCategory,
@@ -2429,6 +2430,9 @@ interface BackendTaskSummary {
     actions_desc?: string[];
   }[];
   actions?: {
+    on_enter_execution_mode?: "sequential" | "parallel_by_device";
+    on_exit_execution_mode?: "sequential" | "parallel_by_device";
+    on_target_execution_mode?: "sequential" | "parallel_by_device";
     on_enter_actions?: BackendAction[];
     on_enter_desc?: string | null;
     on_exit_actions?: BackendAction[];
@@ -2479,6 +2483,19 @@ export async function realListTasks(): Promise<Task[]> {
     // 六个槽恒有。后端漏传时归一成"全空"而不是 null —— 调用方据此决定整个分区
     // 渲不渲染, 留一个可空类型只会换来一句永真的判断
     actions: {
+      // 老后端不带这些字段：缺省即旧行为（全串行）。三个槽各自读自己的列。
+      onEnterExecutionMode:
+        t.actions?.on_enter_execution_mode === "parallel_by_device"
+          ? "parallel_by_device"
+          : "sequential",
+      onExitExecutionMode:
+        t.actions?.on_exit_execution_mode === "parallel_by_device"
+          ? "parallel_by_device"
+          : "sequential",
+      onTargetExecutionMode:
+        t.actions?.on_target_execution_mode === "parallel_by_device"
+          ? "parallel_by_device"
+          : "sequential",
       onEnterDesc: t.actions?.on_enter_desc ?? null,
       onExitDesc: t.actions?.on_exit_desc ?? null,
       onTargetDesc: t.actions?.on_target_desc ?? null,
@@ -2537,6 +2554,27 @@ export async function realUpdateTaskDescription(
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ description }),
+    },
+  );
+}
+
+// 改某个动作槽的执行方式（PATCH /api/tasks/{id}/actions）。
+// 只带真正改过的槽：后端是 partial 语义，没传的槽保持原样。
+export async function realUpdateTaskExecutionModes(
+  taskId: string,
+  modes: Partial<Record<"enter" | "exit" | "target", ActionExecutionMode>>,
+): Promise<void> {
+  const body: Record<string, string> = {};
+  for (const slot of ["enter", "exit", "target"] as const) {
+    const mode = modes[slot];
+    if (mode) body[`on_${slot}_execution_mode`] = mode;
+  }
+  await apiFetch<Normal<unknown>>(
+    `/api/tasks/${encodeURIComponent(taskId)}/actions`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     },
   );
 }

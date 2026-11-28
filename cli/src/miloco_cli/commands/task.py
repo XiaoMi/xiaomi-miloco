@@ -198,6 +198,12 @@ _ACTION_SLOTS = (
     "on_target_desc",
 )
 
+_EXECUTION_MODE_HELP = (
+    "该槽的静态动作执行方式：sequential=按配置顺序全串行（默认）；"
+    "parallel_by_device=按设备并发，同一设备内仍按配置顺序。"
+    "槽内含场景动作时整槽回退串行"
+)
+
 
 @task_group.command("set-actions")
 @click.argument("task_id")
@@ -229,6 +235,27 @@ _ACTION_SLOTS = (
     "--on-target-desc", "on_target_desc", default=None, help="达标时交给 Agent 的指令"
 )
 @click.option(
+    "--on-enter-execution-mode",
+    "on_enter_execution_mode",
+    type=click.Choice(["sequential", "parallel_by_device"]),
+    default=None,
+    help=f"进入槽：{_EXECUTION_MODE_HELP}",
+)
+@click.option(
+    "--on-exit-execution-mode",
+    "on_exit_execution_mode",
+    type=click.Choice(["sequential", "parallel_by_device"]),
+    default=None,
+    help=f"退出槽：{_EXECUTION_MODE_HELP}",
+)
+@click.option(
+    "--on-target-execution-mode",
+    "on_target_execution_mode",
+    type=click.Choice(["sequential", "parallel_by_device"]),
+    default=None,
+    help=f"达标槽：{_EXECUTION_MODE_HELP}",
+)
+@click.option(
     "--clear",
     "clear_slots",
     multiple=True,
@@ -247,12 +274,16 @@ def task_set_actions(
     on_exit_desc,
     on_target_actions_raw,
     on_target_desc,
+    on_enter_execution_mode,
+    on_exit_execution_mode,
+    on_target_execution_mode,
     clear_slots,
     pretty,
 ):
     """改 task 的边界动作（进入 / 退出 / 达标）。
 
     只有传了的槽会被改，其余保持原样；清空某个槽用 --clear。
+    进入 / 退出 / 达标的执行方式各自独立，只传哪一个就只改哪一个。
     多条 rule 争同一个槽时（同方向 ≥2 条），rule 侧的动作 flag 不透传到 task，
     只能从这里改；不同方向的 rule 各写各的槽，仍可从 rule 侧装。
     """
@@ -294,9 +325,16 @@ def task_set_actions(
         )
     for name in clear_slots:
         body[name] = None
+    for name, mode in (
+        ("on_enter_execution_mode", on_enter_execution_mode),
+        ("on_exit_execution_mode", on_exit_execution_mode),
+        ("on_target_execution_mode", on_target_execution_mode),
+    ):
+        if mode is not None:
+            body[name] = mode
 
     if not body:
-        _exit_error("至少要传一个动作槽或 --clear")
+        _exit_error("至少要传一个动作槽、--on-*-execution-mode 或 --clear")
 
     data = api_patch(f"{API_PREFIX}/{task_id}/actions", body)
     print_result(data, pretty)

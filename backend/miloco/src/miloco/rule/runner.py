@@ -33,7 +33,7 @@ import uuid
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Mapping
+from typing import TYPE_CHECKING, Literal, Mapping, cast
 
 if TYPE_CHECKING:
     from miloco.perception.schema import CameraExitWait, CameraExitWaitFactory
@@ -66,6 +66,7 @@ from miloco.rule.schema import (
     TriggerOutcome,
     parse_device_iid,
 )
+from miloco.task.schema import ActionExecutionMode
 from miloco.task.state_machine import (
     ActionSlot,
     SignalKind,
@@ -82,6 +83,23 @@ logger = logging.getLogger(__name__)
 
 _EMPTY_RESULT_MSG = "MIoT 返回为空/不可判定,无法确认执行结果"
 _IOT_RECONCILE_CONTEXT = "iot_reconcile_exit"
+
+# 按设备并发时的在飞设备数上限。动作通常只涉及个位数设备, 这道闸是防一个
+# task 配了几十台设备时把网关/云端瞬时打满。
+_RULE_DEVICE_PARALLEL_LIMIT = 16
+# 每个设备组的兜底墙钟: 组内动作数 × 该值。正常路径由 miot SDK 的本地 RPC
+# 5s / 云端 HTTP 30s(读) 或 15s(写) 先收口, 这里只防某个 await 永久挂住、
+# 把 gather 和整条 rule fire 一起拖死。超时不是"动作失败"的新语义, 而是让
+# 等待有终点。
+#
+# 一条幂等 prop 动作最多走两次 SDK 调用：先 get 预检现值, 再 set 下发。
+# 两趟的云端上限不同：预检读走 get_props_async 默认 30s, 下发 set 是 15s;
+# 本地 RPC 每次先试 5s, 读超时会把 did 打进本地冷却。常见最坏是
+# 5 + 30 + 15 = 50s; 若云端读恰好耗尽 30s, 本地冷却同时到期, 下发还会
+# 再试一次本地 5s, 严格上界 5 + 30 + 5 + 15 = 55s。预算取 60s 覆盖该
+# 极端路径; 低于 55s 会把「本地刚超时、云端还能赶完」的动作误判成超时,
+# 取消时还会跳过台账。
+_RULE_ACTION_WATCHDOG_SECONDS = 60.0
 
 
 def _summarize_rule_result(obj: object) -> tuple[bool, int | None, str | None]:
@@ -210,6 +228,17 @@ def _slot_for(rule: Rule, event: RuleEvent) -> ActionSlot | None:
     if kind is None:
         return None
     return slot_for_edge(rule.resolved_direction.value, kind)
+
+
+def _resolve_slot(
+    rule: Rule, event: RuleEvent, action_slot: ActionSlot | None = None
+) -> ActionSlot | None:
+    """本次 fire 用哪个槽：状态机显式指定的优先，否则按方向/事件反推。
+
+    取动作与取执行方式必须走同一个函数，否则「从哪个槽执行」和「读哪个槽的
+    开关」会在状态机派发的路径上分叉。
+    """
+    return action_slot or _slot_for(rule, event)
 
 
 def _edge_timestamp(slot: ActionSlot | None, edge_at: str) -> dict[str, str]:
@@ -2003,6 +2032,7 @@ class RuleRunner:
         trigger_event_id: str | None = None,
     ) -> RuleExecuteResult | None:
         """Pick the slot for (mode, event), execute, write log."""
+        selected_slot = _resolve_slot(rule, event, action_slot)
         slot = self._select_slot(rule, event, action_slot)
         if slot is None:
             logger.debug(
@@ -2034,13 +2064,12 @@ class RuleRunner:
             # 相位跟触发它的事件走, 与台账两列同源: 退出边沿(含 debounce 之后那次真
             # fire)标 exit, 进入与达标都算触发支。
             phase = "exit" if event is RuleEvent.EXITED else "enter"
-            action_results = [
-                await self._execute_action(
-                    rule.id, a,
-                    phase=phase, trigger_event_id=trigger_event_id,
-                )
-                for a in value
-            ]
+            action_results = await self._execute_static_actions(
+                # kind == "static" 已收窄，但 ty 看不穿 tuple 联合的 destructuring。
+                rule.id, cast(list[RuleAction], value),
+                phase=phase, trigger_event_id=trigger_event_id,
+                mode=self._slot_execution_mode(rule.task_id, selected_slot),
+            )
             ok_all = all(r.result for r in action_results)
             exec_result = RuleExecuteResult(
                 event=event,
@@ -2081,6 +2110,115 @@ class RuleRunner:
         )
         return exec_result
 
+    def _slot_execution_mode(
+        self, task_id: str, slot: ActionSlot | None
+    ) -> ActionExecutionMode:
+        """该槽自己的执行方式。缺键/老库/老测试一律按串行。"""
+        if slot is None:
+            return "sequential"
+        mode = (self._task_actions.get(task_id) or {}).get(
+            f"{slot.value}_execution_mode"
+        )
+        return "parallel_by_device" if mode == "parallel_by_device" else "sequential"
+
+    async def _execute_static_actions(
+        self,
+        rule_id: str,
+        actions: list[RuleAction],
+        *,
+        phase: str | None,
+        trigger_event_id: str | None,
+        mode: ActionExecutionMode,
+    ) -> list[RuleActionExecuteResult]:
+        """执行一个静态动作槽，返回与输入等长、同序的结果。
+
+        ``sequential``（默认）逐条 await，与旧实现一致。
+        ``parallel_by_device`` 按 did 分组：组内仍按配置顺序一条条 await，
+        组间并发。``gather(return_exceptions=True)`` 就是 wait_all —— 一组
+        失败/超时不取消其他组；结果按原下标回填，rule_log 的动作顺序不随调度变化。
+
+        场景动作的影响面跨设备且未知，同槽只要有一处 scene 就整槽回退串行：
+        把场景和设备动作并发，会让"先开灯、再触发电影场景"这种顺序静默失效。
+        """
+        async def run_sequential() -> list[RuleActionExecuteResult]:
+            return [
+                await self._execute_action(
+                    rule_id, a,
+                    phase=phase, trigger_event_id=trigger_event_id,
+                )
+                for a in actions
+            ]
+
+        if mode != "parallel_by_device":
+            return await run_sequential()
+
+        if any(a.iid == SCENE_IID for a in actions):
+            logger.debug(
+                "Rule %s slot has scene action(s); parallel_by_device falls "
+                "back to sequential",
+                safe_log(rule_id),
+            )
+            return await run_sequential()
+
+        # dict 保持首次出现顺序；同 did 的多个动作装进同一组，组内顺序即配置顺序。
+        groups: dict[str, list[tuple[int, RuleAction]]] = {}
+        for index, action in enumerate(actions):
+            groups.setdefault(action.did, []).append((index, action))
+
+        results: list[RuleActionExecuteResult | None] = [None] * len(actions)
+        failures: dict[str, str] = {}
+        limiter = asyncio.Semaphore(_RULE_DEVICE_PARALLEL_LIMIT)
+
+        async def run_group(items: list[tuple[int, RuleAction]]) -> None:
+            for index, action in items:
+                results[index] = await self._execute_action(
+                    rule_id, action,
+                    phase=phase, trigger_event_id=trigger_event_id,
+                )
+
+        async def run_group_guarded(
+            did: str, items: list[tuple[int, RuleAction]]
+        ) -> None:
+            # 先排队再起表：闸门等待不算执行预算，否则 >16 个设备时，排在后面的
+            # 组可能还没轮到就被判超时。
+            async with limiter:
+                # 组内每条动作最坏两次 SDK 调用（预检读云端 30s，下发行云端
+                # 15s，各自先试 5s 本地；极端情况下发会再试一次本地）；这里
+                # 的墙钟按动作数放宽，只兜"某个 await 永久不返回"，不能比
+                # 单条动作的正常最坏耗时还短。
+                budget = _RULE_ACTION_WATCHDOG_SECONDS * len(items)
+                try:
+                    await asyncio.wait_for(run_group(items), timeout=budget)
+                except TimeoutError:
+                    failures[did] = "action_timeout"
+                    logger.warning(
+                        "Rule %s device group %s timed out after %.0fs; "
+                        "%d/%d action(s) left unexecuted",
+                        safe_log(rule_id), safe_log(did), budget,
+                        sum(1 for i, _ in items if results[i] is None),
+                        len(items),
+                    )
+                except Exception as e:  # noqa: BLE001 - _execute_action 已兜异常
+                    failures[did] = "action_group_failed"
+                    logger.error(
+                        "Rule %s device group %s failed: %s",
+                        safe_log(rule_id), safe_log(did), safe_log(e),
+                    )
+
+        await asyncio.gather(
+            *(run_group_guarded(did, items) for did, items in groups.items()),
+            return_exceptions=True,
+        )
+
+        for index, action in enumerate(actions):
+            if results[index] is None:
+                results[index] = RuleActionExecuteResult(
+                    action=action,
+                    result=False,
+                    error=failures.get(action.did, "action_group_failed"),
+                )
+        return [r for r in results if r is not None]
+
     def selects_no_action_on_enter(self, rule: Rule) -> bool:
         """这条规则的进入边沿此刻选不到任何动作吗。
 
@@ -2104,7 +2242,7 @@ class RuleRunner:
         actions = self._task_actions.get(rule.task_id) or {}
         # 调用方给了槽就用它 —— 状态机自己发起的动作按槽名派, 方向反推只对
         # "由某条 rule 的边沿引起"的动作成立。
-        slot = action_slot or _slot_for(rule, event)
+        slot = _resolve_slot(rule, event, action_slot)
         if slot is None:
             return None
 

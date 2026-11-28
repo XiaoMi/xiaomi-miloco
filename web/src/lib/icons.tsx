@@ -240,3 +240,26 @@ export const IconDoorOut = (p: Props) => (
     <path d="M20 12H9" />
   </svg>
 );
+
+/** 分叉 —— 设备并发（不同设备同时开始） */
+export const IconSplit = (p: Props) => (
+  <svg {...base(p)}>
+    <path d="M4 12h5" />
+    <path d="M9 12V6h5" />
+    <path d="M9 12v6h5" />
+    <path d="m12 4 2 2-2 2" />
+    <path d="m12 16 2 2-2 2" />
+  </svg>
+);
+
+/** 有序列表 —— 顺序执行（一条完成再走下一条） */
+export const IconOrderedList = (p: Props) => (
+  <svg {...base(p)}>
+    <path d="M9 6h11" />
+    <path d="M9 12h11" />
+    <path d="M9 18h11" />
+    <path d="M4 5h1v3" />
+    <path d="M4 11h1v3" />
+    <path d="M4 17h1v3" />
+  </svg>
+);

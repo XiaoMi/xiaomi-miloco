@@ -1099,3 +1099,44 @@ def test_a_level_whose_evidence_is_all_filtered_falls_through(tmp_path):
         "v3 证据滤空后要退到下级判, 不能就此认成 v3 把日表留下"
     )
     conn.close()
+
+
+def test_a_v6_shaped_db_is_detected_as_v6(tmp_path):
+    from miloco.database.connector import _detect_schema_version
+
+    conn = _shape_only_db(
+        tmp_path,
+        {
+            "task": [
+                "on_enter_execution_mode",
+                "on_exit_execution_mode",
+                "on_target_execution_mode",
+            ]
+        },
+    )
+    try:
+        assert _detect_schema_version(conn) == 6
+    finally:
+        conn.close()
+
+
+def test_a_v5_shaped_db_without_the_mode_columns_is_detected_as_v5(tmp_path):
+    """v6 的 marker 要三列全中；v5 库不能被误认成 v6、跳过加列。"""
+    from miloco.database.connector import _detect_schema_version
+
+    conn = _shape_only_db(
+        tmp_path,
+        {
+            "task": ["on_target_actions"],
+            "rule": ["direction"],
+            "on_demand_log": [
+                "visual_artifact_kind",
+                "image_frame_counts",
+                "has_audio_artifact",
+            ],
+        },
+    )
+    try:
+        assert _detect_schema_version(conn) == 5
+    finally:
+        conn.close()

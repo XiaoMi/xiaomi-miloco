@@ -29,6 +29,7 @@ import {
   setTaskEnabled,
   updateRuleQuery,
   updateTaskDescription,
+  updateTaskExecutionModes,
 } from "@/api";
 import { useAsync } from "@/hooks/useAsync";
 import { useEscClose } from "@/hooks/useEscClose";
@@ -37,9 +38,12 @@ import {
   IconDoorOut,
   IconFunnel,
   IconHelp,
+  IconLock,
+  IconOrderedList,
   IconPencil,
   IconPlay,
   IconShield,
+  IconSplit,
   IconTrash,
   IconX,
 } from "@/lib/icons";
@@ -51,6 +55,7 @@ import {
   type TaskActionKind,
 } from "@/lib/taskAction";
 import type {
+  ActionExecutionMode,
   Task,
   TaskAction,
   TaskRecordSummary,
@@ -523,6 +528,360 @@ export function RuleGroupCard({
 }
 
 
+type ActionSlotKey = "enter" | "exit" | "target";
+
+const ACTION_SLOT_KEYS: ActionSlotKey[] = ["enter", "exit", "target"];
+
+function slotModeOf(task: Task, key: ActionSlotKey): ActionExecutionMode {
+  if (key === "enter") return task.actions.onEnterExecutionMode;
+  if (key === "exit") return task.actions.onExitExecutionMode;
+  return task.actions.onTargetExecutionMode;
+}
+
+// 设备并发只对「静态设备动作 + ≥2 台不同设备」有意义。场景动作的影响面跨设备
+// 且无法事先枚举，只要槽里有一处 scene，整槽就按顺序执行（与后端一致）。
+function actionsCanRunParallel(actions: TaskAction[]): boolean {
+  if (actions.some((a) => a.iid === "scene")) return false;
+  const dids = new Set(actions.map((a) => a.did).filter(Boolean));
+  return dids.size >= 2;
+}
+
+interface DeviceActionGroup {
+  did: string;
+  name: string;
+  room?: string;
+  actions: TaskAction[];
+}
+
+function groupActionsByDevice(
+  actions: TaskAction[],
+  catalog: ActionCatalog,
+): DeviceActionGroup[] {
+  const groups = new Map<string, DeviceActionGroup>();
+  for (const action of actions) {
+    if (action.iid === "scene") continue;
+    const d = describeTaskAction(action, catalog);
+    const did = String(action.did ?? "");
+    const existing = groups.get(did);
+    if (existing) {
+      existing.actions.push(action);
+    } else {
+      groups.set(did, {
+        did,
+        name: d.device,
+        room: d.room,
+        actions: [action],
+      });
+    }
+  }
+  return [...groups.values()];
+}
+
+function ActionChips({
+  chips,
+  unresolved,
+  kind,
+  t,
+}: {
+  chips: string[];
+  unresolved?: boolean;
+  kind: TaskActionKind;
+  t: TFn;
+}) {
+  return (
+    <>
+      {chips.map((chip) => (
+        <span
+          key={chip}
+          className="text-caption px-1.5 py-0.5 rounded bg-bg-tertiary text-text-tertiary"
+        >
+          {chip}
+        </span>
+      ))}
+      {unresolved && (
+        <span className="text-caption px-1.5 py-0.5 rounded bg-warning-bg text-warning">
+          {t(
+            kind === "scene"
+              ? "tasks.chipUnresolvedScene"
+              : "tasks.chipUnresolvedTarget",
+          )}
+        </span>
+      )}
+    </>
+  );
+}
+
+// Agent 文案的两种落位：平铺视图里是动作容器的一行；设备卡视图里需要在卡片
+// 列表上方独立成块。共享文案 key 与排版，外框形态由调用方决定。
+function AgentActionDesc({
+  desc,
+  standalone = false,
+}: {
+  desc: string;
+  standalone?: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div
+      className={
+        standalone
+          ? "mb-2 rounded-xl bg-bg-primary border border-border px-3.5 py-2.5 text-body text-text-secondary leading-relaxed break-words"
+          : "px-3.5 py-2.5 text-body text-text-secondary leading-relaxed break-words"
+      }
+    >
+      {t("tasks.agentAction", { desc })}
+    </div>
+  );
+}
+
+// 顺序槽：一台一行，保留原来的「设备（房间）· 能力 · 值」读法。
+function FlatActionRows({
+  actions,
+  desc,
+  catalog,
+}: {
+  actions: TaskAction[];
+  desc: string | null;
+  catalog: ActionCatalog;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="rounded-xl bg-bg-primary border border-border divide-y divide-border">
+      {desc?.trim() && <AgentActionDesc desc={desc.trim()} />}
+      {actions.map((action, i) => {
+        const d = describeTaskAction(action, catalog);
+        return (
+          <div
+            key={i}
+            title={d.raw}
+            className="px-3.5 py-2.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-body text-text-secondary"
+          >
+            <span
+              className={`text-caption px-1.5 py-0.5 rounded shrink-0 ${
+                d.kind === "broadcast"
+                  ? "bg-brand-soft text-brand-primary"
+                  : "bg-bg-secondary text-text-secondary"
+              }`}
+            >
+              {t(ACTION_KIND_LABEL[d.kind])}
+            </span>
+            <span className="font-semibold text-text-primary break-all">
+              {d.device}
+            </span>
+            {d.room && (
+              <span className="text-caption text-text-tertiary">
+                {t("tasks.roomParen", { room: d.room })}
+              </span>
+            )}
+            {/* 场景行没有能力名，跳过分隔点，别留一个孤立的「·」 */}
+            {d.capability && (
+              <>
+                <span className="text-text-disabled">·</span>
+                <span className="break-all">{d.capability}</span>
+              </>
+            )}
+            {d.detail && (
+              <span className="text-text-primary break-words">{d.detail}</span>
+            )}
+            <ActionChips
+              chips={d.chips}
+              unresolved={d.unresolved}
+              kind={d.kind}
+              t={t}
+            />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// 设备并发槽：设备一层，设备内动作按配置顺序一层。单色只标记「这是并发
+// 设备组」，不区分具体设备——设备身份由卡片头的名字承担，避免多色抢注意力。
+function GroupedActionCards({
+  groups,
+  catalog,
+}: {
+  groups: DeviceActionGroup[];
+  catalog: ActionCatalog;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-2">
+      {groups.map((g, gi) => {
+        return (
+          <div
+            key={g.did || gi}
+            className="overflow-hidden rounded-xl border border-border bg-bg-primary"
+            style={{
+              borderLeftWidth: 3,
+              borderLeftColor: "var(--color-brand-primary)",
+            }}
+          >
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 border-b border-border px-3.5 py-2">
+              <span className="text-body font-semibold text-text-primary break-all">
+                {g.name}
+              </span>
+              {g.room && (
+                <span className="text-caption text-text-tertiary">
+                  {t("tasks.roomParen", { room: g.room })}
+                </span>
+              )}
+              <span className="ml-auto text-caption text-text-tertiary">
+                {t("tasks.deviceActionCount", { count: g.actions.length })}
+              </span>
+            </div>
+            <ol className="divide-y divide-border">
+              {g.actions.map((action, i) => {
+                const d = describeTaskAction(action, catalog);
+                return (
+                  <li
+                    key={i}
+                    title={d.raw}
+                    className="flex items-start gap-2 px-3.5 py-2.5 text-body text-text-secondary"
+                  >
+                    <span
+                      className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-caption font-semibold num"
+                      style={{
+                        backgroundColor: "var(--color-brand-soft)",
+                        color: "var(--color-brand-primary)",
+                      }}
+                    >
+                      {i + 1}
+                    </span>
+                    <span className="min-w-0 flex flex-1 flex-wrap items-center gap-x-2 gap-y-1">
+                      {d.capability && (
+                        <span className="break-all">{d.capability}</span>
+                      )}
+                      {d.detail && (
+                        <span className="font-semibold text-text-primary break-words">
+                          {d.detail}
+                        </span>
+                      )}
+                      <ActionChips
+                        chips={d.chips}
+                        unresolved={d.unresolved}
+                        kind={d.kind}
+                        t={t}
+                      />
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// 浏览态 V6：图标 + 品牌浅底短标签，和「进入 / 退出」同一行、右对齐。
+function ModeIndicator({
+  label,
+  mode,
+  canParallel,
+  hasScene,
+}: {
+  label: string;
+  mode: ActionExecutionMode;
+  canParallel: boolean;
+  hasScene: boolean;
+}) {
+  const { t } = useTranslation();
+  const effectiveParallel = mode === "parallel_by_device" && canParallel;
+  const text = effectiveParallel
+    ? t("tasks.executionModeParallel")
+    : t("tasks.executionModeSequential");
+  const title = effectiveParallel
+    ? t("tasks.executionModeParallelHint")
+    : mode === "parallel_by_device" && hasScene
+      ? t("tasks.executionModeSceneFallback")
+      : mode === "parallel_by_device"
+        ? t("tasks.executionModeOneDeviceFallback")
+        : t("tasks.executionModeSequentialHint");
+  const Icon = effectiveParallel ? IconSplit : IconOrderedList;
+  return (
+    <span
+      title={title}
+      aria-label={`${label}: ${text}. ${title}`}
+      className="inline-flex shrink-0 items-center gap-1 rounded bg-brand-soft px-1.5 py-0.5 text-caption font-semibold text-brand-primary"
+    >
+      <Icon className="h-3.5 w-3.5" />
+      {text}
+    </span>
+  );
+}
+
+// 编辑态 V8：两段控件。不可并发的槽，平行段带锁；点击只弹提示，不切状态、
+// 滑块也不动 —— 让「配了但不会生效」在按下那一刻就被拦住。
+function ModeControl({
+  label,
+  mode,
+  canParallel,
+  hasScene,
+  onChange,
+}: {
+  label: string;
+  mode: ActionExecutionMode;
+  canParallel: boolean;
+  hasScene: boolean;
+  onChange: (mode: ActionExecutionMode) => void;
+}) {
+  const { t } = useTranslation();
+  const parallel = mode === "parallel_by_device";
+  const disabledReason = hasScene
+    ? t("tasks.executionModeSceneBlocked", { slot: label })
+    : t("tasks.executionModeOneDeviceBlocked", { slot: label });
+  const select = (next: ActionExecutionMode) => {
+    if (next === "parallel_by_device" && !canParallel) {
+      toast(disabledReason, "warn");
+      return;
+    }
+    onChange(next);
+  };
+  return (
+    <div
+      role="group"
+      aria-label={t("tasks.executionModeParallelHint")}
+      className="relative inline-flex w-[11.5rem] shrink-0 items-center rounded-full border border-border bg-bg-primary p-0.5 text-caption"
+    >
+      <span
+        aria-hidden="true"
+        className="absolute bottom-0.5 left-0.5 top-0.5 w-[calc(50%-2px)] rounded-full bg-brand-primary transition-transform duration-150 motion-reduce:transition-none"
+        style={{ transform: parallel ? "translateX(100%)" : "none" }}
+      />
+      <button
+        type="button"
+        aria-pressed={!parallel}
+        onClick={() => select("sequential")}
+        className={`relative z-10 h-6 flex-1 rounded-full px-2 font-semibold transition-colors ${
+          !parallel ? "text-text-inverse" : "text-text-secondary"
+        }`}
+      >
+        {t("tasks.executionModeSequential")}
+      </button>
+      <button
+        type="button"
+        aria-pressed={parallel}
+        aria-disabled={!canParallel}
+        title={canParallel ? t("tasks.executionModeParallelHint") : disabledReason}
+        onClick={() => select("parallel_by_device")}
+        className={`relative z-10 inline-flex h-6 flex-1 items-center justify-center gap-1 rounded-full px-2 font-semibold transition-colors ${
+          parallel
+            ? "text-text-inverse"
+            : canParallel
+              ? "text-text-secondary"
+              : "cursor-not-allowed text-text-disabled"
+        }`}
+      >
+        {!canParallel && <IconLock className="h-3 w-3" />}
+        {t("tasks.executionModeParallel")}
+      </button>
+    </div>
+  );
+}
+
 // 单个动作槽：交给 Agent 的文案 + 一条一行的人话动作。
 // 槽里既没有直控动作、也没有 Agent 文案时整块不渲染（判断在调用处）。
 function ActionSlot({
@@ -530,78 +889,71 @@ function ActionSlot({
   actions,
   desc,
   catalog,
+  mode,
+  editing,
+  onModeChange,
 }: {
   label: string;
   actions: TaskAction[];
   desc: string | null;
   catalog: ActionCatalog;
+  mode: ActionExecutionMode;
+  editing: boolean;
+  onModeChange: (mode: ActionExecutionMode) => void;
 }) {
   const { t } = useTranslation();
+  const hasScene = actions.some((a) => a.iid === "scene");
+  const canParallel = actionsCanRunParallel(actions);
+  const effectiveParallel = mode === "parallel_by_device" && canParallel;
+  // 只有静态动作才有「设备数」可谈。槽被换成 Agent 文案后，执行方式列会保留，
+  // 但不能再挂一行描述不存在的设备动作的回退提示。
+  const fallbackNote =
+    actions.length > 0 && mode === "parallel_by_device" && !canParallel
+      ? hasScene
+        ? t("tasks.executionModeSceneFallback")
+        : t("tasks.executionModeOneDeviceFallback")
+      : null;
+  const groups = effectiveParallel
+    ? groupActionsByDevice(actions, catalog)
+    : [];
+
   return (
-    <div className="mb-2 last:mb-0">
-      <div className="mb-1 text-caption text-text-tertiary">{label}</div>
-      <div className="rounded-xl bg-bg-primary border border-border divide-y divide-border">
-        {desc?.trim() && (
-          <div className="px-3.5 py-2.5 text-body text-text-secondary leading-relaxed break-words">
-            {t("tasks.agentAction", { desc: desc.trim() })}
-          </div>
-        )}
-        {actions.map((action, i) => {
-          const d = describeTaskAction(action, catalog);
-          return (
-            <div
-              key={i}
-              title={d.raw}
-              className="px-3.5 py-2.5 flex flex-wrap items-center gap-x-2 gap-y-1.5 text-body text-text-secondary"
-            >
-              <span
-                className={`text-caption px-1.5 py-0.5 rounded shrink-0 ${
-                  d.kind === "broadcast"
-                    ? "bg-brand-soft text-brand-primary"
-                    : "bg-bg-secondary text-text-secondary"
-                }`}
-              >
-                {t(ACTION_KIND_LABEL[d.kind])}
-              </span>
-              <span className="font-semibold text-text-primary break-all">
-                {d.device}
-              </span>
-              {d.room && (
-                <span className="text-caption text-text-tertiary">
-                  {t("tasks.roomParen", { room: d.room })}
-                </span>
-              )}
-              {/* 场景行没有能力名，跳过分隔点，别留一个孤立的「·」 */}
-              {d.capability && (
-                <>
-                  <span className="text-text-disabled">·</span>
-                  <span className="break-all">{d.capability}</span>
-                </>
-              )}
-              {d.detail && (
-                <span className="text-text-primary break-words">{d.detail}</span>
-              )}
-              {d.chips.map((chip) => (
-                <span
-                  key={chip}
-                  className="text-caption px-1.5 py-0.5 rounded bg-bg-tertiary text-text-tertiary"
-                >
-                  {chip}
-                </span>
-              ))}
-              {d.unresolved && (
-                <span className="text-caption px-1.5 py-0.5 rounded bg-warning-bg text-warning">
-                  {t(
-                    d.kind === "scene"
-                      ? "tasks.chipUnresolvedScene"
-                      : "tasks.chipUnresolvedTarget",
-                  )}
-                </span>
-              )}
-            </div>
-          );
-        })}
+    <div className="mb-3 last:mb-0">
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-x-2 gap-y-1">
+        <span className="text-caption text-text-tertiary">{label}</span>
+        {actions.length > 0 &&
+          (editing ? (
+            <ModeControl
+              label={label}
+              mode={mode}
+              canParallel={canParallel}
+              hasScene={hasScene}
+              onChange={onModeChange}
+            />
+          ) : (
+            <ModeIndicator
+              label={label}
+              mode={mode}
+              canParallel={canParallel}
+              hasScene={hasScene}
+            />
+          ))}
       </div>
+      {fallbackNote && (
+        <p className="mb-1.5 text-caption text-text-tertiary">{fallbackNote}</p>
+      )}
+      {effectiveParallel && groups.length >= 2 ? (
+        <>
+          {/* v3→v4 迁移可能让老 event rule 同时有动作和 Agent 文案；切到设备卡
+              视图后文案不能凭空消失，否则用户会以为它被清掉了。 */}
+          {desc?.trim() && (
+            <AgentActionDesc desc={desc.trim()} standalone />
+          )}
+          <GroupedActionCards groups={groups} catalog={catalog} />
+        </>
+      ) : (
+        <FlatActionRows actions={actions} desc={desc} catalog={catalog} />
+      )}
     </div>
   );
 }
@@ -628,6 +980,14 @@ export function TaskDetailSheet({
   const [descDraft, setDescDraft] = useState(task.description);
   // ruleId → 触发条件草稿；进入编辑态时按当前规则快照重建。
   const [ruleDrafts, setRuleDrafts] = useState<Record<string, string>>({});
+  // 三个槽的执行方式各自独立，草稿也按槽分开；进入编辑态时从当前快照重建。
+  const [modeDrafts, setModeDrafts] = useState<
+    Record<ActionSlotKey, ActionExecutionMode>
+  >({
+    enter: task.actions.onEnterExecutionMode,
+    exit: task.actions.onExitExecutionMode,
+    target: task.actions.onTargetExecutionMode,
+  });
   const [confirmDel, setConfirmDel] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -636,6 +996,11 @@ export function TaskDetailSheet({
     setRuleDrafts(
       Object.fromEntries(task.ruleBriefs.map((r) => [r.ruleId, r.query])),
     );
+    setModeDrafts({
+      enter: task.actions.onEnterExecutionMode,
+      exit: task.actions.onExitExecutionMode,
+      target: task.actions.onTargetExecutionMode,
+    });
     setEditing(true);
   };
   // 退编辑态不必清草稿：下次 startEdit 会按那时的最新数据重建。
@@ -666,6 +1031,7 @@ export function TaskDetailSheet({
   const enterActions = task.actions.onEnterActions;
   const exitActions = task.actions.onExitActions;
   const targetActions = task.actions.onTargetActions;
+
 
   // 标题区统计：数量为 0 的项整条不渲染（与「没有前提就不显示前提」同一条规则），
   // 量词统一（前提论「项」，动作论「条」）。
@@ -710,6 +1076,20 @@ export function TaskDetailSheet({
       if (next && next !== r.query) {
         jobs.push(() => updateRuleQuery(r.ruleId, next));
       }
+    }
+    // 只提交真正改过的槽；后端是 partial 语义，没传的槽保持原样。
+    const changedModes: Partial<
+      Record<ActionSlotKey, ActionExecutionMode>
+    > = {};
+    for (const key of ACTION_SLOT_KEYS) {
+      if (modeDrafts[key] !== slotModeOf(task, key)) {
+        changedModes[key] = modeDrafts[key];
+      }
+    }
+    if (Object.keys(changedModes).length > 0) {
+      jobs.push(() =>
+        updateTaskExecutionModes(task.taskId, changedModes),
+      );
     }
     if (jobs.length === 0) {
       cancelEdit();
@@ -984,6 +1364,15 @@ export function TaskDetailSheet({
                   actions={enterActions}
                   desc={task.actions.onEnterDesc}
                   catalog={catalog}
+                  mode={
+                    editing
+                      ? modeDrafts.enter
+                      : task.actions.onEnterExecutionMode
+                  }
+                  editing={editing}
+                  onModeChange={(mode) =>
+                    setModeDrafts((prev) => ({ ...prev, enter: mode }))
+                  }
                 />
               )}
               {exitSlotFilled && (
@@ -992,6 +1381,13 @@ export function TaskDetailSheet({
                   actions={exitActions}
                   desc={task.actions.onExitDesc}
                   catalog={catalog}
+                  mode={
+                    editing ? modeDrafts.exit : task.actions.onExitExecutionMode
+                  }
+                  editing={editing}
+                  onModeChange={(mode) =>
+                    setModeDrafts((prev) => ({ ...prev, exit: mode }))
+                  }
                 />
               )}
               {targetSlotFilled && (
@@ -1000,6 +1396,15 @@ export function TaskDetailSheet({
                   actions={targetActions}
                   desc={task.actions.onTargetDesc}
                   catalog={catalog}
+                  mode={
+                    editing
+                      ? modeDrafts.target
+                      : task.actions.onTargetExecutionMode
+                  }
+                  editing={editing}
+                  onModeChange={(mode) =>
+                    setModeDrafts((prev) => ({ ...prev, target: mode }))
+                  }
                 />
               )}
             </Section>

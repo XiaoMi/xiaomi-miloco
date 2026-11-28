@@ -29,6 +29,7 @@ import {
   realEventCropMeta,
   realUpdateRuleQuery,
   realUpdateTaskDescription,
+  realUpdateTaskExecutionModes,
   realListTasks,
   _resetUsageStatsCache,
 } from "@/api/real";
@@ -918,6 +919,20 @@ describe("任务详情就地编辑 — 写接口契约", () => {
     expect(cap.body).toEqual({ description: "每天练琴 30 分钟" });
   });
 
+  it("改执行方式：PATCH /api/tasks/{id}/actions 只带改过的槽", async () => {
+    const cap = captureFetch();
+    await realUpdateTaskExecutionModes("piano_practice", {
+      enter: "parallel_by_device",
+      target: "sequential",
+    });
+    expect(cap.method).toBe("PATCH");
+    expect(cap.url).toBe("/api/tasks/piano_practice/actions");
+    expect(cap.body).toEqual({
+      on_enter_execution_mode: "parallel_by_device",
+      on_target_execution_mode: "sequential",
+    });
+  });
+
   it("改触发条件：PATCH /api/rules/{id} 只带 condition.query（不动感知设备）", async () => {
     const cap = captureFetch();
     await realUpdateRuleQuery("rule-1", "孩子在书桌前学习");
@@ -968,6 +983,9 @@ describe("realListTasks — summary 契约", () => {
           { rule_id: "r-out", query: "挥手", direction: "exit" },
         ],
         actions: {
+          on_enter_execution_mode: "parallel_by_device",
+          on_exit_execution_mode: "parallel_by_device",
+          on_target_execution_mode: "sequential",
           on_enter_desc: "推一条消息",
           on_exit_desc: "推一条下线",
           on_target_actions: [{ did: "d1", iid: "prop.2.1", value: true }],
@@ -987,6 +1005,10 @@ describe("realListTasks — summary 契约", () => {
     expect(task.ruleBriefs.map((r) => r.direction)).toEqual(["enter", "exit"]);
     // 停用标记要跨层带出来：界面据此不画不再生效的规则（缺省视为启用）
     expect(task.ruleBriefs.map((r) => r.enabled)).toEqual([false, true]);
+    // 三个槽的执行方式各自独立，不能互相串味
+    expect(task.actions?.onEnterExecutionMode).toBe("parallel_by_device");
+    expect(task.actions?.onExitExecutionMode).toBe("parallel_by_device");
+    expect(task.actions?.onTargetExecutionMode).toBe("sequential");
     expect(task.actions?.onEnterDesc).toBe("推一条消息");
     expect(task.actions?.onExitDesc).toBe("推一条下线");
     // *_actions 原样带出：抽屉要把 did/iid 翻成「哪个设备的哪个动作」
@@ -1020,6 +1042,9 @@ describe("realListTasks — summary 契约", () => {
     expect(task.ruleBriefs[0].enabled).toBe(true);
     // 归一成"六个槽全空"而不是 null —— 调用方据此隐藏整个动作分区
     expect(task.actions).toEqual({
+      onEnterExecutionMode: "sequential",
+      onExitExecutionMode: "sequential",
+      onTargetExecutionMode: "sequential",
       onEnterDesc: null,
       onExitDesc: null,
       onTargetDesc: null,

@@ -29,6 +29,7 @@
 - **STATIC**：低延迟、高确定性，直接执行预先写死的设备指令
 - **DYNAMIC**：规则只写意图描述，触发时交给 Agent 结合当时上下文决定具体操作
 - **动作挂在 task 上**：进入 / 退出 / 达标三个槽，`miloco-cli task set-actions` 配。单方向规则也可以在建规则时直接带动作，由方向决定它落哪个槽
+- **动作执行方式按槽独立**：默认每个槽按配置顺序全串行。`--on-enter-execution-mode` / `--on-exit-execution-mode` / `--on-target-execution-mode` 可各自设 `parallel_by_device`：按设备分组并发，同一设备内仍按配置顺序；槽内含场景动作时整槽回退串行
 - **生命周期**：permanent（永久存在）和 temporary（Agent 判断终止条件后自删）两种
 - **duration 扩展**：触发方向都支持可选的滑动窗口累计触发（`guard` 不支持）——设置后条件需在窗口内达到指定比例才触发，而非单帧 True 即触发
 
