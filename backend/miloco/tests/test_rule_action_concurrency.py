@@ -226,10 +226,11 @@ async def test_device_parallelism_is_capped(runner, monkeypatch):
 def test_watchdog_budget_covers_the_two_calls_of_an_idempotent_action():
     """幂等 prop 动作先预检再下发，单条动作最坏是两次 SDK 调用。
 
-    每次调用本地 RPC 5s 失败后转云端 15s，两次共 40s；组级预算不能比这更短，
-    否则正常但慢的动作会被 watchdog 误杀，连台账都来不及写。
+    预检读走云端默认 30s，下发 set 是 15s，本地各先试 5s；单条最坏
+    5 + 30 + 15 = 50s。组级预算不能比这更短，否则正常但慢的动作会被
+    watchdog 误杀，连台账都来不及写。
     """
-    assert runner_module._RULE_ACTION_WATCHDOG_SECONDS >= 40.0
+    assert runner_module._RULE_ACTION_WATCHDOG_SECONDS >= 50.0
 
 
 def test_slot_execution_mode_reads_each_slot_independently(runner):
@@ -275,12 +276,13 @@ def _rule(task_id: str = "t1") -> Rule:
 
 @pytest.mark.asyncio
 async def test_fire_reads_mode_from_the_selected_slot(runner, monkeypatch):
-    """接线：进入边沿读 on_enter，退出边沿读 on_exit，不共用任务级开关。"""
+    """接线：进入 / 退出 / 达标各读自己槽的执行方式，不共用任务级开关。"""
     runner.set_task_actions(
         "t1",
         {
             "on_enter_execution_mode": "parallel_by_device",
             "on_exit_execution_mode": "sequential",
+            "on_target_execution_mode": "parallel_by_device",
             "on_enter_actions": [
                 {"did": "A", "iid": "prop.2.1", "value": True},
                 {"did": "B", "iid": "prop.2.1", "value": True},
@@ -288,8 +290,13 @@ async def test_fire_reads_mode_from_the_selected_slot(runner, monkeypatch):
             "on_exit_actions": [
                 {"did": "A", "iid": "prop.2.1", "value": False},
             ],
+            "on_target_actions": [
+                {"did": "A", "iid": "prop.2.1", "value": True},
+                {"did": "B", "iid": "prop.2.1", "value": True},
+            ],
             "on_enter_desc": None,
             "on_exit_desc": None,
+            "on_target_desc": None,
         },
     )
     seen: list[str] = []
@@ -310,7 +317,15 @@ async def test_fire_reads_mode_from_the_selected_slot(runner, monkeypatch):
         rule, RuleEvent.EXITED, [], "ctx", "exec-2",
         action_slot=ActionSlot.ON_EXIT,
     )
+    target_result = await runner._fire(
+        rule, RuleEvent.TARGET_FIRED, [], "ctx", "exec-3",
+    )
 
     assert enter_result is not None
     assert exit_result is not None
-    assert seen == ["parallel_by_device", "sequential"]
+    assert target_result is not None
+    assert seen == [
+        "parallel_by_device",
+        "sequential",
+        "parallel_by_device",
+    ]

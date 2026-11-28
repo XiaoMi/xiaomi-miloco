@@ -924,7 +924,16 @@ function ActionSlot({
         <p className="mb-1.5 text-caption text-text-tertiary">{fallbackNote}</p>
       )}
       {effectiveParallel && groups.length >= 2 ? (
-        <GroupedActionCards groups={groups} catalog={catalog} />
+        <>
+          {/* v3→v4 迁移可能让老 event rule 同时有动作和 Agent 文案；切到设备卡
+              视图后文案不能凭空消失，否则用户会以为它被清掉了。 */}
+          {desc?.trim() && (
+            <div className="mb-2 rounded-xl bg-bg-primary border border-border px-3.5 py-2.5 text-body text-text-secondary leading-relaxed break-words">
+              {t("tasks.agentAction", { desc: desc.trim() })}
+            </div>
+          )}
+          <GroupedActionCards groups={groups} catalog={catalog} />
+        </>
       ) : (
         <FlatActionRows actions={actions} desc={desc} catalog={catalog} />
       )}

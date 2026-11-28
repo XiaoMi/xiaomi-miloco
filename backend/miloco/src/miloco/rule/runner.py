@@ -88,14 +88,16 @@ _IOT_RECONCILE_CONTEXT = "iot_reconcile_exit"
 # task 配了几十台设备时把网关/云端瞬时打满。
 _RULE_DEVICE_PARALLEL_LIMIT = 16
 # 每个设备组的兜底墙钟: 组内动作数 × 该值。正常路径由 miot SDK 的本地 RPC
-# 5s / 云端 HTTP 15s 先收口, 这里只防某个 await 永久挂住、把 gather 和整条
-# rule fire 一起拖死。超时不是"动作失败"的新语义, 而是让等待有终点。
+# 5s / 云端 HTTP 30s(读) 或 15s(写) 先收口, 这里只防某个 await 永久挂住、
+# 把 gather 和整条 rule fire 一起拖死。超时不是"动作失败"的新语义, 而是让
+# 等待有终点。
 #
-# 一条幂等 prop 动作最多走两次 SDK 调用：先 get 预检现值, 再 set 下发。每次
-# 调用都可能本地 RPC 5s 超时后转云端 HTTP 15s, 所以单条动作最坏约 40s。
-# 30s 预算只够一次调用, 会把「本地刚超时、云端还能赶完」的动作误判成超时,
-# 并在取消时跳过台账。预算取 45s, 留 5s 余量。
-_RULE_ACTION_WATCHDOG_SECONDS = 45.0
+# 一条幂等 prop 动作最多走两次 SDK 调用：先 get 预检现值, 再 set 下发。
+# 两趟的云端上限不同：预检读走 get_props_async 默认 30s, 下发 set 是 15s;
+# 本地 RPC 每次先试 5s, 读超时会把 did 打进本地冷却, 下发因此直接走云端。
+# 单条最坏 5 + 30 + 15 = 50s; 预算取 60s, 留 10s 余量。低于 50s 会把
+# 「本地刚超时、云端还能赶完」的动作误判成超时, 取消时还会跳过台账。
+_RULE_ACTION_WATCHDOG_SECONDS = 60.0
 
 
 def _summarize_rule_result(obj: object) -> tuple[bool, int | None, str | None]:
@@ -2136,7 +2138,7 @@ class RuleRunner:
         场景动作的影响面跨设备且未知，同槽只要有一处 scene 就整槽回退串行：
         把场景和设备动作并发，会让"先开灯、再触发电影场景"这种顺序静默失效。
         """
-        if mode != "parallel_by_device":
+        async def run_sequential() -> list[RuleActionExecuteResult]:
             return [
                 await self._execute_action(
                     rule_id, a,
@@ -2145,19 +2147,16 @@ class RuleRunner:
                 for a in actions
             ]
 
+        if mode != "parallel_by_device":
+            return await run_sequential()
+
         if any(a.iid == SCENE_IID for a in actions):
             logger.debug(
                 "Rule %s slot has scene action(s); parallel_by_device falls "
                 "back to sequential",
                 safe_log(rule_id),
             )
-            return [
-                await self._execute_action(
-                    rule_id, a,
-                    phase=phase, trigger_event_id=trigger_event_id,
-                )
-                for a in actions
-            ]
+            return await run_sequential()
 
         # dict 保持首次出现顺序；同 did 的多个动作装进同一组，组内顺序即配置顺序。
         groups: dict[str, list[tuple[int, RuleAction]]] = {}
@@ -2181,8 +2180,8 @@ class RuleRunner:
             # 先排队再起表：闸门等待不算执行预算，否则 >16 个设备时，排在后面的
             # 组可能还没轮到就被判超时。
             async with limiter:
-                # 组内每条动作最坏两次 SDK 调用（幂等预检 + 下发），每次本地
-                # RPC 5s 失败后云端 15s；这里的墙钟按动作数放宽，只兜"某个
+                # 组内每条动作最坏两次 SDK 调用（预检读云端 30s，下发行云端
+                # 15s，各自先试 5s 本地）；这里的墙钟按动作数放宽，只兜"某个
                 # await 永久不返回"，不能比单条动作的正常最坏耗时还短。
                 budget = _RULE_ACTION_WATCHDOG_SECONDS * len(items)
                 try:

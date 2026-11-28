@@ -394,6 +394,28 @@ describe("TaskDetailSheet · 设备并发", () => {
     expect(html).not.toContain("--action-dev-");
   });
 
+  it("旧库里槽同时有文案和动作时，设备卡视图仍保留文案", () => {
+    const html = renderToStaticMarkup(
+      <TaskDetailSheet
+        task={task([rule({ ruleId: "e1" })], {
+          onEnterExecutionMode: "parallel_by_device",
+          onEnterDesc: "让 Agent 处理进入",
+          onEnterActions: [
+            { did: "d1", iid: "prop.2.1", value: true },
+            { did: "d2", iid: "prop.2.1", value: true },
+          ],
+        })}
+        catalog={TWO_DEVICE_CATALOG}
+        onClose={noop}
+        onChanged={noop}
+      />,
+    );
+    // v3→v4 迁移可能同时落动作与文案；切到设备卡后文案不能消失
+    expect(html).toContain("让 Agent 处理进入");
+    expect(html).toContain("客厅主灯");
+    expect(html).toContain(i18n.t("tasks.executionModeParallel"));
+  });
+
   it("槽换成 Agent 文案后，不再显示设备数回退提示", () => {
     const html = renderToStaticMarkup(
       <TaskDetailSheet
